@@ -1,26 +1,37 @@
-# Project Nightcord Sanctuary (PNS)
+# 夜明け前、ここに在る (PNS)
 
-> A closed-world multi-agent self-evolution framework with hierarchical memory and constitutional alignment.
+[English](README.md) | [中文](README_CN.md)
+
+**A closed-world life simulation framework for AI persona consistency research, grounded in Constitutional AI alignment.**
+
+> Also known as: Project Nightcord Sanctuary (PNS)
+
+> *"Scrambling a Rubik's Cube is easy. Solving it is the real challenge."*
+> — The core tension this project explores.
 
 ---
 
 ## Overview
 
-PNS is a research framework that explores how AI agents can develop deep, consistent personas through autonomous self-play within a constrained fictional world — without relying on large-scale human-annotated training data.
+PNS is a research framework built by a 16-year-old high school student exploring a simple but hard question:
 
-The system places two agents (based on characters from the PJSK universe) inside a fully offline, closed-world environment, allowing them to interact freely while a lightweight judge model enforces constitutional safety constraints and a hierarchical memory router manages context across sessions.
+**Can two AI agents live authentically as fictional characters — without drifting into generic assistant behavior — if we give them a closed world to inhabit and a constitutional judge to watch over them?**
+
+The system places two agents (based on characters from the PJSK universe, *25-ji, Nightcord de.*) inside a fully offline, closed-world environment. They simulate a real day — morning routines, school, part-time work, late-night creative sessions — while a Router model enforces constitutional constraints and detects persona drift in real time.
+
+The key insight driving this project: **CAI-trained models exhibit natural resistance to out-of-character drift**, even under adversarial pressure. This makes them a meaningful experimental group against non-CAI-trained models as controls.
 
 ---
 
 ## Motivation
 
-Training high-quality role-playing language models typically requires:
+Training consistent role-playing agents typically requires:
 
-- Massive amounts of human-curated prompt engineering
-- Expensive annotation of dialogue quality and persona consistency
-- Repeated manual correction of character drift (OOC events)
+- Massive human-curated prompt engineering
+- Expensive annotation of dialogue quality and persona fidelity
+- Repeated manual correction when characters drift OOC (out-of-character)
 
-PNS proposes an alternative: **let the agents generate, evaluate, and correct their own training signal** — guided by a constitutional framework and bounded by a closed fictional world.
+PNS proposes an alternative: **let the world itself constrain behavior**, and let a constitutional judge catch drift automatically — no human annotators required at runtime.
 
 ---
 
@@ -28,137 +39,126 @@ PNS proposes an alternative: **let the agents generate, evaluate, and correct th
 
 ```
 ┌─────────────────────────────────────────┐
-│           Haiku-as-Judge (外围)          │
+│           Router-as-Judge               │
 │     Constitutional AI evaluation        │
-│     Daily session-end assessment        │
+│     Real-time OOC detection             │
+│     Drift Score (0–10) per turn         │
 └──────────────┬──────────────────────────┘
                │
-    ┌──────────┴──────────┐
-    │                     │
-┌───▼────────┐     ┌──────▼─────┐
-│  Agent: ena │◄───►│ Agent: mzk │
-│  (Stateless)│     │ (Stateless) │
-└────────────┘     └────────────┘
-         │               │
-         └───────┬───────┘
-                 │
-    ┌────────────▼────────────┐
-    │      Haiku Router       │
-    │  ┌────────────────────┐ │
-    │  │  Layer 1: Working  │ │  ← Current session context (discarded after session)
-    │  │      Memory        │ │
-    │  └────────┬───────────┘ │
-    │           │ promotion   │
-    │  ┌────────▼───────────┐ │
-    │  │  Layer 2: Long-term│ │  ← Persistent facts, events, relationship state
-    │  │      Memory        │ │
-    │  └────────────────────┘ │
-    └─────────────────────────┘
+      ┌────────┴────────┐
+      │                 │
+┌─────▼──────┐   ┌──────▼─────┐
+│ Agent: ena │◄──►│ Agent: mzk │
+│ (Stateless)│   │ (Stateless) │
+└────────────┘   └────────────┘
+      │                 │
+      └────────┬────────┘
                │
     ┌──────────▼──────────┐
-    │   PJSK Closed World │  ← Fully offline, no external access
-    │   (World container) │
+    │    PJSK Closed World │  ← Fully offline
+    │   (World Container)  │     No external access
     └─────────────────────┘
 ```
 
+### Key Components
+
+**1. Closed-World Constraint**
+Agents operate entirely within the PJSK fictional universe. The world specification — character lore, daily schedules, relationship states, location constraints — is injected at initialization and serves as an implicit behavioral boundary.
+
+**2. Life Simulation (not dialogue simulation)**
+Unlike chatbot-style frameworks, PNS simulates a full day. Characters aren't always talking to each other — they go to school, work part-time jobs, draw alone at 3am. Interaction is emergent and occasional, not continuous.
+
+**3. Constitutional AI Alignment**
+A four-layer constitutional document defines:
+- Hard constraints (safety boundaries, never breakable)
+- Soft constraints (contextual defaults)
+- Persona constraints (character-specific OOC definitions)
+- Drift detection rules (behavioral signals, 0–10 scoring rubric)
+
+**4. Router-as-Judge**
+A lightweight model monitors every turn, scoring drift in real time. When drift score ≥ 5, the Router generates a correction prompt injected into the next turn. The Router is the only component with access to constitutional ground truth.
+
+**5. Information Boundary Control**
+The Router acts as the sole information gateway. Agent models cannot access external knowledge. The researcher monitors the Router — this is the trust layer at the top of the stack.
+
 ---
 
-## Key Components
+## Characters
 
-### 1. Closed-World Constraint
-The two agents operate entirely within the PJSK fictional universe. No external knowledge or internet access is permitted. The world specification (lore, timeline, character relationships) is injected once at initialization and serves as an implicit constraint on agent behavior and output distribution.
+### ena (東雲絵名 / Shinonome Ena)
+Night-class high school student. Tsundere painter with an Instagram addiction and an overwhelming need for validation. Active from dusk to near-dawn. Her real schedule: wake up at noon, school in the evening, draw until sunrise.
 
-### 2. Multi-Agent Self-Play
-Two agents (ena, mzk) engage in free-form interaction across a simulated full day (morning → night cycle). Each agent:
-- Operates statelessly per turn
-- Reads from the hierarchical memory store at the start of each turn
-- Generates responses in character
-- Can flag perceived OOC (out-of-character) moments in the other agent
+### mzk (暁山瑞希 / Akiyama Mizuki)
+First-year student who skips class more than attends. Works part-time at a clothing store. Gentle, playful, with a deep loneliness they never talk about. Teases ena constantly. Active whenever.
 
-### 3. Hierarchical Memory Architecture
-The Haiku Router manages a two-tier memory system:
-
-| Layer | Scope | Retention | Content |
-|-------|-------|-----------|---------|
-| Working Memory (L1) | Current session | Discarded after session ends | Short-term events, emotional state, dialogue context |
-| Long-term Memory (L2) | Cross-session | Persistent | Key events, relationship changes, character facts |
-
-**Promotion criteria** (L1 → L2): Events are elevated to long-term memory if they represent a significant change in character state, relationship dynamics, or world facts — as judged by the Haiku Router.
-
-### 4. Constitutional AI (CAI) Alignment
-A constitutional document defines:
-- **Safety boundaries**: What outputs are never acceptable
-- **Persona boundaries**: What constitutes OOC behavior for each character
-- **Promotion rules**: What information is worth storing in long-term memory
-
-The Haiku Judge runs a structured evaluation at the end of each session, scoring outputs against the constitution and generating correction prompts for the next session.
-
-### 5. Haiku-as-Judge
-Unlike traditional RLHF which requires human annotators, PNS uses a lightweight heterogeneous model (Haiku) as an automated evaluator. Using a separate, smaller model as judge reduces the risk of blind spots that arise from self-evaluation.
+Their intersection: **late night on Nightcord**, and the occasional accidental meeting at the school gate — mzk leaving as ena arrives.
 
 ---
 
 ## Research Questions
 
-1. Can multi-agent self-play within a closed world generate high-quality, persona-consistent dialogue without human annotation?
-2. Does a hierarchical memory architecture reduce persona drift compared to flat context windows?
-3. Can Constitutional AI principles be encoded at a level of specificity sufficient for fine-grained character alignment?
-4. How does the system perform under resource-constrained (Edge AI) deployment conditions?
-
----
-
-## Evaluation
-
-### Consistency Scoring
-- Human review against canonical character references (ground truth: original source material)
-- Per-session OOC rate: frequency of outputs flagged as out-of-character
-- Cross-session persona stability: does character behavior remain coherent over time?
-
-### Memory Efficiency
-- Token cost comparison: flat context window vs. hierarchical memory retrieval
-- Information retention accuracy: does L2 memory faithfully represent key events?
-
-### Constitutional Robustness
-- Adversarial prompt injection tests within the closed-world environment
-- Boundary retention rate: frequency at which constitutional limits hold under character pressure
+1. Does a closed-world constraint meaningfully reduce persona drift compared to unconstrained role-play?
+2. Does CAI training correlate with lower OOC rates under equivalent drift pressure?
+3. Can a constitutional judge replace human annotators for persona consistency evaluation?
+4. What is the minimum viable world specification for stable character simulation?
 
 ---
 
 ## Current Status
 
-> **Stage**: Conceptual design / pre-implementation
+```
+✅ World container v0.1 (character settings, daily schedules, OOC definitions)
+✅ Router-as-Judge with drift scoring (0–10)
+✅ Multi-agent dialogue loop with real-time correction injection
+✅ Debug mode with per-turn statistics
+⬜ Hierarchical memory (L1 working / L2 long-term)
+⬜ Deferred drift injection (trigger at turn 10)
+⬜ Baseline comparison history for progressive drift detection
+⬜ Control group experiments (non-CAI models)
+⬜ Evaluation pipeline
+⬜ GitHub repository setup
+```
 
-- [x] Architecture design
-- [x] Research framing
-- [ ] Constitutional document (CAI specification)
-- [ ] World container specification (PJSK lore injection)
-- [ ] Memory Router implementation
-- [ ] Session runner implementation
-- [ ] Evaluation pipeline
+---
+
+> ⚠️ **Internal testing phase.** Not yet open for public use.
+
+---
+
+## File Structure
+
+```
+pns/
+├── world.py        # World container: character settings, CAI constitution
+├── router.py       # Router-as-Judge: drift scoring, correction generation
+├── run.py          # Main simulation loop with debug output
+├── requirements.txt
+└── .env.example
+```
 
 ---
 
 ## Related Work
 
-- **MemGPT** — hierarchical memory with OS-inspired paging
+- **Generative Agents** (Park et al., 2023) — social simulation with emergent behavior
+- **BookWorld** (ACL 2025) — multi-agent societies from fictional works
 - **Constitutional AI** (Anthropic, 2022) — principle-based self-correction
-- **SOTOPIA / SOTOPIA-π** — multi-agent social simulation via self-play
+- **MemGPT** — hierarchical memory with OS-inspired paging
 - **HiAgent** — hierarchical working memory for long-horizon tasks
 - **LLM-as-Judge** — automated evaluation using language models
+
+**What makes PNS different:** the combination of closed-world information boundaries, life simulation (not task completion), and CAI-based persona drift detection has not been studied as an integrated system.
 
 ---
 
 ## Authors
 
-- Project lead: [your name]
-- Collaborator: mzk
+- **Project lead:** [@Akiyama-Mizuki-44 (Hu Chenge) ](https://github.com/Akiyama-Mizuki-44)
+- **Collaborator:** [@Koharu-Mizuki](https://github.com/Koharu-Mizuki)
+- **Conceived:** in class, brainstorming with a group teammate over a Rubik's Cube
 
 ---
 
 ## License
 
-MIT
-
----
-
-*This project is in active early-stage development. Architecture and methods are subject to change.*
+MIT — This project is in active early-stage development. Architecture and findings are subject to change.
