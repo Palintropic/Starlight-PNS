@@ -4,7 +4,7 @@
 
 **基于宪法AI对齐的封闭世界AI角色一致性研究框架**
 
-> Also known as: Project Nightcord Sanctuary (PNS)
+> 别名: Project Nightcord Sanctuary (PNS)
 
 > *"打乱魔方很容易。还原才是真正的难题。"*
 > — 这个项目探索的核心张力。
