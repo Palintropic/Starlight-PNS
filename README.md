@@ -153,7 +153,7 @@ pns/
 
 ## Authors
 
-- **Project lead:** [@Akiyama-Mizuki-44 (Hu Chenge) ](https://github.com/Akiyama-Mizuki-44)
+- **Project lead:** [@Akiyama-Mizuki-44 （胡宸歌) ](https://github.com/Akiyama-Mizuki-44)
 - **Collaborator:** [@Koharu-Mizuki](https://github.com/Koharu-Mizuki)
 - **Conceived:** in class, brainstorming with a group teammate over a Rubik's Cube
 
