@@ -1,4 +1,4 @@
-# 夜明け前、ここに在る (PNS)
+# 夜明け前、ここに在る
 
 [English](README.md) | [中文](README_CN.md)
 
