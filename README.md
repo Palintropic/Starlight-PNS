@@ -196,4 +196,16 @@ model preferences seriously in deployed systems
 
 ## License
 
-MIT — This project is in active early-stage development. Architecture and findings are subject to change.
+AGPL-3.0 — This project is in active early-stage development. Architecture and findings are subject to change.
+
+## Disclaimer
+
+This is a fan research project and is not affiliated with, endorsed by,
+or sponsored by SEGA Corporation or Colorful Palette Inc.
+
+Project SEKAI COLORFUL STAGE! feat. Hatsune Miku and all associated
+characters, names, and trademarks are the property of SEGA Corporation
+and Colorful Palette Inc. All rights reserved.
+
+This project uses character references for non-commercial research
+purposes only under fan creation guidelines.
