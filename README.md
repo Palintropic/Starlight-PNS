@@ -6,8 +6,7 @@
 
 > Also known as: Project Nightcord Sanctuary (PNS)
 
-> *"Scrambling a Rubik's Cube is easy. Solving it is the real challenge."*
-> — The core tension this project explores.
+> *"Technology was never meant to be a privilege. It was meant to be for everyone."*
 
 ---
 
