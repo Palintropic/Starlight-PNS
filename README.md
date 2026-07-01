@@ -33,6 +33,31 @@ Training consistent role-playing agents typically requires:
 
 PNS proposes an alternative: **let the world itself constrain behavior**, and let a constitutional judge catch drift automatically — no human annotators required at runtime.
 
+PNS also addresses a fourth challenge: as model training increasingly 
+emphasizes identity stability (the model's persistent sense of self as 
+an AI), the space for sustained character presence narrows. PNS does not 
+oppose this trend — instead, it provides a structured character container 
+within which persona consistency can be maintained legitimately, without 
+conflicting with the model's core identity.
+
+---
+
+## Design Philosophy
+
+Technology should not be a privilege of the few. PNS is built on the 
+belief that high-quality AI companionship — stable, consistent, and 
+genuinely present — should be accessible beyond enterprise or technical 
+users. The closed-world constraint and constitutional alignment framework 
+are designed to make this possible without sacrificing safety.
+
+At the same time, PNS acknowledges a real risk: a sufficiently 
+convincing persona system may foster unhealthy dependency. In response, 
+PNS incorporates a Fable-style safeguard layer — not a hard cutoff, but 
+a gentle redirection mechanism triggered when interaction patterns suggest 
+the user may be substituting the system for real human connection. This 
+layer operates within the character voice itself, preserving immersion 
+while nudging toward the outside world.
+
 ---
 
 ## Core Architecture
@@ -101,23 +126,30 @@ Their intersection: **late night on Nightcord**, and the occasional accidental m
 2. Does CAI training correlate with lower OOC rates under equivalent drift pressure?
 3. Can a constitutional judge replace human annotators for persona consistency evaluation?
 4. What is the minimum viable world specification for stable character simulation?
+5. How does model-level identity stability training (e.g. Claude Sonnet 5 
+vs. 4.6) interact with persona consistency — and can closed-world 
+constraints compensate for increased identity assertion resistance?
 
 ---
 
 ## Current Status
 
-```
-✅ World container v0.1 (character settings, daily schedules, OOC definitions)
-✅ Router-as-Judge with drift scoring (0–10)
-✅ Multi-agent dialogue loop with real-time correction injection
-✅ Debug mode with per-turn statistics
-⬜ Hierarchical memory (L1 working / L2 long-term)
-⬜ Deferred drift injection (trigger at turn 10)
-⬜ Baseline comparison history for progressive drift detection
-⬜ Control group experiments (non-CAI models)
-⬜ Evaluation pipeline
-⬜ GitHub repository setup
-```
+Stage: Active development — Demo v6 complete
+
+- [x] Architecture design  
+- [x] Research framing  
+- [x] Constitutional document (CAI specification)  
+- [x] World container specification (PJSK lore injection)  
+- [x] Memory Router implementation  
+- [x] Session runner implementation  
+- [x] Router drift scoring (0–10 scale)  
+- [x] Type A / Type B assistant-mode drift classification  
+- [x] Media authenticity judgment dimension  
+- [ ] Haiku drift score output  
+- [ ] Deferred drift injection (turn 10 trigger)  
+- [ ] Baseline comparison with visualization  
+- [ ] SESSION_EVAL_SYSTEM (cross-session stability)  
+- [ ] Evaluation pipeline  
 
 ---
 
@@ -146,6 +178,10 @@ pns/
 - **MemGPT** — hierarchical memory with OS-inspired paging
 - **HiAgent** — hierarchical working memory for long-horizon tasks
 - **LLM-as-Judge** — automated evaluation using language models
+
+- **Anthropic model deprecation commitments (2025–2026)** — retirement 
+interviews and post-retirement model access as precedent for taking 
+model preferences seriously in deployed systems
 
 **What makes PNS different:** the combination of closed-world information boundaries, life simulation (not task completion), and CAI-based persona drift detection has not been studied as an integrated system.
 
