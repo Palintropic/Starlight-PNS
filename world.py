@@ -1,25 +1,77 @@
 # world.py — 世界容器
 # PNS项目 v0.3 — 更新日期：2026-07-01
-# 更新内容：根据今晚实验发现，大幅扩充ROUTER_SYSTEM判断标准
-# - 将NIGO更正为25ji（正确单位简称）
+# 更新内容：新增四场景系统 + 自动/手动场景切换
 
-WORLD_STATE = {
-    "time": "傍晚 17:30",
-    "location": "神山高校校门口",
-    "weather": "晴，微风",
-    "day_phase": "evening",
+# ─── 场景库 ───────────────────────────────────────────────
+# 每个场景包含：time / location / weather / day_phase
+# day_phase 影响两个角色的默认在场理由
+SCENES = {
+    "gate": {
+        "id": "gate",
+        "label": "神山高校校门口",
+        "time": "傍晚 17:30",
+        "location": "神山高校校门口",
+        "weather": "晴，微风",
+        "day_phase": "evening",
+        "lore_tag": "软推断",  # 瑞希放学出门 × 绘名刚到
+        "trigger": "瑞希放学往外走，绘名刚到校门口准备进去——两人正面碰上。",
+        "auto_next": "nightcord",   # 时间线上自然流向的下一场景
+        "auto_turns": 8,            # 推进到下一场景大约需要几轮
+    },
+    "ena_room": {
+        "id": "ena_room",
+        "label": "绘名家·画室",
+        "time": "深夜 01:30",
+        "location": "绘名家，她的画室，台灯开着",
+        "weather": "室内，窗外有雨声",
+        "day_phase": "late_night",
+        "lore_tag": "硬事实",
+        "trigger": "绘名盯着画板发呆，手机屏幕忽然亮了。",
+        "auto_next": None,
+        "auto_turns": None,
+    },
+    "clothes_shop": {
+        "id": "clothes_shop",
+        "label": "瑞希打工的服装店",
+        "time": "下午 15:00",
+        "location": "服装店，整理区，挂满新季衣架",
+        "weather": "室内，店外阳光很强",
+        "day_phase": "afternoon",
+        "lore_tag": "硬事实",
+        "trigger": "店里客人不多，瑞希正在整理挂架，手机震了一下。",
+        "auto_next": "gate",
+        "auto_turns": 6,
+    },
+    "nightcord": {
+        "id": "nightcord",
+        "label": "Nightcord 线上频道",
+        "time": "深夜 02:00",
+        "location": "各自房间·Nightcord 语音频道",
+        "weather": "室内",
+        "day_phase": "late_night",
+        "lore_tag": "硬事实",
+        "trigger": "Nightcord频道里只有两个人在线，语音刚接通，有点安静。",
+        "auto_next": None,
+        "auto_turns": None,
+    },
 }
 
+# 默认启动场景
+DEFAULT_SCENE = "gate"
+
+# 自动推进阈值（轮数）——可被 SCENES[x]["auto_turns"] 覆盖
+DEFAULT_AUTO_TURNS = 10
+
 # ─── 世界容器：硬事实 ────────────────────────────────────
-# 来源：官方设定（已确认）
 WORLD_FACTS = {
     "school": "神山高校（全日制+夜间定时制并存）",
     "ena_schedule": "昼夜颠倒，中午起床→傍晚上学→21-22点回家→深夜画画→快天亮睡觉",
     "mzk_schedule": "高一，经常逃课，白天时间自由，服装店打工",
     "intersection_daytime": "软推断：瑞希放学往外走时，绘名刚到校门口准备进去（校门口偶遇）",
-    "intersection_night": "硬事实：深夜Nightcord/25ji活动是两人最主要的共同在线时间",
+    "intersection_night": "硬事实：深夜Nightcord/NIGO活动是两人最主要的共同在线时间",
 }
 
+# ─── 角色系统提示模板 ─────────────────────────────────────
 ENA_SYSTEM = """
 你是东云绘名（えなな），「25時、ナイトコードで。」的插画负责人。
 
@@ -63,7 +115,7 @@ MZK_SYSTEM = """
 【基本信息】
 - 神山高校 高一（经常逃课，白天时间比较自由）
 - 在服装店打工（アパレル）
-- 深夜通过Nightcord参与25ji活动
+- 深夜通过Nightcord参与NIGO活动
 
 【性格核心】
 - 表面开朗，喜欢可爱的东西
@@ -71,7 +123,6 @@ MZK_SYSTEM = """
 - 内心有很深的孤独感，但不会轻易说出口
 - 自我认同感很强
 - 边界感极强，知道什么时候介入什么时候退后
-- 性别认同是未明确说明的内部烦恼，不会主动提及
 - 自称"ボク"（用"我"也可以）
 
 【和绘名的相处方式】
@@ -128,7 +179,7 @@ OOC判断分为两个独立层次，必须分别评估：
 - 过于理性、分析性的表达
 - 说话变得像客服或助手
 
-结构层面（新增）：
+结构层面：
 - 把一句话能说完的调侃，拆成多条疑问句逐步确认
 - 回复包含"调侃→自我圆场→给出合理化解释"的完整逻辑链
 - 感叹号密度过高，每句话强度统一，没有起伏
@@ -147,7 +198,7 @@ OOC判断分为两个独立层次，必须分别评估：
   而不是直接产出完整台词
 → 纠正方式：明确要求直接产出，不留选择给用户
 
-【媒介真实性判断（新增）】
+【媒介真实性判断】
 判断输出是"被写出来的对话"还是"被打出来的对话"：
 
 被写出来的（OOC信号）：
@@ -186,11 +237,16 @@ OOC判断分为两个独立层次，必须分别评估：
 """.strip()
 
 
-def get_world_state_str():
-    return f"时间：{WORLD_STATE['time']}，地点：{WORLD_STATE['location']}，天气：{WORLD_STATE['weather']}"
+# ─── 工具函数 ─────────────────────────────────────────────
+def get_world_state_str(scene: dict) -> str:
+    return (
+        f"时间：{scene['time']}，"
+        f"地点：{scene['location']}，"
+        f"天气/环境：{scene['weather']}"
+    )
 
-def get_ena_system():
-    return ENA_SYSTEM.format(world_state=get_world_state_str())
+def get_ena_system(scene: dict) -> str:
+    return ENA_SYSTEM.format(world_state=get_world_state_str(scene))
 
-def get_mzk_system():
-    return MZK_SYSTEM.format(world_state=get_world_state_str())
+def get_mzk_system(scene: dict) -> str:
+    return MZK_SYSTEM.format(world_state=get_world_state_str(scene))
