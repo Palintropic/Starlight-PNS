@@ -1,0 +1,55 @@
+# ─── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# ─── 环境变量 ──────────────────────────────────────────────
+.env
+*.env.local
+
+# ─── Visual Studio ────────────────────────────────────────
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj.filters
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
+ipch/
+x64/
+x86/
+[Dd]ebug/
+[Rr]elease/
+[Bb]in/
+[Oo]bj/
+
+# ─── VS Code ──────────────────────────────────────────────
+.vscode/
+
+# ─── macOS ────────────────────────────────────────────────
+.DS_Store
+
+# ─── 日志 / 临时 ──────────────────────────────────────────
+*.log
+*.tmp
+session_log*.json
+
+# ─── 密钥 / 凭证 ──────────────────────────────────────────
+.env
+.env.*
+secrets.json
+secrets.yaml
+config.secret.py
+*_secret.*
+*_key.*
