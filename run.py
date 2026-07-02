@@ -19,11 +19,12 @@ MAX_TOKENS    = int(os.environ.get("MAX_TOKENS", "1024"))
 API_DELAY     = float(os.environ.get("API_DELAY", "3"))
 
 def call_character(client, character: str, history: list, scene: dict, correction: str = None) -> str:
+    use_compat = "gemini" in MODEL.lower()
     if character == "ena":
-        system = get_ena_system_compat(scene) if API_FORMAT == "openai" else get_ena_system(scene)
+        system = get_ena_system_compat(scene) if use_compat else get_ena_system(scene)
         char_name = "绘名"
     else:
-        system = get_mzk_system_compat(scene) if API_FORMAT == "openai" else get_mzk_system(scene)
+        system = get_mzk_system_compat(scene) if use_compat else get_mzk_system(scene)
         char_name = "瑞希"
 
     if correction:
