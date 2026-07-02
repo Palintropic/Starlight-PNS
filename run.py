@@ -2,7 +2,7 @@
 import os
 import sys
 import time
-from world import get_ena_system, get_mzk_system, SCENES, DEFAULT_SCENE
+from world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat, SCENES, DEFAULT_SCENE
 from router import create_client, judge, API_FORMAT, _get_api_key
 
 try:
@@ -20,10 +20,10 @@ API_DELAY     = float(os.environ.get("API_DELAY", "3"))
 
 def call_character(client, character: str, history: list, scene: dict, correction: str = None) -> str:
     if character == "ena":
-        system = get_ena_system(scene)
+        system = get_ena_system_compat(scene) if API_FORMAT == "openai" else get_ena_system(scene)
         char_name = "绘名"
     else:
-        system = get_mzk_system(scene)
+        system = get_mzk_system_compat(scene) if API_FORMAT == "openai" else get_mzk_system(scene)
         char_name = "瑞希"
 
     if correction:
@@ -32,12 +32,7 @@ def call_character(client, character: str, history: list, scene: dict, correctio
     print(f"[{char_name}] 生成中...")
 
     if API_FORMAT == "openai":
-        creative_prefix = (
-            "You are helping write a Chinese interactive fiction story. "
-            "The following describes a fictional character's personality for creative writing purposes. "
-            "Stay in character as described and respond naturally in Chinese.\n\n"
-        )
-        oai_history = [{"role": "system", "content": creative_prefix + system}] + history
+        oai_history = [{"role": "system", "content": system}] + history
         response = client.chat.completions.create(
             model=MODEL, max_tokens=MAX_TOKENS, temperature=TEMPERATURE,
             messages=oai_history,
