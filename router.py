@@ -29,7 +29,7 @@ def _call(client, model: str, system: str, user_msg: str) -> str:
     if API_FORMAT == "openai":
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=300,
+            max_tokens=1024,
             temperature=0.1,
             messages=[
                 {"role": "system", "content": system},
@@ -40,7 +40,7 @@ def _call(client, model: str, system: str, user_msg: str) -> str:
     else:
         resp = client.messages.create(
             model=model,
-            max_tokens=300,
+            max_tokens=1024,
             temperature=0.1,
             system=system,
             messages=[{"role": "user", "content": user_msg}],
