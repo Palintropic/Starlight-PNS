@@ -9,7 +9,7 @@ PROVIDERS = {
     "1": {
         "name": "mimo (小秘喵代理)",
         "format": "anthropic",
-        "base_url": "https://api.xiaomimiao.com/anthropic",
+        "base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
         "key_name": "MIMO_API_KEY",
         "models": ["mimo-v2.5-pro", "claude-sonnet-4-5-20251001", "claude-haiku-4-5-20251001"],
     },
