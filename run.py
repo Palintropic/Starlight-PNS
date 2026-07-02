@@ -39,7 +39,10 @@ def call_character(client, character: str, history: list, scene: dict, correctio
         )
         content = response.choices[0].message.content
         if not content:
-            raise ValueError(f"API返回空内容，finish_reason: {response.choices[0].finish_reason}")
+            choice = response.choices[0]
+            print(f"[DEBUG] finish_reason: {choice.finish_reason}")
+            print(f"[DEBUG] full response: {response.model_dump()}")
+            raise ValueError(f"API返回空内容，finish_reason: {choice.finish_reason}")
         return content.strip()
     else:
         response = client.messages.create(
