@@ -10,7 +10,7 @@ except ImportError:
     pass
 
 API_FORMAT = os.environ.get("API_FORMAT", "anthropic")
-BASE_URL    = os.environ.get("BASE_URL", "https://token-plan-cn.xiaomimimo.com")
+BASE_URL    = os.environ.get("BASE_URL", "https://token-plan-cn.xiaomimimo.com/anthropic")
 _KEY_NAME   = os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
 
 def _get_api_key() -> str:
