@@ -9,7 +9,7 @@ PROVIDERS = {
     "1": {
         "name": "mimo (小秘喵代理)",
         "format": "anthropic",
-        "base_url": "https://token-plan-cn.xiaomimimo.com",
+        "base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
         "key_name": "MIMO_API_KEY",
         "models": ["mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed", "mimo-v2-omni"],
     },
