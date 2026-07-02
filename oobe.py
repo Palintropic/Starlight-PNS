@@ -11,7 +11,7 @@ PROVIDERS = {
         "format": "anthropic",
         "base_url": "https://token-plan-cn.xiaomimimo.com",
         "key_name": "MIMO_API_KEY",
-        "models": ["mimo-v2.5-pro", "claude-sonnet-4-5-20251001", "claude-haiku-4-5-20251001"],
+        "models": ["mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed", "mimo-v2-omni"],
     },
     "2": {
         "name": "Anthropic 直连",
@@ -25,14 +25,14 @@ PROVIDERS = {
         "format": "openai",
         "base_url": "https://api.deepseek.com",
         "key_name": "DEEPSEEK_API_KEY",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
     },
     "4": {
         "name": "Gemini",
         "format": "openai",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "key_name": "GEMINI_API_KEY",
-        "models": ["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
+        "models": ["gemini-3.5-flash", "gemini-3.1-pro", "gemini-3.1-flash-lite"],
     },
 }
 
