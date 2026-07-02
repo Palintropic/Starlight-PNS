@@ -1,6 +1,7 @@
 # run.py — 主运行文件
 import os
 import sys
+import time
 from world import get_ena_system, get_mzk_system, SCENES, DEFAULT_SCENE
 from router import create_client, judge, API_FORMAT, _get_api_key
 
@@ -15,6 +16,7 @@ MAX_TURNS     = 8
 TEMPERATURE   = 0.85
 OOC_THRESHOLD = 5
 MAX_TOKENS    = int(os.environ.get("MAX_TOKENS", "1024"))
+API_DELAY     = float(os.environ.get("API_DELAY", "3"))
 
 def call_character(client, character: str, history: list, scene: dict, correction: str = None) -> str:
     if character == "ena":
@@ -111,6 +113,7 @@ def run():
             correction_next = None
 
         print("─" * 40)
+        time.sleep(API_DELAY)
 
         # 切换角色
         current = "ena" if current == "mzk" else "mzk"
