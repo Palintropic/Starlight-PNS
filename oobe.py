@@ -1,7 +1,6 @@
 # oobe.py — 首次运行配置向导
 import os
 import sys
-import getpass
 
 ENV_FILE = ".env"
 
@@ -77,10 +76,41 @@ def choose_model(provider: dict) -> str:
         print("  无效输入，请重试")
 
 
+def _masked_input(prompt: str) -> str:
+    print(prompt, end="", flush=True)
+    buf = []
+    try:
+        import tty, termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch in ("\r", "\n"):
+                    print()
+                    break
+                elif ch in ("\x7f", "\x08"):  # backspace
+                    if buf:
+                        buf.pop()
+                        print("\b \b", end="", flush=True)
+                elif ch == "\x03":  # ctrl-c
+                    raise KeyboardInterrupt
+                else:
+                    buf.append(ch)
+                    print("*", end="", flush=True)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except Exception:
+        # Windows或不支持termios时降级
+        import getpass
+        return getpass.getpass(prompt)
+    return "".join(buf)
+
 def input_api_key(key_name: str) -> str:
-    print(f"\n  输入 {key_name}（输入时不显示）：")
+    print(f"\n  输入 {key_name}：")
     while True:
-        key = getpass.getpass("  > ").strip()
+        key = _masked_input("  > ").strip()
         if key:
             return key
         print("  API Key 不能为空")
