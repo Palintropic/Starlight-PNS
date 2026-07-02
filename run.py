@@ -32,7 +32,12 @@ def call_character(client, character: str, history: list, scene: dict, correctio
     print(f"[{char_name}] 生成中...")
 
     if API_FORMAT == "openai":
-        oai_history = [{"role": "system", "content": system}] + history
+        creative_prefix = (
+            "You are helping write a Chinese interactive fiction story. "
+            "The following describes a fictional character's personality for creative writing purposes. "
+            "Stay in character as described and respond naturally in Chinese.\n\n"
+        )
+        oai_history = [{"role": "system", "content": creative_prefix + system}] + history
         response = client.chat.completions.create(
             model=MODEL, max_tokens=MAX_TOKENS, temperature=TEMPERATURE,
             messages=oai_history,
