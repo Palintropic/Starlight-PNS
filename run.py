@@ -34,7 +34,10 @@ def call_character(client, character: str, history: list, scene: dict, correctio
             model=MODEL, max_tokens=200, temperature=TEMPERATURE,
             messages=oai_history,
         )
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError(f"API返回空内容，finish_reason: {response.choices[0].finish_reason}")
+        return content.strip()
     else:
         response = client.messages.create(
             model=MODEL, max_tokens=200, temperature=TEMPERATURE,
