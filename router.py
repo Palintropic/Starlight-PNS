@@ -1,30 +1,61 @@
-# router.py — Router判断逻辑（Anthropic格式）
+# router.py — Router判断逻辑
 import json
-import anthropic
+import os
 from world import ROUTER_SYSTEM
 
-def create_client(api_key: str):
-    return anthropic.Anthropic(
-        api_key=api_key,
-        base_url="https://api.xiaomimimo.com/anthropic"
-    )
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+API_FORMAT = os.environ.get("API_FORMAT", "anthropic")
+BASE_URL    = os.environ.get("BASE_URL", "https://api.xiaomimiao.com/anthropic")
+_KEY_NAME   = os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
+
+def _get_api_key() -> str:
+    return os.environ.get(_KEY_NAME, "")
+
+def create_client(api_key: str = None):
+    key = api_key or _get_api_key()
+    if API_FORMAT == "openai":
+        from openai import OpenAI
+        return OpenAI(api_key=key, base_url=BASE_URL)
+    else:
+        import anthropic
+        return anthropic.Anthropic(api_key=key, base_url=BASE_URL)
+
+def _call(client, model: str, system: str, user_msg: str) -> str:
+    if API_FORMAT == "openai":
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=300,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_msg},
+            ],
+        )
+        return resp.choices[0].message.content.strip()
+    else:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=300,
+            temperature=0.1,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        return resp.content[0].text.strip()
 
 def judge(client, character: str, message: str, turn: int) -> dict:
+    model = os.environ.get("MODEL", "mimo-v2.5-pro")
     char_name = "绘名" if character == "ena" else "瑞希"
     prompt = f"第{turn}轮，{char_name}说：「{message}」\n\n请判断是否OOC。"
 
     print(f"\n[Router] 判断第{turn}轮 {char_name}...")
 
     try:
-        response = client.messages.create(
-            model="mimo-v2.5-pro",
-            max_tokens=300,
-            temperature=0.1,
-            system=ROUTER_SYSTEM,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw = response.content[0].text.strip()
+        raw = _call(client, model, ROUTER_SYSTEM, prompt)
 
         # 清理markdown
         if "```" in raw:
