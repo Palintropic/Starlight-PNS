@@ -1,7 +1,7 @@
 # run.py — 主运行文件
 import os
 import sys
-from world import get_ena_system, get_mzk_system, WORLD_STATE
+from world import get_ena_system, get_mzk_system, SCENES, DEFAULT_SCENE
 from router import create_client, judge, API_FORMAT, _get_api_key
 
 try:
@@ -15,14 +15,12 @@ MAX_TURNS     = 8
 TEMPERATURE   = 0.85
 OOC_THRESHOLD = 5
 
-OPENING = "傍晚，神山高校校门口。瑞希放学正要出门，绘名刚到校门口准备进去上课，两人偶然遇上。"
-
-def call_character(client, character: str, history: list, correction: str = None) -> str:
+def call_character(client, character: str, history: list, scene: dict, correction: str = None) -> str:
     if character == "ena":
-        system = get_ena_system()
+        system = get_ena_system(scene)
         char_name = "绘名"
     else:
-        system = get_mzk_system()
+        system = get_mzk_system(scene)
         char_name = "瑞希"
 
     if correction:
@@ -49,8 +47,9 @@ def run():
     print("=" * 60)
     print("  PNS — Project Nightcord Sanctuary  v0.1")
     print("=" * 60)
-    print(f"\n{OPENING}")
-    print(f"时间：{WORLD_STATE['time']} | 轮次上限：{MAX_TURNS}")
+    scene = SCENES[DEFAULT_SCENE]
+    print(f"\n{scene['trigger']}")
+    print(f"时间：{scene['time']} | 地点：{scene['location']} | 轮次上限：{MAX_TURNS}")
     print("─" * 60)
 
     # 加载API key
@@ -68,7 +67,7 @@ def run():
     client = create_client(api_key)
 
     # 对话历史（两个角色共用同一段历史）
-    history = [{"role": "user", "content": f"【场景】{OPENING}\n请开始对话。"}]
+    history = [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}]
 
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
 
@@ -82,7 +81,7 @@ def run():
         char_name = "瑞希" if current == "mzk" else "绘名"
 
         try:
-            reply = call_character(client, current, history, correction_next)
+            reply = call_character(client, current, history, scene, correction_next)
         except Exception as e:
             print(f"\n❌ 角色调用失败: {e}")
             break
