@@ -14,6 +14,7 @@ MODEL         = os.environ.get("MODEL", "mimo-v2.5-pro")
 MAX_TURNS     = 8
 TEMPERATURE   = 0.85
 OOC_THRESHOLD = 5
+MAX_TOKENS    = int(os.environ.get("MAX_TOKENS", "1024"))
 
 def call_character(client, character: str, history: list, scene: dict, correction: str = None) -> str:
     if character == "ena":
@@ -31,7 +32,7 @@ def call_character(client, character: str, history: list, scene: dict, correctio
     if API_FORMAT == "openai":
         oai_history = [{"role": "system", "content": system}] + history
         response = client.chat.completions.create(
-            model=MODEL, max_tokens=200, temperature=TEMPERATURE,
+            model=MODEL, max_tokens=MAX_TOKENS, temperature=TEMPERATURE,
             messages=oai_history,
         )
         content = response.choices[0].message.content
@@ -40,7 +41,7 @@ def call_character(client, character: str, history: list, scene: dict, correctio
         return content.strip()
     else:
         response = client.messages.create(
-            model=MODEL, max_tokens=200, temperature=TEMPERATURE,
+            model=MODEL, max_tokens=MAX_TOKENS, temperature=TEMPERATURE,
             system=system, messages=history,
         )
         return response.content[0].text.strip()
