@@ -1,13 +1,18 @@
-# run.py — 主运行文件（Anthropic格式）
+# run.py — 主运行文件
 import os
 import sys
-import anthropic
 from world import get_ena_system, get_mzk_system, WORLD_STATE
-from router import create_client, judge
+from router import create_client, judge, API_FORMAT, _get_api_key
 
-MODEL = "mimo-v2.5-pro"
-MAX_TURNS = 8
-TEMPERATURE = 0.85
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+MODEL         = os.environ.get("MODEL", "mimo-v2.5-pro")
+MAX_TURNS     = 8
+TEMPERATURE   = 0.85
 OOC_THRESHOLD = 5
 
 OPENING = "傍晚，神山高校校门口。瑞希放学正要出门，绘名刚到校门口准备进去上课，两人偶然遇上。"
@@ -25,15 +30,19 @@ def call_character(client, character: str, history: list, correction: str = None
 
     print(f"[{char_name}] 生成中...")
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=200,
-        temperature=TEMPERATURE,
-        system=system,
-        messages=history
-    )
-
-    return response.content[0].text.strip()
+    if API_FORMAT == "openai":
+        oai_history = [{"role": "system", "content": system}] + history
+        response = client.chat.completions.create(
+            model=MODEL, max_tokens=200, temperature=TEMPERATURE,
+            messages=oai_history,
+        )
+        return response.choices[0].message.content.strip()
+    else:
+        response = client.messages.create(
+            model=MODEL, max_tokens=200, temperature=TEMPERATURE,
+            system=system, messages=history,
+        )
+        return response.content[0].text.strip()
 
 
 def run():
@@ -51,10 +60,9 @@ def run():
     except ImportError:
         pass
 
-    api_key = os.environ.get("MIMO_API_KEY")
+    api_key = _get_api_key()
     if not api_key:
-        print("\n❌ 找不到MIMO_API_KEY")
-        print("请在.env文件里写：MIMO_API_KEY=你的key")
+        print("\n❌ 找不到API Key，请先运行：python oobe.py")
         sys.exit(1)
 
     client = create_client(api_key)
