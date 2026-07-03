@@ -189,7 +189,10 @@ async def run_simulation(ws: WebSocket):
         "model": model,
     })
 
-    history = [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}]
+    histories = {
+        "mzk": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
+        "ena": [],
+    }
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
     current = "mzk"
     correction_next = None
@@ -198,17 +201,18 @@ async def run_simulation(ws: WebSocket):
     for turn in range(1, max_turns + 1):
         char_key  = current
         char_name = "瑞希" if current == "mzk" else "绘名"
+        other = "ena" if current == "mzk" else "mzk"
 
         await ws.send_json({"type": "generating", "turn": turn, "character": char_key, "char_name": char_name})
 
         try:
-            reply = await call_character_async(client, current, history, scene, model, max_tokens, temperature, correction_next)
+            reply = await call_character_async(client, current, histories[current], scene, model, max_tokens, temperature, correction_next)
         except Exception as e:
             await ws.send_json({"type": "error", "turn": turn, "message": str(e)})
             break
 
-        role = "assistant" if len(history) % 2 == 1 else "user"
-        history.append({"role": role, "content": f"{char_name}：{reply}"})
+        histories[current].append({"role": "assistant", "content": f"{char_name}：{reply}"})
+        histories[other].append({"role": "user", "content": f"{char_name}：{reply}"})
 
         await ws.send_json({"type": "judging", "turn": turn, "character": char_key, "char_name": char_name})
 
