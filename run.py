@@ -87,7 +87,7 @@ def run():
     # 每个角色各自维护自己视角的历史（自己说的是assistant，对方说的是user）
     histories = {
         "mzk": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
-        "ena": [],
+        "ena": [{"role": "user", "content": f"【场景】{scene['trigger']}"}],
     }
 
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}

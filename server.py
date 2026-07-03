@@ -191,7 +191,7 @@ async def run_simulation(ws: WebSocket):
 
     histories = {
         "mzk": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
-        "ena": [],
+        "ena": [{"role": "user", "content": f"【场景】{scene['trigger']}"}],
     }
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
     current = "mzk"
