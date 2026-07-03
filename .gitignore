@@ -54,3 +54,5 @@ secrets.yaml
 config.secret.py
 *_secret.*
 *_key.*
+
+.claude/session-notes.md
