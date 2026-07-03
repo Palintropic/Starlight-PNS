@@ -2,6 +2,8 @@
 import os
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 from world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat, SCENES, DEFAULT_SCENE
 from router import create_client, judge, API_FORMAT, _get_api_key
 
@@ -86,6 +88,7 @@ def run():
     history = [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}]
 
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
+    turn_log = []
 
     # 瑞希先开口
     current = "mzk"
@@ -122,6 +125,15 @@ def run():
         else:
             correction_next = None
 
+        turn_log.append({
+            "turn": turn, "char_name": char_name, "reply": reply,
+            "score": score, "is_ooc": is_ooc,
+            "drift_type": result.get("drift_type", ""),
+            "reason": result.get("reason", ""),
+            "correction": result.get("correction"),
+            "needs_human_review": result.get("needs_human_review", False),
+        })
+
         print("─" * 40)
         time.sleep(API_DELAY)
 
@@ -135,10 +147,85 @@ def run():
     print(f"总轮次：{len(stats['scores'])}")
     print(f"OOC次数：{stats['ooc_count']}")
     print(f"Router介入：{stats['corrections']}次")
+    avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
     if stats["scores"]:
-        print(f"平均漂移分数：{sum(stats['scores'])/len(stats['scores']):.2f}/10")
+        print(f"平均漂移分数：{avg_score:.2f}/10")
         print(f"最高漂移分数：{max(stats['scores'])}/10")
     print("=" * 60)
+
+    if turn_log:
+        final_stats = {
+            "total_turns": len(stats["scores"]),
+            "ooc_count": stats["ooc_count"],
+            "corrections": stats["corrections"],
+            "avg_score": round(avg_score, 2),
+            "max_score": max(stats["scores"]) if stats["scores"] else 0,
+        }
+        try:
+            saved = _save_history(scene, MODEL, turn_log, final_stats)
+            print(f"\n📄 历史记录已保存：{saved}")
+        except Exception as e:
+            print(f"\n⚠ 历史记录保存失败：{e}")
+
+
+def _save_history(scene: dict, model: str, turns: list, stats: dict) -> Path:
+    history_dir = Path("history")
+    history_dir.mkdir(exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = history_dir / f"{ts}_{scene['id']}.md"
+
+    lines = []
+    lines.append(f"# {scene['label']}")
+    lines.append(f"")
+    lines.append(f"> {scene['trigger']}")
+    lines.append(f"")
+    lines.append(f"| | |")
+    lines.append(f"|---|---|")
+    lines.append(f"| 时间 | {scene['time']} |")
+    lines.append(f"| 地点 | {scene['location']} |")
+    lines.append(f"| 模型 | {model} |")
+    lines.append(f"| 生成时间 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} |")
+    lines.append(f"")
+    lines.append(f"---")
+    lines.append(f"")
+
+    for t in turns:
+        score = t["score"]
+        score_icon = "🟢" if score <= 2 else ("🟡" if score <= 5 else "🔴")
+
+        lines.append(f"**第 {t['turn']} 轮 · {t['char_name']}**")
+        lines.append(f"")
+        lines.append(t["reply"])
+        lines.append(f"")
+
+        router_line = f"{score_icon} Router {score}/10 · {t.get('drift_type', '')}"
+        if t.get("reason"):
+            router_line += f" — {t['reason']}"
+        if t.get("needs_human_review"):
+            router_line += " ⚑待人工校验"
+        lines.append(f"<sub>{router_line}</sub>")
+
+        if t.get("correction"):
+            lines.append(f"")
+            lines.append(f"> ⚡ **纠正** {t['correction']}")
+
+        lines.append(f"")
+        lines.append(f"---")
+        lines.append(f"")
+
+    lines.append(f"## 统计")
+    lines.append(f"")
+    lines.append(f"| 指标 | 数值 |")
+    lines.append(f"|---|---|")
+    lines.append(f"| 总轮次 | {stats['total_turns']} |")
+    lines.append(f"| OOC次数 | {stats['ooc_count']} |")
+    lines.append(f"| Router介入 | {stats['corrections']} 次 |")
+    lines.append(f"| 平均漂移分数 | {stats['avg_score']}/10 |")
+    lines.append(f"| 最高漂移分数 | {stats['max_score']}/10 |")
+
+    filename.write_text("\n".join(lines), encoding="utf-8")
+    return filename
 
 
 if __name__ == "__main__":
