@@ -1,0 +1,490 @@
+<title>Project Nightcord Sanctuary</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0e0e12;
+    --surface: #16161c;
+    --surface2: #1e1e26;
+    --border: #2a2a36;
+    --text: #e8e8f0;
+    --text-dim: #6e6e88;
+    --text-muted: #44445a;
+    --accent-mzk: #b48eff;   /* 瑞希：紫 */
+    --accent-ena: #ff85a2;   /* 绘名：粉 */
+    --accent-router: #60c8ff;
+    --green: #5ddb8e;
+    --red: #ff6b7a;
+    --yellow: #ffd166;
+    --mono: "SF Mono", "Cascadia Code", "Fira Code", ui-monospace, monospace;
+    --sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); }
+
+  /* ── Layout ── */
+  .app { display: grid; grid-template-columns: 280px 1fr; grid-template-rows: 48px 1fr; height: 100vh; }
+  .topbar { grid-column: 1 / -1; background: var(--surface); border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; padding: 0 20px; gap: 12px; }
+  .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 20px 16px;
+             display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── Topbar ── */
+  .logo { font-size: 14px; font-weight: 600; letter-spacing: .04em; color: var(--text); }
+  .logo span { color: var(--accent-mzk); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+  .status-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 1.2s infinite; }
+  .status-dot.error   { background: var(--red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .status-label { font-size: 12px; color: var(--text-dim); }
+  .spacer { flex: 1; }
+  .model-badge { font-size: 11px; color: var(--text-muted); font-family: var(--mono); padding: 3px 8px;
+                 background: var(--surface2); border-radius: 4px; border: 1px solid var(--border); }
+
+  /* ── Sidebar controls ── */
+  .section-label { font-size: 10px; letter-spacing: .08em; color: var(--text-muted); text-transform: uppercase;
+                   margin-bottom: 6px; }
+  .control-group { display: flex; flex-direction: column; gap: 6px; }
+  label { font-size: 12px; color: var(--text-dim); }
+  select, input[type=range], input[type=number] {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-size: 13px; padding: 6px 10px; outline: none;
+    -webkit-appearance: none; appearance: none;
+  }
+  select:focus, input:focus { border-color: var(--accent-mzk); }
+  input[type=range] { padding: 4px 0; cursor: pointer; accent-color: var(--accent-mzk); }
+  .range-row { display: flex; align-items: center; gap: 8px; }
+  .range-row input { flex: 1; }
+  .range-val { font-size: 12px; font-family: var(--mono); color: var(--text-dim); min-width: 28px; text-align: right; }
+
+  .btn { border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;
+         padding: 10px 16px; width: 100%; transition: opacity .15s; letter-spacing: .02em; }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  .btn-start { background: var(--accent-mzk); color: #1a0030; }
+  .btn-start:hover:not(:disabled) { opacity: .85; }
+  .btn-stop  { background: var(--surface2); color: var(--red); border: 1px solid var(--red); }
+  .btn-stop:hover:not(:disabled) { background: #2a1020; }
+  .btn-clear { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+  .btn-clear:hover:not(:disabled) { color: var(--text-dim); border-color: var(--text-muted); }
+
+  /* ── Stats panel ── */
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+               padding: 10px 12px; }
+  .stat-num { font-size: 22px; font-weight: 700; font-family: var(--mono); line-height: 1; }
+  .stat-num.good { color: var(--green); }
+  .stat-num.warn { color: var(--yellow); }
+  .stat-num.bad  { color: var(--red); }
+  .stat-lbl { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+
+  /* ── Dialogue scroll area ── */
+  .script-area { flex: 1; overflow-y: auto; padding: 24px 32px; display: flex; flex-direction: column; gap: 0; }
+  .script-area::-webkit-scrollbar { width: 6px; }
+  .script-area::-webkit-scrollbar-track { background: transparent; }
+  .script-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* scene header */
+  .scene-header { text-align: center; margin-bottom: 28px; padding-bottom: 20px;
+                  border-bottom: 1px solid var(--border); }
+  .scene-header .scene-label { font-size: 11px; letter-spacing: .1em; color: var(--text-muted);
+                                text-transform: uppercase; margin-bottom: 6px; }
+  .scene-header .scene-trigger { font-size: 14px; color: var(--text-dim); line-height: 1.6; }
+  .scene-header .scene-meta { font-size: 11px; color: var(--text-muted); margin-top: 6px; font-family: var(--mono); }
+
+  /* script lines */
+  .script-line { display: grid; grid-template-columns: 80px 1fr; gap: 0; padding: 8px 0; position: relative; }
+  .script-line + .script-line { border-top: 1px solid var(--border); }
+
+  .char-col { padding: 12px 16px 12px 0; display: flex; flex-direction: column; align-items: flex-end;
+              gap: 4px; position: sticky; top: 0; }
+  .char-name { font-size: 12px; font-weight: 700; letter-spacing: .06em; white-space: nowrap; }
+  .char-name.mzk { color: var(--accent-mzk); }
+  .char-name.ena { color: var(--accent-ena); }
+  .turn-num { font-size: 10px; color: var(--text-muted); font-family: var(--mono); }
+
+  .line-col { padding: 12px 0 12px 20px; border-left: 2px solid var(--border); }
+  .script-line.mzk .line-col { border-left-color: var(--accent-mzk); }
+  .script-line.ena .line-col { border-left-color: var(--accent-ena); }
+
+  .line-text { font-size: 15px; line-height: 1.75; color: var(--text); }
+  .line-text.generating { color: var(--text-muted); font-style: italic; animation: blink 1s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  /* router badge */
+  .router-badge { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+                  font-size: 11px; font-family: var(--mono); border-radius: 4px;
+                  padding: 3px 8px; border: 1px solid; }
+  .router-badge.ok    { color: var(--green); border-color: #2a5e3a; background: #0f2a1a; }
+  .router-badge.warn  { color: var(--yellow); border-color: #5e4a0f; background: #2a200a; }
+  .router-badge.ooc   { color: var(--red); border-color: #5e1a20; background: #2a0a0e; }
+  .router-badge .score-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .router-badge.ok  .score-dot { background: var(--green); }
+  .router-badge.warn .score-dot { background: var(--yellow); }
+  .router-badge.ooc  .score-dot { background: var(--red); }
+  .router-reason { font-size: 11px; color: var(--text-muted); margin-top: 3px; line-height: 1.4; }
+  .correction-pill { margin-top: 6px; font-size: 11px; color: var(--yellow); background: #2a200a;
+                     border: 1px solid #5e4a0f; border-radius: 4px; padding: 4px 8px; line-height: 1.5; }
+
+  /* system messages */
+  .sys-line { text-align: center; padding: 12px 0; font-size: 12px; color: var(--text-muted);
+              font-style: italic; }
+  .sys-line.error { color: var(--red); font-style: normal; }
+
+  /* done summary */
+  .done-block { margin: 24px 0; padding: 20px; background: var(--surface2); border: 1px solid var(--border);
+                border-radius: 12px; }
+  .done-block h3 { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; letter-spacing: .04em; }
+  .done-stats { display: flex; flex-wrap: wrap; gap: 16px; }
+  .done-stat { font-size: 12px; color: var(--text-dim); }
+  .done-stat b { color: var(--text); font-family: var(--mono); }
+
+  /* empty state */
+  .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+                 gap: 10px; color: var(--text-muted); padding: 40px; }
+  .empty-state .big { font-size: 40px; }
+  .empty-state p { font-size: 13px; text-align: center; line-height: 1.6; }
+
+  /* no-key warning */
+  .nokey-banner { background: #2a1000; border: 1px solid #5e3000; border-radius: 8px; padding: 12px 14px;
+                  font-size: 12px; color: var(--yellow); line-height: 1.5; }
+</style>
+
+<div class="app">
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="status-dot" id="dot"></div>
+    <div class="logo">Project <span>Nightcord</span> Sanctuary</div>
+    <span class="status-label" id="status-label">就绪</span>
+    <div class="spacer"></div>
+    <div class="model-badge" id="model-badge">—</div>
+  </header>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div id="nokey-banner" class="nokey-banner" style="display:none">
+      ⚠ 未检测到 API Key，请先运行 <code>python oobe.py</code>
+    </div>
+
+    <div class="control-group">
+      <div class="section-label">场景</div>
+      <label>选择场景</label>
+      <select id="scene-select"></select>
+    </div>
+
+    <div class="control-group">
+      <div class="section-label">参数</div>
+      <label>最大轮次</label>
+      <div class="range-row">
+        <input type="range" id="max-turns" min="2" max="20" value="8" step="1">
+        <span class="range-val" id="max-turns-val">8</span>
+      </div>
+      <label>Temperature</label>
+      <div class="range-row">
+        <input type="range" id="temperature" min="0.5" max="1.2" value="0.85" step="0.05">
+        <span class="range-val" id="temperature-val">0.85</span>
+      </div>
+      <label>API 延迟 (s)</label>
+      <div class="range-row">
+        <input type="range" id="api-delay" min="0" max="5" value="1" step="0.5">
+        <span class="range-val" id="api-delay-val">1.0</span>
+      </div>
+    </div>
+
+    <div class="control-group" style="margin-top: auto;">
+      <div class="section-label">操作</div>
+      <button class="btn btn-start" id="btn-start">▶ 开始模拟</button>
+      <button class="btn btn-stop"  id="btn-stop"  disabled>■ 停止</button>
+      <button class="btn btn-clear" id="btn-clear">清空记录</button>
+    </div>
+
+    <div>
+      <div class="section-label" style="margin-bottom:10px">本次统计</div>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-num" id="s-turns">—</div><div class="stat-lbl">总轮次</div></div>
+        <div class="stat-card"><div class="stat-num" id="s-ooc">—</div><div class="stat-lbl">OOC次数</div></div>
+        <div class="stat-card"><div class="stat-num" id="s-avg">—</div><div class="stat-lbl">平均漂移</div></div>
+        <div class="stat-card"><div class="stat-num" id="s-max">—</div><div class="stat-lbl">最高漂移</div></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main script area -->
+  <main class="main">
+    <div class="script-area" id="script-area">
+      <div class="empty-state" id="empty-state">
+        <div class="big">🎭</div>
+        <p>选择场景并点击「开始模拟」<br>对话将以剧本格式流式显示</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let ws = null, running = false;
+let config = {};
+let liveLineEl = null;
+
+// ── Load config ──
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    config = await r.json();
+    $('model-badge').textContent = config.model || '—';
+    if (!config.has_key) $('nokey-banner').style.display = '';
+  } catch {}
+
+  try {
+    const r = await fetch('/api/scenes');
+    const scenes = await r.json();
+    const sel = $('scene-select');
+    sel.innerHTML = '';
+    for (const [id, s] of Object.entries(scenes)) {
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = s.label;
+      if (id === config.default_scene) o.selected = true;
+      sel.appendChild(o);
+    }
+  } catch {}
+}
+
+// ── Range bindings ──
+function bindRange(id, valId, fmt) {
+  const el = $(id), v = $(valId);
+  el.addEventListener('input', () => { v.textContent = fmt ? fmt(el.value) : el.value; });
+}
+bindRange('max-turns', 'max-turns-val');
+bindRange('temperature', 'temperature-val', v => parseFloat(v).toFixed(2));
+bindRange('api-delay', 'api-delay-val', v => parseFloat(v).toFixed(1));
+
+// ── State helpers ──
+function setRunning(r) {
+  running = r;
+  $('btn-start').disabled = r;
+  $('btn-stop').disabled  = !r;
+  const dot = $('dot');
+  dot.className = 'status-dot' + (r ? ' running' : '');
+}
+
+function setStatus(text, isError) {
+  $('status-label').textContent = text;
+  $('status-label').style.color = isError ? 'var(--red)' : '';
+}
+
+// ── Script rendering ──
+function clearScript() {
+  const area = $('script-area');
+  area.innerHTML = '';
+  const empty = document.createElement('div');
+  empty.className = 'empty-state'; empty.id = 'empty-state';
+  empty.innerHTML = '<div class="big">🎭</div><p>选择场景并点击「开始模拟」<br>对话将以剧本格式流式显示</p>';
+  area.appendChild(empty);
+  liveLineEl = null;
+  resetStats();
+}
+
+function removeEmpty() {
+  const e = $('empty-state');
+  if (e) e.remove();
+}
+
+function addSceneHeader(scene) {
+  removeEmpty();
+  const el = document.createElement('div');
+  el.className = 'scene-header';
+  el.innerHTML = `
+    <div class="scene-label">${scene.label}</div>
+    <div class="scene-trigger">${escHtml(scene.trigger)}</div>
+    <div class="scene-meta">${escHtml(scene.time)} · ${escHtml(scene.location)}</div>
+  `;
+  $('script-area').appendChild(el);
+}
+
+function addGeneratingLine(turn, charKey, charName) {
+  const el = document.createElement('div');
+  el.className = `script-line ${charKey}`;
+  el.id = `line-${turn}`;
+  el.innerHTML = `
+    <div class="char-col">
+      <div class="char-name ${charKey}">${escHtml(charName)}</div>
+      <div class="turn-num">#${turn}</div>
+    </div>
+    <div class="line-col">
+      <div class="line-text generating" id="lt-${turn}">生成中…</div>
+    </div>
+  `;
+  $('script-area').appendChild(el);
+  liveLineEl = el;
+  scrollBottom();
+  return el;
+}
+
+function fillLine(turn, reply, score, isOoc, driftType, reason, correction, needsReview) {
+  const lt = $(`lt-${turn}`);
+  if (lt) {
+    lt.className = 'line-text';
+    lt.textContent = reply;
+  }
+  const lineCol = document.querySelector(`#line-${turn} .line-col`);
+  if (!lineCol) return;
+
+  const level = score <= 2 ? 'ok' : score <= 5 ? 'warn' : 'ooc';
+  const badge = document.createElement('div');
+  badge.className = `router-badge ${level}`;
+  badge.innerHTML = `<span class="score-dot"></span> Router ${score}/10 · ${escHtml(driftType || '—')}`;
+  lineCol.appendChild(badge);
+
+  if (reason) {
+    const rd = document.createElement('div');
+    rd.className = 'router-reason';
+    rd.textContent = reason + (needsReview ? ' ⚑' : '');
+    lineCol.appendChild(rd);
+  }
+  if (correction) {
+    const cp = document.createElement('div');
+    cp.className = 'correction-pill';
+    cp.textContent = '⚡ ' + correction;
+    lineCol.appendChild(cp);
+  }
+  scrollBottom();
+}
+
+function addSysLine(text, isError) {
+  const el = document.createElement('div');
+  el.className = 'sys-line' + (isError ? ' error' : '');
+  el.textContent = text;
+  $('script-area').appendChild(el);
+  scrollBottom();
+}
+
+function addJudgingNote(turn) {
+  const lineCol = document.querySelector(`#line-${turn} .line-col`);
+  if (!lineCol) return;
+  let jn = lineCol.querySelector('.judging-note');
+  if (!jn) {
+    jn = document.createElement('div');
+    jn.className = 'router-reason judging-note';
+    jn.textContent = 'Router 判断中…';
+    lineCol.appendChild(jn);
+  }
+}
+
+function addDoneSummary(stats) {
+  const el = document.createElement('div');
+  el.className = 'done-block';
+  el.innerHTML = `
+    <h3>✦ 模拟结束</h3>
+    <div class="done-stats">
+      <div class="done-stat">总轮次 <b>${stats.total_turns}</b></div>
+      <div class="done-stat">OOC次数 <b>${stats.ooc_count}</b></div>
+      <div class="done-stat">Router介入 <b>${stats.corrections}次</b></div>
+      <div class="done-stat">平均漂移 <b>${stats.avg_score}/10</b></div>
+      <div class="done-stat">最高漂移 <b>${stats.max_score}/10</b></div>
+    </div>
+  `;
+  $('script-area').appendChild(el);
+  scrollBottom();
+}
+
+function scrollBottom() {
+  const a = $('script-area');
+  a.scrollTop = a.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Stats panel ──
+function resetStats() {
+  ['s-turns','s-ooc','s-avg','s-max'].forEach(id => {
+    $(id).textContent = '—';
+    $(id).className = 'stat-num';
+  });
+}
+
+function updateStats(stats) {
+  $('s-turns').textContent = stats.total_turns;
+  $('s-ooc').textContent   = stats.ooc_count;
+  $('s-ooc').className = 'stat-num ' + (stats.ooc_count === 0 ? 'good' : stats.ooc_count <= 2 ? 'warn' : 'bad');
+  $('s-avg').textContent   = stats.avg_score;
+  $('s-avg').className = 'stat-num ' + (stats.avg_score <= 2 ? 'good' : stats.avg_score <= 5 ? 'warn' : 'bad');
+  $('s-max').textContent   = stats.max_score;
+  $('s-max').className = 'stat-num ' + (stats.max_score <= 2 ? 'good' : stats.max_score <= 5 ? 'warn' : 'bad');
+}
+
+// ── WebSocket run ──
+function startRun() {
+  if (running) return;
+  clearScript();
+  setRunning(true);
+  setStatus('连接中…');
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/run`);
+
+  ws.onopen = () => {
+    setStatus('模拟中');
+    ws.send(JSON.stringify({
+      scene:       $('scene-select').value,
+      max_turns:   parseInt($('max-turns').value),
+      temperature: parseFloat($('temperature').value),
+      api_delay:   parseFloat($('api-delay').value),
+    }));
+  };
+
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case 'start':
+        addSceneHeader(msg.scene);
+        break;
+      case 'generating':
+        addGeneratingLine(msg.turn, msg.character, msg.char_name);
+        setStatus(`第 ${msg.turn} 轮 · ${msg.char_name} 生成中`);
+        break;
+      case 'judging':
+        addJudgingNote(msg.turn);
+        setStatus(`第 ${msg.turn} 轮 · Router 判断中`);
+        break;
+      case 'turn':
+        fillLine(msg.turn, msg.reply, msg.score, msg.is_ooc,
+                 msg.drift_type, msg.reason, msg.correction, msg.needs_human_review);
+        break;
+      case 'done':
+        addDoneSummary(msg.stats);
+        updateStats(msg.stats);
+        setRunning(false);
+        setStatus('完成');
+        ws.close();
+        break;
+      case 'error':
+        addSysLine(`错误：${msg.message}`, true);
+        setRunning(false);
+        setStatus('错误', true);
+        ws.close();
+        break;
+    }
+  };
+
+  ws.onclose = () => { if (running) { setRunning(false); setStatus('已断开'); } };
+  ws.onerror = () => { addSysLine('WebSocket 连接失败', true); setRunning(false); setStatus('连接失败', true); };
+}
+
+function stopRun() {
+  if (ws) ws.close();
+  setRunning(false);
+  setStatus('已停止');
+  addSysLine('模拟已手动停止');
+}
+
+$('btn-start').addEventListener('click', startRun);
+$('btn-stop').addEventListener('click', stopRun);
+$('btn-clear').addEventListener('click', clearScript);
+
+loadConfig();
+</script>
