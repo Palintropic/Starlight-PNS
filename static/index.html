@@ -373,9 +373,12 @@ function addJudgingNote(turn) {
   }
 }
 
-function addDoneSummary(stats) {
+function addDoneSummary(stats, historyFile) {
   const el = document.createElement('div');
   el.className = 'done-block';
+  const fileNote = historyFile
+    ? `<div class="done-stat" style="grid-column:1/-1;color:var(--text-muted);font-family:var(--mono);font-size:11px">📄 ${escHtml(historyFile)}</div>`
+    : '';
   el.innerHTML = `
     <h3>✦ 模拟结束</h3>
     <div class="done-stats">
@@ -384,6 +387,7 @@ function addDoneSummary(stats) {
       <div class="done-stat">Router介入 <b>${stats.corrections}次</b></div>
       <div class="done-stat">平均漂移 <b>${stats.avg_score}/10</b></div>
       <div class="done-stat">最高漂移 <b>${stats.max_score}/10</b></div>
+      ${fileNote}
     </div>
   `;
   $('script-area').appendChild(el);
@@ -456,7 +460,7 @@ function startRun() {
                  msg.drift_type, msg.reason, msg.correction, msg.needs_human_review);
         break;
       case 'done':
-        addDoneSummary(msg.stats);
+        addDoneSummary(msg.stats, msg.history_file);
         updateStats(msg.stats);
         setRunning(false);
         setStatus('完成');
