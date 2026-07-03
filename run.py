@@ -84,8 +84,11 @@ def run():
 
     client = create_client(api_key)
 
-    # 对话历史（两个角色共用同一段历史）
-    history = [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}]
+    # 每个角色各自维护自己视角的历史（自己说的是assistant，对方说的是user）
+    histories = {
+        "mzk": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
+        "ena": [],
+    }
 
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
     turn_log = []
@@ -98,18 +101,19 @@ def run():
 
     for turn in range(1, MAX_TURNS + 1):
         char_name = "瑞希" if current == "mzk" else "绘名"
+        other = "ena" if current == "mzk" else "mzk"
 
         try:
-            reply = call_character(client, current, history, scene, correction_next)
+            reply = call_character(client, current, histories[current], scene, correction_next)
         except Exception as e:
             print(f"\n❌ 角色调用失败: {e}")
             break
 
         print(f"\n第{turn}轮 | {char_name}：{reply}")
 
-        # 加入历史（交替role）
-        role = "assistant" if len(history) % 2 == 1 else "user"
-        history.append({"role": role, "content": f"{char_name}：{reply}"})
+        # 分别写入双方视角的历史
+        histories[current].append({"role": "assistant", "content": f"{char_name}：{reply}"})
+        histories[other].append({"role": "user", "content": f"{char_name}：{reply}"})
 
         # Router判断
         result = judge(client, current, reply, turn)
