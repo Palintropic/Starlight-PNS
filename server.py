@@ -39,12 +39,20 @@ def get_config():
         "default_scene": DEFAULT_SCENE,
     }
 
+def _strip_prefix(text: str, char_name: str) -> str:
+    prefix = char_name + "："
+    while text.startswith(prefix):
+        text = text[len(prefix):]
+    return text
+
 async def call_character_async(client, character: str, history: list, scene: dict, model: str, max_tokens: int, temperature: float, correction: str = None) -> str:
     use_compat = "flash-lite" in model.lower()
     if character == "ena":
         system = get_ena_system_compat(scene) if use_compat else get_ena_system(scene)
+        char_name = "绘名"
     else:
         system = get_mzk_system_compat(scene) if use_compat else get_mzk_system(scene)
+        char_name = "瑞希"
 
     if correction:
         system += f"\n\n【注意】{correction}"
@@ -61,13 +69,13 @@ async def call_character_async(client, character: str, history: list, scene: dic
             content = response.choices[0].message.content
             if not content:
                 raise ValueError(f"API返回空内容，finish_reason: {response.choices[0].finish_reason}")
-            return content.strip()
+            return _strip_prefix(content.strip(), char_name)
         else:
             response = client.messages.create(
                 model=model, max_tokens=max_tokens, temperature=temperature,
                 system=system, messages=history,
             )
-            return response.content[0].text.strip()
+            return _strip_prefix(response.content[0].text.strip(), char_name)
 
     return await loop.run_in_executor(None, _call)
 

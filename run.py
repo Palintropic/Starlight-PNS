@@ -18,6 +18,12 @@ OOC_THRESHOLD = 5
 MAX_TOKENS    = int(os.environ.get("MAX_TOKENS", "1024"))
 API_DELAY     = float(os.environ.get("API_DELAY", "3"))
 
+def _strip_prefix(text: str, char_name: str) -> str:
+    prefix = char_name + "："
+    while text.startswith(prefix):
+        text = text[len(prefix):]
+    return text
+
 def call_character(client, character: str, history: list, scene: dict, correction: str = None) -> str:
     use_compat = "flash-lite" in MODEL.lower()
     if character == "ena":
@@ -44,13 +50,13 @@ def call_character(client, character: str, history: list, scene: dict, correctio
             print(f"[DEBUG] finish_reason: {choice.finish_reason}")
             print(f"[DEBUG] full response: {response.model_dump()}")
             raise ValueError(f"API返回空内容，finish_reason: {choice.finish_reason}")
-        return content.strip()
+        return _strip_prefix(content.strip(), char_name)
     else:
         response = client.messages.create(
             model=MODEL, max_tokens=MAX_TOKENS, temperature=TEMPERATURE,
             system=system, messages=history,
         )
-        return response.content[0].text.strip()
+        return _strip_prefix(response.content[0].text.strip(), char_name)
 
 
 def run():
