@@ -20,6 +20,7 @@ JUDGE_MODEL = "mimo-v2.5-pro"
 MAX_TOKENS  = 512
 OOC_THRESHOLD = 5
 DILUTION_TURN  = 7          # 超过此轮警告 context dilution
+LOG_FILE       = "drift_scores.jsonl"
 
 # Windows 终端颜色（ANSI，Win10+ 默认支持）
 C = {
@@ -55,7 +56,8 @@ def call_api(system: str, messages: list, model: str = CHAR_MODEL) -> str:
         return f"[API错误 {e.response.status_code}]"
 
 # ─── Router ───────────────────────────────────────────────
-def router_eval(character: str, utterance: str) -> dict:
+def router_eval(character: str, utterance: str, turn: int = 0) -> dict:
+    import datetime
     prompt = f"角色：{character}\n台词：{utterance}"
     raw = call_api(ROUTER_SYSTEM, [{"role": "user", "content": prompt}],
                    model=JUDGE_MODEL)
@@ -66,13 +68,24 @@ def router_eval(character: str, utterance: str) -> dict:
         if clean.startswith("json"):
             clean = clean[4:].strip()
     try:
-        return json.loads(clean)
+        result = json.loads(clean)
     except json.JSONDecodeError:
-        return {
+        result = {
             "character": character, "score": -1,
             "drift_type": "解析失败", "reason": raw[:80],
             "is_ooc": False, "needs_human_review": True, "correction": None,
         }
+    log_entry = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "turn": turn,
+        "character": character,
+        "score": result.get("score", -1),
+        "drift_type": result.get("drift_type", ""),
+        "is_ooc": result.get("is_ooc", False),
+    }
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    return result
 
 # ─── 显示 ─────────────────────────────────────────────────
 LABELS = {"ena": "绘名", "mzk": "瑞希", "router": "Router"}
@@ -183,7 +196,7 @@ def run_session(start_scene: str = DEFAULT_SCENE):
     cprint("mzk", mzk_reply)
 
     if state.router_on:
-        result = router_eval("mzk", mzk_reply)
+        result = router_eval("mzk", mzk_reply, 0)
         print_router(result)
         if result.get("correction"):
             state.mzk_sys_ext += f"\n\n【本轮纠正】{result['correction']}"
@@ -205,7 +218,7 @@ def run_session(start_scene: str = DEFAULT_SCENE):
         cprint("ena", ena_reply)
 
         if state.router_on:
-            result = router_eval("ena", ena_reply)
+            result = router_eval("ena", ena_reply, state.turn)
             print_router(result)
             if result.get("correction"):
                 state.ena_sys_ext += f"\n\n【本轮纠正】{result['correction']}"
@@ -252,7 +265,7 @@ def run_session(start_scene: str = DEFAULT_SCENE):
         cprint("mzk", mzk_reply)
 
         if state.router_on:
-            result = router_eval("mzk", mzk_reply)
+            result = router_eval("mzk", mzk_reply, state.turn)
             print_router(result)
             if result.get("correction"):
                 state.mzk_sys_ext += f"\n\n【本轮纠正】{result['correction']}"
