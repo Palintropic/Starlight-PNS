@@ -1,0 +1,65 @@
+# config.yaml
+# PNS全局配置文件
+
+# API配置
+api:
+  provider: "mimo"              # mimo / gemini
+  base_url: "https://api.mimoai.com/v1"
+  model: "mimo-v2.5-pro"
+  timeout: 30
+  max_retries: 3
+
+# 模拟配置
+simulation:
+  session_length: 12            # 每个session的turns数
+  time_step: 10                 # 每turn推进的分钟数
+  auto_advance_threshold: 8     # 场景自动推进的turn阈值
+
+# Router配置
+router:
+  drift_threshold: 6.5          # 认为有drift的分数阈值
+  confidence_threshold: 0.7     # 认为可靠的confidence阈值
+  context_dilution_warning: 7   # 多少turn后需要重新注入纠正指令
+
+# 输出配置
+output:
+  drift_scores_file: "drift_scores.jsonl"  # drift分数日志
+  session_logs_dir: "./sessions"           # session日志目录
+  backup_enabled: true
+  backup_interval: 10                      # 每N个session备份一次
+
+# 服务器配置
+server:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+  reload: false
+  workers: 1
+
+# 角色配置
+characters:
+  include_partial: false          # 是否包含sample不足的角色
+  include_not_ready: false        # 是否包含未准备好的角色
+  default_pairs:                  # 默认的角色组合
+    - ['ena', 'mzk']
+
+# 场景配置
+scenes:
+  default_scene: "gate"
+  available_scenes:
+    - gate
+    - ena_room
+    - clothes_shop
+    - nightcord
+
+# 日志配置
+logging:
+  level: "INFO"                   # DEBUG / INFO / WARNING / ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./pns.log"
+
+# 开发配置
+development:
+  mock_api: false                 # 是否mock API调用（测试用）
+  verbose: false                  # 是否显示详细日志
+  save_all_turns: true            # 是否保存所有turn（不仅仅是有drift的）
