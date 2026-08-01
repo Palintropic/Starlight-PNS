@@ -1,0 +1,38 @@
+:root {
+  --bg: #0e0e12;
+  --surface: #16161c;
+  --surface2: #1e1e26;
+  --border: #2a2a36;
+  --text: #e8e8f0;
+  --text-dim: #6e6e88;
+  --text-muted: #44445a;
+  --accent-mzk: #b48eff;
+  --accent-ena: #ff85a2;
+  --green: #5ddb8e;
+  --red: #ff6b7a;
+  --yellow: #ffd166;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+  --sans: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+
+  color-scheme: dark;
+  font-family: var(--sans);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+textarea {
+  font: inherit;
+  color: inherit;
+}

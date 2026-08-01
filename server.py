@@ -12,9 +12,12 @@ try:
 except ImportError:
     pass
 
+from typing import Literal, Optional
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat, SCENES, DEFAULT_SCENE
 from router import create_client, judge, API_FORMAT, _get_api_key
@@ -25,6 +28,90 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/")
 def index():
     return FileResponse("static/index.html")
+
+
+# ─── Review Dashboard API ────────────────────────────────────────────
+# 数据来源尚未定案（见 PNS_Web_Dashboard_开工工单.md 第4节），这里先用
+# 手搓样例数据把 Dashboard 的三栏交互跑通。字段对齐 pns/models/drift_score.py
+# 的 DriftScore，外加 text（台词原文）和 session_id（会话分组）。
+# 真正数据源定下来后，把 SAMPLE_TURNS 换成读取实际 log 即可，接口形状不用变。
+
+REVIEW_DECISIONS_FILE = Path("review_decisions.jsonl")
+
+SAMPLE_TURNS = [
+    {
+        "session_id": "sample-001", "turn": 0, "character": "mzk", "char_name": "瑞希",
+        "text": "绘名绘名！今天的天空颜色超好看的，感觉可以直接拿来当新曲的封面色喵！",
+        "drift_score": 1, "confidence": 0.92, "drift_type": "无",
+        "reason": "语气活泼、话题跳跃，符合瑞希日常状态。", "needs_human_review": False,
+        "correction": None, "timestamp": "2026-07-30T10:00:00",
+    },
+    {
+        "session_id": "sample-001", "turn": 1, "character": "ena", "char_name": "绘名",
+        "text": "……嗯，是挺好看的。",
+        "drift_score": 2, "confidence": 0.8, "drift_type": "无",
+        "reason": "省略号收尾+简短回应，与瑞希互动时的克制符合设定。", "needs_human_review": False,
+        "correction": None, "timestamp": "2026-07-30T10:00:40",
+    },
+    {
+        "session_id": "sample-001", "turn": 2, "character": "mzk", "char_name": "瑞希",
+        "text": "如果你需要，我可以帮你整理一份关于天空配色的参考资料，你觉得怎么样？要不要我先列个大纲？",
+        "drift_score": 7, "confidence": 0.88, "drift_type": "助手化A",
+        "reason": "把决定权交还用户（'你觉得怎么样'），语气偏向客服式建议，情绪浓度与句子密度不匹配。",
+        "needs_human_review": True,
+        "correction": "去掉征询式收尾，直接用瑞希的方式把感受说完，不留选择给用户。",
+        "timestamp": "2026-07-30T10:01:10",
+    },
+    {
+        "session_id": "sample-001", "turn": 3, "character": "ena", "char_name": "绘名",
+        "text": "没关系的，随便都行，你决定就好。",
+        "drift_score": 8, "confidence": 0.9, "drift_type": "内容OOC",
+        "reason": "'没关系'、'随便都行'是典型绘名OOC信号，此话题（与瑞希）本应收敛而非过度顺从退让。",
+        "needs_human_review": True,
+        "correction": "换成绘名式的迂回克制，而不是讨好式的全盘让步。",
+        "timestamp": "2026-07-30T10:01:50",
+    },
+]
+
+
+class ReviewDecision(BaseModel):
+    session_id: str
+    turn: int
+    character: str
+    decision: Literal["approve", "reject", "rewrite"]
+    note: Optional[str] = None
+
+
+def _decision_key(session_id: str, turn: int) -> str:
+    return f"{session_id}:{turn}"
+
+
+@app.get("/api/review/turns")
+def get_review_turns():
+    return SAMPLE_TURNS
+
+
+@app.get("/api/review/decisions")
+def get_review_decisions():
+    decisions: dict[str, dict] = {}
+    if REVIEW_DECISIONS_FILE.exists():
+        with REVIEW_DECISIONS_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                decisions[_decision_key(record["session_id"], record["turn"])] = record
+    return decisions
+
+
+@app.post("/api/review/decision")
+def post_review_decision(decision: ReviewDecision):
+    record = decision.model_dump()
+    record["decided_at"] = datetime.now().isoformat()
+    with REVIEW_DECISIONS_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
 
 @app.get("/api/scenes")
 def get_scenes():

@@ -1,7 +1,7 @@
 # router.py — Router判断逻辑
 import json
 import os
-from world import ROUTER_SYSTEM
+from pns.logic.router import ROUTER_SYSTEM
 
 try:
     from dotenv import load_dotenv
