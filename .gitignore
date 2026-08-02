@@ -56,3 +56,6 @@ config.secret.py
 *_key.*
 
 .claude/session-notes.md
+
+# ─── 开工/规划文档（给 CC 用，不进仓库）────────────────────
+/kickoff/
