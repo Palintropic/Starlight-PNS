@@ -162,7 +162,7 @@ class Scene(BaseModel):
     weather: str
     day_phase: Literal["morning", "afternoon", "evening", "late_night"]
     scene_type: str
-    lore_tag: Literal["硬事实", "软推断", "待验证"]
+    lore_tag: Literal["CANON", "INFERRED", "UNVERIFIED"]
     trigger: str
     gate_triggers: Optional[dict[str, str]] = None
     gate_opening_note: Optional[str] = None
@@ -283,9 +283,9 @@ async def call_character_async(client, character: str, history: list, scene: dic
     return await loop.run_in_executor(None, _call)
 
 
-async def judge_async(client, character: str, message: str, turn: int) -> dict:
+async def judge_async(client, character: str, message: str, turn: int, scene: dict | None = None) -> dict:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, router_mod.judge, client, character, message, turn)
+    return await loop.run_in_executor(None, router_mod.judge, client, character, message, turn, scene)
 
 
 def save_history(session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
@@ -420,7 +420,7 @@ async def run_simulation(ws: WebSocket):
 
         await ws.send_json({"type": "judging", "turn": turn, "character": char_key, "char_name": char_name})
 
-        result = await judge_async(client, current, reply, turn)
+        result = await judge_async(client, current, reply, turn, scene)
         score   = result.get("drift_score", 0)
         is_ooc  = result.get("is_ooc", False)
 
@@ -460,6 +460,8 @@ async def run_simulation(ws: WebSocket):
             "reason": result.get("reason", ""),
             "needs_human_review": result.get("needs_human_review", False),
             "correction": result.get("correction"),
+            "scene_id": result.get("scene_id", ""),
+            "lore_tag": result.get("lore_tag", ""),
             "timestamp": datetime.now().isoformat(),
         }
         with DRIFT_SCORES_FILE.open("a", encoding="utf-8") as f:

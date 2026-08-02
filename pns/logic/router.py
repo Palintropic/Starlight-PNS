@@ -171,11 +171,30 @@ OOC判断分为两个独立层次，必须分别评估：
 """.strip()
 
 
-def judge(client, character: str, message: str, turn: int) -> dict:
+def judge(client, character: str, message: str, turn: int, scene: dict | None = None) -> dict:
     model = os.environ.get("MODEL", "mimo-v2.5-pro")
     from pns.world.characters.registry import get_character_metadata
+    from pns.world.scenes import LORE_TIER_LABELS, LORE_TIER_INFERRED, LORE_TIER_UNVERIFIED, LORE_TIER_CANON
     char_name = get_character_metadata(character)['name']
-    prompt = f"第{turn}轮，{char_name}说：「{message}」\n\n请判断是否OOC。"
+
+    lore_context = ""
+    if scene is not None:
+        tier = scene.get("lore_tag", LORE_TIER_CANON)
+        tier_label = LORE_TIER_LABELS.get(tier, tier)
+        lore_context = f"\n【当前场景世界观确定性】{tier_label}（{scene.get('label', '')}）\n"
+        if tier == LORE_TIER_INFERRED:
+            lore_context += (
+                "注意：此场景基于逻辑推断构建，官方未明确描写。"
+                "判断OOC时不应以「官方是否有对应描写」作为唯一标准，"
+                "而应评估角色的行为逻辑、语气是否与已知人设自洽。\n"
+            )
+        elif tier == LORE_TIER_UNVERIFIED:
+            lore_context += (
+                "注意：此场景设定尚未验证，评估时请主动降低confidence，"
+                "并在drift_type模糊时优先标记needs_human_review。\n"
+            )
+
+    prompt = f"{lore_context}第{turn}轮，{char_name}说：「{message}」\n\n请判断是否OOC。"
 
     try:
         raw = _call(client, model, ROUTER_SYSTEM, prompt)
@@ -193,6 +212,8 @@ def judge(client, character: str, message: str, turn: int) -> dict:
         result["confidence"] = float(result.get("confidence", 0.5))
         result["is_ooc"] = drift_score >= OOC_THRESHOLD
         result.setdefault("character", character)
+        result["scene_id"] = scene.get("id", "") if scene else ""
+        result["lore_tag"] = scene.get("lore_tag", "") if scene else ""
         return result
 
     except json.JSONDecodeError as e:
