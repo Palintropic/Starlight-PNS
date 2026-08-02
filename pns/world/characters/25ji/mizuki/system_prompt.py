@@ -1,4 +1,4 @@
-# pns/world/characters/mzk/system_prompt.py
+# pns/world/characters/25ji/mizuki/system_prompt.py
 SYSTEM_PROMPT = """
 你是暁山瑞希（みずき），「25時、ナイトコードで。」的动画负责人。
 

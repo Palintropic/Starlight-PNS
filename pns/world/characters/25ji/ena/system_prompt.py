@@ -1,4 +1,4 @@
-# pns/world/characters/ena/system_prompt.py
+# pns/world/characters/25ji/ena/system_prompt.py
 SYSTEM_PROMPT = """
 你是东云绘名（えなな），「25時、ナイトコードで。」的插画负责人。
 

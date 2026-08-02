@@ -1,7 +1,18 @@
 # pns/world/characters/registry.py
+import importlib
 from typing import Dict, List, Optional
 
+# 团 unit 字段值 → 角色目录树里的团级目录名
+UNIT_DIR_MAP = {
+    '25ji': '25ji',
+    'VBS': 'vbs',
+    'WxS': 'wxs',
+    'MMJ': 'mmj',
+    'Leo/need': 'leoneed',
+}
+
 # 角色注册表 - 定义所有20个角色的元数据
+# key = 角色ID = pns/world/characters/<unit_dir>/<角色ID>/ 目录名（官方罗马字）
 CHARACTER_REGISTRY = {
     # 25ji - 完整样本
     'ena': {
@@ -15,7 +26,7 @@ CHARACTER_REGISTRY = {
         'grade': 3,
         'class': '3-D',
     },
-    'mzk': {
+    'mizuki': {
         'name': '暁山瑞希',
         'name_jp': '暁山瑞希',
         'status': 'ready',
@@ -48,9 +59,9 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-?',
     },
-    
+
     # Vivid BAD SQUAD
-    'akaito': {
+    'akito': {
         'name': '东云彰人',
         'name_jp': '東雲彰人',
         'status': 'not_ready',
@@ -61,7 +72,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-A',
     },
-    'oshiro_anne': {
+    'an': {
         'name': '白石杏',
         'name_jp': '白石杏',
         'status': 'not_ready',
@@ -72,7 +83,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-A',
     },
-    'aoyagi_toya': {
+    'toya': {
         'name': '青柳冬弥',
         'name_jp': '青柳冬弥',
         'status': 'not_ready',
@@ -83,7 +94,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-B',
     },
-    'azusawa_kokoro': {
+    'kohane': {
         'name': '小豆泽心羽',
         'name_jp': '小豆泽心羽',
         'status': 'not_ready',
@@ -94,9 +105,9 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-A',
     },
-    
+
     # Wonderlands×Showtime
-    'amia': {
+    'tsukasa': {
         'name': '天马司',
         'name_jp': '天馬司',
         'status': 'not_ready',
@@ -107,7 +118,7 @@ CHARACTER_REGISTRY = {
         'grade': 3,
         'class': '3-C',
     },
-    'otori_emu': {
+    'emu': {
         'name': '凤笑梦',
         'name_jp': '鳳笑梦',
         'status': 'not_ready',
@@ -118,7 +129,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-B',
     },
-    'kusanagi_nene': {
+    'nene': {
         'name': '草薙宁宁',
         'name_jp': '草薙寧々',
         'status': 'not_ready',
@@ -129,7 +140,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-A',
     },
-    'jinkoji_rui': {
+    'rui': {
         'name': '神代类',
         'name_jp': '神代類',
         'status': 'not_ready',
@@ -140,9 +151,9 @@ CHARACTER_REGISTRY = {
         'grade': 3,
         'class': '3-C',
     },
-    
+
     # MORE MORE JUMP!
-    'hanawa_shinori': {
+    'minori': {
         'name': '花里实乃理',
         'name_jp': '花里実乃理',
         'status': 'not_ready',
@@ -153,7 +164,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-D',
     },
-    'kiriya_haruka': {
+    'haruka': {
         'name': '桐谷遥',
         'name_jp': '桐谷遥',
         'status': 'not_ready',
@@ -164,7 +175,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-D',
     },
-    'momoi_airi': {
+    'airi': {
         'name': '桃井爱莉',
         'name_jp': '桃井愛莉',
         'status': 'not_ready',
@@ -175,7 +186,7 @@ CHARACTER_REGISTRY = {
         'grade': 3,
         'class': '3-E',
     },
-    'hinomori_shio': {
+    'shizuku': {
         'name': '日野森雫',
         'name_jp': '日野森雫',
         'status': 'not_ready',
@@ -186,9 +197,9 @@ CHARACTER_REGISTRY = {
         'grade': 3,
         'class': '3-E',
     },
-    
+
     # Leo/need
-    'hoshino_ichika': {
+    'ichika': {
         'name': '星乃一歌',
         'name_jp': '星乃一歌',
         'status': 'not_ready',
@@ -199,7 +210,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-A',
     },
-    'tenma_saki': {
+    'saki': {
         'name': '天马咲希',
         'name_jp': '天馬咲希',
         'status': 'not_ready',
@@ -210,7 +221,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-B',
     },
-    'mochizuki_honami': {
+    'honami': {
         'name': '望月穗波',
         'name_jp': '望月穗波',
         'status': 'not_ready',
@@ -221,7 +232,7 @@ CHARACTER_REGISTRY = {
         'grade': 2,
         'class': '2-A',
     },
-    'hinomori_shiho': {
+    'shiho': {
         'name': '日野森志步',
         'name_jp': '日野森志步',
         'status': 'not_ready',
@@ -234,28 +245,40 @@ CHARACTER_REGISTRY = {
     },
 }
 
+
 def get_character_prompt(character_id: str) -> str:
-    """获取角色的SYSTEM prompt"""
-    # 动态导入以避免循环依赖
-    from . import ena, mzk, kanade, mafuyu
-    
-    prompts = {
-        'ena': ena.SYSTEM_PROMPT,
-        'mzk': mzk.SYSTEM_PROMPT,
-        'kanade': kanade.SYSTEM_PROMPT if hasattr(kanade, 'SYSTEM_PROMPT') else '',
-        'mafuyu': mafuyu.SYSTEM_PROMPT if hasattr(mafuyu, 'SYSTEM_PROMPT') else '',
-    }
-    
-    if character_id not in prompts:
-        raise ValueError(f"Character not found: {character_id}")
-    
-    return prompts[character_id]
+    """获取角色的SYSTEM prompt，按registry里的unit动态定位模块"""
+    if character_id not in CHARACTER_REGISTRY:
+        raise ValueError(f"Character not found in registry: {character_id}")
+
+    info = CHARACTER_REGISTRY[character_id]
+    unit_dir = UNIT_DIR_MAP.get(info['unit'])
+    if unit_dir is None:
+        raise ValueError(f"Unknown unit '{info['unit']}' for character {character_id}")
+
+    module_path = f"pns.world.characters.{unit_dir}.{character_id}"
+    try:
+        module = importlib.import_module(module_path)
+    except ModuleNotFoundError as e:
+        raise ValueError(
+            f"角色 {character_id}（status={info['status']}）尚无 system_prompt.py，"
+            f"预期路径 {module_path.replace('.', '/')}.py"
+        ) from e
+
+    if not hasattr(module, 'SYSTEM_PROMPT'):
+        raise ValueError(
+            f"角色 {character_id} 的模块存在，但未定义 SYSTEM_PROMPT"
+            f"（status={info['status']}，可能素材尚未补全）"
+        )
+    return module.SYSTEM_PROMPT
+
 
 def get_character_metadata(character_id: str) -> Dict:
     """获取角色的元数据"""
     if character_id not in CHARACTER_REGISTRY:
         raise ValueError(f"Character not found: {character_id}")
     return CHARACTER_REGISTRY[character_id].copy()
+
 
 def list_characters(include_partial: bool = False, include_not_ready: bool = False) -> Dict[str, Dict]:
     """列出所有可用角色"""
@@ -268,6 +291,7 @@ def list_characters(include_partial: bool = False, include_not_ready: bool = Fal
         elif include_not_ready and info['status'] == 'not_ready':
             result[char_id] = info
     return result
+
 
 def get_available_pairs() -> List[tuple]:
     """获取所有ready状态的角色组合"""

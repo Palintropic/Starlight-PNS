@@ -394,18 +394,18 @@ async def run_simulation(ws: WebSocket):
     })
 
     histories = {
-        "mzk": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
+        "mizuki": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
         "ena": [{"role": "user", "content": f"【场景】{scene['trigger']}"}],
     }
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
-    current = "mzk"
+    current = "mizuki"
     correction_next = None
     turn_log = []
 
     for turn in range(1, max_turns + 1):
         char_key  = current
-        char_name = "瑞希" if current == "mzk" else "绘名"
-        other = "ena" if current == "mzk" else "mzk"
+        char_name = "瑞希" if current == "mizuki" else "绘名"
+        other = "ena" if current == "mizuki" else "mizuki"
 
         await ws.send_json({"type": "generating", "turn": turn, "character": char_key, "char_name": char_name})
 
@@ -466,7 +466,7 @@ async def run_simulation(ws: WebSocket):
             f.write(json.dumps(drift_record, ensure_ascii=False) + "\n")
 
         await asyncio.sleep(api_delay)
-        current = "ena" if current == "mzk" else "mzk"
+        current = "ena" if current == "mizuki" else "mizuki"
 
     avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
     final_stats = {

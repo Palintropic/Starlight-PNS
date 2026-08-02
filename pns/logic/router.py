@@ -173,7 +173,8 @@ OOC判断分为两个独立层次，必须分别评估：
 
 def judge(client, character: str, message: str, turn: int) -> dict:
     model = os.environ.get("MODEL", "mimo-v2.5-pro")
-    char_name = "绘名" if character == "ena" else "瑞希"
+    from pns.world.characters.registry import get_character_metadata
+    char_name = get_character_metadata(character)['name']
     prompt = f"第{turn}轮，{char_name}说：「{message}」\n\n请判断是否OOC。"
 
     try:

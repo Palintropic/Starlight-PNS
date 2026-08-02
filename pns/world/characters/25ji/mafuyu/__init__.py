@@ -1,4 +1,4 @@
-# pns/world/characters/mafuyu/__init__.py
+# pns/world/characters/25ji/mafuyu/__init__.py
 # status: partial — 基础设定已有，语气样本不足
 
 SYSTEM_PROMPT = ""  # 待补充

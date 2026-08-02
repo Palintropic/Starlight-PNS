@@ -250,7 +250,7 @@
   border: 1px solid;
   background: var(--surface);
 }
-.avatar.mzk {
+.avatar.mizuki {
   color: var(--accent-mzk);
   border-color: var(--accent-mzk);
 }
@@ -319,7 +319,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
 }
-.char-name.mzk {
+.char-name.mizuki {
   color: var(--accent-mzk);
 }
 .char-name.ena {
