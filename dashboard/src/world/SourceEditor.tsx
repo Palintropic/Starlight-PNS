@@ -68,7 +68,7 @@ function SourceEditor({ target, onSaved }: Props) {
       <CodeMirror
         value={source}
         height="70vh"
-        theme="dark"
+        theme="light"
         extensions={[python()]}
         onChange={(value) => setSource(value)}
       />

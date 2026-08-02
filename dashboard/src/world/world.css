@@ -65,7 +65,7 @@
   cursor: pointer;
 }
 .world-list-item.active {
-  border-color: var(--accent-mzk);
+  border-color: var(--accent);
   background: var(--surface2);
 }
 .world-list-id {
@@ -105,7 +105,7 @@
 }
 .world-mode-switch button.active {
   color: var(--text);
-  border-color: var(--accent-mzk);
+  border-color: var(--accent);
 }
 
 .world-error {
@@ -150,8 +150,7 @@
 .world-field input:focus,
 .world-field select:focus,
 .world-field textarea:focus {
-  border-color: var(--accent-mzk);
-  box-shadow: 0 0 0 3px rgba(180, 142, 255, 0.15);
+  border-color: var(--accent);
 }
 .world-field input:disabled {
   color: var(--text-muted);
@@ -234,7 +233,7 @@
 .fact-key {
   background: transparent;
   border: none;
-  color: var(--accent-mzk);
+  color: var(--accent);
   font-family: var(--mono);
   font-size: 12px;
   cursor: pointer;
@@ -249,7 +248,7 @@
   font-size: 12px;
 }
 .fact-delete:hover {
-  color: var(--red);
+  color: var(--warn);
 }
 .fact-row textarea {
   background: var(--surface2);

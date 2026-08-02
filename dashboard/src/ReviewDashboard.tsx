@@ -197,6 +197,12 @@ function ReviewDashboard() {
               <div className={`score-badge ${scoreLevel(selectedTurn.drift_score)}`}>
                 {selectedTurn.drift_score}<span className="score-badge-max">/10</span>
               </div>
+              <div className="score-bar">
+                <div
+                  className={`score-bar-fill ${scoreLevel(selectedTurn.drift_score)}`}
+                  style={{ width: `${Math.min(100, (selectedTurn.drift_score / 10) * 100)}%` }}
+                />
+              </div>
               <div className="detail-row">
                 <span className="detail-label">类型</span>
                 <span>{selectedTurn.drift_type}</span>
