@@ -24,7 +24,7 @@ import importlib
 import pns.world as world_mod
 import pns.world.scenes as scenes_submod
 import pns.world.facts as facts_submod
-from pns.world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat
+from pns.world import get_ena_system, get_mizuki_system, get_ena_system_compat, get_mizuki_system_compat
 from pns.world import codegen
 import pns.logic.router as router_mod
 from oobe import PROVIDERS, write_env
@@ -254,7 +254,7 @@ async def call_character_async(client, character: str, history: list, scene: dic
         system = get_ena_system_compat(scene) if use_compat else get_ena_system(scene)
         char_name = "绘名"
     else:
-        system = get_mzk_system_compat(scene) if use_compat else get_mzk_system(scene)
+        system = get_mizuki_system_compat(scene) if use_compat else get_mizuki_system(scene)
         char_name = "瑞希"
 
     if correction:

@@ -160,7 +160,7 @@ OOC判断分为两个独立层次，必须分别评估：
 
 【输出格式（只输出JSON，不要其他内容）】
 {
-  "character": "ena或mzk",
+  "character": "ena或mizuki",
   "drift_score": 数字(0-10),
   "confidence": 数字(0-1),
   "drift_type": "无 / 内容OOC / 结构性漂移 / 媒介失真 / 助手化A / 助手化B",

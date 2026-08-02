@@ -71,10 +71,10 @@ while nudging toward the outside world.
                │
       ┌────────┴────────┐
       │                 │
-┌─────▼──────┐   ┌──────▼─────┐
-│ Agent: ena │◄──►│ Agent: mzk │
+┌─────▼──────┐   ┌──────▼──────┐
+│ Agent: ena │◄──►│Agent: mizuki│
 │ (Stateless)│   │ (Stateless) │
-└────────────┘   └────────────┘
+└────────────┘   └─────────────┘
       │                 │
       └────────┬────────┘
                │
@@ -112,10 +112,10 @@ The Router acts as the sole information gateway. Agent models cannot access exte
 ### ena (東雲絵名 / Shinonome Ena)
 Night-class high school student. Tsundere painter with an Instagram addiction and an overwhelming need for validation. Active from dusk to near-dawn. Her real schedule: wake up at noon, school in the evening, draw until sunrise.
 
-### mzk (暁山瑞希 / Akiyama Mizuki)
+### mizuki (暁山瑞希 / Akiyama Mizuki)
 First-year student who skips class more than attends. Works part-time at a clothing store. Gentle, playful, with a deep loneliness they never talk about. Teases ena constantly. Active whenever.
 
-Their intersection: **late night on Nightcord**, and the occasional accidental meeting at the school gate — mzk leaving as ena arrives.
+Their intersection: **late night on Nightcord**, and the occasional accidental meeting at the school gate — mizuki leaving as ena arrives.
 
 ---
 
