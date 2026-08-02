@@ -73,3 +73,34 @@ export const saveWorldFactsSource = (source: string): Promise<{ source: string }
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ source }),
   }).then((res) => json(res));
+
+// ─── Setup / Config ────────────────────────────────────────────────────
+
+export interface ConfigStatus {
+  has_key: boolean;
+  model: string;
+  api_format: string;
+  default_scene: string;
+}
+
+export interface ProviderOption {
+  name: string;
+  models: string[];
+}
+
+export const fetchConfig = (): Promise<ConfigStatus> =>
+  fetch('/api/config').then((res) => json(res));
+
+export const fetchConfigProviders = (): Promise<Record<string, ProviderOption>> =>
+  fetch('/api/config/providers').then((res) => json(res));
+
+export const submitConfig = (
+  providerKey: string,
+  model: string,
+  apiKey: string,
+): Promise<{ configured: boolean }> =>
+  fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider_key: providerKey, model, api_key: apiKey }),
+  }).then((res) => json(res));

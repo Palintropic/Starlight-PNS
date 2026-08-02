@@ -26,7 +26,8 @@ import pns.world.scenes as scenes_submod
 import pns.world.facts as facts_submod
 from pns.world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat
 from pns.world import codegen
-from pns.logic.router import create_client, judge, API_FORMAT, _get_api_key
+import pns.logic.router as router_mod
+from oobe import PROVIDERS, write_env
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -98,12 +99,48 @@ def get_scenes():
 
 @app.get("/api/config")
 def get_config():
-    key = _get_api_key()
+    key = router_mod._get_api_key()
     return {
         "has_key": bool(key),
         "model": os.environ.get("MODEL", "mimo-v2.5-pro"),
-        "api_format": API_FORMAT,
+        "api_format": router_mod.API_FORMAT,
         "default_scene": world_mod.DEFAULT_SCENE,
+    }
+
+
+class ConfigPayload(BaseModel):
+    provider_key: str  # "1"/"2"/"3"/"4"，对应 oobe.PROVIDERS 的 key
+    model: str
+    api_key: str
+
+
+@app.post("/api/config")
+def post_config(payload: ConfigPayload):
+    provider = PROVIDERS.get(payload.provider_key)
+    if not provider:
+        raise HTTPException(400, f"未知的 provider_key: {payload.provider_key}")
+    if not payload.model:
+        raise HTTPException(400, "model 不能为空")
+    if not payload.api_key:
+        raise HTTPException(400, "api_key 不能为空")
+
+    write_env(provider, payload.model, payload.api_key)
+
+    # 写入 .env 后让当前进程感知新配置：load_dotenv 更新 os.environ，
+    # 但 router_mod 的 API_FORMAT/BASE_URL/_KEY_NAME 是模块导入时算好的
+    # 常量，光靠 load_dotenv 不会变，所以还要 reload 这个模块本身
+    # （跟下面 _reload_world() reload 世界模块是同一套路）。
+    load_dotenv(override=True)
+    importlib.reload(router_mod)
+
+    return {"configured": True}
+
+
+@app.get("/api/config/providers")
+def get_config_providers():
+    return {
+        k: {"name": v["name"], "models": v["models"]}
+        for k, v in PROVIDERS.items()
     }
 
 # ─── World Editor API ────────────────────────────────────────────────
@@ -226,7 +263,7 @@ async def call_character_async(client, character: str, history: list, scene: dic
     loop = asyncio.get_event_loop()
 
     def _call():
-        if API_FORMAT == "openai":
+        if router_mod.API_FORMAT == "openai":
             oai_history = [{"role": "system", "content": system}] + history
             response = client.chat.completions.create(
                 model=model, max_tokens=max_tokens, temperature=temperature,
@@ -248,7 +285,7 @@ async def call_character_async(client, character: str, history: list, scene: dic
 
 async def judge_async(client, character: str, message: str, turn: int) -> dict:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, judge, client, character, message, turn)
+    return await loop.run_in_executor(None, router_mod.judge, client, character, message, turn)
 
 
 def save_history(session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
@@ -336,14 +373,14 @@ async def run_simulation(ws: WebSocket):
     api_delay  = float(params.get("api_delay", 1.0))
 
     scene = world_mod.SCENES.get(scene_id, world_mod.SCENES[world_mod.DEFAULT_SCENE])
-    api_key = _get_api_key()
+    api_key = router_mod._get_api_key()
 
     if not api_key:
-        await ws.send_json({"type": "error", "message": "找不到 API Key，请先运行 python oobe.py"})
+        await ws.send_json({"type": "error", "message": "找不到 API Key，请刷新页面完成配置向导，或运行 python oobe.py"})
         await ws.close()
         return
 
-    client = create_client(api_key)
+    client = router_mod.create_client(api_key)
 
     session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{scene['id']}"
 
