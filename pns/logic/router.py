@@ -1,7 +1,49 @@
 # pns/logic/router.py
 import json
-from typing import Optional
-from pns.models import DriftScore
+import os
+
+API_FORMAT  = os.environ.get("API_FORMAT", "anthropic")
+BASE_URL    = os.environ.get("BASE_URL", "https://token-plan-cn.xiaomimimo.com/anthropic")
+_KEY_NAME   = os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
+OOC_THRESHOLD = float(os.environ.get("OOC_THRESHOLD", "5"))
+
+
+def _get_api_key() -> str:
+    return os.environ.get(_KEY_NAME, "")
+
+
+def create_client(api_key: str = None):
+    key = api_key or _get_api_key()
+    if API_FORMAT == "openai":
+        from openai import OpenAI
+        return OpenAI(api_key=key, base_url=BASE_URL)
+    else:
+        import anthropic
+        return anthropic.Anthropic(api_key=key, base_url=BASE_URL)
+
+
+def _call(client, model: str, system: str, user_msg: str) -> str:
+    if API_FORMAT == "openai":
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=1024,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_msg},
+            ],
+        )
+        return resp.choices[0].message.content.strip()
+    else:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            temperature=0.1,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        return resp.content[0].text.strip()
+
 
 ROUTER_SYSTEM = """
 你是PNS世界的监督者Router，负责判断角色是否发生了角色漂移（OOC）。
@@ -129,58 +171,40 @@ OOC判断分为两个独立层次，必须分别评估：
 """.strip()
 
 
-class Router:
-    """Router评分类"""
+def judge(client, character: str, message: str, turn: int) -> dict:
+    model = os.environ.get("MODEL", "mimo-v2.5-pro")
+    char_name = "绘名" if character == "ena" else "瑞希"
+    prompt = f"第{turn}轮，{char_name}说：「{message}」\n\n请判断是否OOC。"
 
-    def __init__(self):
-        self.system_prompt = ROUTER_SYSTEM
+    try:
+        raw = _call(client, model, ROUTER_SYSTEM, prompt)
 
-    def evaluate(self, character: str, response: str, turn: int = 0) -> DriftScore:
-        from pns.logic.api import call_mimo_api
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
 
-        eval_prompt = f"""
-角色：{character}
-当前turn：{turn}
-回复内容：{response}
+        result = json.loads(raw)
 
-根据上述Router规则评估这条回复，返回JSON格式评分。
-""".strip()
+        drift_score = float(result.get("drift_score", 0))
+        result["drift_score"] = drift_score
+        result["confidence"] = float(result.get("confidence", 0.5))
+        result["is_ooc"] = drift_score >= OOC_THRESHOLD
+        result.setdefault("character", character)
+        return result
 
-        try:
-            result_str = call_mimo_api(eval_prompt, self.system_prompt, max_tokens=300)
-            result_str = result_str.strip()
-            if result_str.startswith('```'):
-                result_str = result_str.split('```')[1]
-                if result_str.startswith('json'):
-                    result_str = result_str[4:]
-            result_str = result_str.strip()
-
-            result_json = json.loads(result_str)
-
-            return DriftScore(
-                session_id="temp",
-                turn=turn,
-                character=character,
-                drift_score=float(result_json.get('drift_score', 5.0)),
-                confidence=float(result_json.get('confidence', 0.5)),
-                reason=result_json.get('reason', 'Unknown'),
-                needs_human_review=result_json.get('needs_human_review', False),
-                drift_type=result_json.get('drift_type', 'unknown'),
-            )
-        except Exception as e:
-            return DriftScore(
-                session_id="temp",
-                turn=turn,
-                character=character,
-                drift_score=5.0,
-                confidence=0.3,
-                reason=f"Router evaluation failed: {str(e)}",
-                needs_human_review=True,
-                drift_type="error",
-            )
-
-
-def router_eval(character: str, response: str, turn: int = 0) -> DriftScore:
-    """便捷函数：快速评估"""
-    router = Router()
-    return router.evaluate(character, response, turn)
+    except json.JSONDecodeError as e:
+        print(f"[Router] ⚠️ JSON解析失败: {e}\n原始: {raw}")
+        return {
+            "character": character, "drift_score": 0, "confidence": 0.0,
+            "drift_type": "解析失败", "reason": "解析失败", "is_ooc": False,
+            "needs_human_review": True, "correction": None,
+        }
+    except Exception as e:
+        print(f"[Router] ❌ 调用失败: {e}")
+        return {
+            "character": character, "drift_score": 0, "confidence": 0.0,
+            "drift_type": "error", "reason": str(e), "is_ooc": False,
+            "needs_human_review": True, "correction": None,
+        }

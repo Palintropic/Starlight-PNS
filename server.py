@@ -14,13 +14,19 @@ except ImportError:
 
 from typing import Literal, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat, SCENES, DEFAULT_SCENE
-from router import create_client, judge, API_FORMAT, _get_api_key
+import importlib
+
+import pns.world as world_mod
+import pns.world.scenes as scenes_submod
+import pns.world.facts as facts_submod
+from pns.world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat
+from pns.world import codegen
+from pns.logic.router import create_client, judge, API_FORMAT, _get_api_key
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -31,47 +37,11 @@ def index():
 
 
 # ─── Review Dashboard API ────────────────────────────────────────────
-# 数据来源尚未定案（见 PNS_Web_Dashboard_开工工单.md 第4节），这里先用
-# 手搓样例数据把 Dashboard 的三栏交互跑通。字段对齐 pns/models/drift_score.py
-# 的 DriftScore，外加 text（台词原文）和 session_id（会话分组）。
-# 真正数据源定下来后，把 SAMPLE_TURNS 换成读取实际 log 即可，接口形状不用变。
+# /api/review/turns 直接读取 /ws/run 实时写入的 drift_scores.jsonl，字段与
+# dashboard/src/types.ts 的 Turn 对齐（写入端见 run_simulation 里的 drift_record）。
 
 REVIEW_DECISIONS_FILE = Path("review_decisions.jsonl")
-
-SAMPLE_TURNS = [
-    {
-        "session_id": "sample-001", "turn": 0, "character": "mzk", "char_name": "瑞希",
-        "text": "绘名绘名！今天的天空颜色超好看的，感觉可以直接拿来当新曲的封面色喵！",
-        "drift_score": 1, "confidence": 0.92, "drift_type": "无",
-        "reason": "语气活泼、话题跳跃，符合瑞希日常状态。", "needs_human_review": False,
-        "correction": None, "timestamp": "2026-07-30T10:00:00",
-    },
-    {
-        "session_id": "sample-001", "turn": 1, "character": "ena", "char_name": "绘名",
-        "text": "……嗯，是挺好看的。",
-        "drift_score": 2, "confidence": 0.8, "drift_type": "无",
-        "reason": "省略号收尾+简短回应，与瑞希互动时的克制符合设定。", "needs_human_review": False,
-        "correction": None, "timestamp": "2026-07-30T10:00:40",
-    },
-    {
-        "session_id": "sample-001", "turn": 2, "character": "mzk", "char_name": "瑞希",
-        "text": "如果你需要，我可以帮你整理一份关于天空配色的参考资料，你觉得怎么样？要不要我先列个大纲？",
-        "drift_score": 7, "confidence": 0.88, "drift_type": "助手化A",
-        "reason": "把决定权交还用户（'你觉得怎么样'），语气偏向客服式建议，情绪浓度与句子密度不匹配。",
-        "needs_human_review": True,
-        "correction": "去掉征询式收尾，直接用瑞希的方式把感受说完，不留选择给用户。",
-        "timestamp": "2026-07-30T10:01:10",
-    },
-    {
-        "session_id": "sample-001", "turn": 3, "character": "ena", "char_name": "绘名",
-        "text": "没关系的，随便都行，你决定就好。",
-        "drift_score": 8, "confidence": 0.9, "drift_type": "内容OOC",
-        "reason": "'没关系'、'随便都行'是典型绘名OOC信号，此话题（与瑞希）本应收敛而非过度顺从退让。",
-        "needs_human_review": True,
-        "correction": "换成绘名式的迂回克制，而不是讨好式的全盘让步。",
-        "timestamp": "2026-07-30T10:01:50",
-    },
-]
+DRIFT_SCORES_FILE = Path("drift_scores.jsonl")
 
 
 class ReviewDecision(BaseModel):
@@ -88,7 +58,16 @@ def _decision_key(session_id: str, turn: int) -> str:
 
 @app.get("/api/review/turns")
 def get_review_turns():
-    return SAMPLE_TURNS
+    if not DRIFT_SCORES_FILE.exists():
+        return []
+    turns = []
+    with DRIFT_SCORES_FILE.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            turns.append(json.loads(line))
+    return turns
 
 
 @app.get("/api/review/decisions")
@@ -115,7 +94,7 @@ def post_review_decision(decision: ReviewDecision):
 
 @app.get("/api/scenes")
 def get_scenes():
-    return {k: {"id": v["id"], "label": v["label"], "trigger": v["trigger"]} for k, v in SCENES.items()}
+    return {k: {"id": v["id"], "label": v["label"], "trigger": v["trigger"]} for k, v in world_mod.SCENES.items()}
 
 @app.get("/api/config")
 def get_config():
@@ -124,8 +103,107 @@ def get_config():
         "has_key": bool(key),
         "model": os.environ.get("MODEL", "mimo-v2.5-pro"),
         "api_format": API_FORMAT,
-        "default_scene": DEFAULT_SCENE,
+        "default_scene": world_mod.DEFAULT_SCENE,
     }
+
+# ─── World Editor API ────────────────────────────────────────────────
+# 图形化编辑 pns/world/scenes.py / facts.py。写回逻辑（JSON⇄Python源码、备份、
+# 校验）都在 pns/world/codegen.py 里，这里只负责路由、reload、报错转换。
+
+def _reload_world():
+    """scenes.py / facts.py 写盘后，让正在跑的进程也看到新内容。"""
+    importlib.reload(scenes_submod)
+    importlib.reload(facts_submod)
+    importlib.reload(world_mod)
+
+
+class Scene(BaseModel):
+    id: str
+    label: str
+    time: str
+    location: str
+    weather: str
+    day_phase: Literal["morning", "afternoon", "evening", "late_night"]
+    scene_type: str
+    lore_tag: Literal["硬事实", "软推断", "待验证"]
+    trigger: str
+    gate_triggers: Optional[dict[str, str]] = None
+    gate_opening_note: Optional[str] = None
+    auto_next: Optional[str] = None
+    auto_turns: Optional[int] = None
+
+
+class FactsPayload(BaseModel):
+    facts: dict[str, str]
+
+
+class SourcePayload(BaseModel):
+    source: str
+
+
+@app.get("/api/world/scenes")
+def get_world_scenes():
+    return world_mod.SCENES
+
+
+@app.post("/api/world/scenes")
+def post_world_scenes(scenes: dict[str, Scene]):
+    for key, scene in scenes.items():
+        if scene.id != key:
+            raise HTTPException(400, f"scene key '{key}' 与内部 id '{scene.id}' 不一致")
+    payload = {key: scene.model_dump() for key, scene in scenes.items()}
+    try:
+        codegen.save_scenes(payload)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return world_mod.SCENES
+
+
+@app.get("/api/world/scenes/source")
+def get_world_scenes_source():
+    return {"source": codegen.SCENES_PATH.read_text(encoding="utf-8")}
+
+
+@app.post("/api/world/scenes/source")
+def post_world_scenes_source(payload: SourcePayload):
+    try:
+        codegen.save_scenes_source(payload.source)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return {"source": codegen.SCENES_PATH.read_text(encoding="utf-8")}
+
+
+@app.get("/api/world/facts")
+def get_world_facts():
+    return {"facts": world_mod.WORLD_FACTS, "groups": codegen.FACT_GROUPS}
+
+
+@app.post("/api/world/facts")
+def post_world_facts(payload: FactsPayload):
+    try:
+        codegen.save_facts(payload.facts)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return {"facts": world_mod.WORLD_FACTS, "groups": codegen.FACT_GROUPS}
+
+
+@app.get("/api/world/facts/source")
+def get_world_facts_source():
+    return {"source": codegen.FACTS_PATH.read_text(encoding="utf-8")}
+
+
+@app.post("/api/world/facts/source")
+def post_world_facts_source(payload: SourcePayload):
+    try:
+        codegen.save_facts_source(payload.source)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return {"source": codegen.FACTS_PATH.read_text(encoding="utf-8")}
+
 
 def _strip_prefix(text: str, char_name: str) -> str:
     prefix = char_name + "："
@@ -173,12 +251,11 @@ async def judge_async(client, character: str, message: str, turn: int) -> dict:
     return await loop.run_in_executor(None, judge, client, character, message, turn)
 
 
-def save_history(scene: dict, model: str, turns: list, stats: dict) -> Path:
+def save_history(session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
     history_dir = Path("history")
     history_dir.mkdir(exist_ok=True)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = history_dir / f"{ts}_{scene['id']}.md"
+    filename = history_dir / f"{session_id}.md"
 
     lines = []
     lines.append(f"# {scene['label']}")
@@ -251,14 +328,14 @@ async def run_simulation(ws: WebSocket):
         await ws.close(code=1003)
         return
 
-    scene_id   = params.get("scene", DEFAULT_SCENE)
+    scene_id   = params.get("scene", world_mod.DEFAULT_SCENE)
     max_turns  = int(params.get("max_turns", 8))
     model      = params.get("model") or os.environ.get("MODEL", "mimo-v2.5-pro")
     max_tokens = int(params.get("max_tokens", 1024))
     temperature = float(params.get("temperature", 0.85))
     api_delay  = float(params.get("api_delay", 1.0))
 
-    scene = SCENES.get(scene_id, SCENES[DEFAULT_SCENE])
+    scene = world_mod.SCENES.get(scene_id, world_mod.SCENES[world_mod.DEFAULT_SCENE])
     api_key = _get_api_key()
 
     if not api_key:
@@ -268,8 +345,11 @@ async def run_simulation(ws: WebSocket):
 
     client = create_client(api_key)
 
+    session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{scene['id']}"
+
     await ws.send_json({
         "type": "start",
+        "session_id": session_id,
         "scene": {"id": scene["id"], "label": scene["label"], "trigger": scene["trigger"],
                   "time": scene["time"], "location": scene["location"]},
         "max_turns": max_turns,
@@ -304,7 +384,7 @@ async def run_simulation(ws: WebSocket):
         await ws.send_json({"type": "judging", "turn": turn, "character": char_key, "char_name": char_name})
 
         result = await judge_async(client, current, reply, turn)
-        score   = result.get("score", 0)
+        score   = result.get("drift_score", 0)
         is_ooc  = result.get("is_ooc", False)
 
         stats["scores"].append(score)
@@ -331,6 +411,23 @@ async def run_simulation(ws: WebSocket):
         turn_log.append(turn_data)
         await ws.send_json({"type": "turn", **turn_data})
 
+        drift_record = {
+            "session_id": session_id,
+            "turn": turn,
+            "character": char_key,
+            "char_name": char_name,
+            "text": reply,
+            "drift_score": score,
+            "confidence": result.get("confidence", 0.0),
+            "drift_type": result.get("drift_type", ""),
+            "reason": result.get("reason", ""),
+            "needs_human_review": result.get("needs_human_review", False),
+            "correction": result.get("correction"),
+            "timestamp": datetime.now().isoformat(),
+        }
+        with DRIFT_SCORES_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(drift_record, ensure_ascii=False) + "\n")
+
         await asyncio.sleep(api_delay)
         current = "ena" if current == "mzk" else "mzk"
 
@@ -346,12 +443,13 @@ async def run_simulation(ws: WebSocket):
     saved_path = None
     if turn_log:
         try:
-            saved_path = save_history(scene, model, turn_log, final_stats)
+            saved_path = save_history(session_id, scene, model, turn_log, final_stats)
         except Exception as e:
             print(f"[server] 历史记录保存失败: {e}")
 
     await ws.send_json({
         "type": "done",
+        "session_id": session_id,
         "stats": final_stats,
         "history_file": str(saved_path) if saved_path else None,
     })

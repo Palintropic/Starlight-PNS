@@ -1,7 +1,11 @@
 import type { Decision, DecisionMap, DecisionValue, Turn } from './types';
+import type { FactsResponse, ScenesMap } from './world/types';
 
 async function json<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error((body && body.detail) || `${res.status} ${res.statusText}`);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -26,4 +30,46 @@ export const submitDecision = (
       decision,
       note: note ?? null,
     }),
+  }).then((res) => json(res));
+
+// ─── World Editor ─────────────────────────────────────────────────────
+
+export const fetchWorldScenes = (): Promise<ScenesMap> =>
+  fetch('/api/world/scenes').then((res) => json(res));
+
+export const saveWorldScenes = (scenes: ScenesMap): Promise<ScenesMap> =>
+  fetch('/api/world/scenes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(scenes),
+  }).then((res) => json(res));
+
+export const fetchWorldScenesSource = (): Promise<{ source: string }> =>
+  fetch('/api/world/scenes/source').then((res) => json(res));
+
+export const saveWorldScenesSource = (source: string): Promise<{ source: string }> =>
+  fetch('/api/world/scenes/source', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source }),
+  }).then((res) => json(res));
+
+export const fetchWorldFacts = (): Promise<FactsResponse> =>
+  fetch('/api/world/facts').then((res) => json(res));
+
+export const saveWorldFacts = (facts: Record<string, string>): Promise<FactsResponse> =>
+  fetch('/api/world/facts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facts }),
+  }).then((res) => json(res));
+
+export const fetchWorldFactsSource = (): Promise<{ source: string }> =>
+  fetch('/api/world/facts/source').then((res) => json(res));
+
+export const saveWorldFactsSource = (source: string): Promise<{ source: string }> =>
+  fetch('/api/world/facts/source', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source }),
   }).then((res) => json(res));
