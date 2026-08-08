@@ -1,0 +1,10 @@
+# packs/pjsk/units/25ji.yaml
+unit_id: 25ji
+unit_name: "25時、ナイトコードで。"
+unit_name_short: "NIGO / 25ji"
+description: "深夜网络乐队，成员通过NIGO在深夜活动"
+members:
+  - ena
+  - mizuki
+  - kanade
+  - mafuyu

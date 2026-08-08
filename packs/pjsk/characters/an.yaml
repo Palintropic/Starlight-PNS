@@ -1,0 +1,12 @@
+# packs/pjsk/characters/an.yaml
+character_id: an
+name: 白石杏
+name_jp: 白石杏
+unit: vbs
+role: 成员
+school: 神山高校
+grade: 2
+class: "2-A"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: an_prompt.md

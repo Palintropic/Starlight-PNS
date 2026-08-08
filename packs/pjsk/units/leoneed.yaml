@@ -1,0 +1,10 @@
+# packs/pjsk/units/leoneed.yaml
+unit_id: leoneed
+unit_name: "Leo/need"
+unit_name_short: "Leo/need"
+description: "主流学园系乐队，以校园偶像小组活动为背景"
+members:
+  - ichika
+  - saki
+  - honami
+  - shiho

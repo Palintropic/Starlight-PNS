@@ -1,0 +1,12 @@
+# packs/pjsk/characters/toya.yaml
+character_id: toya
+name: 青柳冬弥
+name_jp: 青柳冬弥
+unit: vbs
+role: 成员
+school: 神山高校
+grade: 2
+class: "2-B"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: toya_prompt.md

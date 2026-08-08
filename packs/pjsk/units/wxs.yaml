@@ -1,0 +1,10 @@
+# packs/pjsk/units/wxs.yaml
+unit_id: wxs
+unit_name: "Wonderlands×Showtime"
+unit_name_short: "WxS"
+description: "剧团系乐队，以舞台剧表演为背景"
+members:
+  - tsukasa
+  - emu
+  - nene
+  - rui

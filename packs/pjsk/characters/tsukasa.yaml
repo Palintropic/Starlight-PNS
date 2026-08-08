@@ -1,0 +1,12 @@
+# packs/pjsk/characters/tsukasa.yaml
+character_id: tsukasa
+name: 天马司
+name_jp: 天馬司
+unit: wxs
+role: 成员
+school: 神山高校
+grade: 3
+class: "3-C"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: tsukasa_prompt.md

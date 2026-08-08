@@ -1,294 +1,113 @@
 # pns/world/characters/registry.py
-import importlib
+"""角色数据的运行时加载入口。
+
+不再硬编码角色表：所有角色/团体数据来自 packs/<ACTIVE_PACK>/ 下的
+pack.yaml + units/*.yaml + characters/*.yaml + characters/*_prompt.md，
+按 kickoff/PACK_SPEC_v1.md 描述的格式加载。框架代码本身不含任何
+PJSK 专属字符串（角色名、团名等）。
+
+v1 只支持单一 active pack（见 PACK_SPEC_v1.md §8），先写死为 'pjsk'。
+"""
+from pathlib import Path
 from typing import Dict, List, Optional
 
-# 团 unit 字段值 → 角色目录树里的团级目录名
-UNIT_DIR_MAP = {
-    '25ji': '25ji',
-    'VBS': 'vbs',
-    'WxS': 'wxs',
-    'MMJ': 'mmj',
-    'Leo/need': 'leoneed',
-}
+import yaml
 
-# 角色注册表 - 定义所有20个角色的元数据
-# key = 角色ID = pns/world/characters/<unit_dir>/<角色ID>/ 目录名（官方罗马字）
-CHARACTER_REGISTRY = {
-    # 25ji - 完整样本
-    'ena': {
-        'name': '东云绘名',
-        'name_jp': '東雲絵名',
-        'status': 'ready',           # ready / partial / not_ready
-        'sample_coverage': 1.0,      # 0-1
-        'unit': '25ji',
-        'role': '插画负责人',
-        'school': '神山高校',
-        'grade': 3,
-        'class': '3-D',
-    },
-    'mizuki': {
-        'name': '暁山瑞希',
-        'name_jp': '暁山瑞希',
-        'status': 'ready',
-        'sample_coverage': 1.0,
-        'unit': '25ji',
-        'role': '动画负责人',
-        'school': '神山高校',
-        'grade': 2,
-        'class': '2-B',
-    },
-    'kanade': {
-        'name': '宵崎奏',
-        'name_jp': '宵崎奏',
-        'status': 'partial',
-        'sample_coverage': 0.3,
-        'unit': '25ji',
-        'role': '作曲人',
-        'school': '居家自学',
-        'grade': None,
-        'class': None,
-    },
-    'mafuyu': {
-        'name': '朝比奈真冬',
-        'name_jp': '朝比奈真冬',
-        'status': 'partial',
-        'sample_coverage': 0.3,
-        'unit': '25ji',
-        'role': '作词人',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-?',
-    },
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PACKS_ROOT = REPO_ROOT / "packs"
+ACTIVE_PACK = "pjsk"
 
-    # Vivid BAD SQUAD
-    'akito': {
-        'name': '东云彰人',
-        'name_jp': '東雲彰人',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'VBS',
-        'role': '成员',
-        'school': '神山高校',
-        'grade': 2,
-        'class': '2-A',
-    },
-    'an': {
-        'name': '白石杏',
-        'name_jp': '白石杏',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'VBS',
-        'role': '成员',
-        'school': '神山高校',
-        'grade': 2,
-        'class': '2-A',
-    },
-    'toya': {
-        'name': '青柳冬弥',
-        'name_jp': '青柳冬弥',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'VBS',
-        'role': '成员',
-        'school': '神山高校',
-        'grade': 2,
-        'class': '2-B',
-    },
-    'kohane': {
-        'name': '小豆泽心羽',
-        'name_jp': '小豆泽心羽',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'VBS',
-        'role': '成员',
-        'school': '神山高校',
-        'grade': 2,
-        'class': '2-A',
-    },
+_cache: Optional[Dict] = None
 
-    # Wonderlands×Showtime
-    'tsukasa': {
-        'name': '天马司',
-        'name_jp': '天馬司',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'WxS',
-        'role': '成员',
-        'school': '神山高校',
-        'grade': 3,
-        'class': '3-C',
-    },
-    'emu': {
-        'name': '凤笑梦',
-        'name_jp': '鳳笑梦',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'WxS',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-B',
-    },
-    'nene': {
-        'name': '草薙宁宁',
-        'name_jp': '草薙寧々',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'WxS',
-        'role': '成员',
-        'school': '神山高校',
-        'grade': 2,
-        'class': '2-A',
-    },
-    'rui': {
-        'name': '神代类',
-        'name_jp': '神代類',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'WxS',
-        'role': '成员',
-        'school': '神山高校',
-        'grade': 3,
-        'class': '3-C',
-    },
 
-    # MORE MORE JUMP!
-    'minori': {
-        'name': '花里实乃理',
-        'name_jp': '花里実乃理',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'MMJ',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-D',
-    },
-    'haruka': {
-        'name': '桐谷遥',
-        'name_jp': '桐谷遥',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'MMJ',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-D',
-    },
-    'airi': {
-        'name': '桃井爱莉',
-        'name_jp': '桃井愛莉',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'MMJ',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 3,
-        'class': '3-E',
-    },
-    'shizuku': {
-        'name': '日野森雫',
-        'name_jp': '日野森雫',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'MMJ',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 3,
-        'class': '3-E',
-    },
+def _read_yaml(path: Path) -> Dict:
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-    # Leo/need
-    'ichika': {
-        'name': '星乃一歌',
-        'name_jp': '星乃一歌',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'Leo/need',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-A',
-    },
-    'saki': {
-        'name': '天马咲希',
-        'name_jp': '天馬咲希',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'Leo/need',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-B',
-    },
-    'honami': {
-        'name': '望月穗波',
-        'name_jp': '望月穗波',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'Leo/need',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-A',
-    },
-    'shiho': {
-        'name': '日野森志步',
-        'name_jp': '日野森志步',
-        'status': 'not_ready',
-        'sample_coverage': 0.0,
-        'unit': 'Leo/need',
-        'role': '成员',
-        'school': '宮益坂女子学院',
-        'grade': 2,
-        'class': '2-B',
-    },
-}
+
+def _load_pack() -> Dict:
+    """读取并校验 active pack，结果按进程缓存一次。"""
+    global _cache
+    if _cache is not None:
+        return _cache
+
+    pack_dir = PACKS_ROOT / ACTIVE_PACK
+    manifest_path = pack_dir / "pack.yaml"
+    if not manifest_path.exists():
+        raise ValueError(f"Pack manifest not found: {manifest_path}")
+    manifest = _read_yaml(manifest_path)
+
+    units: Dict[str, Dict] = {}
+    for unit_id in manifest.get("units", []):
+        unit_path = pack_dir / "units" / f"{unit_id}.yaml"
+        if not unit_path.exists():
+            raise ValueError(
+                f"Pack '{ACTIVE_PACK}' 声明了 unit '{unit_id}'，但找不到 {unit_path}"
+            )
+        units[unit_id] = _read_yaml(unit_path)
+
+    characters: Dict[str, Dict] = {}
+    for entry in manifest.get("characters", []):
+        char_id, unit_id = entry["id"], entry["unit"]
+        if unit_id not in units:
+            raise ValueError(
+                f"角色 '{char_id}' 的 unit '{unit_id}' 不在 pack.yaml 的 units 列表里"
+            )
+        char_path = pack_dir / "characters" / f"{char_id}.yaml"
+        if not char_path.exists():
+            raise ValueError(
+                f"pack.yaml 声明了角色 '{char_id}'，但找不到 {char_path}"
+            )
+        data = _read_yaml(char_path)
+        if data.get("unit") != unit_id:
+            raise ValueError(
+                f"角色 '{char_id}' 在 pack.yaml 里的 unit 是 '{unit_id}'，"
+                f"但 {char_path} 里写的是 '{data.get('unit')}'"
+            )
+        characters[char_id] = data
+
+    _cache = {"manifest": manifest, "units": units, "characters": characters, "pack_dir": pack_dir}
+    return _cache
 
 
 def get_character_prompt(character_id: str) -> str:
-    """获取角色的SYSTEM prompt，按registry里的unit动态定位模块"""
-    if character_id not in CHARACTER_REGISTRY:
+    """获取角色的 SYSTEM prompt，从 pack 里的 prompt_file 读取"""
+    pack = _load_pack()
+    if character_id not in pack["characters"]:
         raise ValueError(f"Character not found in registry: {character_id}")
 
-    info = CHARACTER_REGISTRY[character_id]
-    unit_dir = UNIT_DIR_MAP.get(info['unit'])
-    if unit_dir is None:
-        raise ValueError(f"Unknown unit '{info['unit']}' for character {character_id}")
+    info = pack["characters"][character_id]
+    prompt_file = info.get("prompt_file")
+    if not prompt_file:
+        raise ValueError(f"角色 {character_id} 未声明 prompt_file")
 
-    module_path = f"pns.world.characters.{unit_dir}.{character_id}"
-    try:
-        module = importlib.import_module(module_path)
-    except ModuleNotFoundError as e:
+    prompt_path = pack["pack_dir"] / "characters" / prompt_file
+    if not prompt_path.exists():
         raise ValueError(
-            f"角色 {character_id}（status={info['status']}）尚无 system_prompt.py，"
-            f"预期路径 {module_path.replace('.', '/')}.py"
-        ) from e
-
-    if not hasattr(module, 'SYSTEM_PROMPT'):
-        raise ValueError(
-            f"角色 {character_id} 的模块存在，但未定义 SYSTEM_PROMPT"
-            f"（status={info['status']}，可能素材尚未补全）"
+            f"角色 {character_id}（status={info.get('status')}）尚无 system prompt，"
+            f"预期路径 {prompt_path.relative_to(REPO_ROOT)}"
         )
-    return module.SYSTEM_PROMPT
+    return prompt_path.read_text(encoding="utf-8").strip()
 
 
 def get_character_metadata(character_id: str) -> Dict:
     """获取角色的元数据"""
-    if character_id not in CHARACTER_REGISTRY:
+    pack = _load_pack()
+    if character_id not in pack["characters"]:
         raise ValueError(f"Character not found: {character_id}")
-    return CHARACTER_REGISTRY[character_id].copy()
+    return pack["characters"][character_id].copy()
 
 
 def list_characters(include_partial: bool = False, include_not_ready: bool = False) -> Dict[str, Dict]:
     """列出所有可用角色"""
+    pack = _load_pack()
     result = {}
-    for char_id, info in CHARACTER_REGISTRY.items():
-        if info['status'] == 'ready':
+    for char_id, info in pack["characters"].items():
+        if info["status"] == "ready":
             result[char_id] = info
-        elif include_partial and info['status'] == 'partial':
+        elif include_partial and info["status"] == "partial":
             result[char_id] = info
-        elif include_not_ready and info['status'] == 'not_ready':
+        elif include_not_ready and info["status"] == "not_ready":
             result[char_id] = info
     return result
 
@@ -299,6 +118,6 @@ def get_available_pairs() -> List[tuple]:
     pairs = []
     ids = list(ready_chars.keys())
     for i in range(len(ids)):
-        for j in range(i+1, len(ids)):
+        for j in range(i + 1, len(ids)):
             pairs.append((ids[i], ids[j]))
     return pairs
