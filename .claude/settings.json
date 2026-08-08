@@ -3,7 +3,12 @@
     "allow": [
       "Bash(git push origin main)",
       "Bash(git commit *)",
-      "Bash(git push -u origin *)"
+      "Bash(git push -u origin *)",
+      "Bash(git config user.name)",
+      "Bash(git config user.email)",
+      "Bash(git config --local --list)",
+      "Bash(dig *)",
+      "Bash(brew cat *)"
     ]
   },
   "hooks": {

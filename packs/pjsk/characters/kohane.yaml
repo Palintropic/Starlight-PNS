@@ -1,0 +1,12 @@
+# packs/pjsk/characters/kohane.yaml
+character_id: kohane
+name: 小豆泽心羽
+name_jp: 小豆泽心羽
+unit: vbs
+role: 成员
+school: 神山高校
+grade: 2
+class: "2-A"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: kohane_prompt.md

@@ -1,0 +1,12 @@
+# packs/pjsk/characters/shiho.yaml
+character_id: shiho
+name: 日野森志步
+name_jp: 日野森志步
+unit: leoneed
+role: 成员
+school: 宮益坂女子学院
+grade: 2
+class: "2-B"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: shiho_prompt.md

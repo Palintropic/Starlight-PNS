@@ -1,0 +1,12 @@
+# packs/pjsk/characters/honami.yaml
+character_id: honami
+name: 望月穗波
+name_jp: 望月穗波
+unit: leoneed
+role: 成员
+school: 宮益坂女子学院
+grade: 2
+class: "2-A"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: honami_prompt.md

@@ -1,0 +1,12 @@
+# packs/pjsk/characters/haruka.yaml
+character_id: haruka
+name: 桐谷遥
+name_jp: 桐谷遥
+unit: mmj
+role: 成员
+school: 宮益坂女子学院
+grade: 2
+class: "2-D"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: haruka_prompt.md

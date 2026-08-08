@@ -1,0 +1,10 @@
+# packs/pjsk/units/vbs.yaml
+unit_id: vbs
+unit_name: "Vivid BAD SQUAD"
+unit_name_short: "VBS"
+description: "街头文化系乐队，以街舞和涂鸦为背景"
+members:
+  - akito
+  - an
+  - toya
+  - kohane
