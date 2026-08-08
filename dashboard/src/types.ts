@@ -1,4 +1,4 @@
-export type Character = 'mzk' | 'ena' | string;
+export type Character = 'mizuki' | 'ena' | string;
 
 export interface Turn {
   session_id: string;

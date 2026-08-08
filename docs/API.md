@@ -32,7 +32,7 @@
 | `type` | 时机 | 字段 |
 |---|---|---|
 | `start` | 收到参数、确认场景后 | `session_id`、`scene`（`id`/`label`/`trigger`/`time`/`location`）、`max_turns`、`model` |
-| `generating` | 角色开始生成这一轮台词前 | `turn`、`character`（`mzk`/`ena`）、`char_name` |
+| `generating` | 角色开始生成这一轮台词前 | `turn`、`character`（`mizuki`/`ena`）、`char_name` |
 | `judging` | 台词生成完毕，Router 开始判分前 | `turn`、`character`、`char_name` |
 | `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review` |
 | `error` | 角色调用失败／没有 API Key | `turn`（可能没有）、`message` |
@@ -73,7 +73,7 @@
   {
     "session_id": "20260802_170000_gate",
     "turn": 1,
-    "character": "mzk",
+    "character": "mizuki",
     "char_name": "瑞希",
     "text": "绘名绘名！今天的天空颜色超好看的喵！",
     "drift_score": 1,
@@ -96,7 +96,7 @@
   "20260802_170000_gate:2": {
     "session_id": "20260802_170000_gate",
     "turn": 2,
-    "character": "mzk",
+    "character": "mizuki",
     "decision": "rewrite",
     "note": "去掉征询式收尾",
     "decided_at": "2026-08-02T17:05:00.000000"
@@ -108,7 +108,7 @@
 
 ```json
 // request
-{ "session_id": "20260802_170000_gate", "turn": 2, "character": "mzk", "decision": "rewrite", "note": "去掉征询式收尾" }
+{ "session_id": "20260802_170000_gate", "turn": 2, "character": "mizuki", "decision": "rewrite", "note": "去掉征询式收尾" }
 ```
 
 `decision` 只能是 `approve` / `reject` / `rewrite`。响应是写入的完整记录（附带服务端生成的 `decided_at`）。追加写入 `review_decisions.jsonl`。
@@ -181,7 +181,7 @@
     "25ji_shinonome_ena": "东云绘名；..."
   },
   "groups": {
-    "学校/作息": ["school", "ena_schedule", "mzk_schedule", "intersection_daytime", "intersection_night", "class_2b_classmate"],
+    "学校/作息": ["school", "ena_schedule", "mizuki_schedule", "intersection_daytime", "intersection_night", "class_2b_classmate"],
     "性别认同注记": ["mizuki_gender_note"],
     "25ji": ["25ji_shinonome_ena", "25ji_akiyama_mizuki", "25ji_hiiragi_kanade", "25ji_asahi_mafuyu"],
     "VBS": ["vbs_shinonome_akito", "vbs_shiraishi_an", "vbs_aoyagi_toya", "vbs_azusawa_kohane"],

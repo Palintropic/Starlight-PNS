@@ -6,8 +6,7 @@ from .characters import get_character_prompt, list_characters, get_character_met
 __all__ = [
     'WORLD_FACTS', 'SCENES', 'DEFAULT_SCENE',
     'get_character_prompt', 'list_characters', 'get_character_metadata', 'get_available_pairs',
-    'get_world_state_str', 'get_ena_system', 'get_mzk_system',
-    'get_ena_system_compat', 'get_mzk_system_compat', 'get_shizuku_system',
+    'get_world_state_str', 'get_character_system',
 ]
 
 
@@ -19,20 +18,13 @@ def get_world_state_str(scene: dict) -> str:
     )
 
 
-def get_ena_system(scene: dict) -> str:
-    from .characters.ena import SYSTEM_PROMPT
-    return SYSTEM_PROMPT.format(world_state=get_world_state_str(scene))
-
-
-def get_mzk_system(scene: dict) -> str:
-    from .characters.mzk import SYSTEM_PROMPT
-    return SYSTEM_PROMPT.format(world_state=get_world_state_str(scene))
-
-
-def get_shizuku_system(scene: dict) -> str:
-    from .characters import get_character_prompt
-    prompt = get_character_prompt('shizuku')
-    return prompt.format(world_state=get_world_state_str(scene))
+def get_character_system(character_id: str, scene: dict, compat: bool = False) -> str:
+    """获取任意角色的system prompt，compat=True时优先用兼容版（如果存在）"""
+    world_state = get_world_state_str(scene)
+    if compat and character_id in _COMPAT_PROMPTS:
+        return _COMPAT_PROMPTS[character_id].format(world_state=world_state)
+    prompt = get_character_prompt(character_id)  # 从 .characters 动态取
+    return prompt.format(world_state=world_state)
 
 
 # ─── 兼容版（叙事框架，适配Gemini等严格安全策略的模型）────
@@ -62,7 +54,7 @@ _ENA_SYSTEM_COMPAT = """
 请直接续写绘名的下一句话，只写台词本身，说中文。
 """.strip()
 
-_MZK_SYSTEM_COMPAT = """
+_MIZUKI_SYSTEM_COMPAT = """
 以下是一段中文互动小说的创作场景，请以暁山瑞希（みずき）的视角续写对话。
 
 【角色背景】
@@ -88,9 +80,14 @@ _MZK_SYSTEM_COMPAT = """
 """.strip()
 
 
-def get_ena_system_compat(scene: dict) -> str:
-    return _ENA_SYSTEM_COMPAT.format(world_state=get_world_state_str(scene))
+_COMPAT_PROMPTS = {
+    'ena': _ENA_SYSTEM_COMPAT,
+    'mizuki': _MIZUKI_SYSTEM_COMPAT,
+}
 
 
-def get_mzk_system_compat(scene: dict) -> str:
-    return _MZK_SYSTEM_COMPAT.format(world_state=get_world_state_str(scene))
+# ─── 过渡别名，待 server.py 完成N人轮转重构后删除 ────
+def get_ena_system(scene): return get_character_system('ena', scene)
+def get_mizuki_system(scene): return get_character_system('mizuki', scene)
+def get_ena_system_compat(scene): return get_character_system('ena', scene, compat=True)
+def get_mizuki_system_compat(scene): return get_character_system('mizuki', scene, compat=True)

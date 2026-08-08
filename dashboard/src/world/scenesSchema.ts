@@ -12,7 +12,7 @@ export interface FieldSchema {
 }
 
 export const DAY_PHASE_OPTIONS = ['morning', 'afternoon', 'evening', 'late_night'] as const;
-export const LORE_TAG_OPTIONS = ['硬事实', '软推断', '待验证'] as const;
+export const LORE_TAG_OPTIONS = ['CANON', 'INFERRED', 'UNVERIFIED'] as const;
 
 // gate_triggers / gate_opening_note / auto_next / auto_turns 有专门的子控件（A/B/C 子表单、
 // 场景下拉、数字输入带清空），不走这份通用 schema，在 SceneEditor 里单独渲染。

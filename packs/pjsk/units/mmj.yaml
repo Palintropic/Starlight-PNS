@@ -1,0 +1,10 @@
+# packs/pjsk/units/mmj.yaml
+unit_id: mmj
+unit_name: "MORE MORE JUMP!"
+unit_name_short: "MMJ"
+description: "元偶像系乐队，以校园偶像活动为背景"
+members:
+  - minori
+  - haruka
+  - airi
+  - shizuku

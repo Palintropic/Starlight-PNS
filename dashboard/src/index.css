@@ -9,7 +9,7 @@
   --text-muted: #b0a797;
 
   --accent: #5b7a9d;       /* 雾蓝：主强调色 / 交互态 */
-  --accent-mzk: var(--accent);
+  --accent-mizuki: var(--accent);
   --accent-ena: #8a7368;   /* 克制的暖褐，第二角色的区分色 */
   --stable: #6b7a5e;       /* 灰绿：稳定 / 已通过 */
   --caution: #b8935c;      /* 混浊金：中等 drift / 需重写 */

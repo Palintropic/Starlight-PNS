@@ -24,7 +24,7 @@ import importlib
 import pns.world as world_mod
 import pns.world.scenes as scenes_submod
 import pns.world.facts as facts_submod
-from pns.world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat
+from pns.world import get_ena_system, get_mizuki_system, get_ena_system_compat, get_mizuki_system_compat
 from pns.world import codegen
 import pns.logic.router as router_mod
 from oobe import PROVIDERS, write_env
@@ -162,7 +162,7 @@ class Scene(BaseModel):
     weather: str
     day_phase: Literal["morning", "afternoon", "evening", "late_night"]
     scene_type: str
-    lore_tag: Literal["硬事实", "软推断", "待验证"]
+    lore_tag: Literal["CANON", "INFERRED", "UNVERIFIED"]
     trigger: str
     gate_triggers: Optional[dict[str, str]] = None
     gate_opening_note: Optional[str] = None
@@ -254,7 +254,7 @@ async def call_character_async(client, character: str, history: list, scene: dic
         system = get_ena_system_compat(scene) if use_compat else get_ena_system(scene)
         char_name = "绘名"
     else:
-        system = get_mzk_system_compat(scene) if use_compat else get_mzk_system(scene)
+        system = get_mizuki_system_compat(scene) if use_compat else get_mizuki_system(scene)
         char_name = "瑞希"
 
     if correction:
@@ -283,9 +283,9 @@ async def call_character_async(client, character: str, history: list, scene: dic
     return await loop.run_in_executor(None, _call)
 
 
-async def judge_async(client, character: str, message: str, turn: int) -> dict:
+async def judge_async(client, character: str, message: str, turn: int, scene: dict | None = None) -> dict:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, router_mod.judge, client, character, message, turn)
+    return await loop.run_in_executor(None, router_mod.judge, client, character, message, turn, scene)
 
 
 def save_history(session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
@@ -394,18 +394,18 @@ async def run_simulation(ws: WebSocket):
     })
 
     histories = {
-        "mzk": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
+        "mizuki": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
         "ena": [{"role": "user", "content": f"【场景】{scene['trigger']}"}],
     }
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
-    current = "mzk"
+    current = "mizuki"
     correction_next = None
     turn_log = []
 
     for turn in range(1, max_turns + 1):
         char_key  = current
-        char_name = "瑞希" if current == "mzk" else "绘名"
-        other = "ena" if current == "mzk" else "mzk"
+        char_name = "瑞希" if current == "mizuki" else "绘名"
+        other = "ena" if current == "mizuki" else "mizuki"
 
         await ws.send_json({"type": "generating", "turn": turn, "character": char_key, "char_name": char_name})
 
@@ -420,7 +420,7 @@ async def run_simulation(ws: WebSocket):
 
         await ws.send_json({"type": "judging", "turn": turn, "character": char_key, "char_name": char_name})
 
-        result = await judge_async(client, current, reply, turn)
+        result = await judge_async(client, current, reply, turn, scene)
         score   = result.get("drift_score", 0)
         is_ooc  = result.get("is_ooc", False)
 
@@ -460,13 +460,15 @@ async def run_simulation(ws: WebSocket):
             "reason": result.get("reason", ""),
             "needs_human_review": result.get("needs_human_review", False),
             "correction": result.get("correction"),
+            "scene_id": result.get("scene_id", ""),
+            "lore_tag": result.get("lore_tag", ""),
             "timestamp": datetime.now().isoformat(),
         }
         with DRIFT_SCORES_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(drift_record, ensure_ascii=False) + "\n")
 
         await asyncio.sleep(api_delay)
-        current = "ena" if current == "mzk" else "mzk"
+        current = "ena" if current == "mizuki" else "mizuki"
 
     avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
     final_stats = {

@@ -13,12 +13,15 @@ class DriftScore:
     reason: str                 # 为什么认为有/没有drift
     needs_human_review: bool    # 是否需要人工审核
     drift_type: str = "none"    # none / type_a / type_b（语气漂移 / 任务执行漂移）
+    scene_id: str = ""
+    lore_tag: str = ""
+    hardware_backend: str = ""
     timestamp: str = None
-    
+
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now().isoformat()
-    
+
     def to_dict(self):
         """转换为dict（用于JSON序列化）"""
         return {
@@ -30,9 +33,15 @@ class DriftScore:
             'reason': self.reason,
             'needs_human_review': self.needs_human_review,
             'drift_type': self.drift_type,
+            'scene_id': self.scene_id,
+            'lore_tag': self.lore_tag,
+            'hardware_backend': self.hardware_backend,
             'timestamp': self.timestamp,
         }
-    
-    def is_problematic(self, threshold: float = 6.5) -> bool:
+
+    def is_problematic(self, threshold: float | None = None) -> bool:
         """判断是否超过drift阈值"""
+        if threshold is None:
+            from pns.logic.router import OOC_THRESHOLD
+            threshold = OOC_THRESHOLD
         return self.drift_score >= threshold

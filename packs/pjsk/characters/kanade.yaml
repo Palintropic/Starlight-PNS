@@ -1,0 +1,16 @@
+# packs/pjsk/characters/kanade.yaml
+character_id: kanade
+name: 宵崎奏
+name_jp: 宵崎奏
+
+unit: 25ji
+role: 作曲人
+school: 居家自学
+grade: null
+class: null
+
+status: partial
+sample_coverage: 0.0
+
+# 待补充 — 语气样本不足，kanade_prompt.md 尚未创建
+prompt_file: kanade_prompt.md

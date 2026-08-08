@@ -1,5 +1,5 @@
 export type DayPhase = 'morning' | 'afternoon' | 'evening' | 'late_night';
-export type LoreTag = '硬事实' | '软推断' | '待验证';
+export type LoreTag = 'CANON' | 'INFERRED' | 'UNVERIFIED';
 
 export interface Scene {
   id: string;
@@ -32,7 +32,7 @@ export const blankScene = (id: string): Scene => ({
   weather: '',
   day_phase: 'morning',
   scene_type: 'area_talk',
-  lore_tag: '待验证',
+  lore_tag: 'UNVERIFIED',
   trigger: '',
   gate_triggers: null,
   gate_opening_note: null,

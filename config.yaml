@@ -41,7 +41,7 @@ characters:
   include_partial: false          # 是否包含sample不足的角色
   include_not_ready: false        # 是否包含未准备好的角色
   default_pairs:                  # 默认的角色组合
-    - ['ena', 'mzk']
+    - ['ena', 'mizuki']
 
 # 场景配置
 scenes:

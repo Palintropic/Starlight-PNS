@@ -250,9 +250,9 @@
   border: 1px solid;
   background: var(--surface);
 }
-.avatar.mzk {
-  color: var(--accent-mzk);
-  border-color: var(--accent-mzk);
+.avatar.mizuki {
+  color: var(--accent-mizuki);
+  border-color: var(--accent-mizuki);
 }
 .avatar.ena {
   color: var(--accent-ena);
@@ -297,7 +297,7 @@
 }
 .turn-item.active {
   background: var(--surface2);
-  border-left-color: var(--accent-mzk);
+  border-left-color: var(--accent-mizuki);
 }
 .turn-item.ena.active {
   border-left-color: var(--accent-ena);
@@ -319,8 +319,8 @@
   font-weight: 700;
   letter-spacing: 0.06em;
 }
-.char-name.mzk {
-  color: var(--accent-mzk);
+.char-name.mizuki {
+  color: var(--accent-mizuki);
 }
 .char-name.ena {
   color: var(--accent-ena);

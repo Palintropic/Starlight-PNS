@@ -16,7 +16,7 @@ FACTS_PATH = Path(__file__).parent / "facts.py"
 # 保存而把手写的分组注释冲掉。
 FACT_GROUPS: dict[str, list[str]] = {
     "学校/作息": [
-        "school", "ena_schedule", "mzk_schedule",
+        "school", "ena_schedule", "mizuki_schedule",
         "intersection_daytime", "intersection_night", "class_2b_classmate",
     ],
     "性别认同注记": ["mizuki_gender_note"],

@@ -1,0 +1,16 @@
+# packs/pjsk/characters/mafuyu.yaml
+character_id: mafuyu
+name: 朝比奈真冬
+name_jp: 朝比奈真冬
+
+unit: 25ji
+role: 作词人
+school: 宮益坂女子学院
+grade: 2
+class: "2-?"
+
+status: partial
+sample_coverage: 0.0
+
+# 待补充 — 语气样本不足，mafuyu_prompt.md 尚未创建
+prompt_file: mafuyu_prompt.md
