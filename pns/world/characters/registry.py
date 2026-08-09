@@ -99,6 +99,24 @@ def get_character_prompt(character_id: str) -> str:
     return prompt_path.read_text(encoding="utf-8").strip()
 
 
+def get_character_prompt_compat(character_id: str) -> Optional[str]:
+    """获取角色的 compat（叙事框架）prompt，不存在则返回 None（正常情况，非错误）"""
+    pack = _load_pack()
+    if character_id not in pack["characters"]:
+        raise ValueError(f"Character not found in registry: {character_id}")
+
+    info = pack["characters"][character_id]
+    prompt_file = info.get("prompt_file_compat")
+    if not prompt_file:
+        return None
+
+    prompt_path = pack["pack_dir"] / "characters" / prompt_file
+    if not prompt_path.exists():
+        return None
+
+    return prompt_path.read_text(encoding="utf-8").strip()
+
+
 def get_character_metadata(character_id: str) -> Dict:
     """获取角色的元数据"""
     pack = _load_pack()

@@ -2,14 +2,14 @@
 
 ## compat（flash-lite）prompt 目前只覆盖 ena/mizuki 两人
 
-**位置**：`pns/world/__init__.py` 的 `_COMPAT_PROMPTS` 字典 + `get_character_system(character_id, scene, compat=True)`
+**位置**：`packs/pjsk/characters/*.yaml` 的 `prompt_file_compat` 字段
 
-**背景**：`_COMPAT_PROMPTS` 是硬编码在 `pns/world/__init__.py` 里的 dict，只给 ena/mizuki
-手写过叙事框架版 system prompt（为适配 Gemini/flash-lite 等严格安全策略模型）。
-`get_character_system()` 本身已经是通用入口——`compat=True` 且角色不在 `_COMPAT_PROMPTS`
-里时会自动回退到 registry 里的普通 `get_character_prompt()`，所以 N 人轮转不会因为
-compat 缺失而崩，只是那些角色跑 flash-lite 系模型时用不到叙事框架包装。
+**背景**：compat（叙事框架，适配 Gemini/flash-lite 等严格安全策略模型）prompt 已经
+是 pack 化数据了（`prompt_file_compat` 字段 + `registry.get_character_prompt_compat()`），
+不再硬编码在框架代码里。但内容本身只给 ena/mizuki 写过，其余 18 人的 yaml 没有这个
+字段——`get_character_system(compat=True)` 找不到字段/文件时会自动回退到普通
+`prompt_file`，所以不会报错或阻断 N 人轮转，只是那 18 人跑 flash-lite 系模型时用不到
+叙事框架包装。
 
-**何时处理**：要不要把 compat prompt 也纳入 pack schema（比如给
-`packs/<pack>/characters/<id>.yaml` 加一个 `prompt_file_compat` 字段，从文件读取而不是
-硬编码在框架代码里），这个设计问题还没定，先记录，不要在补角色内容时顺手加。
+**何时处理**：跟角色内容本身（`_prompt.md`）一起按需补齐即可，不是架构问题了，
+纯粹是内容覆盖率问题。
