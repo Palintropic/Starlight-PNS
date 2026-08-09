@@ -84,10 +84,3 @@ _COMPAT_PROMPTS = {
     'ena': _ENA_SYSTEM_COMPAT,
     'mizuki': _MIZUKI_SYSTEM_COMPAT,
 }
-
-
-# ─── 过渡别名，待 server.py 完成N人轮转重构后删除 ────
-def get_ena_system(scene): return get_character_system('ena', scene)
-def get_mizuki_system(scene): return get_character_system('mizuki', scene)
-def get_ena_system_compat(scene): return get_character_system('ena', scene, compat=True)
-def get_mizuki_system_compat(scene): return get_character_system('mizuki', scene, compat=True)

@@ -20,6 +20,15 @@ ACTIVE_PACK = "pjsk"
 _cache: Optional[Dict] = None
 
 
+class CharacterNotReadyError(Exception):
+    """角色存在于 pack 里，但还没有可用的 system prompt（status=partial/not_ready 且未补内容）。"""
+
+    def __init__(self, character_id: str, detail: str):
+        self.character_id = character_id
+        self.detail = detail
+        super().__init__(detail)
+
+
 def _read_yaml(path: Path) -> Dict:
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
