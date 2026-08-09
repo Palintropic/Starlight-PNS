@@ -10,3 +10,17 @@ class: "3-E"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: airi_prompt.md
+
+family:
+  - relation: 父亲
+    name: null
+    note: "姓名职业未公开，擅长做饭，给三姐妹做午餐与圣诞蛋糕"
+  - relation: 母亲
+    name: null
+    note: "姓名职业未公开，爱莉童年时会纠正她偏男孩子气的行为；爱莉的名字取自母亲喜欢的女演员"
+  - relation: 姐妹
+    name: null
+    note: "有一位姐姐和一位妹妹，爱莉是三姐妹中的老二（Area Conversation中爱莉亲口确认）。姐妹姓名/年龄/学校/职业均未公开"
+  - relation: 备注
+    name: null
+    note: "退出偶像组合QT的核心原因是事务所路线冲突（公司认为她更适合综艺、经理评价她作为偶像很普通），而非家庭矛盾"

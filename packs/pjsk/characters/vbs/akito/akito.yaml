@@ -10,3 +10,14 @@ class: "2-A"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: akito_prompt.md
+
+family:
+  - relation: 父亲
+    name: 東雲慎英
+    note: "与绘名完全是同一家庭背景，不存在独立的'彰人家'设定。彰人曾直接质问父亲为何不能对绘名温和一点，理解父亲的担忧但也指出绘名想要的只是父亲对画作的认可"
+  - relation: 母亲
+    name: null
+    note: "姓名职业未公开，负责家务并关心绘名，与绘名条目共享"
+  - relation: 姐姐
+    name: 东云绘名
+    note: "拌嘴但互相关心；绘名在彰人退出足球后带他看现场演出、鼓励他走上街头音乐道路"

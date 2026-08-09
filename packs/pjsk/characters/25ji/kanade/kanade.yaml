@@ -5,12 +5,28 @@ name_jp: 宵崎奏
 
 unit: 25ji
 role: 作曲人
-school: 居家自学
+school: 通信制高校
+school_note: "正式高中学籍类型（与全日制/定时制并列），核心特征是不必每天到校，以自学+提交报告为主，每年仅需数天到数十天面授；不等于'没有学籍'或'居家自学'"
 grade: null
 class: null
+class_note: "不套用神山高校/宫益坂女子学院的班级号体系，无对应班级号"
 
 status: partial
 sample_coverage: 0.0
 
 # 待补充 — 语气样本不足，kanade_prompt.md 尚未创建
 prompt_file: kanade_prompt.md
+
+family:
+  - relation: 母亲
+    name: null
+    note: "已故（官方明确），奏年幼时因病去世，具体病名/日期未公开。喜欢康乃馨，童年家庭回忆集中在 Carnation Recollection"
+  - relation: 父亲
+    name: null
+    note: "仍在世、长期住院，未离异也非已故，是接委托维生的自由作曲家。因长期过劳倒下，留有严重记忆障碍，间歇清醒并逐渐恢复。官方文本不支持'长期昏迷/昏睡'或'中风/植物人'等具体诊断"
+  - relation: 祖母
+    name: null
+    note: "姓名未公开，因健康问题住院观察而未与奏同住，因担心奏无法照顾自己而联系家政中心，安排穗波升高中后定期照顾"
+  - relation: 兄弟姐妹等
+    name: null
+    note: "官方未公开提及"

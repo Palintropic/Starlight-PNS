@@ -10,3 +10,17 @@ class: "2-B"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: shiho_prompt.md
+
+family:
+  - relation: 父亲
+    name: null
+    note: "曾是知名乐队的吉他手，姓名未公开，与姐姐雫共享同一父母"
+  - relation: 母亲
+    name: null
+    note: "筝（琴）教师，姓名未公开"
+  - relation: 姐姐
+    name: 日野森雫
+    note: "志步对姐姐感到'棘手'的主因不是恨她，而是雫非常喜欢拥抱、黏着、公开宠妹妹，志步性格独立、怕尴尬、不擅长应付这种强烈亲密表达；关系底色是亲密但表达方式相冲，不存在官方定义的'姐妹决裂事件'"
+  - relation: 祖母
+    name: null
+    note: "给姐妹做过衣服、教雫刺绣，没有其他兄弟姐妹"

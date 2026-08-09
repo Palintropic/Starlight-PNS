@@ -10,3 +10,14 @@ class: "3-C"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: rui_prompt.md
+
+family:
+  - relation: 父亲
+    name: null
+    note: "机器人学工程师，姓名未公开。对幼年类的装置结构表现出专业兴趣与肯定"
+  - relation: 母亲
+    name: null
+    note: "生物学家，姓名未公开。小时候也因钻研生物被视为怪人，因此告诉类可以珍惜自己喜欢的事；促成类认识刚搬来的宁宁"
+  - relation: 兄弟姐妹
+    name: null
+    note: "没有官方提及，常见'独生子'说法缺少直接台词，不作硬确认"

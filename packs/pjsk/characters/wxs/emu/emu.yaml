@@ -10,3 +10,23 @@ class: "2-B"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: emu_prompt.md
+
+family:
+  - relation: 高祖父
+    name: 鳳喜一郎（Otori Kiichiro）
+    note: "'爷爷的爷爷'，鳳家祖宅'鳳喜一郎邸'所有者，该宅邸后来将成为重要文化财，也曾被祖父楽之介用作别墅（这是此前误将两人当同一人的原因）"
+  - relation: 祖父
+    name: 鳳楽之介（Otori Rakunosuke）
+    note: "Phoenix Wonderland创立者，笑梦口中的'おじいちゃん'，出自活动《POP IN MY HEART!!》"
+  - relation: 父亲
+    name: 鳳幸之介（Otori Kounosuke）
+    note: "笑梦之父，Phoenix Wonderland乐园相关"
+  - relation: 兄长
+    name: "鳳庆介（长男，Phoenix Wonderland社长，30岁）、鳳晶介（次男，专务）"
+    note: "两人身份多个独立来源互证，可信度较高"
+  - relation: 姐姐
+    name: "日文原名假名'ひなた'，中国服官方译名'鳳陽詩/阳诗'"
+    note: "日文官方未查到汉字写法；中文'陽詩'是中国服本地化团队的官方正式译名，与日文原名并不矛盾，是同一角色的语言本地化差异"
+  - relation: 备注
+    name: null
+    note: "对真冬有敏锐的直觉恐惧感（'表面在笑但感觉不对'）；表面天然呆实则聪明，考进过全校前三；视KAITO、MEIKO为兄姐"

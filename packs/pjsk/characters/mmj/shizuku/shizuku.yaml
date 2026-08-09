@@ -10,3 +10,17 @@ class: "3-E"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: shizuku_prompt.md
+
+family:
+  - relation: 父亲
+    name: null
+    note: "曾是知名乐队的吉他手，姓名未公开"
+  - relation: 母亲
+    name: null
+    note: "筝（琴）教师，姓名未公开"
+  - relation: 妹妹
+    name: 日野森志步
+    note: "雫因偶像工作繁忙格外喜欢黏着照顾志步，志步觉得应付姐姐麻烦但认可她的付出；关系底色是互相保护，不是长期敌对"
+  - relation: 祖母
+    name: null
+    note: "存在，给姐妹做过衣服并教雫刺绣，姓名/同住情况/职业未公开"

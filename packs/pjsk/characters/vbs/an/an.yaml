@@ -10,3 +10,14 @@ class: "2-A"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: an_prompt.md
+
+family:
+  - relation: 父亲
+    name: 白石謙
+    note: "经营live café酒吧Weekend Garage，是杏的父亲兼音乐导师，杏也在店里帮忙。年轻时与古泷大河、古泷凪从初中起组队，后为RADder成员，RAD WEEKEND中的角色是表演者/核心协力者/传承者（不是唯一主办人，愿望由凪提出）"
+  - relation: 母亲
+    name: null
+    note: "存在、与謙共同生活也会工作，职业是教师（官方确认，未限定任教学校/科目），不擅长料理（官方确认）。姓名'由香'证据不足，暂不列作官方确认"
+  - relation: 兄弟姐妹/祖父母
+    name: null
+    note: "没有确认的兄弟姐妹或祖父母。古泷大河（杏称'Uncle Taiga'）、古泷凪是亲密称呼与拟亲属关系，不是白石家血亲"
