@@ -2,9 +2,10 @@
 """角色数据的运行时加载入口。
 
 不再硬编码角色表：所有角色/团体数据来自 packs/<ACTIVE_PACK>/ 下的
-pack.yaml + units/*.yaml + characters/<unit_id>/*.yaml +
-characters/<unit_id>/*_prompt.md，按团分子目录存放，按 kickoff/PACK_SPEC_v1.md
-描述的格式加载。框架代码本身不含任何 PJSK 专属字符串（角色名、团名等）。
+pack.yaml + units/*.yaml + characters/<unit_id>/<character_id>/*.yaml +
+characters/<unit_id>/<character_id>/*_prompt.md，按团、再按角色逐级分子目录
+存放，按 kickoff/PACK_SPEC_v1.md 描述的格式加载。框架代码本身不含任何
+PJSK 专属字符串（角色名、团名等）。
 
 v1 只支持单一 active pack（见 PACK_SPEC_v1.md §8），先写死为 'pjsk'。
 """
@@ -62,7 +63,7 @@ def _load_pack() -> Dict:
             raise ValueError(
                 f"角色 '{char_id}' 的 unit '{unit_id}' 不在 pack.yaml 的 units 列表里"
             )
-        char_path = pack_dir / "characters" / unit_id / f"{char_id}.yaml"
+        char_path = pack_dir / "characters" / unit_id / char_id / f"{char_id}.yaml"
         if not char_path.exists():
             raise ValueError(
                 f"pack.yaml 声明了角色 '{char_id}'，但找不到 {char_path}"
@@ -90,7 +91,7 @@ def get_character_prompt(character_id: str) -> str:
     if not prompt_file:
         raise ValueError(f"角色 {character_id} 未声明 prompt_file")
 
-    prompt_path = pack["pack_dir"] / "characters" / info["unit"] / prompt_file
+    prompt_path = pack["pack_dir"] / "characters" / info["unit"] / character_id / prompt_file
     if not prompt_path.exists():
         raise ValueError(
             f"角色 {character_id}（status={info.get('status')}）尚无 system prompt，"
@@ -110,7 +111,7 @@ def get_character_prompt_compat(character_id: str) -> Optional[str]:
     if not prompt_file:
         return None
 
-    prompt_path = pack["pack_dir"] / "characters" / info["unit"] / prompt_file
+    prompt_path = pack["pack_dir"] / "characters" / info["unit"] / character_id / prompt_file
     if not prompt_path.exists():
         return None
 
