@@ -81,7 +81,12 @@ while nudging toward the outside world.
     ┌──────────▼──────────┐
     │    PJSK Closed World │  ← Fully offline
     │   (World Container)  │     No external access
-    └─────────────────────┘
+    └──────────┬───────────┘
+               │
+    ┌──────────▼──────────┐
+    │   Character Pack      │  ← packs/pjsk/
+    │  (pluggable, YAML)    │     20 characters, swappable
+    └────────────────────────┘
 ```
 
 ### Key Components
@@ -109,13 +114,33 @@ The Router acts as the sole information gateway. Agent models cannot access exte
 
 ## Characters
 
-### ena (東雲絵名 / Shinonome Ena)
+Status legend: ✅ ready · 🟡 partial · ⚪ not yet started
+
+### 25ji (25時、ナイトコードで。)
+
+**ena (東雲絵名)** ✅
 Night-class high school student. Tsundere painter with an Instagram addiction and an overwhelming need for validation. Active from dusk to near-dawn. Her real schedule: wake up at noon, school in the evening, draw until sunrise.
 
-### mizuki (暁山瑞希 / Akiyama Mizuki)
+**mizuki (暁山瑞希)** ✅
 First-year student who skips class more than attends. Works part-time at a clothing store. Gentle, playful, with a deep loneliness they never talk about. Teases ena constantly. Active whenever.
 
 Their intersection: **late night on Nightcord**, and the occasional accidental meeting at the school gate — mizuki leaving as ena arrives.
+
+**kanade (宵崎奏)** 🟡 — Composer. Character sheet exists; dialogue samples not yet collected.
+
+**mafuyu (朝比奈真冬)** 🟡 — Lyricist. Character sheet exists; dialogue samples not yet collected.
+
+### Vivid BAD SQUAD ⚪
+akito · an · toya · kohane — registered in the character pack, not yet built out.
+
+### Wonderlands×Showtime ⚪
+tsukasa · emu · nene · rui — registered in the character pack, not yet built out.
+
+### MORE MORE JUMP! ⚪
+minori · haruka · airi · shizuku — registered in the character pack, not yet built out.
+
+### Leo/need ⚪
+ichika · saki · honami · shiho — registered in the character pack, not yet built out.
 
 ---
 
@@ -144,6 +169,8 @@ Stage: Active development — Demo v6 complete
 - [x] Router drift scoring (0–10 scale)  
 - [x] Type A / Type B assistant-mode drift classification  
 - [x] Media authenticity judgment dimension  
+- [x] Character pack architecture (pluggable YAML, AOSP-oriented, N-character rotation)
+- [ ] Character portraits
 - [ ] Haiku drift score output  
 - [ ] Deferred drift injection (turn 10 trigger)  
 - [ ] Baseline comparison with visualization  
@@ -160,11 +187,38 @@ Stage: Active development — Demo v6 complete
 
 ```
 pns/
-├── world.py        # World container: character settings, CAI constitution
-├── router.py       # Router-as-Judge: drift scoring, correction generation
-├── run.py          # Main simulation loop with debug output
-├── requirements.txt
-└── .env.example
+├── world/
+│   ├── __init__.py        # get_character_system(): unified prompt entry, no
+│   │                       #   character-specific strings (pure framework code)
+│   ├── scenes.py          # Scene definitions (lore tier: canon/inferred/unverified)
+│   ├── facts.py            # World facts (schedules, relationships, shared knowledge)
+│   ├── codegen.py          # World Editor read/write for scenes.py & facts.py
+│   └── characters/
+│       └── registry.py     # Runtime loader for active character pack;
+│                            #   CharacterNotReadyError for not-yet-built characters
+├── logic/
+│   └── router.py           # Router-as-Judge: drift scoring, correction generation
+├── models/                 # Data models (DriftScore, etc.)
+└── interfaces/
+
+packs/
+└── pjsk/                   # Character pack — pluggable, see PACK_SPEC_v1.md
+    ├── pack.yaml            # Manifest: units + characters index
+    ├── units/               # Unit-level metadata (25ji, vbs, wxs, mmj, leoneed)
+    ├── characters/
+    │   └── <unit>/
+    │       └── <character>/
+    │           ├── <character>.yaml         # metadata + samples
+    │           ├── <character>_prompt.md    # system prompt
+    │           └── <character>_prompt_compat.md  # optional, narrative-framed
+    │                                          #   variant for stricter-safety models
+    └── assets/portraits/    # Character portraits (planned)
+
+dashboard/                  # React web dashboard (drift review UI)
+static/                     # Legacy dark-themed panel (pending consolidation)
+preprint/                   # arXiv preprint drafts (EN/CN)
+server.py                    # N-character rotation, WebSocket session runner, persists drift_scores.jsonl
+oobe.py                      # Setup wizard
 ```
 
 ---
@@ -196,7 +250,8 @@ model preferences seriously in deployed systems
 
 ## License
 
-AGPL-3.0 — This project is in active early-stage development. Architecture and findings are subject to change.
+PolyForm Noncommercial 1.0.0 — This project is in active early-stage development. Architecture and findings are subject to change.
+Non-commercial use only. Contributors are encouraged (though not legally required) to share modifications back to the community.
 
 ## Disclaimer
 
