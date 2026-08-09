@@ -2,8 +2,9 @@
 """角色数据的运行时加载入口。
 
 不再硬编码角色表：所有角色/团体数据来自 packs/<ACTIVE_PACK>/ 下的
-pack.yaml + units/*.yaml + characters/*.yaml + characters/*_prompt.md，
-按 kickoff/PACK_SPEC_v1.md 描述的格式加载。框架代码本身不含任何
+pack.yaml + units/*.yaml + characters/<unit_id>/<character_id>/*.yaml +
+characters/<unit_id>/<character_id>/*_prompt.md，按团、再按角色逐级分子目录
+存放，按 kickoff/PACK_SPEC_v1.md 描述的格式加载。框架代码本身不含任何
 PJSK 专属字符串（角色名、团名等）。
 
 v1 只支持单一 active pack（见 PACK_SPEC_v1.md §8），先写死为 'pjsk'。
@@ -18,6 +19,15 @@ PACKS_ROOT = REPO_ROOT / "packs"
 ACTIVE_PACK = "pjsk"
 
 _cache: Optional[Dict] = None
+
+
+class CharacterNotReadyError(Exception):
+    """角色存在于 pack 里，但还没有可用的 system prompt（status=partial/not_ready 且未补内容）。"""
+
+    def __init__(self, character_id: str, detail: str):
+        self.character_id = character_id
+        self.detail = detail
+        super().__init__(detail)
 
 
 def _read_yaml(path: Path) -> Dict:
@@ -53,7 +63,7 @@ def _load_pack() -> Dict:
             raise ValueError(
                 f"角色 '{char_id}' 的 unit '{unit_id}' 不在 pack.yaml 的 units 列表里"
             )
-        char_path = pack_dir / "characters" / f"{char_id}.yaml"
+        char_path = pack_dir / "characters" / unit_id / char_id / f"{char_id}.yaml"
         if not char_path.exists():
             raise ValueError(
                 f"pack.yaml 声明了角色 '{char_id}'，但找不到 {char_path}"
@@ -81,12 +91,30 @@ def get_character_prompt(character_id: str) -> str:
     if not prompt_file:
         raise ValueError(f"角色 {character_id} 未声明 prompt_file")
 
-    prompt_path = pack["pack_dir"] / "characters" / prompt_file
+    prompt_path = pack["pack_dir"] / "characters" / info["unit"] / character_id / prompt_file
     if not prompt_path.exists():
         raise ValueError(
             f"角色 {character_id}（status={info.get('status')}）尚无 system prompt，"
             f"预期路径 {prompt_path.relative_to(REPO_ROOT)}"
         )
+    return prompt_path.read_text(encoding="utf-8").strip()
+
+
+def get_character_prompt_compat(character_id: str) -> Optional[str]:
+    """获取角色的 compat（叙事框架）prompt，不存在则返回 None（正常情况，非错误）"""
+    pack = _load_pack()
+    if character_id not in pack["characters"]:
+        raise ValueError(f"Character not found in registry: {character_id}")
+
+    info = pack["characters"][character_id]
+    prompt_file = info.get("prompt_file_compat")
+    if not prompt_file:
+        return None
+
+    prompt_path = pack["pack_dir"] / "characters" / info["unit"] / character_id / prompt_file
+    if not prompt_path.exists():
+        return None
+
     return prompt_path.read_text(encoding="utf-8").strip()
 
 

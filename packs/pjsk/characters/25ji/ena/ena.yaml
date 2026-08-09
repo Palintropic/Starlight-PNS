@@ -1,4 +1,4 @@
-# packs/pjsk/characters/ena.yaml
+# packs/pjsk/characters/25ji/ena/ena.yaml
 character_id: ena
 name: 东云绘名
 name_jp: 東雲絵名
@@ -15,6 +15,7 @@ status: ready
 sample_coverage: 1.0
 
 prompt_file: ena_prompt.md
+prompt_file_compat: ena_prompt_compat.md
 
 personality_core:
   - 嘴硬心软的傲娇

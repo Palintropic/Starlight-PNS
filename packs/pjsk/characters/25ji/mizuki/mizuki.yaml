@@ -1,4 +1,4 @@
-# packs/pjsk/characters/mizuki.yaml
+# packs/pjsk/characters/25ji/mizuki/mizuki.yaml
 character_id: mizuki
 name: 暁山瑞希
 name_jp: 暁山瑞希
@@ -15,6 +15,7 @@ status: ready
 sample_coverage: 1.0
 
 prompt_file: mizuki_prompt.md
+prompt_file_compat: mizuki_prompt_compat.md
 
 personality_core:
   - 表面开朗

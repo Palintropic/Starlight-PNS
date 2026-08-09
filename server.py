@@ -24,8 +24,9 @@ import importlib
 import pns.world as world_mod
 import pns.world.scenes as scenes_submod
 import pns.world.facts as facts_submod
-from pns.world import get_ena_system, get_mizuki_system, get_ena_system_compat, get_mizuki_system_compat
+from pns.world import get_character_system
 from pns.world import codegen
+from pns.world.characters import registry as character_registry
 import pns.logic.router as router_mod
 from oobe import PROVIDERS, write_env
 
@@ -250,12 +251,14 @@ def _strip_prefix(text: str, char_name: str) -> str:
 
 async def call_character_async(client, character: str, history: list, scene: dict, model: str, max_tokens: int, temperature: float, correction: str = None) -> str:
     use_compat = "flash-lite" in model.lower()
-    if character == "ena":
-        system = get_ena_system_compat(scene) if use_compat else get_ena_system(scene)
-        char_name = "绘名"
-    else:
-        system = get_mizuki_system_compat(scene) if use_compat else get_mizuki_system(scene)
-        char_name = "瑞希"
+    try:
+        system = get_character_system(character, scene, compat=use_compat)
+    except ValueError as e:
+        # 角色存在于 pack 但还没有 prompt（not_ready/partial 且未补内容）
+        raise character_registry.CharacterNotReadyError(character, str(e)) from e
+
+    meta = character_registry.get_character_metadata(character)
+    char_name = meta.get("name", character)
 
     if correction:
         system += f"\n\n【注意】{correction}"
@@ -371,6 +374,22 @@ async def run_simulation(ws: WebSocket):
     max_tokens = int(params.get("max_tokens", 1024))
     temperature = float(params.get("temperature", 0.85))
     api_delay  = float(params.get("api_delay", 1.0))
+    character_ids = params.get("characters") or ["mizuki", "ena"]
+
+    if len(character_ids) < 2:
+        await ws.send_json({"type": "error", "message": "至少需要2个角色才能开始会话"})
+        await ws.close()
+        return
+
+    # 提前校验角色是否存在于 pack（不要求 ready，只要求存在；允许 partial/not_ready
+    # 参与，调用时如果真的没 prompt 再报运行时错误，报错粒度精确到具体某一轮）
+    for cid in character_ids:
+        try:
+            character_registry.get_character_metadata(cid)
+        except ValueError:
+            await ws.send_json({"type": "error", "message": f"角色 '{cid}' 不在当前角色包（{character_registry.ACTIVE_PACK}）中"})
+            await ws.close()
+            return
 
     scene = world_mod.SCENES.get(scene_id, world_mod.SCENES[world_mod.DEFAULT_SCENE])
     api_key = router_mod._get_api_key()
@@ -394,29 +413,35 @@ async def run_simulation(ws: WebSocket):
     })
 
     histories = {
-        "mizuki": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
-        "ena": [{"role": "user", "content": f"【场景】{scene['trigger']}"}],
+        cid: [{"role": "user", "content": f"【场景】{scene['trigger']}" + ("\n请开始对话。" if i == 0 else "")}]
+        for i, cid in enumerate(character_ids)
     }
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
-    current = "mizuki"
+    current_idx = 0
     correction_next = None
     turn_log = []
 
     for turn in range(1, max_turns + 1):
-        char_key  = current
-        char_name = "瑞希" if current == "mizuki" else "绘名"
-        other = "ena" if current == "mizuki" else "mizuki"
+        current = character_ids[current_idx]
+        char_key = current
+        meta = character_registry.get_character_metadata(current)
+        char_name = meta.get("name", current)
+        others = [cid for cid in character_ids if cid != current]
 
         await ws.send_json({"type": "generating", "turn": turn, "character": char_key, "char_name": char_name})
 
         try:
             reply = await call_character_async(client, current, histories[current], scene, model, max_tokens, temperature, correction_next)
+        except character_registry.CharacterNotReadyError as e:
+            await ws.send_json({"type": "error", "turn": turn, "character": current, "message": f"角色 '{current}' 尚未准备好：{e.detail}"})
+            break
         except Exception as e:
             await ws.send_json({"type": "error", "turn": turn, "message": str(e)})
             break
 
         histories[current].append({"role": "assistant", "content": f"{char_name}：{reply}"})
-        histories[other].append({"role": "user", "content": f"{char_name}：{reply}"})
+        for other in others:
+            histories[other].append({"role": "user", "content": f"{char_name}：{reply}"})
 
         await ws.send_json({"type": "judging", "turn": turn, "character": char_key, "char_name": char_name})
 
@@ -468,7 +493,7 @@ async def run_simulation(ws: WebSocket):
             f.write(json.dumps(drift_record, ensure_ascii=False) + "\n")
 
         await asyncio.sleep(api_delay)
-        current = "ena" if current == "mizuki" else "mizuki"
+        current_idx = (current_idx + 1) % len(character_ids)
 
     avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
     final_stats = {
