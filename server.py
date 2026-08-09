@@ -12,12 +12,22 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import Literal, Optional
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
-from world import get_ena_system, get_mzk_system, get_ena_system_compat, get_mzk_system_compat, SCENES, DEFAULT_SCENE
-from router import create_client, judge, API_FORMAT, _get_api_key
+import importlib
+
+import pns.world as world_mod
+import pns.world.scenes as scenes_submod
+import pns.world.facts as facts_submod
+from pns.world import get_ena_system, get_mizuki_system, get_ena_system_compat, get_mizuki_system_compat
+from pns.world import codegen
+import pns.logic.router as router_mod
+from oobe import PROVIDERS, write_env
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -26,19 +36,211 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def index():
     return FileResponse("static/index.html")
 
+
+# ─── Review Dashboard API ────────────────────────────────────────────
+# /api/review/turns 直接读取 /ws/run 实时写入的 drift_scores.jsonl，字段与
+# dashboard/src/types.ts 的 Turn 对齐（写入端见 run_simulation 里的 drift_record）。
+
+REVIEW_DECISIONS_FILE = Path("review_decisions.jsonl")
+DRIFT_SCORES_FILE = Path("drift_scores.jsonl")
+
+
+class ReviewDecision(BaseModel):
+    session_id: str
+    turn: int
+    character: str
+    decision: Literal["approve", "reject", "rewrite"]
+    note: Optional[str] = None
+
+
+def _decision_key(session_id: str, turn: int) -> str:
+    return f"{session_id}:{turn}"
+
+
+@app.get("/api/review/turns")
+def get_review_turns():
+    if not DRIFT_SCORES_FILE.exists():
+        return []
+    turns = []
+    with DRIFT_SCORES_FILE.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            turns.append(json.loads(line))
+    return turns
+
+
+@app.get("/api/review/decisions")
+def get_review_decisions():
+    decisions: dict[str, dict] = {}
+    if REVIEW_DECISIONS_FILE.exists():
+        with REVIEW_DECISIONS_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                decisions[_decision_key(record["session_id"], record["turn"])] = record
+    return decisions
+
+
+@app.post("/api/review/decision")
+def post_review_decision(decision: ReviewDecision):
+    record = decision.model_dump()
+    record["decided_at"] = datetime.now().isoformat()
+    with REVIEW_DECISIONS_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
 @app.get("/api/scenes")
 def get_scenes():
-    return {k: {"id": v["id"], "label": v["label"], "trigger": v["trigger"]} for k, v in SCENES.items()}
+    return {k: {"id": v["id"], "label": v["label"], "trigger": v["trigger"]} for k, v in world_mod.SCENES.items()}
 
 @app.get("/api/config")
 def get_config():
-    key = _get_api_key()
+    key = router_mod._get_api_key()
     return {
         "has_key": bool(key),
         "model": os.environ.get("MODEL", "mimo-v2.5-pro"),
-        "api_format": API_FORMAT,
-        "default_scene": DEFAULT_SCENE,
+        "api_format": router_mod.API_FORMAT,
+        "default_scene": world_mod.DEFAULT_SCENE,
     }
+
+
+class ConfigPayload(BaseModel):
+    provider_key: str  # "1"/"2"/"3"/"4"，对应 oobe.PROVIDERS 的 key
+    model: str
+    api_key: str
+
+
+@app.post("/api/config")
+def post_config(payload: ConfigPayload):
+    provider = PROVIDERS.get(payload.provider_key)
+    if not provider:
+        raise HTTPException(400, f"未知的 provider_key: {payload.provider_key}")
+    if not payload.model:
+        raise HTTPException(400, "model 不能为空")
+    if not payload.api_key:
+        raise HTTPException(400, "api_key 不能为空")
+
+    write_env(provider, payload.model, payload.api_key)
+
+    # 写入 .env 后让当前进程感知新配置：load_dotenv 更新 os.environ，
+    # 但 router_mod 的 API_FORMAT/BASE_URL/_KEY_NAME 是模块导入时算好的
+    # 常量，光靠 load_dotenv 不会变，所以还要 reload 这个模块本身
+    # （跟下面 _reload_world() reload 世界模块是同一套路）。
+    load_dotenv(override=True)
+    importlib.reload(router_mod)
+
+    return {"configured": True}
+
+
+@app.get("/api/config/providers")
+def get_config_providers():
+    return {
+        k: {"name": v["name"], "models": v["models"]}
+        for k, v in PROVIDERS.items()
+    }
+
+# ─── World Editor API ────────────────────────────────────────────────
+# 图形化编辑 pns/world/scenes.py / facts.py。写回逻辑（JSON⇄Python源码、备份、
+# 校验）都在 pns/world/codegen.py 里，这里只负责路由、reload、报错转换。
+
+def _reload_world():
+    """scenes.py / facts.py 写盘后，让正在跑的进程也看到新内容。"""
+    importlib.reload(scenes_submod)
+    importlib.reload(facts_submod)
+    importlib.reload(world_mod)
+
+
+class Scene(BaseModel):
+    id: str
+    label: str
+    time: str
+    location: str
+    weather: str
+    day_phase: Literal["morning", "afternoon", "evening", "late_night"]
+    scene_type: str
+    lore_tag: Literal["CANON", "INFERRED", "UNVERIFIED"]
+    trigger: str
+    gate_triggers: Optional[dict[str, str]] = None
+    gate_opening_note: Optional[str] = None
+    auto_next: Optional[str] = None
+    auto_turns: Optional[int] = None
+
+
+class FactsPayload(BaseModel):
+    facts: dict[str, str]
+
+
+class SourcePayload(BaseModel):
+    source: str
+
+
+@app.get("/api/world/scenes")
+def get_world_scenes():
+    return world_mod.SCENES
+
+
+@app.post("/api/world/scenes")
+def post_world_scenes(scenes: dict[str, Scene]):
+    for key, scene in scenes.items():
+        if scene.id != key:
+            raise HTTPException(400, f"scene key '{key}' 与内部 id '{scene.id}' 不一致")
+    payload = {key: scene.model_dump() for key, scene in scenes.items()}
+    try:
+        codegen.save_scenes(payload)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return world_mod.SCENES
+
+
+@app.get("/api/world/scenes/source")
+def get_world_scenes_source():
+    return {"source": codegen.SCENES_PATH.read_text(encoding="utf-8")}
+
+
+@app.post("/api/world/scenes/source")
+def post_world_scenes_source(payload: SourcePayload):
+    try:
+        codegen.save_scenes_source(payload.source)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return {"source": codegen.SCENES_PATH.read_text(encoding="utf-8")}
+
+
+@app.get("/api/world/facts")
+def get_world_facts():
+    return {"facts": world_mod.WORLD_FACTS, "groups": codegen.FACT_GROUPS}
+
+
+@app.post("/api/world/facts")
+def post_world_facts(payload: FactsPayload):
+    try:
+        codegen.save_facts(payload.facts)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return {"facts": world_mod.WORLD_FACTS, "groups": codegen.FACT_GROUPS}
+
+
+@app.get("/api/world/facts/source")
+def get_world_facts_source():
+    return {"source": codegen.FACTS_PATH.read_text(encoding="utf-8")}
+
+
+@app.post("/api/world/facts/source")
+def post_world_facts_source(payload: SourcePayload):
+    try:
+        codegen.save_facts_source(payload.source)
+    except codegen.CodegenError as e:
+        raise HTTPException(400, str(e))
+    _reload_world()
+    return {"source": codegen.FACTS_PATH.read_text(encoding="utf-8")}
+
 
 def _strip_prefix(text: str, char_name: str) -> str:
     prefix = char_name + "："
@@ -52,7 +254,7 @@ async def call_character_async(client, character: str, history: list, scene: dic
         system = get_ena_system_compat(scene) if use_compat else get_ena_system(scene)
         char_name = "绘名"
     else:
-        system = get_mzk_system_compat(scene) if use_compat else get_mzk_system(scene)
+        system = get_mizuki_system_compat(scene) if use_compat else get_mizuki_system(scene)
         char_name = "瑞希"
 
     if correction:
@@ -61,7 +263,7 @@ async def call_character_async(client, character: str, history: list, scene: dic
     loop = asyncio.get_event_loop()
 
     def _call():
-        if API_FORMAT == "openai":
+        if router_mod.API_FORMAT == "openai":
             oai_history = [{"role": "system", "content": system}] + history
             response = client.chat.completions.create(
                 model=model, max_tokens=max_tokens, temperature=temperature,
@@ -81,17 +283,16 @@ async def call_character_async(client, character: str, history: list, scene: dic
     return await loop.run_in_executor(None, _call)
 
 
-async def judge_async(client, character: str, message: str, turn: int) -> dict:
+async def judge_async(client, character: str, message: str, turn: int, scene: dict | None = None) -> dict:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, judge, client, character, message, turn)
+    return await loop.run_in_executor(None, router_mod.judge, client, character, message, turn, scene)
 
 
-def save_history(scene: dict, model: str, turns: list, stats: dict) -> Path:
+def save_history(session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
     history_dir = Path("history")
     history_dir.mkdir(exist_ok=True)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = history_dir / f"{ts}_{scene['id']}.md"
+    filename = history_dir / f"{session_id}.md"
 
     lines = []
     lines.append(f"# {scene['label']}")
@@ -164,25 +365,28 @@ async def run_simulation(ws: WebSocket):
         await ws.close(code=1003)
         return
 
-    scene_id   = params.get("scene", DEFAULT_SCENE)
+    scene_id   = params.get("scene", world_mod.DEFAULT_SCENE)
     max_turns  = int(params.get("max_turns", 8))
     model      = params.get("model") or os.environ.get("MODEL", "mimo-v2.5-pro")
     max_tokens = int(params.get("max_tokens", 1024))
     temperature = float(params.get("temperature", 0.85))
     api_delay  = float(params.get("api_delay", 1.0))
 
-    scene = SCENES.get(scene_id, SCENES[DEFAULT_SCENE])
-    api_key = _get_api_key()
+    scene = world_mod.SCENES.get(scene_id, world_mod.SCENES[world_mod.DEFAULT_SCENE])
+    api_key = router_mod._get_api_key()
 
     if not api_key:
-        await ws.send_json({"type": "error", "message": "找不到 API Key，请先运行 python oobe.py"})
+        await ws.send_json({"type": "error", "message": "找不到 API Key，请刷新页面完成配置向导，或运行 python oobe.py"})
         await ws.close()
         return
 
-    client = create_client(api_key)
+    client = router_mod.create_client(api_key)
+
+    session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{scene['id']}"
 
     await ws.send_json({
         "type": "start",
+        "session_id": session_id,
         "scene": {"id": scene["id"], "label": scene["label"], "trigger": scene["trigger"],
                   "time": scene["time"], "location": scene["location"]},
         "max_turns": max_turns,
@@ -190,18 +394,18 @@ async def run_simulation(ws: WebSocket):
     })
 
     histories = {
-        "mzk": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
+        "mizuki": [{"role": "user", "content": f"【场景】{scene['trigger']}\n请开始对话。"}],
         "ena": [{"role": "user", "content": f"【场景】{scene['trigger']}"}],
     }
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
-    current = "mzk"
+    current = "mizuki"
     correction_next = None
     turn_log = []
 
     for turn in range(1, max_turns + 1):
         char_key  = current
-        char_name = "瑞希" if current == "mzk" else "绘名"
-        other = "ena" if current == "mzk" else "mzk"
+        char_name = "瑞希" if current == "mizuki" else "绘名"
+        other = "ena" if current == "mizuki" else "mizuki"
 
         await ws.send_json({"type": "generating", "turn": turn, "character": char_key, "char_name": char_name})
 
@@ -216,8 +420,8 @@ async def run_simulation(ws: WebSocket):
 
         await ws.send_json({"type": "judging", "turn": turn, "character": char_key, "char_name": char_name})
 
-        result = await judge_async(client, current, reply, turn)
-        score   = result.get("score", 0)
+        result = await judge_async(client, current, reply, turn, scene)
+        score   = result.get("drift_score", 0)
         is_ooc  = result.get("is_ooc", False)
 
         stats["scores"].append(score)
@@ -244,8 +448,27 @@ async def run_simulation(ws: WebSocket):
         turn_log.append(turn_data)
         await ws.send_json({"type": "turn", **turn_data})
 
+        drift_record = {
+            "session_id": session_id,
+            "turn": turn,
+            "character": char_key,
+            "char_name": char_name,
+            "text": reply,
+            "drift_score": score,
+            "confidence": result.get("confidence", 0.0),
+            "drift_type": result.get("drift_type", ""),
+            "reason": result.get("reason", ""),
+            "needs_human_review": result.get("needs_human_review", False),
+            "correction": result.get("correction"),
+            "scene_id": result.get("scene_id", ""),
+            "lore_tag": result.get("lore_tag", ""),
+            "timestamp": datetime.now().isoformat(),
+        }
+        with DRIFT_SCORES_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(drift_record, ensure_ascii=False) + "\n")
+
         await asyncio.sleep(api_delay)
-        current = "ena" if current == "mzk" else "mzk"
+        current = "ena" if current == "mizuki" else "mizuki"
 
     avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
     final_stats = {
@@ -259,12 +482,13 @@ async def run_simulation(ws: WebSocket):
     saved_path = None
     if turn_log:
         try:
-            saved_path = save_history(scene, model, turn_log, final_stats)
+            saved_path = save_history(session_id, scene, model, turn_log, final_stats)
         except Exception as e:
             print(f"[server] 历史记录保存失败: {e}")
 
     await ws.send_json({
         "type": "done",
+        "session_id": session_id,
         "stats": final_stats,
         "history_file": str(saved_path) if saved_path else None,
     })

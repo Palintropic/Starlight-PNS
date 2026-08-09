@@ -1,0 +1,12 @@
+# packs/pjsk/characters/minori.yaml
+character_id: minori
+name: 花里实乃理
+name_jp: 花里実乃理
+unit: mmj
+role: 成员
+school: 宮益坂女子学院
+grade: 2
+class: "2-D"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: minori_prompt.md

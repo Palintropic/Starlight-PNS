@@ -1,0 +1,12 @@
+# packs/pjsk/characters/rui.yaml
+character_id: rui
+name: 神代类
+name_jp: 神代類
+unit: wxs
+role: 成员
+school: 神山高校
+grade: 3
+class: "3-C"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: rui_prompt.md

@@ -1,0 +1,12 @@
+# packs/pjsk/characters/akito.yaml
+character_id: akito
+name: 东云彰人
+name_jp: 東雲彰人
+unit: vbs
+role: 成员
+school: 神山高校
+grade: 2
+class: "2-A"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: akito_prompt.md

@@ -1,0 +1,43 @@
+:root {
+  /* 深夜研究站：暖米色纸感，Anthropic 调性 */
+  --bg: #f4f1ea;
+  --surface: #efeae0;
+  --surface2: #e9e2d2;
+  --border: #ddd7c8;
+  --text: #2a2620;
+  --text-dim: #8a8171;
+  --text-muted: #b0a797;
+
+  --accent: #5b7a9d;       /* 雾蓝：主强调色 / 交互态 */
+  --accent-mizuki: var(--accent);
+  --accent-ena: #8a7368;   /* 克制的暖褐，第二角色的区分色 */
+  --stable: #6b7a5e;       /* 灰绿：稳定 / 已通过 */
+  --caution: #b8935c;      /* 混浊金：中等 drift / 需重写 */
+  --warn: #b85c3e;         /* 陶土红：drift 偏高 / 拒绝 */
+
+  --mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+  --sans: 'PingFang SC', 'Hiragino Sans GB', 'Hiragino Kaku Gothic ProN', 'Yu Gothic',
+    'Microsoft YaHei', system-ui, sans-serif;
+
+  color-scheme: light;
+  font-family: var(--sans);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+textarea {
+  font: inherit;
+  color: inherit;
+}

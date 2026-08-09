@@ -1,0 +1,35 @@
+# packs/pjsk/pack.yaml
+pack_id: pjsk
+pack_name: "Project Sekai: Colorful Stage!"
+version: "1.0.0"
+license: "PolyForm Noncommercial"
+description: "PJSK 20名角色的世界观参考实现"
+
+units:
+  - 25ji
+  - vbs
+  - wxs
+  - mmj
+  - leoneed
+
+characters:
+  - { id: ena,      unit: 25ji }
+  - { id: mizuki,   unit: 25ji }
+  - { id: kanade,   unit: 25ji }
+  - { id: mafuyu,   unit: 25ji }
+  - { id: akito,    unit: vbs }
+  - { id: an,       unit: vbs }
+  - { id: toya,     unit: vbs }
+  - { id: kohane,   unit: vbs }
+  - { id: tsukasa,  unit: wxs }
+  - { id: emu,      unit: wxs }
+  - { id: nene,     unit: wxs }
+  - { id: rui,      unit: wxs }
+  - { id: minori,   unit: mmj }
+  - { id: haruka,   unit: mmj }
+  - { id: airi,     unit: mmj }
+  - { id: shizuku,  unit: mmj }
+  - { id: ichika,   unit: leoneed }
+  - { id: saki,     unit: leoneed }
+  - { id: honami,   unit: leoneed }
+  - { id: shiho,    unit: leoneed }

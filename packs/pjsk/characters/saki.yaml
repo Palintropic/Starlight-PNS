@@ -1,0 +1,12 @@
+# packs/pjsk/characters/saki.yaml
+character_id: saki
+name: 天马咲希
+name_jp: 天馬咲希
+unit: leoneed
+role: 成员
+school: 宮益坂女子学院
+grade: 2
+class: "2-B"
+status: not_ready
+sample_coverage: 0.0
+prompt_file: saki_prompt.md
