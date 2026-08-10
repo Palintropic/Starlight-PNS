@@ -16,6 +16,8 @@ sample_coverage: 1.0
 
 prompt_file: mizuki_prompt.md
 prompt_file_compat: mizuki_prompt_compat.md
+constitution_file: mizuki_constitution.md
+router_reference_file: mizuki_router_reference.md
 
 personality_core:
   - 表面开朗

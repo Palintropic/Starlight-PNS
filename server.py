@@ -487,6 +487,7 @@ async def run_simulation(ws: WebSocket):
             "correction": result.get("correction"),
             "scene_id": result.get("scene_id", ""),
             "lore_tag": result.get("lore_tag", ""),
+            "router_reference_status": result.get("router_reference_status", ""),
             "timestamp": datetime.now().isoformat(),
         }
         with DRIFT_SCORES_FILE.open("a", encoding="utf-8") as f:

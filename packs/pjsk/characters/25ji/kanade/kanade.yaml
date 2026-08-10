@@ -11,11 +11,12 @@ grade: null
 class: null
 class_note: "不套用神山高校/宫益坂女子学院的班级号体系，无对应班级号"
 
-status: partial
-sample_coverage: 0.0
+status: ready
+sample_coverage: 1.0  # 三件套齐全时的占位值，评分口径未最终确定，后续可能重新定义
 
-# 待补充 — 语气样本不足，kanade_prompt.md 尚未创建
 prompt_file: kanade_prompt.md
+constitution_file: kanade_constitution.md
+router_reference_file: kanade_router_reference.md
 
 family:
   - relation: 母亲

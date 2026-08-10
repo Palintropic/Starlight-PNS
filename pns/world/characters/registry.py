@@ -118,6 +118,24 @@ def get_character_prompt_compat(character_id: str) -> Optional[str]:
     return prompt_path.read_text(encoding="utf-8").strip()
 
 
+def get_character_router_reference(character_id: str) -> Optional[str]:
+    """获取角色的 Router 评分参考文件（评分层，生成模型不可见），不存在则返回 None（正常情况，非错误）"""
+    pack = _load_pack()
+    if character_id not in pack["characters"]:
+        raise ValueError(f"Character not found in registry: {character_id}")
+
+    info = pack["characters"][character_id]
+    reference_file = info.get("router_reference_file")
+    if not reference_file:
+        return None
+
+    reference_path = pack["pack_dir"] / "characters" / info["unit"] / character_id / reference_file
+    if not reference_path.exists():
+        return None
+
+    return reference_path.read_text(encoding="utf-8").strip()
+
+
 def get_character_metadata(character_id: str) -> Dict:
     """获取角色的元数据"""
     pack = _load_pack()
