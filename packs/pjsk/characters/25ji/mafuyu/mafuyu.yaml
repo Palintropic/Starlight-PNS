@@ -6,11 +6,23 @@ name_jp: 朝比奈真冬
 unit: 25ji
 role: 作词人
 school: 宮益坂女子学院
-grade: 2
-class: "2-?"
+grade: 3
+class: "3-B"
+class_history: "2-B（进级前）→ 3-B（进级后，现状）"
 
 status: partial
 sample_coverage: 0.0
 
 # 待补充 — 语气样本不足，mafuyu_prompt.md 尚未创建
 prompt_file: mafuyu_prompt.md
+
+family:
+  - relation: 母亲
+    name: null
+    note: "姓名职业未公开，直接出场很多次。会照顾生病的幼年真冬，也真心认为自己在为女儿安排最好的未来；同时把'乖、优秀、体面'的标准强加给真冬，控制持续升级（查电脑发现Nightcord、限制音乐活动、收走电脑手机等），真冬离家投奔奏后仍在持续修复中"
+  - relation: 父亲
+    name: null
+    note: "姓名职业未公开，存在且直接出场。长期因工作忙很少在家，过去基本相信妻子的判断；真冬的合成器是他买的。后续在 A Light Drawn Closer、Unreliable Notes 等剧情中逐渐正视女儿的真实痛苦"
+  - relation: 兄弟姐妹/祖父母
+    name: null
+    note: "官方未公开提及。'真冬是独生女'可由现有家庭描写推测，但没有像一歌那样的'only child'台词，不列为硬确认"

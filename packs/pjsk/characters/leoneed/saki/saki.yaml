@@ -10,3 +10,17 @@ class: "2-B"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: saki_prompt.md
+
+family:
+  - relation: 母亲
+    name: null
+    note: "钢琴教师，姓名未公开。咲希与哥哥司从小都由母亲教钢琴"
+  - relation: 父亲
+    name: null
+    note: "职业姓名未公开"
+  - relation: 哥哥
+    name: 天马司
+    note: "咲希住院期间司持续探望、逗她开心，形成极强的兄妹羁绊"
+  - relation: 疾病
+    name: null
+    note: "官方未公开病名，不能诊断为白血病/心脏病等具体疾病。小学到初中反复住院，初中因转远院与朋友难以见面；高中入学时好转到可返校，但仍可能过劳后病倒"

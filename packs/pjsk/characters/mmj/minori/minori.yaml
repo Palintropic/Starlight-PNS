@@ -10,3 +10,14 @@ class: "2-D"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: minori_prompt.md
+
+family:
+  - relation: 父母
+    name: null
+    note: "姓名职业未公开，关心她看完ASRUN演唱会后的沉默、听她谈偶像梦想；卡面剧情中父母互相打趣女儿的粗心/倒霉像谁"
+  - relation: 弟弟
+    name: null
+    note: "存在，为小学生，姓名未公开，不可用同人补名"
+  - relation: 宠物
+    name: サモちゃん/Samo-chan
+    note: "家中的萨摩耶犬"

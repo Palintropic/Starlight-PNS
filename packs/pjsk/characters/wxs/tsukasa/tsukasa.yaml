@@ -10,3 +10,14 @@ class: "3-C"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: tsukasa_prompt.md
+
+family:
+  - relation: 母亲
+    name: null
+    note: "钢琴教师，姓名未公开。司和咲希小时候都由母亲教钢琴，与青柳家因钢琴圈相识"
+  - relation: 父亲
+    name: null
+    note: "职业姓名均未公开。此前'公司高管/executive'说法无剧情台词支持，日文家族资料明确记作'职业不明'，已删除该误记"
+  - relation: 妹妹
+    name: 天马咲希
+    note: "从小体弱、反复住院，司为逗她开心练过《小星星》，并把'成为明星、让咲希与父母笑'当作最初梦想。兄妹曾因咲希身体与照顾方式发生争执又彼此理解"

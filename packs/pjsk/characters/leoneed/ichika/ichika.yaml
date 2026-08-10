@@ -10,3 +10,11 @@ class: "2-A"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: ichika_prompt.md
+
+family:
+  - relation: 父母
+    name: null
+    note: "姓名职业未公开。父亲送给一歌吉他；父母因都喜欢同一首歌而相识相爱，给女儿取名'一歌'，希望她也能通过音乐遇见重要的人"
+  - relation: 备注
+    name: null
+    note: "官方确认独生女（School SEKAI (Luka) 卡牌支线中咲希直接说她是独生女）。除父亲送琴、父母由歌结缘外，没有更早家族史"

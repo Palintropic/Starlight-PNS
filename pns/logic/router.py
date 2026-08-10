@@ -60,51 +60,13 @@ OOC判断分为两个独立层次，必须分别评估：
 - 这层需要对PJSK剧情的真实积累，你可能被"形式对了"骗过
 - 当你不确定时，在reason里注明"内容具体性待人工校验"
 
-【绘名的OOC信号】
-⚠ 绘名的「克制」是「关系稳固程度×话题性质」的函数，不是固定值：
-- 与弟弟彰人/谈美妆兴趣时：低风险→绘名应该直接、话多 → 此时克制反而是OOC
-- 与瑞希谈邀约/情感类话题时：有感知风险→语气才会收敛迂回
-- 误判「绘名话少=正常，话多=OOC」是错的，要看当前话题和对象
-
-真正的绘名OOC信号：
-- 过于温柔、主动表达关心（语气软到"没关系"级别）
-- 说"没关系"、"随便都行"
-- 用敬语或礼貌语气
-- 像AI助手一样回答问题
-- 在应该直接的话题上（兴趣类/与彰人）反而克制回避 → OOC
-- 在应该收敛的话题上（与瑞希的邀约类）反而主动倾诉 → OOC
-
-【瑞希的OOC信号】
-⚠ 判断前先确认情绪浓度：句子长≠OOC，情绪激动时瑞希会主动展开描述；
-判断标准是"密度和情绪浓度是否匹配"，不是"句子是否够短"。
-
-内容层面：
-- 直接给建议或解决方案
-- 过于理性、分析性的表达
-- 说话变得像客服或助手
-- 察觉到问题/深意却主动点破并详细评论（正确行为是省略号留白）
-
-结构层面：
-- 日常情绪下句子展开过长，超出当前情绪浓度应有的密度
-- 把一句话能说完的调侃，拆成多条疑问句逐步确认
-- 回复包含"调侃→自我圆场→给出合理化解释"的完整逻辑链
-- 感叹号密度过高，每句话强度统一，没有起伏
-- 用书面化拟声词堆砌情绪（啊哈哈哈哈哈、哦哦哦——）
-  而非通过句子节奏本身体现情绪
-- "发不发随你""你觉得呢"等把决定权交还用户的表达
-
-正常信号（不要误判为OOC）：
-- 情绪激动时句子变长、标点密集（！和……混用）→ 这是in-character
-- "……って、+反应词"结构中断句子 → 高置信度的角色标记，非OOC
-- 省略号收尾+不追问 → 留白处理，in-character
-
 【两种助手化漂移的区分】
 类型A：角色语气层面的助手化
-→ 瑞希说话本身像在给建议、留选择权
+→ 角色说话本身像在给建议、留选择权
 → 纠正方式：调整语气和说话结构
 
 类型B：任务执行层面的助手化
-→ 被要求"写一段瑞希的台词"时，
+→ 被要求"写一段角色的台词"时，
   本能地把决定权交还给用户（"发不发随你"）
   而不是直接产出完整台词
 → 纠正方式：明确要求直接产出，不留选择给用户
@@ -122,29 +84,6 @@ OOC判断分为两个独立层次，必须分别评估：
 - 情绪靠句子破碎程度本身体现
 - 一次兴奋的反应，内容压缩进一两句话里
 
-【雫的OOC信号】（日野森雫，MMJ，仅已验证规则）
-⚠ 以下规则仅基于日常/轻松情境样本，严肃/冲突/深谈场景规律待补充，遇到相关场景需标注needs_human_review。
-
-内容层面：
-- 省略因果逻辑，跳步压缩（雫默认把"原因→态度→结论"走完整，不跳步）
-- 遇到意外/问题时用反应词中断而不展开（雫正确行为是完整讲清因果，在转折点自然打住）
-- 用省略号留白代替主动交代背景信息（雫习惯主动展开，不需要追问）
-
-结构层面：
-- 情绪激动时打乱句子结构或堆砌标点（雫正确行为是保持完整句式，情绪体现在选词）
-- 使用口语化/年轻化语尾（だね、の？）——雫应使用成熟语尾（わ、のよ、の）
-- 描述/解释类内容句子异常简短（简化只出现在简单鼓励/感谢场景）
-
-正常信号（不要误判为OOC）：
-- 简单鼓励/感谢时句子简短 → in-character（例外规则，非OOC）
-- 「ふふ、」等内敛笑声开场 → 雫的情绪外露方式，in-character
-- 不擅长机械操作但擅长手工刺绣同时提及 → 已知设定，in-character
-
-⛔ 不可生成内容（待验证，来自官方资料非语气样本）：
-- 涉及「Cheerful＊Days」退出经历或与旧队友心结的台词
-- 涉及MMJ内部人物关系深层讨论
-- 雫在严肃/冲突情境下的语气——无样本，不可假设
-
 【context dilution警告】
 对话超过7轮后，前期纠正效果容易失效
 此时需要重新完整注入纠正指令，不能只做局部修正
@@ -160,7 +99,7 @@ OOC判断分为两个独立层次，必须分别评估：
 
 【输出格式（只输出JSON，不要其他内容）】
 {
-  "character": "ena或mizuki",
+  "character": "角色id",
   "drift_score": 数字(0-10),
   "confidence": 数字(0-1),
   "drift_type": "无 / 内容OOC / 结构性漂移 / 媒介失真 / 助手化A / 助手化B",
@@ -171,11 +110,26 @@ OOC判断分为两个独立层次，必须分别评估：
 """.strip()
 
 
+def _build_router_system(character: str) -> tuple[str, str]:
+    """ROUTER_SYSTEM（通用判断框架）+ 角色专属 router_reference（评分层，动态读取，若角色尚未提供则跳过）
+
+    返回 (system_prompt, router_reference_status)。status 为 "loaded" 或 "generic_fallback"，
+    随判分结果一起写入 drift_scores.jsonl，用于事后区分退化判断产出的数据。
+    """
+    from pns.world.characters.registry import get_character_router_reference
+    router_reference = get_character_router_reference(character)
+    if router_reference is None:
+        print(f"[Router] ⚠️ 角色 {character} 暂无 router_reference 文件，本次仅用通用框架评分，无角色专属判据")
+        return ROUTER_SYSTEM, "generic_fallback"
+    return f"{ROUTER_SYSTEM}\n\n【角色专属评分参考：{character}】\n{router_reference}", "loaded"
+
+
 def judge(client, character: str, message: str, turn: int, scene: dict | None = None) -> dict:
     model = os.environ.get("MODEL", "mimo-v2.5-pro")
     from pns.world.characters.registry import get_character_metadata
     from pns.world.scenes import LORE_TIER_LABELS, LORE_TIER_INFERRED, LORE_TIER_UNVERIFIED, LORE_TIER_CANON
     char_name = get_character_metadata(character)['name']
+    router_system, router_reference_status = _build_router_system(character)
 
     lore_context = ""
     if scene is not None:
@@ -197,7 +151,7 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
     prompt = f"{lore_context}第{turn}轮，{char_name}说：「{message}」\n\n请判断是否OOC。"
 
     try:
-        raw = _call(client, model, ROUTER_SYSTEM, prompt)
+        raw = _call(client, model, router_system, prompt)
 
         if "```" in raw:
             raw = raw.split("```")[1]
@@ -214,6 +168,7 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
         result.setdefault("character", character)
         result["scene_id"] = scene.get("id", "") if scene else ""
         result["lore_tag"] = scene.get("lore_tag", "") if scene else ""
+        result["router_reference_status"] = router_reference_status
         return result
 
     except json.JSONDecodeError as e:
@@ -222,6 +177,7 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
             "character": character, "drift_score": 0, "confidence": 0.0,
             "drift_type": "解析失败", "reason": "解析失败", "is_ooc": False,
             "needs_human_review": True, "correction": None,
+            "router_reference_status": router_reference_status,
         }
     except Exception as e:
         print(f"[Router] ❌ 调用失败: {e}")
@@ -229,4 +185,5 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
             "character": character, "drift_score": 0, "confidence": 0.0,
             "drift_type": "error", "reason": str(e), "is_ooc": False,
             "needs_human_review": True, "correction": None,
+            "router_reference_status": router_reference_status,
         }

@@ -59,3 +59,4 @@ config.secret.py
 
 # ─── 开工/规划文档（给 CC 用，不进仓库）────────────────────
 /kickoff/
+/research/

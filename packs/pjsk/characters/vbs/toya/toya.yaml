@@ -10,3 +10,14 @@ class: "2-B"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: toya_prompt.md
+
+family:
+  - relation: 父亲
+    name: 青柳春道
+    note: "维也纳音乐学院毕业，职业钢琴家、在日本以古典作曲家闻名，会钢琴和小提琴并以此训练三个儿子（不能只写'钢琴老师'或'只拉小提琴'）。曾对冬弥进行极严格古典训练引发父子冲突，冬弥把街头音乐当反抗，后经多个活动逐步缓和"
+  - relation: 母亲
+    name: null
+    note: "姓名职业未公开，过去会让冬弥做拉伸以维持弹琴姿势"
+  - relation: 两位兄长
+    name: null
+    note: "姓名均未公开。一位已成为职业古典音乐人，另一位正在纽约的音乐学校就读，具体谁年长/各自主修乐器官方未明确分配"

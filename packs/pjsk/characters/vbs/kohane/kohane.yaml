@@ -4,9 +4,21 @@ name: 小豆泽心羽
 name_jp: 小豆泽心羽
 unit: vbs
 role: 成员
-school: 神山高校
+school: 宮益坂女子学院
+school_note: "VBS成员中唯一跨校归属宫益坂女子学院者（本人游戏自述台词'我是宫益坂女子学院一年级学生'），与队友杏、彰人、冬弥的神山高校不同校"
 grade: 2
 class: "2-A"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: kohane_prompt.md
+
+family:
+  - relation: 父亲
+    name: null
+    note: "姓名/工作单位未公开，极热爱摄影，使用大型相机拍城市风景、星空、妻女。为心羽取名，也为宠物白蛇取名'パール伯爵'。'职业摄影师'未完全锁定，更严谨说法是摄影者/摄影爱好者"
+  - relation: 母亲
+    name: null
+    note: "存在、姓名职业未公开，心羽会帮她做饭"
+  - relation: 兄弟姐妹
+    name: null
+    note: "没有被提及。父亲称心羽为'one and only daughter'可支持她是家中唯一女儿，但不能逻辑排除未提到的儿子，不作'绝对独生女'强结论"

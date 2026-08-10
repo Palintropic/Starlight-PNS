@@ -10,3 +10,14 @@ class: "2-A"
 status: not_ready
 sample_coverage: 0.0
 prompt_file: nene_prompt.md
+
+family:
+  - relation: 母亲
+    name: null
+    note: "姓名职业未公开，直接出场。宁宁家搬到神代家隔壁时，宁宁母亲与类母亲来往，促成两个孩子相识"
+  - relation: 父亲
+    name: null
+    note: "未找到可独立确认其存在或设定的明确台词，不列为硬结论"
+  - relation: 兄弟姐妹
+    name: null
+    note: "没有被游戏剧情明确提及。社区常列宁宁为独生女，但无'only child'台词，标为'未确认'"
