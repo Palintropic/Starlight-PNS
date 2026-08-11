@@ -113,8 +113,8 @@ Character and unit data live outside the core framework in a pack manifest, YAML
 **4. N-Character Rotation**
 A session selects two or more registered characters. The runner keeps a separate history for each character, shares each turn with the other selected characters, and rotates through the pool without hard-coding a particular pair.
 
-**5. Constitutional AI Alignment**
-A four-layer constitutional document defines hard constraints, soft defaults, character-specific persona constraints, and drift-detection rules with a 0–10 scoring rubric.
+**5. Three-Layer Character Methodology**
+Each character is defined across three separate files with strict content boundaries: a **fact layer** (`_prompt.md`, identity/relationships/psychological state, visible to the generation model), a **principle layer** (`_constitution.md`, CAI-style self-critique principles explaining *why* the character behaves as they do, also visible to the generation model), and a **scoring layer** (`_router_reference.md`, structural and content-specificity judging criteria with evidence-tier annotations, visible only to the Router). Neither the fact layer nor the principle layer contains surface-level language rules (e.g. punctuation frequency, sentence length); such rules exist only in the scoring layer. This separation exists to keep drift measurement comparable across characters — if language rules were hardcoded into some characters' prompts but not others', drift score differences would reflect prompt verbosity rather than the underlying research question.
 
 **6. Router-as-Judge**
 The Router monitors every turn against constitutional ground truth. It records persona drift and can generate a correction for the next turn when intervention is needed. It also serves as the system's controlled information gateway, with the researcher remaining the top-level trust layer.
@@ -139,11 +139,13 @@ Status legend: ✅ ready to run · 🟡 partial metadata, prompt not yet availab
 Illustrator and night-class high school student. Her current character sheet includes her reversed schedule, core personality, relationships, and tone research.
 
 **mizuki (暁山瑞希)** ✅
-Video animator and high school student. Their current character sheet includes their flexible daytime schedule, part-time work, late-night group activity, relationships, and tone research.
+Video animator and high school student. Their current character sheet includes their flexible daytime schedule, part-time work, late-night group activity, relationships, and tone research — likewise organized under the three-layer methodology described in Key Components #5 above.
 
 As one relationship detail inside this content pack, ena and mizuki often meet late at night on Nightcord and may occasionally cross paths around school; this is part of their character context, not a limit on which characters the framework can simulate.
 
-**kanade (宵崎奏)** 🟡 — Composer. Basic metadata exists; dialogue research and a runnable prompt are not yet complete.
+**kanade (宵崎奏)** ✅
+Composer. Her current character sheet includes her core psychological drive, her relationship history, and tone research — structured across the three-layer methodology (see Key Components #5 above).
+
 **mafuyu (朝比奈真冬)** 🟡 — Lyricist. Basic metadata exists; dialogue research and a runnable prompt are not yet complete.
 
 ### Vivid BAD SQUAD
@@ -192,6 +194,8 @@ Stage: Active development — Demo v6 complete
 - [x] Type A / Type B assistant-mode drift classification  
 - [x] Media authenticity judgment dimension  
 - [x] Character pack architecture (pluggable YAML, AOSP-oriented, N-character rotation)
+- [x] Three-layer character methodology (fact/principle/scoring separation)
+- [x] Router dynamic loading of per-character `_router_reference.md`
 - [ ] Character portraits
 - [ ] Haiku drift score output  
 - [ ] Deferred drift injection (turn 10 trigger)  
@@ -230,10 +234,15 @@ packs/
     ├── characters/
     │   └── <unit>/
     │       └── <character>/
-    │           ├── <character>.yaml         # metadata + samples
-    │           ├── <character>_prompt.md    # system prompt
-    │           └── <character>_prompt_compat.md  # optional, narrative-framed
-    │                                          #   variant for stricter-safety models
+    │           ├── <character>.yaml              # metadata + samples
+    │           ├── <character>_prompt.md         # fact layer — identity, relationships,
+    │           │                                  #   psychological state (visible to model)
+    │           ├── <character>_constitution.md   # principle layer — CAI-style self-critique
+    │           │                                  #   principles (visible to model)
+    │           ├── <character>_prompt_compat.md  # optional, narrative-framed variant for
+    │           │                                  #   stricter-safety models
+    │           └── <character>_router_reference.md  # scoring layer — Router-only,
+    │                                                  #   not visible to generation model
     └── assets/portraits/    # Character portraits (planned)
 
 dashboard/                  # React web dashboard (drift review UI)
