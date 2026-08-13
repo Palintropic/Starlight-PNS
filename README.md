@@ -262,6 +262,8 @@ scripts/
 └── oobe.py                   # Setup wizard
 ```
 
+The `_prompt_compat.md` file listed above is optional and exists for a specific reason: some generation models treat a direct, clinical system prompt as itself a signal to become more cautious, especially once the underlying character material touches on heavier subject matter — a minor growing up under a controlling household, identity and self-recognition struggles, a family member's health seriously and irreversibly harmed. The compat file wraps the same factual core in a narrative framing rather than a direct instruction set, so a model that would otherwise hedge or refuse can still produce in-character output without any change to the underlying facts. Whether a character needs this layer is judged by whether their core material falls into that pattern, not by convenience or by how much other material already exists for them. The current 25-ji cast — ena, mizuki, kanade, and mafuyu — has been configured this way; the remaining characters have not yet been evaluated against this criterion.
+
 ---
 
 ## Related Work
