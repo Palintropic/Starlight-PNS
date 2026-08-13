@@ -164,7 +164,10 @@ Registered in the pack with basic metadata; runnable prompts have not yet been c
 **minori (花里実乃理)** ✅
 Idol and MMJ member. Her current character sheet includes her pre-debut audition history, her service-oriented psychological drive toward audiences, and her team relationship dynamics with haruka/airi/shizuku — structured across the three-layer methodology (see Key Components #5 above).
 
-**haruka (桐谷遥)** ⚪ · **airi (桃井愛莉)** ⚪ · **shizuku (日野森雫)** ⚪
+**airi (桃井愛莉)** ✅
+Idol, MMJ member, and former member of idol group QT. Her current character sheet includes her ongoing recovery from her QT retirement, her experience-calibrated action-translation mechanism — turning ambiguous team problems into concrete next steps — and her team relationship dynamics with minori/haruka/shizuku — structured across the three-layer methodology (see Key Components #5 above).
+
+**haruka (桐谷遥)** ⚪ · **shizuku (日野森雫)** ⚪
 Registered in the pack with basic metadata; runnable prompts have not yet been created.
 
 ### Leo/need
