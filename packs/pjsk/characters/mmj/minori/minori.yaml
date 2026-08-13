@@ -7,9 +7,12 @@ role: 成员
 school: 宮益坂女子学院
 grade: 2
 class: "2-D"
-status: not_ready
-sample_coverage: 0.0
+status: ready
+sample_coverage: 1.0  # 三件套齐全时的占位值，评分口径未最终确定，后续可能重新定义
+
 prompt_file: minori_prompt.md
+constitution_file: minori_constitution.md
+router_reference_file: minori_router_reference.md
 
 family:
   - relation: 父母

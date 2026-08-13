@@ -160,7 +160,10 @@ Registered in the pack with basic metadata; runnable prompts have not yet been c
 
 ### MORE MORE JUMP!
 
-**minori (花里实乃理)** ⚪ · **haruka (桐谷遥)** ⚪ · **airi (桃井愛莉)** ⚪ · **shizuku (日野森雫)** ⚪
+**minori (花里実乃理)** ✅
+Idol and MMJ member. Her current character sheet includes her pre-debut audition history, her service-oriented psychological drive toward audiences, and her team relationship dynamics with haruka/airi/shizuku — structured across the three-layer methodology (see Key Components #5 above).
+
+**haruka (桐谷遥)** ⚪ · **airi (桃井愛莉)** ⚪ · **shizuku (日野森雫)** ⚪
 Registered in the pack with basic metadata; runnable prompts have not yet been created.
 
 ### Leo/need
