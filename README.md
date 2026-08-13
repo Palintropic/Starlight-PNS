@@ -252,8 +252,14 @@ packs/
 dashboard/                  # React web dashboard (drift review UI)
 static/                     # Legacy dark-themed panel (pending consolidation)
 preprint/                   # arXiv preprint drafts (EN/CN)
-server.py                    # N-character rotation, WebSocket session runner, persists drift_scores.jsonl
-oobe.py                      # Setup wizard
+docs/
+├── API.md                   # Server API reference
+└── TODO_TECH_DEBT.md        # Known gaps and deferred cleanup
+data/
+└── drift_scores.jsonl       # Router drift log, tagged with methodology_version (see docs/TODO_TECH_DEBT.md)
+scripts/
+├── server.py                 # N-character rotation, WebSocket session runner, persists data/drift_scores.jsonl
+└── oobe.py                   # Setup wizard
 ```
 
 ---

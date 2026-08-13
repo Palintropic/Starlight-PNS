@@ -23,7 +23,7 @@ router:
 
 # 输出配置
 output:
-  drift_scores_file: "drift_scores.jsonl"  # drift分数日志
+  drift_scores_file: "data/drift_scores.jsonl"  # drift分数日志（当前未被代码读取，见TODO_TECH_DEBT）
   session_logs_dir: "./sessions"           # session日志目录
   backup_enabled: true
   backup_interval: 10                      # 每N个session备份一次

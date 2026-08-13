@@ -237,8 +237,14 @@ packs/
 dashboard/                  # React 网页 Dashboard（漂移审核界面）
 static/                     # 旧版深色面板（待与 dashboard 整合）
 preprint/                   # arXiv 预印本草稿（中英文）
-server.py                    # N人角色轮转，WebSocket session runner，持久化 drift_scores.jsonl
-oobe.py                      # 初始化配置向导
+docs/
+├── API.md                   # Server API 文档
+└── TODO_TECH_DEBT.md        # 已知缺口与待处理技术债
+data/
+└── drift_scores.jsonl       # Router 漂移日志，带 methodology_version 标注（见 docs/TODO_TECH_DEBT.md）
+scripts/
+├── server.py                 # N人角色轮转，WebSocket session runner，持久化 data/drift_scores.jsonl
+└── oobe.py                   # 初始化配置向导
 ```
 
 ---

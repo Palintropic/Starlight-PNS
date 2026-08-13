@@ -1,6 +1,6 @@
 # PNS Dashboard API
 
-`server.py` 是 PNS 的唯一服务入口，提供本文档列出的所有 HTTP/WebSocket 接口。目前**没有任何鉴权机制**——服务假定运行在本地或受信任网络里，供单个使用者操作；如果之后要对外暴露，需要在这层之上补鉴权。
+`scripts/server.py` 是 PNS 的唯一服务入口，提供本文档列出的所有 HTTP/WebSocket 接口。目前**没有任何鉴权机制**——服务假定运行在本地或受信任网络里，供单个使用者操作；如果之后要对外暴露，需要在这层之上补鉴权。
 
 所有 JSON 请求/响应均为 `application/json`，字符编码 UTF-8。
 
@@ -56,9 +56,9 @@
 }
 ```
 
-> `turn` 消息里字段名是 `score`/`is_ooc`（兼容 `static/index.html` 的旧前端），而落盘到 `drift_scores.jsonl`（见第 4 节）的记录用的是 `drift_score`/`confidence`，字段名不一样但值同源——`score` 就是 `drift_score`，`is_ooc` 是 `drift_score >= OOC_THRESHOLD`（默认 5，环境变量 `OOC_THRESHOLD` 可覆盖）派生出来的。
+> `turn` 消息里字段名是 `score`/`is_ooc`（兼容 `static/index.html` 的旧前端），而落盘到 `data/drift_scores.jsonl`（见第 4 节）的记录用的是 `drift_score`/`confidence`，字段名不一样但值同源——`score` 就是 `drift_score`，`is_ooc` 是 `drift_score >= OOC_THRESHOLD`（默认 5，环境变量 `OOC_THRESHOLD` 可覆盖）派生出来的。
 
-`session_id` 格式固定为 `{YYYYMMDD_HHMMSS}_{scene_id}`，同一次运行里 markdown 归档（`history/<session_id>.md`）和 `drift_scores.jsonl` 里的记录共用这个 ID，方便互相对照。
+`session_id` 格式固定为 `{YYYYMMDD_HHMMSS}_{scene_id}`，同一次运行里 markdown 归档（`history/<session_id>.md`）和 `data/drift_scores.jsonl` 里的记录共用这个 ID，方便互相对照。
 
 ---
 
@@ -66,7 +66,7 @@
 
 ### `GET /api/review/turns`
 
-逐行读取 `drift_scores.jsonl` 并原样返回列表；文件不存在时返回 `[]`。
+逐行读取 `data/drift_scores.jsonl` 并原样返回列表；文件不存在时返回 `[]`。
 
 ```json
 [
@@ -230,7 +230,7 @@
 
 | 路径 | 写入时机 | 说明 |
 |---|---|---|
-| `drift_scores.jsonl` | `/ws/run` 每一轮判分后追加一行 | 历史审核模块（`/api/review/turns`）的数据源，字段见第 2 节 |
+| `data/drift_scores.jsonl` | `/ws/run` 每一轮判分后追加一行 | 历史审核模块（`/api/review/turns`）的数据源，字段见第 2 节。记录带 `methodology_version` 字段（`v1_prescriptive`/`v2_layered`/`unknown`），跨版本数据不应直接混合比较，详见 `docs/TODO_TECH_DEBT.md` |
 | `review_decisions.jsonl` | `POST /api/review/decision` 追加一行 | 人工审核决策记录 |
 | `history/<session_id>.md` | `/ws/run` 一次完整运行结束后写入 | 人类可读的对话归档，文件名就是 `session_id` |
 | `pns/world/scenes.py.bak` | `POST /api/world/scenes` 或 `/api/world/scenes/source` 写盘前 | 覆盖式单份备份（不是历史版本链，每次保存都会覆盖上一份） |

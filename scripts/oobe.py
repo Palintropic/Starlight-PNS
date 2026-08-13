@@ -1,8 +1,9 @@
-# oobe.py — 首次运行配置向导
+# scripts/oobe.py — 首次运行配置向导
 import os
 import sys
+from pathlib import Path
 
-ENV_FILE = ".env"
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 PROVIDERS = {
     "1": {
@@ -162,7 +163,7 @@ def main():
     print(f"     模型：  {model}")
     print(f"     格式：  {provider['format']}")
     print()
-    print("  现在可以运行：python run.py")
+    print("  现在可以运行：python scripts/server.py")
     print()
 
 

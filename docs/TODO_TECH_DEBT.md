@@ -1,5 +1,28 @@
 # 技术债务清单
 
+## data/drift_scores.jsonl 的 methodology_version 标注
+
+**背景**：v2 重构（三层分离方法论落地，`kickoff/Kanade/pns_v2_upgrade_spec.md` 任务6）前后，
+`router.py` 判分所依据的机制不同——重构前 `ROUTER_SYSTEM` 里混杂着按角色硬编码的判断规则，
+重构后（commit `3984c5d`，2026-08-10 22:26:55）改为运行时动态加载各角色的
+`{character}_router_reference.md`。两套机制测出的 drift_score 不是同一把尺子，不应直接
+混合比较。
+
+**判定方法**：以 `3984c5d`（router.py 动态加载重构落地）为分界点，交叉核对两个独立信号——
+记录的 `timestamp` 是否早于该提交时间，以及记录里是否存在 `router_reference_status` 字段
+（这个字段是重构的同一个提交里才加进 `scripts/server.py` 的 drift_record，重构前的代码根本
+不会写这个 key，不是"值为空"而是"key 不存在"）。两个信号一致时才判定版本，不一致则标
+`unknown`，不强行归类。
+
+**当前结果**：现存 10 条记录（全部来自 2026-08-09 21:07–21:08，`mizuki`/`ena` 各5条）时间戳
+和缺失 `router_reference_status` 字段两个信号完全吻合，均判定为 `v1_prescriptive`；无
+`v2_layered` 或 `unknown` 记录（重构后至今还没有新跑过会话）。每条记录已加上
+`"methodology_version": "v1_prescriptive"` 字段。后续新跑的会话产生的记录会自然带上
+`router_reference_status` 字段，但**不会自动带 `methodology_version` 字段**——`scripts/server.py`
+当前没有写入这个字段的逻辑，这次是对存量数据的一次性人工标注，不是新建了自动打标机制；
+如果需要新记录也自动标注，需要在 `run_simulation` 的 `drift_record` 里补一行赋值，这次范围
+内未做。
+
 ## compat（flash-lite）prompt 目前只覆盖 ena/mizuki 两人
 
 **位置**：`packs/pjsk/characters/*.yaml` 的 `prompt_file_compat` 字段

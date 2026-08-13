@@ -1,10 +1,17 @@
-# server.py — PNS Web 前端服务
+# scripts/server.py — PNS Web 前端服务
 import os
+import sys
 import json
 import asyncio
 import time
 from datetime import datetime
 from pathlib import Path
+
+# 本文件位于 scripts/ 下，repo 根目录（pns/ 包所在处）不会自动在 sys.path 上，
+# 需要显式加入，否则 `import pns.*` 在非 repo-root CWD 下会失败
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 try:
     from dotenv import load_dotenv
@@ -31,19 +38,19 @@ import pns.logic.router as router_mod
 from oobe import PROVIDERS, write_env
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(ROOT_DIR / "static")), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse("static/index.html")
+    return FileResponse(str(ROOT_DIR / "static" / "index.html"))
 
 
 # ─── Review Dashboard API ────────────────────────────────────────────
 # /api/review/turns 直接读取 /ws/run 实时写入的 drift_scores.jsonl，字段与
 # dashboard/src/types.ts 的 Turn 对齐（写入端见 run_simulation 里的 drift_record）。
 
-REVIEW_DECISIONS_FILE = Path("review_decisions.jsonl")
-DRIFT_SCORES_FILE = Path("drift_scores.jsonl")
+REVIEW_DECISIONS_FILE = ROOT_DIR / "review_decisions.jsonl"
+DRIFT_SCORES_FILE = ROOT_DIR / "data" / "drift_scores.jsonl"
 
 
 class ReviewDecision(BaseModel):
@@ -292,7 +299,7 @@ async def judge_async(client, character: str, message: str, turn: int, scene: di
 
 
 def save_history(session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
-    history_dir = Path("history")
+    history_dir = ROOT_DIR / "history"
     history_dir.mkdir(exist_ok=True)
 
     filename = history_dir / f"{session_id}.md"
@@ -523,4 +530,4 @@ async def run_simulation(ws: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 7860))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
