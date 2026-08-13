@@ -146,7 +146,8 @@ As one relationship detail inside this content pack, ena and mizuki often meet l
 **kanade (宵崎奏)** ✅
 Composer. Her current character sheet includes her core psychological drive, her relationship history, and tone research — structured across the three-layer methodology (see Key Components #5 above).
 
-**mafuyu (朝比奈真冬)** 🟡 — Lyricist. Basic metadata exists; dialogue research and a runnable prompt are not yet complete.
+**mafuyu (朝比奈真冬)** ✅
+Lyricist. Her current character sheet includes her family history under a controlling household, her ongoing relationship with kanade, and the process of reclaiming her own identity — structured across the three-layer methodology (see Key Components #5 above).
 
 ### Vivid BAD SQUAD
 
