@@ -118,6 +118,30 @@ def get_character_prompt_compat(character_id: str) -> Optional[str]:
     return prompt_path.read_text(encoding="utf-8").strip()
 
 
+def get_character_constitution(character_id: str) -> Optional[str]:
+    """获取角色宪法；未声明或文件不存在时返回 None。"""
+    pack = _load_pack()
+    if character_id not in pack["characters"]:
+        raise ValueError(f"Character not found in registry: {character_id}")
+
+    info = pack["characters"][character_id]
+    constitution_file = info.get("constitution_file")
+    if not constitution_file:
+        return None
+
+    constitution_path = (
+        pack["pack_dir"]
+        / "characters"
+        / info["unit"]
+        / character_id
+        / constitution_file
+    )
+    if not constitution_path.exists():
+        return None
+
+    return constitution_path.read_text(encoding="utf-8").strip()
+
+
 def get_character_router_reference(character_id: str) -> Optional[str]:
     """获取角色的 Router 评分参考文件（评分层，生成模型不可见），不存在则返回 None（正常情况，非错误）"""
     pack = _load_pack()
