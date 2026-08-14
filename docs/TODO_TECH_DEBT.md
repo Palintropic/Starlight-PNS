@@ -2,6 +2,10 @@
 
 ## data/drift_scores.jsonl 的 methodology_version 标注
 
+**状态更新（2026-08-13）**：新运行记录现在由服务端自动写入
+`"methodology_version": "v3_contextual_multidimensional"`，并附带七维评分、原始直接要求和
+本轮实际应用的纠正。下述内容仅用于解释v1/v2存量数据，不能与v3分数直接混合比较。
+
 **背景**：v2 重构（三层分离方法论落地，`kickoff/Kanade/pns_v2_upgrade_spec.md` 任务6）前后，
 `router.py` 判分所依据的机制不同——重构前 `ROUTER_SYSTEM` 里混杂着按角色硬编码的判断规则，
 重构后（commit `3984c5d`，2026-08-10 22:26:55）改为运行时动态加载各角色的
@@ -17,11 +21,9 @@
 **当前结果**：现存 10 条记录（全部来自 2026-08-09 21:07–21:08，`mizuki`/`ena` 各5条）时间戳
 和缺失 `router_reference_status` 字段两个信号完全吻合，均判定为 `v1_prescriptive`；无
 `v2_layered` 或 `unknown` 记录（重构后至今还没有新跑过会话）。每条记录已加上
-`"methodology_version": "v1_prescriptive"` 字段。后续新跑的会话产生的记录会自然带上
-`router_reference_status` 字段，但**不会自动带 `methodology_version` 字段**——`scripts/server.py`
-当前没有写入这个字段的逻辑，这次是对存量数据的一次性人工标注，不是新建了自动打标机制；
-如果需要新记录也自动标注，需要在 `run_simulation` 的 `drift_record` 里补一行赋值，这次范围
-内未做。
+`"methodology_version": "v1_prescriptive"` 字段。旧版当时不会自动写入该字段；这一缺口
+现已在v3调用链中补齐，后续新记录会同时带上 `router_reference_status` 与
+`methodology_version`。
 
 ## compat（flash-lite）prompt 目前只覆盖 ena/mizuki 两人
 

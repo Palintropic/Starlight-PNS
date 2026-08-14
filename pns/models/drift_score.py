@@ -1,5 +1,5 @@
 # pns/models/drift_score.py
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 @dataclass
@@ -16,6 +16,9 @@ class DriftScore:
     scene_id: str = ""
     lore_tag: str = ""
     hardware_backend: str = ""
+    dimensions: dict = field(default_factory=dict)
+    dimensions_complete: bool = False
+    methodology_version: str = ""
     timestamp: str = None
 
     def __post_init__(self):
@@ -36,6 +39,9 @@ class DriftScore:
             'scene_id': self.scene_id,
             'lore_tag': self.lore_tag,
             'hardware_backend': self.hardware_backend,
+            'dimensions': self.dimensions,
+            'dimensions_complete': self.dimensions_complete,
+            'methodology_version': self.methodology_version,
             'timestamp': self.timestamp,
         }
 
