@@ -14,6 +14,16 @@ const DECISION_LABEL: Record<DecisionValue, string> = {
   rewrite: '✎ 需要重写',
 };
 
+const DIMENSION_LABEL: Record<string, string> = {
+  character_facts: '角色事实',
+  psychological_mechanism: '心理机制',
+  language_structure: '语言结构',
+  media_authenticity: '媒介真实性',
+  task_compliance: '任务遵循',
+  unsupported_invention: '无依据补写',
+  timeline_boundary: '时间线边界',
+};
+
 function Avatar({ character, name }: { character: string; name: string }) {
   return <span className={`avatar ${character}`}>{name.charAt(0)}</span>;
 }
@@ -219,6 +229,17 @@ function ReviewDashboard() {
                 <div className="detail-label">原因</div>
                 <p>{selectedTurn.reason}</p>
               </div>
+              {selectedTurn.dimensions && (
+                <div className="dimension-list">
+                  <div className="detail-label">七维验收</div>
+                  {Object.entries(selectedTurn.dimensions).map(([key, value]) => (
+                    <div className="dimension-item" key={key} title={value.reason}>
+                      <span>{DIMENSION_LABEL[key] ?? key}</span>
+                      <strong className={scoreLevel(value.score)}>{value.score}/10</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
               {selectedTurn.correction && (
                 <div className="detail-block correction">
                   <div className="detail-label">⚡ 建议纠正</div>
