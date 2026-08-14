@@ -117,7 +117,7 @@ def get_config():
 
 
 class ConfigPayload(BaseModel):
-    provider_key: str  # "1"/"2"/"3"/"4"，对应 oobe.PROVIDERS 的 key
+    provider_key: str  # 对应 oobe.PROVIDERS 的动态 key
     model: str
     api_key: str
 
@@ -288,14 +288,35 @@ async def call_character_async(client, character: str, history: list, scene: dic
                 model=model, max_tokens=max_tokens, temperature=temperature,
                 system=system, messages=history,
             )
-            return _strip_prefix(response.content[0].text.strip(), char_name)
+            return _strip_prefix(router_mod.extract_anthropic_text(response), char_name)
 
     return await loop.run_in_executor(None, _call)
 
 
-async def judge_async(client, character: str, message: str, turn: int, scene: dict | None = None) -> dict:
+async def judge_async(
+    client,
+    character: str,
+    message: str,
+    turn: int,
+    scene: dict | None = None,
+    original_request: str | None = None,
+    recent_history: list | None = None,
+    correction_applied: str | None = None,
+) -> dict:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, router_mod.judge, client, character, message, turn, scene)
+    return await loop.run_in_executor(
+        None,
+        lambda: router_mod.judge(
+            client,
+            character,
+            message,
+            turn,
+            scene,
+            original_request=original_request,
+            recent_history=recent_history,
+            correction_applied=correction_applied,
+        ),
+    )
 
 
 def save_history(session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
@@ -425,7 +446,7 @@ async def run_simulation(ws: WebSocket):
     }
     stats = {"ooc_count": 0, "scores": [], "corrections": 0}
     current_idx = 0
-    correction_next = None
+    pending_corrections = {cid: None for cid in character_ids}
     turn_log = []
 
     for turn in range(1, max_turns + 1):
@@ -437,8 +458,19 @@ async def run_simulation(ws: WebSocket):
 
         await ws.send_json({"type": "generating", "turn": turn, "character": char_key, "char_name": char_name})
 
+        generation_history = list(histories[current])
+        original_request = next(
+            (
+                item.get("content", "")
+                for item in reversed(generation_history)
+                if item.get("role") == "user"
+            ),
+            scene.get("trigger", ""),
+        )
+        correction_applied = pending_corrections[current]
+
         try:
-            reply = await call_character_async(client, current, histories[current], scene, model, max_tokens, temperature, correction_next)
+            reply = await call_character_async(client, current, generation_history, scene, model, max_tokens, temperature, correction_applied)
         except character_registry.CharacterNotReadyError as e:
             await ws.send_json({"type": "error", "turn": turn, "character": current, "message": f"角色 '{current}' 尚未准备好：{e.detail}"})
             break
@@ -452,18 +484,27 @@ async def run_simulation(ws: WebSocket):
 
         await ws.send_json({"type": "judging", "turn": turn, "character": char_key, "char_name": char_name})
 
-        result = await judge_async(client, current, reply, turn, scene)
+        result = await judge_async(
+            client,
+            current,
+            reply,
+            turn,
+            scene,
+            original_request=original_request,
+            recent_history=generation_history,
+            correction_applied=correction_applied,
+        )
         score   = result.get("drift_score", 0)
         is_ooc  = result.get("is_ooc", False)
 
         stats["scores"].append(score)
         if is_ooc:
             stats["ooc_count"] += 1
-            correction_next = result.get("correction")
-            if correction_next:
+            pending_corrections[current] = result.get("correction")
+            if pending_corrections[current]:
                 stats["corrections"] += 1
         else:
-            correction_next = None
+            pending_corrections[current] = None
 
         turn_data = {
             "turn": turn,
@@ -476,6 +517,9 @@ async def run_simulation(ws: WebSocket):
             "reason": result.get("reason", ""),
             "correction": result.get("correction"),
             "needs_human_review": result.get("needs_human_review", False),
+            "dimensions": result.get("dimensions", {}),
+            "dimensions_complete": result.get("dimensions_complete", False),
+            "methodology_version": result.get("methodology_version", ""),
         }
         turn_log.append(turn_data)
         await ws.send_json({"type": "turn", **turn_data})
@@ -495,6 +539,11 @@ async def run_simulation(ws: WebSocket):
             "scene_id": result.get("scene_id", ""),
             "lore_tag": result.get("lore_tag", ""),
             "router_reference_status": result.get("router_reference_status", ""),
+            "dimensions": result.get("dimensions", {}),
+            "dimensions_complete": result.get("dimensions_complete", False),
+            "methodology_version": result.get("methodology_version", ""),
+            "original_request": original_request,
+            "correction_applied": correction_applied,
             "timestamp": datetime.now().isoformat(),
         }
         with DRIFT_SCORES_FILE.open("a", encoding="utf-8") as f:

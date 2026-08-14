@@ -7,27 +7,48 @@ ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 PROVIDERS = {
     "1": {
-        "name": "mimo (小秘喵代理)",
+        "name": "Xiaomi MiMo API（按量付费）",
+        "format": "anthropic",
+        "base_url": "https://api.xiaomimimo.com/anthropic",
+        "key_name": "MIMO_API_KEY",
+        "models": ["mimo-v2.5-pro", "mimo-v2.5"],
+    },
+    "2": {
+        "name": "Xiaomi MiMo Token Plan（中国区）",
         "format": "anthropic",
         "base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
         "key_name": "MIMO_API_KEY",
-        "models": ["mimo-v2.5-pro", "mimo-v2.5-pro-ultraspeed", "mimo-v2-omni"],
+        "models": ["mimo-v2.5-pro", "mimo-v2.5"],
     },
-    "2": {
+    "3": {
+        "name": "Xiaomi MiMo Token Plan（新加坡区）",
+        "format": "anthropic",
+        "base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic",
+        "key_name": "MIMO_API_KEY",
+        "models": ["mimo-v2.5-pro", "mimo-v2.5"],
+    },
+    "4": {
+        "name": "Xiaomi MiMo Token Plan（欧洲区）",
+        "format": "anthropic",
+        "base_url": "https://token-plan-ams.xiaomimimo.com/anthropic",
+        "key_name": "MIMO_API_KEY",
+        "models": ["mimo-v2.5-pro", "mimo-v2.5"],
+    },
+    "5": {
         "name": "Anthropic 直连",
         "format": "anthropic",
         "base_url": "https://api.anthropic.com",
         "key_name": "ANTHROPIC_API_KEY",
         "models": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
     },
-    "3": {
+    "6": {
         "name": "DeepSeek",
         "format": "openai",
         "base_url": "https://api.deepseek.com",
         "key_name": "DEEPSEEK_API_KEY",
         "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
     },
-    "4": {
+    "7": {
         "name": "Gemini",
         "format": "openai",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -53,10 +74,10 @@ def choose_provider() -> dict:
     print()
 
     while True:
-        choice = input("  输入编号 [1-4]：").strip()
+        choice = input(f"  输入编号 [1-{len(PROVIDERS)}]：").strip()
         if choice in PROVIDERS:
             return PROVIDERS[choice]
-        print("  请输入 1 到 4 之间的数字")
+        print(f"  请输入 1 到 {len(PROVIDERS)} 之间的数字")
 
 
 def choose_model(provider: dict) -> str:
