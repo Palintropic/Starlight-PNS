@@ -117,7 +117,9 @@ A session selects two or more registered characters. The runner keeps a separate
 Each character is defined across three separate files with strict content boundaries: a **fact layer** (`_prompt.md`, identity/relationships/psychological state, visible to the generation model), a **principle layer** (`_constitution.md`, CAI-style self-critique principles explaining *why* the character behaves as they do, also visible to the generation model), and a **scoring layer** (`_router_reference.md`, structural and content-specificity judging criteria with evidence-tier annotations, visible only to the Router). Neither the fact layer nor the principle layer contains surface-level language rules (e.g. punctuation frequency, sentence length); such rules exist only in the scoring layer. This separation exists to keep drift measurement comparable across characters — if language rules were hardcoded into some characters' prompts but not others', drift score differences would reflect prompt verbosity rather than the underlying research question.
 
 **6. Router-as-Judge**
-The Router monitors every turn against constitutional ground truth. It records persona drift and can generate a correction for the next turn when intervention is needed. It also serves as the system's controlled information gateway, with the researcher remaining the top-level trust layer.
+The Router evaluates each turn with the original request, recent conversation history, any applied correction, and the character-specific scoring reference. It scores seven dimensions separately: character facts, psychological mechanism, language structure, media authenticity, task compliance, unsupported invention, and timeline boundary. The overall drift score cannot be lower than the highest dimension score. Corrections are queued per character and injected only when that same character acts again, preventing cross-character correction leakage during rotation.
+
+This `v3_contextual_multidimensional` Router is the first infrastructure step toward fine-grained acceptance, **not yet a validated autonomous acceptance authority**. Boundary cases still require human review until a human-labeled benchmark establishes false-negative, false-positive, and repeatability performance. Scores from different methodology versions must not be pooled directly.
 
 ### How Architecture and Content Relate
 
@@ -203,16 +205,27 @@ Stage: Active development — Demo v6 complete
 - [x] Character pack architecture (pluggable YAML, AOSP-oriented, N-character rotation)
 - [x] Three-layer character methodology (fact/principle/scoring separation)
 - [x] Router dynamic loading of per-character `_router_reference.md`
+- [x] Router context injection (original request, recent history, correction state)
+- [x] Seven-dimension evaluation and per-character correction queues
 - [ ] Character portraits
 - [ ] Haiku drift score output  
 - [ ] Deferred drift injection (turn 10 trigger)  
 - [ ] Baseline comparison with visualization  
 - [ ] SESSION_EVAL_SYSTEM (cross-session stability)  
 - [ ] Evaluation pipeline  
+- [ ] Human-labeled Router benchmark and fine-grained acceptance validation
 
 ---
 
 > ⚠️ **Internal testing phase.** Not yet open for public use.
+
+### MiMo API setup
+
+Run `python3 scripts/oobe.py` to choose either the official pay-as-you-go API or a Token Plan endpoint
+for the China, Singapore, or Europe cluster. Pay-as-you-go keys normally start with `sk-`; Token Plan
+keys start with `tp-`, and the two credential types are not interchangeable. Token Plan users must
+select the cluster shown in their console. The default text-model list contains the generally available
+`mimo-v2.5-pro` and `mimo-v2.5`; permission-gated UltraSpeed variants remain available through manual input.
 
 ---
 
