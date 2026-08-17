@@ -265,8 +265,7 @@ packs/
     │                                                  #   not visible to generation model
     └── assets/portraits/    # Character portraits (planned)
 
-dashboard/                  # React web dashboard (drift review UI)
-static/                     # Legacy dark-themed panel (pending consolidation)
+dashboard/                  # React web dashboard — the single frontend (simulate / review / world editor tabs)
 preprint/                   # arXiv preprint drafts (EN/CN)
 docs/
 ├── API.md                   # Server API reference

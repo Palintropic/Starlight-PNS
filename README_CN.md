@@ -246,8 +246,7 @@ packs/
     │                                              #   生成模型不可见
     └── assets/portraits/    # 角色头像（规划中）
 
-dashboard/                  # React 网页 Dashboard（漂移审核界面）
-static/                     # 旧版深色面板（待与 dashboard 整合）
+dashboard/                  # React 网页 Dashboard —— 唯一前端（模拟 / 审核 / World Editor 三个 tab）
 preprint/                   # arXiv 预印本草稿（中英文）
 docs/
 ├── API.md                   # Server API 文档
