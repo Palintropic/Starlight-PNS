@@ -1,2 +1,4 @@
 # pns/interfaces/__init__.py
-# 占位 — cli.py 和 scripts/server.py 待迁移
+from .app import create_app
+
+__all__ = ['create_app']

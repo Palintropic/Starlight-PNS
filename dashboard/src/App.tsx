@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import ReviewDashboard from './ReviewDashboard';
 import WorldEditor from './world/WorldEditor';
 import SetupWizard from './SetupWizard';
+import Simulate from './Simulate';
 import { fetchConfig, type ConfigStatus } from './api';
 import './App.css';
 
-type Tab = 'review' | 'world';
+type Tab = 'simulate' | 'review' | 'world';
 
 function App() {
-  const [tab, setTab] = useState<Tab>('review');
+  const [tab, setTab] = useState<Tab>('simulate');
   const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
 
@@ -43,6 +44,9 @@ function App() {
   return (
     <div className="shell">
       <nav className="tabbar">
+        <button className={`tab-btn ${tab === 'simulate' ? 'active' : ''}`} onClick={() => setTab('simulate')}>
+          模拟
+        </button>
         <button className={`tab-btn ${tab === 'review' ? 'active' : ''}`} onClick={() => setTab('review')}>
           审核
         </button>
@@ -51,7 +55,7 @@ function App() {
         </button>
       </nav>
       <div className="shell-body">
-        {tab === 'review' ? <ReviewDashboard /> : <WorldEditor />}
+        {tab === 'simulate' ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : <WorldEditor />}
       </div>
     </div>
   );

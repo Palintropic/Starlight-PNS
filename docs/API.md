@@ -142,7 +142,7 @@
 
 ### 3.1 场景 `GET/POST /api/world/scenes`
 
-**`GET`** 返回完整 `SCENES` dict（区别于已有的 `GET /api/scenes`——那个是给实时对话模块的场景下拉框用的精简版，只有 `id`/`label`/`trigger` 三个字段，未改动）。
+**`GET`** 返回完整 `SCENES` dict。实时对话模块（module①）的场景下拉框也复用这一个接口——两边合并进同一个 dashboard 前端后，不再需要单独维护一份精简版。
 
 ```json
 {
@@ -229,19 +229,26 @@
 
 ## 4. 其余已有接口
 
-### `GET /api/scenes`
-
-给实时对话模块（module①）场景下拉框用的精简版，只有 `id`/`label`/`trigger`：
-
-```json
-{ "gate": { "id": "gate", "label": "神山高校校门口", "trigger": "瑞希放学往外走..." } }
-```
-
 ### `GET /api/config`
 
 ```json
 { "has_key": true, "model": "gemini-3.1-flash-lite", "api_format": "openai", "default_scene": "gate" }
 ```
+
+### `GET /api/config/providers`
+
+返回 `oobe.PROVIDERS` 里每个 provider 的展示名和可选模型列表，供 Setup Wizard 的下拉框使用：
+
+```json
+{
+  "anthropic": { "name": "Anthropic", "models": ["claude-sonnet-5", "claude-opus-5"] },
+  "openai": { "name": "OpenAI", "models": ["gpt-5"] }
+}
+```
+
+### `POST /api/config`
+
+写入 `.env`（`provider_key`/`model`/`api_key`），成功返回 `{"configured": true}`；`provider_key` 不在 `PROVIDERS` 里或字段为空时返回 400。
 
 ---
 
