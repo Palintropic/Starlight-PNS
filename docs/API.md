@@ -1,6 +1,6 @@
 # PNS Dashboard API
 
-`server.py` 是 PNS 的唯一服务入口，提供本文档列出的所有 HTTP/WebSocket 接口。目前**没有任何鉴权机制**——服务假定运行在本地或受信任网络里，供单个使用者操作；如果之后要对外暴露，需要在这层之上补鉴权。
+`scripts/server.py` 是 PNS 的唯一服务入口，提供本文档列出的所有 HTTP/WebSocket 接口。目前**没有任何鉴权机制**——服务假定运行在本地或受信任网络里，供单个使用者操作；如果之后要对外暴露，需要在这层之上补鉴权。
 
 所有 JSON 请求/响应均为 `application/json`，字符编码 UTF-8。
 
@@ -34,7 +34,7 @@
 | `start` | 收到参数、确认场景后 | `session_id`、`scene`（`id`/`label`/`trigger`/`time`/`location`）、`max_turns`、`model` |
 | `generating` | 角色开始生成这一轮台词前 | `turn`、`character`（`mizuki`/`ena`）、`char_name` |
 | `judging` | 台词生成完毕，Router 开始判分前 | `turn`、`character`、`char_name` |
-| `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review` |
+| `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version` |
 | `error` | 角色调用失败／没有 API Key | `turn`（可能没有）、`message` |
 | `done` | 全部轮次结束 | `session_id`、`stats`（`total_turns`/`ooc_count`/`corrections`/`avg_score`/`max_score`）、`history_file` |
 
@@ -51,14 +51,25 @@
   "is_ooc": false,
   "drift_type": "无",
   "reason": "省略号收尾+简短回应，与瑞希互动时的克制符合设定。",
+  "dimensions": {
+    "character_facts": {"score": 0, "reason": "未出现事实冲突。"},
+    "psychological_mechanism": {"score": 1, "reason": "符合关系语境。"},
+    "language_structure": {"score": 1, "reason": "长度与停顿自然。"},
+    "media_authenticity": {"score": 1, "reason": "像即时对话。"},
+    "task_compliance": {"score": 0, "reason": "遵守只输出台词的要求。"},
+    "unsupported_invention": {"score": 0, "reason": "没有补写具体事实。"},
+    "timeline_boundary": {"score": 0, "reason": "未越过时间线。"}
+  },
+  "dimensions_complete": true,
+  "methodology_version": "v3_contextual_multidimensional",
   "correction": null,
   "needs_human_review": false
 }
 ```
 
-> `turn` 消息里字段名是 `score`/`is_ooc`（兼容 `static/index.html` 的旧前端），而落盘到 `drift_scores.jsonl`（见第 4 节）的记录用的是 `drift_score`/`confidence`，字段名不一样但值同源——`score` 就是 `drift_score`，`is_ooc` 是 `drift_score >= OOC_THRESHOLD`（默认 5，环境变量 `OOC_THRESHOLD` 可覆盖）派生出来的。
+> `turn` 消息里字段名是 `score`/`is_ooc`（兼容旧前端），而落盘记录使用 `drift_score`/`confidence`。`drift_score` 会被服务端规范为“模型给出的总分”和“七维最高分”中的较高者；任一维度达到 `OOC_THRESHOLD`（默认5）都会使该轮成为OOC。若七维返回不完整，`dimensions_complete=false`，服务端会强制 `needs_human_review=true`。
 
-`session_id` 格式固定为 `{YYYYMMDD_HHMMSS}_{scene_id}`，同一次运行里 markdown 归档（`history/<session_id>.md`）和 `drift_scores.jsonl` 里的记录共用这个 ID，方便互相对照。
+`session_id` 格式固定为 `{YYYYMMDD_HHMMSS}_{scene_id}`，同一次运行里 markdown 归档（`history/<session_id>.md`）和 `data/drift_scores.jsonl` 里的记录共用这个 ID，方便互相对照。
 
 ---
 
@@ -66,7 +77,7 @@
 
 ### `GET /api/review/turns`
 
-逐行读取 `drift_scores.jsonl` 并原样返回列表；文件不存在时返回 `[]`。
+逐行读取 `data/drift_scores.jsonl` 并原样返回列表；文件不存在时返回 `[]`。
 
 ```json
 [
@@ -82,6 +93,14 @@
     "reason": "语气活泼、话题跳跃，符合瑞希日常状态。",
     "needs_human_review": false,
     "correction": null,
+    "dimensions": {
+      "character_facts": {"score": 0, "reason": "未出现事实冲突。"},
+      "psychological_mechanism": {"score": 1, "reason": "符合角色机制。"}
+    },
+    "dimensions_complete": true,
+    "methodology_version": "v3_contextual_multidimensional",
+    "original_request": "绘名：要不要晚点碰面？",
+    "correction_applied": null,
     "timestamp": "2026-08-02T17:00:12.345678"
   }
 ]
@@ -123,7 +142,7 @@
 
 ### 3.1 场景 `GET/POST /api/world/scenes`
 
-**`GET`** 返回完整 `SCENES` dict（区别于已有的 `GET /api/scenes`——那个是给实时对话模块的场景下拉框用的精简版，只有 `id`/`label`/`trigger` 三个字段，未改动）。
+**`GET`** 返回完整 `SCENES` dict。实时对话模块（module①）的场景下拉框也复用这一个接口——两边合并进同一个 dashboard 前端后，不再需要单独维护一份精简版。
 
 ```json
 {
@@ -210,19 +229,26 @@
 
 ## 4. 其余已有接口
 
-### `GET /api/scenes`
-
-给实时对话模块（module①）场景下拉框用的精简版，只有 `id`/`label`/`trigger`：
-
-```json
-{ "gate": { "id": "gate", "label": "神山高校校门口", "trigger": "瑞希放学往外走..." } }
-```
-
 ### `GET /api/config`
 
 ```json
 { "has_key": true, "model": "gemini-3.1-flash-lite", "api_format": "openai", "default_scene": "gate" }
 ```
+
+### `GET /api/config/providers`
+
+返回 `oobe.PROVIDERS` 里每个 provider 的展示名和可选模型列表，供 Setup Wizard 的下拉框使用：
+
+```json
+{
+  "anthropic": { "name": "Anthropic", "models": ["claude-sonnet-5", "claude-opus-5"] },
+  "openai": { "name": "OpenAI", "models": ["gpt-5"] }
+}
+```
+
+### `POST /api/config`
+
+写入 `.env`（`provider_key`/`model`/`api_key`），成功返回 `{"configured": true}`；`provider_key` 不在 `PROVIDERS` 里或字段为空时返回 400。
 
 ---
 
@@ -230,7 +256,7 @@
 
 | 路径 | 写入时机 | 说明 |
 |---|---|---|
-| `drift_scores.jsonl` | `/ws/run` 每一轮判分后追加一行 | 历史审核模块（`/api/review/turns`）的数据源，字段见第 2 节 |
+| `data/drift_scores.jsonl` | `/ws/run` 每一轮判分后追加一行 | 历史审核模块的数据源。新记录自动标记 `v3_contextual_multidimensional`，并保存七维评分、原始直接要求和实际应用的纠正；历史记录可能是 `v1_prescriptive`、`v2_layered` 或 `unknown`，跨版本不得直接混合比较。 |
 | `review_decisions.jsonl` | `POST /api/review/decision` 追加一行 | 人工审核决策记录 |
 | `history/<session_id>.md` | `/ws/run` 一次完整运行结束后写入 | 人类可读的对话归档，文件名就是 `session_id` |
 | `pns/world/scenes.py.bak` | `POST /api/world/scenes` 或 `/api/world/scenes/source` 写盘前 | 覆盖式单份备份（不是历史版本链，每次保存都会覆盖上一份） |

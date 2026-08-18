@@ -12,6 +12,9 @@ export interface Turn {
   reason: string;
   needs_human_review: boolean;
   correction: string | null;
+  dimensions?: Record<string, { score: number; reason: string }>;
+  dimensions_complete?: boolean;
+  methodology_version?: string;
   timestamp: string;
 }
 

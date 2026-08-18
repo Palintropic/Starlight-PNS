@@ -441,6 +441,24 @@
 .detail-block.correction .detail-label {
   color: var(--caution);
 }
+.dimension-list {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+.dimension-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  font-size: 12px;
+}
+.dimension-item strong {
+  font-family: var(--mono);
+}
+.dimension-item strong.ok { color: var(--stable); }
+.dimension-item strong.warn { color: var(--caution); }
+.dimension-item strong.ooc { color: var(--warn); }
 
 /* ── ③ 人工决策 ── */
 .decision-panel {

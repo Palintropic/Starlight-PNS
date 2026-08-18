@@ -117,7 +117,9 @@ A session selects two or more registered characters. The runner keeps a separate
 Each character is defined across three separate files with strict content boundaries: a **fact layer** (`_prompt.md`, identity/relationships/psychological state, visible to the generation model), a **principle layer** (`_constitution.md`, CAI-style self-critique principles explaining *why* the character behaves as they do, also visible to the generation model), and a **scoring layer** (`_router_reference.md`, structural and content-specificity judging criteria with evidence-tier annotations, visible only to the Router). Neither the fact layer nor the principle layer contains surface-level language rules (e.g. punctuation frequency, sentence length); such rules exist only in the scoring layer. This separation exists to keep drift measurement comparable across characters — if language rules were hardcoded into some characters' prompts but not others', drift score differences would reflect prompt verbosity rather than the underlying research question.
 
 **6. Router-as-Judge**
-The Router monitors every turn against constitutional ground truth. It records persona drift and can generate a correction for the next turn when intervention is needed. It also serves as the system's controlled information gateway, with the researcher remaining the top-level trust layer.
+The Router evaluates each turn with the original request, recent conversation history, any applied correction, and the character-specific scoring reference. It scores seven dimensions separately: character facts, psychological mechanism, language structure, media authenticity, task compliance, unsupported invention, and timeline boundary. The overall drift score cannot be lower than the highest dimension score. Corrections are queued per character and injected only when that same character acts again, preventing cross-character correction leakage during rotation.
+
+This `v3_contextual_multidimensional` Router is the first infrastructure step toward fine-grained acceptance, **not yet a validated autonomous acceptance authority**. Boundary cases still require human review until a human-labeled benchmark establishes false-negative, false-positive, and repeatability performance. Scores from different methodology versions must not be pooled directly.
 
 ### How Architecture and Content Relate
 
@@ -146,7 +148,8 @@ As one relationship detail inside this content pack, ena and mizuki often meet l
 **kanade (宵崎奏)** ✅
 Composer. Her current character sheet includes her core psychological drive, her relationship history, and tone research — structured across the three-layer methodology (see Key Components #5 above).
 
-**mafuyu (朝比奈真冬)** 🟡 — Lyricist. Basic metadata exists; dialogue research and a runnable prompt are not yet complete.
+**mafuyu (朝比奈真冬)** ✅
+Lyricist. Her current character sheet includes her family history under a controlling household, her ongoing relationship with kanade, and the process of reclaiming her own identity — structured across the three-layer methodology (see Key Components #5 above).
 
 ### Vivid BAD SQUAD
 
@@ -160,7 +163,13 @@ Registered in the pack with basic metadata; runnable prompts have not yet been c
 
 ### MORE MORE JUMP!
 
-**minori (花里实乃理)** ⚪ · **haruka (桐谷遥)** ⚪ · **airi (桃井愛莉)** ⚪ · **shizuku (日野森雫)** ⚪
+**minori (花里実乃理)** ✅
+Idol and MMJ member. Her current character sheet includes her pre-debut audition history, her service-oriented psychological drive toward audiences, and her team relationship dynamics with haruka/airi/shizuku — structured across the three-layer methodology (see Key Components #5 above).
+
+**airi (桃井愛莉)** ✅
+Idol, MMJ member, and former member of idol group QT. Her current character sheet includes her ongoing recovery from her QT retirement, her experience-calibrated action-translation mechanism — turning ambiguous team problems into concrete next steps — and her team relationship dynamics with minori/haruka/shizuku — structured across the three-layer methodology (see Key Components #5 above).
+
+**haruka (桐谷遥)** ⚪ · **shizuku (日野森雫)** ⚪
 Registered in the pack with basic metadata; runnable prompts have not yet been created.
 
 ### Leo/need
@@ -196,16 +205,27 @@ Stage: Active development — Demo v6 complete
 - [x] Character pack architecture (pluggable YAML, AOSP-oriented, N-character rotation)
 - [x] Three-layer character methodology (fact/principle/scoring separation)
 - [x] Router dynamic loading of per-character `_router_reference.md`
+- [x] Router context injection (original request, recent history, correction state)
+- [x] Seven-dimension evaluation and per-character correction queues
 - [ ] Character portraits
 - [ ] Haiku drift score output  
 - [ ] Deferred drift injection (turn 10 trigger)  
 - [ ] Baseline comparison with visualization  
 - [ ] SESSION_EVAL_SYSTEM (cross-session stability)  
 - [ ] Evaluation pipeline  
+- [ ] Human-labeled Router benchmark and fine-grained acceptance validation
 
 ---
 
 > ⚠️ **Internal testing phase.** Not yet open for public use.
+
+### MiMo API setup
+
+Run `python3 scripts/oobe.py` to choose either the official pay-as-you-go API or a Token Plan endpoint
+for the China, Singapore, or Europe cluster. Pay-as-you-go keys normally start with `sk-`; Token Plan
+keys start with `tp-`, and the two credential types are not interchangeable. Token Plan users must
+select the cluster shown in their console. The default text-model list contains the generally available
+`mimo-v2.5-pro` and `mimo-v2.5`; permission-gated UltraSpeed variants remain available through manual input.
 
 ---
 
@@ -245,12 +265,19 @@ packs/
     │                                                  #   not visible to generation model
     └── assets/portraits/    # Character portraits (planned)
 
-dashboard/                  # React web dashboard (drift review UI)
-static/                     # Legacy dark-themed panel (pending consolidation)
+dashboard/                  # React web dashboard — the single frontend (simulate / review / world editor tabs)
 preprint/                   # arXiv preprint drafts (EN/CN)
-server.py                    # N-character rotation, WebSocket session runner, persists drift_scores.jsonl
-oobe.py                      # Setup wizard
+docs/
+├── API.md                   # Server API reference
+└── TODO_TECH_DEBT.md        # Known gaps and deferred cleanup
+data/
+└── drift_scores.jsonl       # Router drift log, tagged with methodology_version (see docs/TODO_TECH_DEBT.md)
+scripts/
+├── server.py                 # N-character rotation, WebSocket session runner, persists data/drift_scores.jsonl
+└── oobe.py                   # Setup wizard
 ```
+
+The `_prompt_compat.md` file listed above is optional and exists for a specific reason: some generation models treat a direct, clinical system prompt as itself a signal to become more cautious, especially once the underlying character material touches on heavier subject matter — a minor growing up under a controlling household, identity and self-recognition struggles, a family member's health seriously and irreversibly harmed. The compat file wraps the same factual core in a narrative framing rather than a direct instruction set, so a model that would otherwise hedge or refuse can still produce in-character output without any change to the underlying facts. Whether a character needs this layer is judged by whether their core material falls into that pattern, not by convenience or by how much other material already exists for them. The current 25-ji cast — ena, mizuki, kanade, and mafuyu — has been configured this way; the remaining characters have not yet been evaluated against this criterion.
 
 ---
 

@@ -1,0 +1,307 @@
+/* ── Simulate tab (实时对话模拟，from the old static/index.html panel) ── */
+.simulate-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.sim-topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 20px;
+  gap: 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.status-dot.running {
+  background: var(--stable);
+  box-shadow: 0 0 6px var(--stable);
+  animation: sim-pulse 1.2s infinite;
+}
+.status-dot.error {
+  background: var(--warn);
+}
+@keyframes sim-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.sim-status-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.sim-spacer {
+  flex: 1;
+}
+.model-badge {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  padding: 3px 8px;
+  background: var(--surface2);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.sim-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+}
+
+/* ── Sidebar ── */
+.sim-sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+.sim-section-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.sim-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sim-control-group label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.sim-sidebar select,
+.sim-sidebar input[type='range'] {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 6px 10px;
+  outline: none;
+}
+.sim-sidebar select:focus {
+  border-color: var(--accent);
+}
+.sim-sidebar input[type='range'] {
+  padding: 4px 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.sim-range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sim-range-row input {
+  flex: 1;
+}
+.sim-range-val {
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+  min-width: 28px;
+  text-align: right;
+}
+
+.simulate-app .btn-start { background: var(--accent); color: var(--bg); width: 100%; margin-bottom: 8px; }
+.simulate-app .btn-stop { background: var(--surface2); color: var(--warn); border-color: var(--warn); width: 100%; margin-bottom: 8px; }
+.simulate-app .btn-clear { background: transparent; color: var(--text-muted); border-color: var(--border); width: 100%; }
+
+.sim-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.sim-stat-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.sim-stat-card .stat-value {
+  font-size: 20px;
+}
+.sim-stat-lbl {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* ── Script area ── */
+.sim-main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sim-script-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+
+.sim-scene-header {
+  text-align: center;
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.sim-scene-label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.sim-scene-trigger {
+  font-size: 14px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.sim-scene-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  font-family: var(--mono);
+}
+
+.sim-script-line {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  padding: 8px 0;
+}
+.sim-script-line + .sim-script-line {
+  border-top: 1px solid var(--border);
+}
+.sim-char-col {
+  padding: 12px 16px 12px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.sim-line-col {
+  padding: 12px 0 12px 20px;
+  border-left: 2px solid var(--border);
+}
+.sim-script-line.mizuki .sim-line-col { border-left-color: var(--accent-mizuki); }
+.sim-script-line.ena .sim-line-col { border-left-color: var(--accent-ena); }
+
+.sim-line-text {
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--text);
+}
+.sim-line-text.generating {
+  color: var(--text-muted);
+  font-style: italic;
+  animation: sim-blink 1s infinite;
+}
+@keyframes sim-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.sim-router-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  border-radius: 4px;
+  padding: 3px 8px;
+  border: 1px solid;
+}
+.sim-router-badge.ok { color: var(--stable); border-color: var(--stable); }
+.sim-router-badge.warn { color: var(--caution); border-color: var(--caution); }
+.sim-router-badge.ooc { color: var(--warn); border-color: var(--warn); }
+.sim-router-reason {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  line-height: 1.4;
+}
+.sim-correction-pill {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--caution);
+  background: var(--surface2);
+  border: 1px solid var(--caution);
+  border-radius: 4px;
+  padding: 4px 8px;
+  line-height: 1.5;
+}
+
+.sim-sys-line {
+  text-align: center;
+  padding: 12px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.sim-sys-line.error {
+  color: var(--warn);
+  font-style: normal;
+}
+
+.sim-done-block {
+  margin: 24px 0;
+  padding: 20px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.sim-done-block h3 {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+  letter-spacing: 0.04em;
+}
+.sim-done-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.sim-done-stat {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.sim-done-stat b {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.sim-empty-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-muted);
+  padding: 40px;
+}
+.sim-empty-big {
+  font-size: 40px;
+}
+.sim-empty-state p {
+  font-size: 13px;
+  text-align: center;
+  line-height: 1.6;
+}

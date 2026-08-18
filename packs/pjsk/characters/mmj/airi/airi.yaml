@@ -7,9 +7,11 @@ role: 成员
 school: 宮益坂女子学院
 grade: 3
 class: "3-E"
-status: not_ready
-sample_coverage: 0.0
+status: ready
+sample_coverage: 1.0  # 三件套齐全时的占位值，评分口径未最终确定，后续可能重新定义
 prompt_file: airi_prompt.md
+constitution_file: airi_constitution.md
+router_reference_file: airi_router_reference.md
 
 family:
   - relation: 父亲
@@ -23,4 +25,4 @@ family:
     note: "有一位姐姐和一位妹妹，爱莉是三姐妹中的老二（Area Conversation中爱莉亲口确认）。姐妹姓名/年龄/学校/职业均未公开"
   - relation: 备注
     name: null
-    note: "退出偶像组合QT的核心原因是事务所路线冲突（公司认为她更适合综艺、经理评价她作为偶像很普通），而非家庭矛盾"
+    note: "QT时期事务所长期把她推向综艺路线，经纪人也曾评价她作为偶像'十人並み'（普通水平）；她后来更换事务所、很快辞职，但退出QT的完整因果过程未公开，不应写成单一确定的核心原因"

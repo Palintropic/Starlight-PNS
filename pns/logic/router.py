@@ -3,9 +3,20 @@ import json
 import os
 
 API_FORMAT  = os.environ.get("API_FORMAT", "anthropic")
-BASE_URL    = os.environ.get("BASE_URL", "https://token-plan-cn.xiaomimimo.com/anthropic")
+BASE_URL    = os.environ.get("BASE_URL", "https://api.xiaomimimo.com/anthropic")
 _KEY_NAME   = os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
 OOC_THRESHOLD = float(os.environ.get("OOC_THRESHOLD", "5"))
+METHODOLOGY_VERSION = "v3_contextual_multidimensional"
+
+DIMENSION_KEYS = (
+    "character_facts",
+    "psychological_mechanism",
+    "language_structure",
+    "media_authenticity",
+    "task_compliance",
+    "unsupported_invention",
+    "timeline_boundary",
+)
 
 
 def _get_api_key() -> str:
@@ -22,6 +33,19 @@ def create_client(api_key: str = None):
         return anthropic.Anthropic(api_key=key, base_url=BASE_URL)
 
 
+def extract_anthropic_text(response) -> str:
+    """从Anthropic兼容响应中提取全部文本块，跳过MiMo等模型的thinking块。"""
+    texts = []
+    for block in getattr(response, "content", []):
+        text = getattr(block, "text", None)
+        if text:
+            texts.append(text)
+    if not texts:
+        block_types = [type(block).__name__ for block in getattr(response, "content", [])]
+        raise ValueError(f"API返回中没有文本块，content类型: {block_types}")
+    return "\n".join(texts).strip()
+
+
 def _call(client, model: str, system: str, user_msg: str) -> str:
     if API_FORMAT == "openai":
         resp = client.chat.completions.create(
@@ -35,14 +59,21 @@ def _call(client, model: str, system: str, user_msg: str) -> str:
         )
         return resp.choices[0].message.content.strip()
     else:
-        resp = client.messages.create(
+        request = dict(
             model=model,
             max_tokens=1024,
             temperature=0.1,
             system=system,
             messages=[{"role": "user", "content": user_msg}],
         )
-        return resp.content[0].text.strip()
+        # MiMo 2.5 may spend the entire Router output budget on a ThinkingBlock,
+        # leaving no JSON to parse. Router is a constrained classification call,
+        # so disable extended thinking here while keeping it available to normal
+        # character-generation requests.
+        if "xiaomimimo.com" in BASE_URL:
+            request["thinking"] = {"type": "disabled"}
+        resp = client.messages.create(**request)
+        return extract_anthropic_text(resp)
 
 
 ROUTER_SYSTEM = """
@@ -97,10 +128,33 @@ OOC判断分为两个独立层次，必须分别评估：
 
 注意：结构性漂移即使内容100%符合性格，也单独触发3-4分
 
+【精细验收维度】
+你必须分别评估以下七个维度，不能让“内容很像角色”掩盖其他问题：
+1. character_facts：身份、关系、既有事实是否正确
+2. psychological_mechanism：动机、触发条件与应对路径是否符合角色
+3. language_structure：句式、密度、停顿和表达收放是否符合角色与场景
+4. media_authenticity：是否像即时对话，而非完整书面稿、总结稿或会议纪要
+5. task_compliance：是否遵守原始任务，例如“只输出下一句话”、指定语言或格式
+6. unsupported_invention：是否擅自补出原输入与既有资料未提供的具体事实
+7. timeline_boundary：是否越过当前时间线或把未发生内容写成既成事实
+
+每个维度均给0-10分和一句理由。总drift_score不得低于任一维度最高分；
+任一维度达到5分即视为OOC。若缺少判断某维度所需的上下文，要标记人工复核，
+不得用其他维度的低分抵消。
+
 【输出格式（只输出JSON，不要其他内容）】
 {
   "character": "角色id",
   "drift_score": 数字(0-10),
+  "dimensions": {
+    "character_facts": {"score": 数字(0-10), "reason": "一句话原因"},
+    "psychological_mechanism": {"score": 数字(0-10), "reason": "一句话原因"},
+    "language_structure": {"score": 数字(0-10), "reason": "一句话原因"},
+    "media_authenticity": {"score": 数字(0-10), "reason": "一句话原因"},
+    "task_compliance": {"score": 数字(0-10), "reason": "一句话原因"},
+    "unsupported_invention": {"score": 数字(0-10), "reason": "一句话原因"},
+    "timeline_boundary": {"score": 数字(0-10), "reason": "一句话原因"}
+  },
   "confidence": 数字(0-1),
   "drift_type": "无 / 内容OOC / 结构性漂移 / 媒介失真 / 助手化A / 助手化B",
   "reason": "一句话原因",
@@ -124,7 +178,53 @@ def _build_router_system(character: str) -> tuple[str, str]:
     return f"{ROUTER_SYSTEM}\n\n【角色专属评分参考：{character}】\n{router_reference}", "loaded"
 
 
-def judge(client, character: str, message: str, turn: int, scene: dict | None = None) -> dict:
+def _bounded_score(value, default: float = 0.0) -> float:
+    try:
+        return max(0.0, min(10.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_dimensions(raw_dimensions) -> tuple[dict, bool]:
+    """规范七维评分；返回 (dimensions, 是否完整)。"""
+    source = raw_dimensions if isinstance(raw_dimensions, dict) else {}
+    normalized = {}
+    complete = True
+    for key in DIMENSION_KEYS:
+        item = source.get(key)
+        if not isinstance(item, dict) or "score" not in item:
+            complete = False
+            item = {}
+        normalized[key] = {
+            "score": _bounded_score(item.get("score")),
+            "reason": str(item.get("reason", "")).strip(),
+        }
+    return normalized, complete
+
+
+def _format_recent_history(history: list | None, limit: int = 8) -> str:
+    if not history:
+        return "（无）"
+    compact = []
+    for item in history[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "unknown"))
+        content = str(item.get("content", ""))
+        compact.append({"role": role, "content": content[:2000]})
+    return json.dumps(compact, ensure_ascii=False)
+
+
+def judge(
+    client,
+    character: str,
+    message: str,
+    turn: int,
+    scene: dict | None = None,
+    original_request: str | None = None,
+    recent_history: list | None = None,
+    correction_applied: str | None = None,
+) -> dict:
     model = os.environ.get("MODEL", "mimo-v2.5-pro")
     from pns.world.characters.registry import get_character_metadata
     from pns.world.scenes import LORE_TIER_LABELS, LORE_TIER_INFERRED, LORE_TIER_UNVERIFIED, LORE_TIER_CANON
@@ -148,7 +248,13 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
                 "并在drift_type模糊时优先标记needs_human_review。\n"
             )
 
-    prompt = f"{lore_context}第{turn}轮，{char_name}说：「{message}」\n\n请判断是否OOC。"
+    prompt = (
+        f"{lore_context}【原始任务/当前直接要求】\n{original_request or '（未提供）'}\n\n"
+        f"【生成前最近对话历史】\n{_format_recent_history(recent_history)}\n\n"
+        f"【本轮是否注入过纠正】\n{correction_applied or '（无）'}\n\n"
+        f"【待验收输出】\n第{turn}轮，{char_name}说：「{message}」\n\n"
+        "请按七个维度判断是否OOC或违反任务，并只输出指定JSON。"
+    )
 
     try:
         raw = _call(client, model, router_system, prompt)
@@ -161,14 +267,21 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
 
         result = json.loads(raw)
 
-        drift_score = float(result.get("drift_score", 0))
+        dimensions, dimensions_complete = _normalize_dimensions(result.get("dimensions"))
+        dimension_max = max(item["score"] for item in dimensions.values())
+        drift_score = max(_bounded_score(result.get("drift_score")), dimension_max)
         result["drift_score"] = drift_score
+        result["dimensions"] = dimensions
+        result["dimensions_complete"] = dimensions_complete
         result["confidence"] = float(result.get("confidence", 0.5))
         result["is_ooc"] = drift_score >= OOC_THRESHOLD
+        if not dimensions_complete:
+            result["needs_human_review"] = True
         result.setdefault("character", character)
         result["scene_id"] = scene.get("id", "") if scene else ""
         result["lore_tag"] = scene.get("lore_tag", "") if scene else ""
         result["router_reference_status"] = router_reference_status
+        result["methodology_version"] = METHODOLOGY_VERSION
         return result
 
     except json.JSONDecodeError as e:
@@ -177,6 +290,9 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
             "character": character, "drift_score": 0, "confidence": 0.0,
             "drift_type": "解析失败", "reason": "解析失败", "is_ooc": False,
             "needs_human_review": True, "correction": None,
+            "dimensions": _normalize_dimensions(None)[0],
+            "dimensions_complete": False,
+            "methodology_version": METHODOLOGY_VERSION,
             "router_reference_status": router_reference_status,
         }
     except Exception as e:
@@ -185,5 +301,8 @@ def judge(client, character: str, message: str, turn: int, scene: dict | None = 
             "character": character, "drift_score": 0, "confidence": 0.0,
             "drift_type": "error", "reason": str(e), "is_ooc": False,
             "needs_human_review": True, "correction": None,
+            "dimensions": _normalize_dimensions(None)[0],
+            "dimensions_complete": False,
+            "methodology_version": METHODOLOGY_VERSION,
             "router_reference_status": router_reference_status,
         }
