@@ -30,7 +30,8 @@ async def run_simulation(ws: WebSocket):
 
     scene_id   = params.get("scene", world_mod.DEFAULT_SCENE)
     max_turns  = int(params.get("max_turns", 8))
-    model      = params.get("model") or os.environ.get("MODEL", "mimo-v2.5-pro")
+    model      = params.get("model") or os.environ.get("GENERATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.5-pro")
+    generator_provider = os.environ.get("PROVIDER", "")
     max_tokens = int(params.get("max_tokens", 1024))
     temperature = float(params.get("temperature", 0.85))
     api_delay  = float(params.get("api_delay", 1.0))
@@ -152,6 +153,10 @@ async def run_simulation(ws: WebSocket):
             "dimensions": result.get("dimensions", {}),
             "dimensions_complete": result.get("dimensions_complete", False),
             "methodology_version": result.get("methodology_version", ""),
+            "generator_provider": generator_provider,
+            "generator_model": model,
+            "evaluator_provider": result.get("evaluator_provider", ""),
+            "evaluator_model": result.get("evaluator_model", ""),
         }
         turn_log.append(turn_data)
         await ws.send_json({"type": "turn", **turn_data})
@@ -174,6 +179,10 @@ async def run_simulation(ws: WebSocket):
             "dimensions": result.get("dimensions", {}),
             "dimensions_complete": result.get("dimensions_complete", False),
             "methodology_version": result.get("methodology_version", ""),
+            "generator_provider": generator_provider,
+            "generator_model": model,
+            "evaluator_provider": result.get("evaluator_provider", ""),
+            "evaluator_model": result.get("evaluator_model", ""),
             "original_request": original_request,
             "correction_applied": correction_applied,
             "timestamp": datetime.now().isoformat(),
