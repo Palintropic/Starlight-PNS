@@ -339,7 +339,7 @@ PNS 不在框架代码中定义固定角色阵容。系统从当前启用的可�
 - [x] 面向会话的生成 / Router 编排已抽到 `pns.logic.simulation`
 - [x] `SessionState` 与 `WorldState` 基础数据模型
 - [ ] 将 `SessionState` / `WorldState` 接入实时运行路径并成为权威状态
-- [ ] 分离生成模型与评估模型的配置 / provenance
+- [x] 分离生成模型与评估模型的配置 / provenance
 - [ ] Event model
 - [ ] Exposure / perceptual gate
 - [ ] 持久 Scheduler 与 Lifecycle

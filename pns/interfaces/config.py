@@ -16,9 +16,12 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 @router.get("")
 def get_config():
     key = router_mod._get_api_key()
+    model = os.environ.get("MODEL", "mimo-v2.5-pro")
     return {
         "has_key": bool(key),
-        "model": os.environ.get("MODEL", "mimo-v2.5-pro"),
+        "model": model,
+        "generator_model": os.environ.get("GENERATOR_MODEL") or model,
+        "evaluator_model": os.environ.get("EVALUATOR_MODEL") or model,
         "api_format": router_mod.API_FORMAT,
         "default_scene": world_mod.DEFAULT_SCENE,
     }

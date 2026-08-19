@@ -225,7 +225,8 @@ def judge(
     recent_history: list | None = None,
     correction_applied: str | None = None,
 ) -> dict:
-    model = os.environ.get("MODEL", "mimo-v2.5-pro")
+    model = os.environ.get("EVALUATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.5-pro")
+    evaluator_provider = os.environ.get("PROVIDER", "")
     from pns.world.characters.registry import get_character_metadata
     from pns.world.scenes import LORE_TIER_LABELS, LORE_TIER_INFERRED, LORE_TIER_UNVERIFIED, LORE_TIER_CANON
     char_name = get_character_metadata(character)['name']
@@ -282,6 +283,8 @@ def judge(
         result["lore_tag"] = scene.get("lore_tag", "") if scene else ""
         result["router_reference_status"] = router_reference_status
         result["methodology_version"] = METHODOLOGY_VERSION
+        result["evaluator_model"] = model
+        result["evaluator_provider"] = evaluator_provider
         return result
 
     except json.JSONDecodeError as e:
@@ -294,6 +297,8 @@ def judge(
             "dimensions_complete": False,
             "methodology_version": METHODOLOGY_VERSION,
             "router_reference_status": router_reference_status,
+            "evaluator_model": model,
+            "evaluator_provider": evaluator_provider,
         }
     except Exception as e:
         print(f"[Router] ❌ 调用失败: {e}")
@@ -305,4 +310,6 @@ def judge(
             "dimensions_complete": False,
             "methodology_version": METHODOLOGY_VERSION,
             "router_reference_status": router_reference_status,
+            "evaluator_model": model,
+            "evaluator_provider": evaluator_provider,
         }
