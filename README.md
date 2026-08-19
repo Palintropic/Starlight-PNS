@@ -452,9 +452,8 @@ This project is developed under [Palintropic](https://github.com/Palintropic) as
 
 Project Starlight is the Studio / organizational context for PNS and related character-system research and experiences; it is not itself the PNS runtime.
 
-- **Project lead:** [@Akiyama-Mizuki-44 （胡宸歌）](https://github.com/Akiyama-Mizuki-44)
+- **Project lead:** [@Akiyama-Mizuki-44](https://github.com/Akiyama-Mizuki-44)
 - **Collaborator:** [@Koharu-Mizuki](https://github.com/Koharu-Mizuki)
-- **Conceived:** in class, brainstorming with a group teammate over a Rubik's Cube
 
 ---
 

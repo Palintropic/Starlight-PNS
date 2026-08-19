@@ -456,9 +456,8 @@ compat 文件用更接近叙事框架的方式包装同一个事实核心，让�
 
 Project Starlight 是承载 PNS、相关角色系统研究和体验项目的 Studio / 组织层；它本身不是 PNS Runtime。
 
-- **项目负责人：** [@Akiyama-Mizuki-44（胡宸歌）](https://github.com/Akiyama-Mizuki-44)
+- **项目负责人：** [@Akiyama-Mizuki-44](https://github.com/Akiyama-Mizuki-44)
 - **协作者：** [@Koharu-Mizuki](https://github.com/Koharu-Mizuki)
-- **构思起点：**在课堂上，和小组同伴一边玩魔方一边脑暴出来的想法
 
 ---
 
