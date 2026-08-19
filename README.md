@@ -22,6 +22,8 @@ The working assumption behind this project is that **CAI-trained models may resi
 
 PNS already contains a **session-oriented character runtime** rather than only a persona evaluator. Character discovery, closed-world context assembly, character generation, N-character scheduling, Router evaluation, per-character correction, session history and runtime-facing interfaces all currently live inside the framework.
 
+The first Runtime Foundation milestone has now been completed. Generator and evaluator model configuration are separated at the runtime interface level, and generation/evaluation provenance is recorded throughout the execution pipeline while preserving legacy `MODEL` fallback behavior.
+
 Longer-lived capabilities — event propagation, perception/exposure, autonomous agency, planning, persistent world state, subjective memory and lifecycle management — are therefore intended as an evolution of PNS's existing runtime capabilities, not as a replacement for PNS or a parallel duplicate runtime.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current ownership boundaries and long-term architecture direction.
@@ -244,7 +246,7 @@ Architecture and content are two separate layers:
 
 In principle, swapping `packs/pjsk/` for another fictional or original character pack should not require character-specific changes to framework code.
 
-This framework/content separation is also the basis of the project's existing **AOSP-oriented** character-pack direction: reusable framework logic, explicit compatibility boundaries, pluggable content and a reference implementation remain preferable to embedding one cast directly into the runtime.
+This framework/content separation also forms the basis of the project's **modular architecture approach** for character packs: reusable framework logic, explicit compatibility boundaries, pluggable content, and a reference implementation, rather than hard-coding a fixed cast directly into the Runtime.
 
 ---
 
