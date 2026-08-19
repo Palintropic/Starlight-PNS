@@ -335,7 +335,7 @@ Stage: Active development — Demo v6 complete
 - [x] Session-oriented generation / Router orchestration extracted into `pns.logic.simulation`
 - [x] `SessionState` and `WorldState` foundational data models
 - [ ] Integrate `SessionState` / `WorldState` into the authoritative live runtime path
-- [ ] Separate generation-model and evaluator-model configuration / provenance
+- [x] Separate generation-model and evaluator-model configuration / provenance
 - [ ] Event model
 - [ ] Exposure / perceptual gate
 - [ ] Persistent scheduler and lifecycle
