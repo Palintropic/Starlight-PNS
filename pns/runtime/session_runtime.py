@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator, Optional
+from uuid import uuid4
 
 import pns.world as world_mod
 import pns.logic.router as router_mod
@@ -80,6 +81,7 @@ class SessionRuntime:
         self._current_idx = 0
         self._pending_corrections = {cid: None for cid in character_ids}
         self._turn_log = []
+        self._has_run = False
 
     @classmethod
     def create(
@@ -89,17 +91,33 @@ class SessionRuntime:
         history_dir: Path = _DEFAULT_HISTORY_DIR,
         drift_scores_file: Path = _DEFAULT_DRIFT_SCORES_FILE,
     ) -> "SessionRuntime":
+        if not isinstance(params, dict):
+            raise SessionSetupError("会话参数必须是 JSON 对象")
+
         scene_id = params.get("scene", world_mod.DEFAULT_SCENE)
-        max_turns = int(params.get("max_turns", 8))
+        try:
+            max_turns = int(params.get("max_turns", 8))
+            max_tokens = int(params.get("max_tokens", 1024))
+            temperature = float(params.get("temperature", 0.85))
+            api_delay = float(params.get("api_delay", 1.0))
+        except (TypeError, ValueError) as e:
+            raise SessionSetupError("max_turns、max_tokens、temperature 和 api_delay 必须是数字") from e
+
+        if max_turns < 1 or max_tokens < 1 or api_delay < 0:
+            raise SessionSetupError("max_turns 和 max_tokens 必须大于 0，api_delay 不能小于 0")
+
         model = params.get("model") or os.environ.get("GENERATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.5-pro")
         generator_provider = os.environ.get("PROVIDER", "")
-        max_tokens = int(params.get("max_tokens", 1024))
-        temperature = float(params.get("temperature", 0.85))
-        api_delay = float(params.get("api_delay", 1.0))
         character_ids = params.get("characters") or ["mizuki", "ena"]
 
+        if not isinstance(character_ids, list) or not all(
+            isinstance(cid, str) and cid for cid in character_ids
+        ):
+            raise SessionSetupError("characters 必须是非空角色 ID 组成的数组")
         if len(character_ids) < 2:
             raise SessionSetupError("至少需要2个角色才能开始会话")
+        if len(set(character_ids)) != len(character_ids):
+            raise SessionSetupError("角色列表不能包含重复角色")
 
         for cid in character_ids:
             try:
@@ -115,7 +133,9 @@ class SessionRuntime:
             raise SessionSetupError("找不到 API Key，请刷新页面完成配置向导，或运行 python oobe.py")
 
         client = router_mod.create_client(api_key)
-        session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{scene['id']}"
+        session_id = (
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{scene['id']}_{uuid4().hex[:12]}"
+        )
 
         return cls(
             session_id=session_id,
@@ -133,6 +153,9 @@ class SessionRuntime:
         )
 
     async def run(self) -> AsyncIterator[dict]:
+        if self._has_run:
+            raise RuntimeError("SessionRuntime.run() 只能调用一次")
+        self._has_run = True
         scene = self.scene
 
         yield {
@@ -190,27 +213,22 @@ class SessionRuntime:
 
             yield {"type": "judging", "turn": turn, "character": char_key, "char_name": char_name}
 
-            result = await judge_async(
-                self.client,
-                current,
-                reply,
-                turn,
-                scene,
-                original_request=original_request,
-                recent_history=generation_history,
-                correction_applied=correction_applied,
-            )
+            try:
+                result = await judge_async(
+                    self.client,
+                    current,
+                    reply,
+                    turn,
+                    scene,
+                    original_request=original_request,
+                    recent_history=generation_history,
+                    correction_applied=correction_applied,
+                )
+            except Exception as e:
+                yield {"type": "error", "turn": turn, "message": str(e)}
+                break
             score = result.get("drift_score", 0)
             is_ooc = result.get("is_ooc", False)
-
-            self._stats["scores"].append(score)
-            if is_ooc:
-                self._stats["ooc_count"] += 1
-                self._pending_corrections[current] = result.get("correction")
-                if self._pending_corrections[current]:
-                    self._stats["corrections"] += 1
-            else:
-                self._pending_corrections[current] = None
 
             turn_data = {
                 "turn": turn,
@@ -231,18 +249,6 @@ class SessionRuntime:
                 "evaluator_provider": result.get("evaluator_provider", ""),
                 "evaluator_model": result.get("evaluator_model", ""),
             }
-            self._turn_log.append(turn_data)
-            self.state.add_turn(
-                Turn(
-                    turn_number=turn,
-                    character=current,
-                    prompt=original_request,
-                    response=reply,
-                    timestamp=datetime.now().isoformat(),
-                )
-            )
-            yield {"type": "turn", **turn_data}
-
             drift_record = {
                 "session_id": self.session_id,
                 "turn": turn,
@@ -269,7 +275,32 @@ class SessionRuntime:
                 "correction_applied": correction_applied,
                 "timestamp": datetime.now().isoformat(),
             }
-            append_drift_record(self.drift_scores_file, drift_record)
+            try:
+                append_drift_record(self.drift_scores_file, drift_record)
+            except Exception as e:
+                yield {"type": "error", "turn": turn, "message": f"漂移记录保存失败: {e}"}
+                break
+
+            self._stats["scores"].append(score)
+            if is_ooc:
+                self._stats["ooc_count"] += 1
+                self._pending_corrections[current] = result.get("correction")
+                if self._pending_corrections[current]:
+                    self._stats["corrections"] += 1
+            else:
+                self._pending_corrections[current] = None
+
+            self._turn_log.append(turn_data)
+            self.state.add_turn(
+                Turn(
+                    turn_number=turn,
+                    character=current,
+                    prompt=original_request,
+                    response=reply,
+                    timestamp=datetime.now().isoformat(),
+                )
+            )
+            yield {"type": "turn", **turn_data}
 
             await asyncio.sleep(self.api_delay)
             self._current_idx = (self._current_idx + 1) % len(self.character_ids)
@@ -293,6 +324,7 @@ class SessionRuntime:
             except Exception as e:
                 print(f"[server] 历史记录保存失败: {e}")
 
+        self.state.status = "completed"
         yield {
             "type": "done",
             "session_id": self.session_id,

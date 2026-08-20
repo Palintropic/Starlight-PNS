@@ -31,6 +31,8 @@ class ConfigPayload(BaseModel):
     provider_key: str  # 对应 oobe.PROVIDERS 的动态 key
     model: str
     api_key: str
+    generator_model: str | None = None
+    evaluator_model: str | None = None
 
 
 @router.post("")
@@ -43,7 +45,15 @@ def post_config(payload: ConfigPayload):
     if not payload.api_key:
         raise HTTPException(400, "api_key 不能为空")
 
-    write_env(provider, payload.model, payload.api_key)
+    generator_model = payload.generator_model or payload.model
+    evaluator_model = payload.evaluator_model or payload.model
+    write_env(
+        provider,
+        payload.model,
+        payload.api_key,
+        generator_model=generator_model,
+        evaluator_model=evaluator_model,
+    )
 
     # 写入 .env 后让当前进程感知新配置：load_dotenv 更新 os.environ，
     # 但 router_mod 的 API_FORMAT/BASE_URL/_KEY_NAME 是模块导入时算好的

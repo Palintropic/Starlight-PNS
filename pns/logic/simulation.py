@@ -86,12 +86,13 @@ async def judge_async(
 
 
 def append_drift_record(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def save_history(history_dir: Path, session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
-    history_dir.mkdir(exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
 
     filename = history_dir / f"{session_id}.md"
 

@@ -9,7 +9,8 @@ interface SetupWizardProps {
 function SetupWizard({ onDone }: SetupWizardProps) {
   const [providers, setProviders] = useState<Record<string, ProviderOption>>({});
   const [providerKey, setProviderKey] = useState('');
-  const [model, setModel] = useState('');
+  const [generatorModel, setGeneratorModel] = useState('');
+  const [evaluatorModel, setEvaluatorModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +20,7 @@ function SetupWizard({ onDone }: SetupWizardProps) {
   }, []);
 
   const selectedProvider = providerKey ? providers[providerKey] : null;
-  const canSubmit = Boolean(providerKey && model && apiKey.trim()) && !submitting;
+  const canSubmit = Boolean(providerKey && generatorModel && evaluatorModel && apiKey.trim()) && !submitting;
 
   const handleSubmit = async () => {
     if (!canSubmit) {
@@ -29,7 +30,7 @@ function SetupWizard({ onDone }: SetupWizardProps) {
     setSubmitting(true);
     setError(null);
     try {
-      await submitConfig(providerKey, model, apiKey.trim());
+      await submitConfig(providerKey, generatorModel, evaluatorModel, apiKey.trim());
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : '配置失败');
@@ -48,7 +49,11 @@ function SetupWizard({ onDone }: SetupWizardProps) {
           模型提供商
           <select
             value={providerKey}
-            onChange={(e) => { setProviderKey(e.target.value); setModel(''); }}
+            onChange={(e) => {
+              setProviderKey(e.target.value);
+              setGeneratorModel('');
+              setEvaluatorModel('');
+            }}
           >
             <option value="">请选择</option>
             {Object.entries(providers).map(([key, p]) => (
@@ -59,8 +64,20 @@ function SetupWizard({ onDone }: SetupWizardProps) {
 
         {selectedProvider && (
           <label className="setup-field">
-            模型
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
+            角色生成模型
+            <select value={generatorModel} onChange={(e) => setGeneratorModel(e.target.value)}>
+              <option value="">请选择</option>
+              {selectedProvider.models.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {selectedProvider && (
+          <label className="setup-field">
+            Router 评估模型
+            <select value={evaluatorModel} onChange={(e) => setEvaluatorModel(e.target.value)}>
               <option value="">请选择</option>
               {selectedProvider.models.map((m) => (
                 <option key={m} value={m}>{m}</option>
