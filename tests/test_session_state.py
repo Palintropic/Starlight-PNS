@@ -1,6 +1,9 @@
 import unittest
+from datetime import datetime
 
 from pns.models.session import SessionState, Turn
+from pns.models.world_state import WorldState
+from pns.world.locations import build_default_location_graph
 
 
 class SessionStateTests(unittest.TestCase):
@@ -111,6 +114,40 @@ class SessionStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.state.record_turn(skipped_number)
         self.assertEqual(self.state.turns, [])
+
+
+class SessionWorldStateTests(unittest.TestCase):
+    def setUp(self):
+        self.state = SessionState(
+            session_id="session-1", scene="gate", characters=["mizuki", "ena"]
+        )
+        self.world = WorldState(
+            clock=datetime(2026, 8, 20, 17, 30),
+            locations=build_default_location_graph(),
+        )
+
+    def test_world_state_starts_unattached_and_serializes_as_empty(self):
+        self.assertIsNone(self.state.world_state)
+        self.assertEqual(self.state.to_dict()["world_state"], {})
+
+    def test_attached_world_state_is_the_same_object(self):
+        self.state.attach_world_state(self.world)
+        self.assertIs(self.state.world_state, self.world)
+
+        self.world.place_character("mizuki", "kamiyama_high_gate")
+        self.assertEqual(
+            self.state.to_dict()["world_state"]["character_locations"],
+            {"mizuki": "kamiyama_high_gate"},
+        )
+
+    def test_world_state_can_only_be_attached_once(self):
+        self.state.attach_world_state(self.world)
+        with self.assertRaises(RuntimeError):
+            self.state.attach_world_state(self.world)
+
+    def test_world_state_must_be_typed(self):
+        with self.assertRaises(TypeError):
+            self.state.attach_world_state({"time": "17:30"})
 
 
 if __name__ == "__main__":

@@ -11,8 +11,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pns.models.world_state import WorldState
 from pns.runtime.session_runtime import SessionRuntime, SessionSetupError
 from pns.world.characters import registry as character_registry
+from pns.world.context import render_session_location
+from pns.world.scenes import SCENES
 
 
 async def _run(runtime):
@@ -44,6 +47,30 @@ class SessionSetupTests(unittest.TestCase):
         ):
             with self.subTest(params=params), self.assertRaises(SessionSetupError):
                 SessionRuntime.create(params)
+
+    @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
+    @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
+    def test_scene_without_a_world_mapping_is_a_setup_error(self, _mock_client, _mock_key):
+        unmapped = {**SCENES, "user_authored": dict(SCENES["gate"], id="user_authored")}
+        with patch("pns.runtime.session_runtime.world_mod.SCENES", unmapped):
+            with self.assertRaises(SessionSetupError) as ctx:
+                SessionRuntime.create(
+                    {"characters": ["mizuki", "ena"], "scene": "user_authored"}
+                )
+        self.assertIn("user_authored", str(ctx.exception))
+
+    @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
+    @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
+    def test_unknown_scene_id_still_falls_back_to_the_default_scene(
+        self, _mock_client, _mock_key
+    ):
+        runtime = SessionRuntime.create(
+            {"characters": ["mizuki", "ena"], "scene": "definitely_not_a_scene"}
+        )
+        self.assertEqual(runtime.scene["id"], "gate")
+        self.assertEqual(
+            runtime.world.characters_at("kamiyama_high_gate"), ["ena", "mizuki"]
+        )
 
     @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
     @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
@@ -224,6 +251,88 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.state.pending_corrections["mizuki"])
         self.assertEqual(runtime.state.final_stats()["ooc_count"], 1)
         self.assertEqual(runtime.state.final_stats()["corrections"], 1)
+
+    async def test_session_state_owns_the_single_authoritative_world_state(self):
+        runtime = self._create()
+
+        self.assertIsInstance(runtime.state.world_state, WorldState)
+        self.assertIs(runtime.world, runtime.state.world_state)
+        # 只允许绑定一次：不存在第二份可变世界状态。
+        with self.assertRaises(RuntimeError):
+            runtime.state.attach_world_state(runtime.world)
+
+        runtime.world.advance_time(15)
+        self.assertEqual(
+            runtime.state.to_dict()["world_state"]["time"], runtime.world.time
+        )
+
+    async def test_start_message_projects_time_and_place_from_world_state(self):
+        runtime = self._create(scene="nightcord")
+        runtime.world.advance_time(30)
+
+        async def fake_call(*args, **kwargs):
+            return "reply"
+
+        async def fake_judge(*args, **kwargs):
+            return {"drift_score": 1, "is_ooc": False}
+
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge):
+            messages = await _run(runtime)
+
+        start = messages[0]
+        # 遗留 scene 块形状不变……
+        self.assertEqual(
+            set(start["scene"]), {"id", "label", "trigger", "time", "location"}
+        )
+        self.assertEqual(start["scene"]["id"], "nightcord")
+        self.assertEqual(start["scene"]["trigger"], SCENES["nightcord"]["trigger"])
+        # ……但 time/location 来自当前世界状态，不是 scene 里的静态文本。
+        self.assertEqual(start["scene"]["time"], "深夜 02:30")
+        self.assertNotEqual(start["scene"]["time"], SCENES["nightcord"]["time"])
+        self.assertEqual(
+            start["scene"]["location"], render_session_location(runtime.world)
+        )
+        self.assertEqual(start["world"], runtime.world.to_dict())
+
+    async def test_generation_receives_the_live_world_state_not_the_scene_dict(self):
+        seen = []
+
+        async def fake_call(client, character, history, context, model, max_tokens, temperature, correction):
+            seen.append(context)
+            return "reply"
+
+        async def fake_judge(client, character, message, turn, scene, **kwargs):
+            # Router 仍然拿遗留 scene（它评估的是对白/世界观确定性，本阶段不动）
+            self.assertEqual(scene["id"], "gate")
+            return {"drift_score": 1, "is_ooc": False}
+
+        runtime = self._create(max_turns=2)
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge):
+            await _run(runtime)
+
+        self.assertEqual(len(seen), 2)
+        for context in seen:
+            self.assertIs(context, runtime.world)
+
+    async def test_markdown_history_projects_place_from_world_state(self):
+        async def fake_call(*args, **kwargs):
+            return "reply"
+
+        async def fake_judge(*args, **kwargs):
+            return {"drift_score": 1, "is_ooc": False}
+
+        runtime = self._create(scene="nightcord", max_turns=1)
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge):
+            messages = await _run(runtime)
+
+        history = Path(messages[-1]["history_file"]).read_text(encoding="utf-8")
+        self.assertIn(f"| 地点 | {render_session_location(runtime.world)} |", history)
+        self.assertIn(f"| 时间 | 深夜 02:00 |", history)
+        # 标题/开场白仍是遗留 scene 的叙事投影
+        self.assertIn(SCENES["nightcord"]["label"], history)
 
     async def test_closing_run_marks_authoritative_state_cancelled(self):
         runtime = self._create()
