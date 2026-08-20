@@ -35,6 +35,24 @@ class SessionSetupTests(unittest.TestCase):
         with self.assertRaises(SessionSetupError):
             SessionRuntime.create({"characters": ["mizuki", "ena"]})
 
+    def test_rejects_invalid_parameter_types_before_api_setup(self):
+        for params in (
+            [],
+            {"max_turns": "many"},
+            {"characters": ["mizuki", "mizuki"]},
+            {"characters": "mizuki,ena"},
+        ):
+            with self.subTest(params=params), self.assertRaises(SessionSetupError):
+                SessionRuntime.create(params)
+
+    @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
+    @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
+    def test_session_ids_are_unique(self, _mock_client, _mock_key):
+        params = {"characters": ["mizuki", "ena"]}
+        first = SessionRuntime.create(params)
+        second = SessionRuntime.create(params)
+        self.assertNotEqual(first.session_id, second.session_id)
+
 
 class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -92,6 +110,7 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(runtime.state.turns), 2)
         self.assertEqual(runtime.state.turns[0].character, "mizuki")
+        self.assertEqual(runtime.state.status, "completed")
 
     async def test_generation_error_still_emits_done(self):
         # 保留原 simulate.py 的既有行为：轮内异常 break 出循环，但仍然会
@@ -110,6 +129,7 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
         # 没有任何轮次落地，history 不应该被写出
         self.assertIsNone(messages[-1]["history_file"])
         self.assertEqual(self.drift_file.read_text(encoding="utf-8"), "")
+        self.assertEqual(runtime.state.status, "completed")
 
     async def test_character_not_ready_error_uses_detail(self):
         async def not_ready(*args, **kwargs):
@@ -122,6 +142,53 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
         error_msg = next(m for m in messages if m["type"] == "error")
         self.assertEqual(error_msg["character"], "mizuki")
         self.assertIn("缺少 prompt", error_msg["message"])
+
+    async def test_judge_error_emits_error_and_done(self):
+        async def fake_call(*args, **kwargs):
+            return "reply"
+
+        async def failing_judge(*args, **kwargs):
+            raise RuntimeError("judge boom")
+
+        runtime = self._create()
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", failing_judge):
+            messages = await _run(runtime)
+
+        self.assertEqual([m["type"] for m in messages], ["start", "generating", "judging", "error", "done"])
+        self.assertEqual(messages[-2]["message"], "judge boom")
+        self.assertEqual(messages[-1]["stats"]["total_turns"], 0)
+
+    async def test_drift_failure_does_not_publish_turn(self):
+        async def fake_call(*args, **kwargs):
+            return "reply"
+
+        async def fake_judge(*args, **kwargs):
+            return {"drift_score": 1, "is_ooc": False}
+
+        runtime = self._create()
+        runtime.drift_scores_file = Path(self._tmp.name)
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge):
+            messages = await _run(runtime)
+
+        self.assertEqual([m["type"] for m in messages], ["start", "generating", "judging", "error", "done"])
+        self.assertEqual(runtime.state.turns, [])
+        self.assertEqual(messages[-1]["stats"]["total_turns"], 0)
+
+    async def test_runtime_is_single_use(self):
+        async def fake_call(*args, **kwargs):
+            return "reply"
+
+        async def fake_judge(*args, **kwargs):
+            return {"drift_score": 1, "is_ooc": False}
+
+        runtime = self._create(max_turns=1)
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge):
+            await _run(runtime)
+        with self.assertRaises(RuntimeError):
+            await _run(runtime)
 
 
 if __name__ == "__main__":
