@@ -113,3 +113,39 @@ export const submitConfig = (
       api_key: apiKey,
     }),
   }).then((res) => json(res));
+
+// ─── 配置重载边界 ──────────────────────────────────────────────────────
+
+export interface RegistrySummary {
+  revision: number;
+  built_at: string;
+  pack: string;
+  scene_count: number;
+  default_scene: string;
+  fact_count: number;
+  character_count: number;
+  ready_characters: string[];
+}
+
+export interface ReloadResult {
+  status: 'ok' | 'failed' | 'busy';
+  revision: number;
+  finished_at: string;
+  stopped_sessions: string[];
+  error: string | null;
+  registry: RegistrySummary | null;
+}
+
+export interface ReloadStatus {
+  reloading: boolean;
+  accepting_sessions: boolean;
+  live_sessions: string[];
+  registry: RegistrySummary | null;
+  last_reload: ReloadResult | null;
+}
+
+export const fetchReloadStatus = (): Promise<ReloadStatus> =>
+  fetch('/api/config/reload').then((res) => json(res));
+
+export const reloadConfig = (): Promise<ReloadResult> =>
+  fetch('/api/config/reload', { method: 'POST' }).then((res) => json(res));

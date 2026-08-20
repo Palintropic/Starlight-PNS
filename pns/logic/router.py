@@ -2,6 +2,10 @@
 import json
 import os
 
+# 这四个模块级常量是**遗留兜底**：进程启动那一刻的 .env 快照，只服务于还没拿到
+# ContentRegistry 的调用方。运行时（SessionRuntime）一律传 settings=registry.models，
+# 那份是重载时重新读盘构建的。以前这里靠 importlib.reload(router) 来"更新"它们，
+# 那等于在跑着的进程里换代码 —— P7 之后不再这么做。
 API_FORMAT  = os.environ.get("API_FORMAT", "anthropic")
 BASE_URL    = os.environ.get("BASE_URL", "https://api.xiaomimimo.com/anthropic")
 _KEY_NAME   = os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
@@ -19,18 +23,26 @@ DIMENSION_KEYS = (
 )
 
 
-def _get_api_key() -> str:
-    return os.environ.get(_KEY_NAME, "")
+def _get_api_key(key_name: str = None) -> str:
+    return os.environ.get(key_name or _KEY_NAME, "")
 
 
-def create_client(api_key: str = None):
-    key = api_key or _get_api_key()
-    if API_FORMAT == "openai":
+def create_client(api_key: str = None, *, settings=None):
+    """按 provider 设定建客户端。
+
+    settings 是一份 ModelSettings 快照（来自 ContentRegistry）。客户端和它的
+    api_format 必须来自同一份快照，否则会出现"用 anthropic 客户端走 openai
+    分支"这种错配 —— 这正是重载前 importlib.reload(router) 造成的老问题。
+    """
+    api_format = settings.api_format if settings is not None else API_FORMAT
+    base_url = settings.base_url if settings is not None else BASE_URL
+    key = api_key or _get_api_key(settings.key_name if settings is not None else None)
+    if api_format == "openai":
         from openai import OpenAI
-        return OpenAI(api_key=key, base_url=BASE_URL)
+        return OpenAI(api_key=key, base_url=base_url)
     else:
         import anthropic
-        return anthropic.Anthropic(api_key=key, base_url=BASE_URL)
+        return anthropic.Anthropic(api_key=key, base_url=base_url)
 
 
 def extract_anthropic_text(response) -> str:
@@ -46,8 +58,10 @@ def extract_anthropic_text(response) -> str:
     return "\n".join(texts).strip()
 
 
-def _call(client, model: str, system: str, user_msg: str) -> str:
-    if API_FORMAT == "openai":
+def _call(client, model: str, system: str, user_msg: str, *, settings=None) -> str:
+    api_format = settings.api_format if settings is not None else API_FORMAT
+    base_url = settings.base_url if settings is not None else BASE_URL
+    if api_format == "openai":
         resp = client.chat.completions.create(
             model=model,
             max_tokens=1024,
@@ -70,7 +84,7 @@ def _call(client, model: str, system: str, user_msg: str) -> str:
         # leaving no JSON to parse. Router is a constrained classification call,
         # so disable extended thinking here while keeping it available to normal
         # character-generation requests.
-        if "xiaomimimo.com" in BASE_URL:
+        if "xiaomimimo.com" in base_url:
             request["thinking"] = {"type": "disabled"}
         resp = client.messages.create(**request)
         return extract_anthropic_text(resp)
@@ -164,14 +178,17 @@ OOC判断分为两个独立层次，必须分别评估：
 """.strip()
 
 
-def _build_router_system(character: str) -> tuple[str, str]:
+def _build_router_system(character: str, registry=None) -> tuple[str, str]:
     """ROUTER_SYSTEM（通用判断框架）+ 角色专属 router_reference（评分层，动态读取，若角色尚未提供则跳过）
 
     返回 (system_prompt, router_reference_status)。status 为 "loaded" 或 "generic_fallback"，
     随判分结果一起写入 drift_scores.jsonl，用于事后区分退化判断产出的数据。
     """
-    from pns.world.characters.registry import get_character_router_reference
-    router_reference = get_character_router_reference(character)
+    if registry is not None:
+        router_reference = registry.router_reference(character)
+    else:
+        from pns.world.characters.registry import get_character_router_reference
+        router_reference = get_character_router_reference(character)
     if router_reference is None:
         print(f"[Router] ⚠️ 角色 {character} 暂无 router_reference 文件，本次仅用通用框架评分，无角色专属判据")
         return ROUTER_SYSTEM, "generic_fallback"
@@ -224,13 +241,22 @@ def judge(
     original_request: str | None = None,
     recent_history: list | None = None,
     correction_applied: str | None = None,
+    registry=None,
 ) -> dict:
-    model = os.environ.get("EVALUATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.5-pro")
-    evaluator_provider = os.environ.get("PROVIDER", "")
-    from pns.world.characters.registry import get_character_metadata
+    settings = registry.models if registry is not None else None
+    if settings is not None:
+        model = settings.evaluator_model
+        evaluator_provider = settings.provider
+        ooc_threshold = settings.ooc_threshold
+        char_name = registry.character_name(character)
+    else:
+        model = os.environ.get("EVALUATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.5-pro")
+        evaluator_provider = os.environ.get("PROVIDER", "")
+        ooc_threshold = OOC_THRESHOLD
+        from pns.world.characters.registry import get_character_metadata
+        char_name = get_character_metadata(character)['name']
     from pns.world.scenes import LORE_TIER_LABELS, LORE_TIER_INFERRED, LORE_TIER_UNVERIFIED, LORE_TIER_CANON
-    char_name = get_character_metadata(character)['name']
-    router_system, router_reference_status = _build_router_system(character)
+    router_system, router_reference_status = _build_router_system(character, registry)
 
     lore_context = ""
     if scene is not None:
@@ -258,7 +284,7 @@ def judge(
     )
 
     try:
-        raw = _call(client, model, router_system, prompt)
+        raw = _call(client, model, router_system, prompt, settings=settings)
 
         if "```" in raw:
             raw = raw.split("```")[1]
@@ -275,7 +301,7 @@ def judge(
         result["dimensions"] = dimensions
         result["dimensions_complete"] = dimensions_complete
         result["confidence"] = float(result.get("confidence", 0.5))
-        result["is_ooc"] = drift_score >= OOC_THRESHOLD
+        result["is_ooc"] = drift_score >= ooc_threshold
         if not dimensions_complete:
             result["needs_human_review"] = True
         result.setdefault("character", character)

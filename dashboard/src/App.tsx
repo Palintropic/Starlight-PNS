@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import ReviewDashboard from './ReviewDashboard';
 import WorldEditor from './world/WorldEditor';
 import SetupWizard from './SetupWizard';
+import ConfigReload from './ConfigReload';
 import Simulate from './Simulate';
 import { fetchConfig, type ConfigStatus } from './api';
 import './App.css';
@@ -53,6 +54,7 @@ function App() {
         <button className={`tab-btn ${tab === 'world' ? 'active' : ''}`} onClick={() => setTab('world')}>
           World Editor
         </button>
+        <ConfigReload />
       </nav>
       <div className="shell-body">
         {tab === 'simulate' ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : <WorldEditor />}

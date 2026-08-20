@@ -36,12 +36,27 @@ def _read_yaml(path: Path) -> Dict:
 
 
 def _load_pack() -> Dict:
-    """读取并校验 active pack，结果按进程缓存一次。"""
+    """读取并校验 active pack，结果按进程缓存一次。
+
+    这条缓存路径只服务于还没拿到 ContentRegistry 的遗留调用方。运行时的配置
+    重载不走它 —— 重载调用 load_pack_data()，每次都真的回磁盘读一遍。
+    """
     global _cache
     if _cache is not None:
         return _cache
 
-    pack_dir = PACKS_ROOT / ACTIVE_PACK
+    _cache = load_pack_data()
+    return _cache
+
+
+def load_pack_data(pack_name: Optional[str] = None) -> Dict:
+    """从磁盘完整读取并校验一个角色包，不走任何缓存。
+
+    这是配置重载读取角色内容的入口：每次都重新读盘、重新校验，失败就抛
+    ValueError，由调用方决定是否作废这次重载。
+    """
+    pack_name = pack_name or ACTIVE_PACK
+    pack_dir = PACKS_ROOT / pack_name
     manifest_path = pack_dir / "pack.yaml"
     if not manifest_path.exists():
         raise ValueError(f"Pack manifest not found: {manifest_path}")
@@ -52,7 +67,7 @@ def _load_pack() -> Dict:
         unit_path = pack_dir / "units" / f"{unit_id}.yaml"
         if not unit_path.exists():
             raise ValueError(
-                f"Pack '{ACTIVE_PACK}' 声明了 unit '{unit_id}'，但找不到 {unit_path}"
+                f"Pack '{pack_name}' 声明了 unit '{unit_id}'，但找不到 {unit_path}"
             )
         units[unit_id] = _read_yaml(unit_path)
 
@@ -76,8 +91,19 @@ def _load_pack() -> Dict:
             )
         characters[char_id] = data
 
-    _cache = {"manifest": manifest, "units": units, "characters": characters, "pack_dir": pack_dir}
-    return _cache
+    return {
+        "pack_name": pack_name,
+        "manifest": manifest,
+        "units": units,
+        "characters": characters,
+        "pack_dir": pack_dir,
+    }
+
+
+def reset_cache() -> None:
+    """丢弃遗留缓存。重载配置时调用，免得遗留调用方继续看到上一份角色包。"""
+    global _cache
+    _cache = None
 
 
 def get_character_prompt(character_id: str) -> str:

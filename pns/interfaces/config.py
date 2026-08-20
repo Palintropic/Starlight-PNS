@@ -1,29 +1,32 @@
-# pns/interfaces/config.py — Setup Wizard 用的 provider/API Key 配置 API
-import importlib
-import os
-
-from dotenv import load_dotenv
+# pns/interfaces/config.py — Setup Wizard 的 provider/API Key 配置 API，
+# 以及配置重载边界的后台接口。
+#
+# 这里不再 importlib.reload 任何模块：让新配置生效的唯一办法是走
+# pns.runtime.reload.BOUNDARY.reload()，它会关闸门、停会话、整体重建校验、
+# 原子替换，失败则保留上一份可用配置。改 Python 代码属于 cold update，
+# 必须停服替换文件再重启，后台接口不提供、也不应该提供这种能力。
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import pns.logic.router as router_mod
-import pns.world as world_mod
 from oobe import PROVIDERS, write_env
+from pns.runtime.reload import BOUNDARY
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 
 @router.get("")
 def get_config():
-    key = router_mod._get_api_key()
-    model = os.environ.get("MODEL", "mimo-v2.5-pro")
+    registry = BOUNDARY.active()
+    models = registry.models
     return {
-        "has_key": bool(key),
-        "model": model,
-        "generator_model": os.environ.get("GENERATOR_MODEL") or model,
-        "evaluator_model": os.environ.get("EVALUATOR_MODEL") or model,
-        "api_format": router_mod.API_FORMAT,
-        "default_scene": world_mod.DEFAULT_SCENE,
+        "has_key": bool(router_mod._get_api_key(models.key_name)),
+        "model": models.model,
+        "generator_model": models.generator_model,
+        "evaluator_model": models.evaluator_model,
+        "api_format": models.api_format,
+        "default_scene": registry.default_scene,
+        "config_revision": registry.revision,
     }
 
 
@@ -55,14 +58,14 @@ def post_config(payload: ConfigPayload):
         evaluator_model=evaluator_model,
     )
 
-    # 写入 .env 后让当前进程感知新配置：load_dotenv 更新 os.environ，
-    # 但 router_mod 的 API_FORMAT/BASE_URL/_KEY_NAME 是模块导入时算好的
-    # 常量，光靠 load_dotenv 不会变，所以还要 reload 这个模块本身
-    # （跟 world.py 里 _reload_world() reload 世界模块是同一套路）。
-    load_dotenv(override=True)
-    importlib.reload(router_mod)
-
-    return {"configured": True}
+    # .env 属于 reloadable configuration：写盘之后走一次完整重载让它生效。
+    result = BOUNDARY.reload(reason="provider 配置更新")
+    if result.status == "failed":
+        raise HTTPException(
+            400,
+            f"配置已写入 .env，但重新加载失败，仍在使用上一份可用配置：{result.error}",
+        )
+    return {"configured": True, "reload": result.to_dict()}
 
 
 @router.get("/providers")
@@ -71,3 +74,29 @@ def get_config_providers():
         k: {"name": v["name"], "models": v["models"]}
         for k, v in PROVIDERS.items()
     }
+
+
+@router.get("/reload")
+def get_reload_status():
+    """当前生效的配置快照、准入状态和上一次重载的结果。"""
+    return BOUNDARY.status()
+
+
+@router.post("/reload")
+def post_reload():
+    """后台「重新加载配置」按钮。
+
+    并发保护在 ConfigBoundary 里：已经有一次重载在跑时返回 status="busy"，
+    对应 HTTP 409，不排队也不并发执行第二次。
+    """
+    result = BOUNDARY.reload()
+    if result.status == "busy":
+        raise HTTPException(409, result.error or "已有一次配置重载正在进行")
+    if result.status == "failed":
+        # 400 但服务是好的：旧配置还在生效，新 session 照常能开。
+        raise HTTPException(
+            400,
+            f"配置校验失败，未生效；仍在使用上一份可用配置"
+            f"（revision {result.revision}）：{result.error}",
+        )
+    return result.to_dict()

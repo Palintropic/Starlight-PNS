@@ -23,29 +23,39 @@ def _strip_prefix(text: str, char_name: str) -> str:
 async def call_character_async(
     client, character: str, history: list, context, model: str,
     max_tokens: int, temperature: float, correction: str = None,
+    *, registry=None,
 ) -> str:
     """调用角色模型。
 
     context 是权威的 WorldState（新路径）或遗留 scene dict（兼容路径）；
     两种都只被渲染成提示词文本，不反向影响世界状态。
+
+    registry 是本次会话锁定的 ContentRegistry 快照：提示词文本和 provider 设定
+    都从它取，所以会话跑到一半有人重载配置，这一路调用不会串到新配置上去。
+    传 None 走遗留路径（直接读磁盘上的角色包），只给还没迁移的调用方用。
     """
     use_compat = "flash-lite" in model.lower()
-    try:
-        system = get_character_system(character, context, compat=use_compat)
-    except ValueError as e:
-        # 角色存在于 pack 但还没有 prompt（not_ready/partial 且未补内容）
-        raise character_registry.CharacterNotReadyError(character, str(e)) from e
-
-    meta = character_registry.get_character_metadata(character)
-    char_name = meta.get("name", character)
+    if registry is not None:
+        system = registry.character_system(character, context, compat=use_compat)
+        char_name = registry.character_name(character)
+    else:
+        try:
+            system = get_character_system(character, context, compat=use_compat)
+        except ValueError as e:
+            # 角色存在于 pack 但还没有 prompt（not_ready/partial 且未补内容）
+            raise character_registry.CharacterNotReadyError(character, str(e)) from e
+        meta = character_registry.get_character_metadata(character)
+        char_name = meta.get("name", character)
 
     if correction:
         system += f"\n\n【注意】{correction}"
 
     loop = asyncio.get_event_loop()
 
+    api_format = registry.models.api_format if registry is not None else router_mod.API_FORMAT
+
     def _call():
-        if router_mod.API_FORMAT == "openai":
+        if api_format == "openai":
             oai_history = [{"role": "system", "content": system}] + history
             response = client.chat.completions.create(
                 model=model, max_tokens=max_tokens, temperature=temperature,
@@ -74,6 +84,7 @@ async def judge_async(
     original_request: str | None = None,
     recent_history: list | None = None,
     correction_applied: str | None = None,
+    registry=None,
 ) -> dict:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
@@ -87,6 +98,7 @@ async def judge_async(
             original_request=original_request,
             recent_history=recent_history,
             correction_applied=correction_applied,
+            registry=registry,
         ),
     )
 

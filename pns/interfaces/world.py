@@ -1,25 +1,40 @@
 # pns/interfaces/world.py — World Editor API
 # 图形化编辑 pns/world/scenes.py / facts.py。写回逻辑（JSON⇄Python源码、备份、
-# 校验）都在 pns/world/codegen.py 里，这里只负责路由、reload、报错转换。
-import importlib
+# 校验）都在 pns/world/codegen.py 里，这里只负责路由、重载、报错转换。
+#
+# scenes.py / facts.py 里的是纯数据字面量，属于 reloadable configuration：写盘
+# 之后走 BOUNDARY.reload() 让它生效。以前这里用 importlib.reload 把模块重新
+# 执行一遍 —— 那是在跑着的进程里换代码，没有整体校验、没有原子性、失败会留下
+# 半初始化的模块，也不会停掉正在读旧配置的会话。P7 之后不再这么做。
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-import pns.world as world_mod
-import pns.world.facts as facts_submod
-import pns.world.scenes as scenes_submod
+from pns.runtime.reload import BOUNDARY
 from pns.world import codegen
 
 router = APIRouter(prefix="/api/world", tags=["world"])
 
 
-def _reload_world():
-    """scenes.py / facts.py 写盘后，让正在跑的进程也看到新内容。"""
-    importlib.reload(scenes_submod)
-    importlib.reload(facts_submod)
-    importlib.reload(world_mod)
+def _apply_reload():
+    """写盘之后让新配置生效；失败时保留上一份可用配置并把原因抛给编辑器。"""
+    result = BOUNDARY.reload(reason="World Editor 保存")
+    if result.status == "busy":
+        raise HTTPException(409, result.error or "已有一次配置重载正在进行")
+    if result.status == "failed":
+        raise HTTPException(
+            400,
+            f"已写入磁盘，但新配置没通过校验、未生效，仍在使用上一份可用配置：{result.error}",
+        )
+
+
+def _scenes() -> dict:
+    return {k: dict(v) for k, v in BOUNDARY.active().scenes.items()}
+
+
+def _facts() -> dict:
+    return dict(BOUNDARY.active().world_facts)
 
 
 class Scene(BaseModel):
@@ -48,7 +63,7 @@ class SourcePayload(BaseModel):
 
 @router.get("/scenes")
 def get_world_scenes():
-    return world_mod.SCENES
+    return _scenes()
 
 
 @router.post("/scenes")
@@ -61,8 +76,8 @@ def post_world_scenes(scenes: dict[str, Scene]):
         codegen.save_scenes(payload)
     except codegen.CodegenError as e:
         raise HTTPException(400, str(e))
-    _reload_world()
-    return world_mod.SCENES
+    _apply_reload()
+    return _scenes()
 
 
 @router.get("/scenes/source")
@@ -76,13 +91,13 @@ def post_world_scenes_source(payload: SourcePayload):
         codegen.save_scenes_source(payload.source)
     except codegen.CodegenError as e:
         raise HTTPException(400, str(e))
-    _reload_world()
+    _apply_reload()
     return {"source": codegen.SCENES_PATH.read_text(encoding="utf-8")}
 
 
 @router.get("/facts")
 def get_world_facts():
-    return {"facts": world_mod.WORLD_FACTS, "groups": codegen.FACT_GROUPS}
+    return {"facts": _facts(), "groups": codegen.FACT_GROUPS}
 
 
 @router.post("/facts")
@@ -91,8 +106,8 @@ def post_world_facts(payload: FactsPayload):
         codegen.save_facts(payload.facts)
     except codegen.CodegenError as e:
         raise HTTPException(400, str(e))
-    _reload_world()
-    return {"facts": world_mod.WORLD_FACTS, "groups": codegen.FACT_GROUPS}
+    _apply_reload()
+    return {"facts": _facts(), "groups": codegen.FACT_GROUPS}
 
 
 @router.get("/facts/source")
@@ -106,5 +121,5 @@ def post_world_facts_source(payload: SourcePayload):
         codegen.save_facts_source(payload.source)
     except codegen.CodegenError as e:
         raise HTTPException(400, str(e))
-    _reload_world()
+    _apply_reload()
     return {"source": codegen.FACTS_PATH.read_text(encoding="utf-8")}

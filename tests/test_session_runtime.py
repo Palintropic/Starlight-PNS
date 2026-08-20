@@ -8,6 +8,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from pns.models.event import EventScope, EventType
 from pns.models.exposure import ExposureReason
 from pns.models.world_state import Availability, WorldState
 from pns.runtime.event_commit import EventCommitError
+from pns.runtime.reload import SessionSupervisor, active_registry
 from pns.runtime.session_runtime import SessionRuntime, SessionSetupError
 from pns.world.characters import registry as character_registry
 from pns.world.context import render_session_location
@@ -54,8 +56,12 @@ class SessionSetupTests(unittest.TestCase):
     @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
     @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
     def test_scene_without_a_world_mapping_is_a_setup_error(self, _mock_client, _mock_key):
+        # 正常路径下这种场景根本进不了 registry（build_content_registry 会因为
+        # SCENE_WORLD_MAP 里没有映射直接判这次配置不合格）。这里绕过构建期校验，
+        # 单独盯住会话建立时那道防线本身。
         unmapped = {**SCENES, "user_authored": dict(SCENES["gate"], id="user_authored")}
-        with patch("pns.runtime.session_runtime.world_mod.SCENES", unmapped):
+        registry = replace(active_registry(), scenes=unmapped)
+        with patch("pns.runtime.session_runtime.BOUNDARY.active", return_value=registry):
             with self.assertRaises(SessionSetupError) as ctx:
                 SessionRuntime.create(
                     {"characters": ["mizuki", "ena"], "scene": "user_authored"}
@@ -98,6 +104,8 @@ class RuntimeTestBase(unittest.IsolatedAsyncioTestCase):
         self._client_patch = patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
         self._key_patch.start()
         self._client_patch.start()
+        # 每个用例一套独立的准入记账，不去动进程级的那份单例。
+        self.supervisor = SessionSupervisor()
 
     def tearDown(self):
         self._key_patch.stop()
@@ -107,12 +115,17 @@ class RuntimeTestBase(unittest.IsolatedAsyncioTestCase):
     def _create(self, **params):
         base = {"characters": ["mizuki", "ena"], "max_turns": 2, "api_delay": 0}
         base.update(params)
-        return SessionRuntime.create(base, history_dir=self.history_dir, drift_scores_file=self.drift_file)
+        return SessionRuntime.create(
+            base,
+            supervisor=self.supervisor,
+            history_dir=self.history_dir,
+            drift_scores_file=self.drift_file,
+        )
 
 
 class SessionRuntimeRunTests(RuntimeTestBase):
     async def test_happy_path_message_sequence_and_persistence(self):
-        async def fake_call(client, character, history, scene, model, max_tokens, temperature, correction):
+        async def fake_call(client, character, history, scene, model, max_tokens, temperature, correction, **_kw):
             return f"reply-from-{character}"
 
         async def fake_judge(client, character, message, turn, scene, **kwargs):
@@ -240,7 +253,7 @@ class SessionRuntimeRunTests(RuntimeTestBase):
     async def test_state_owns_pending_corrections(self):
         corrections_seen = []
 
-        async def fake_call(client, character, history, scene, model, max_tokens, temperature, correction):
+        async def fake_call(client, character, history, scene, model, max_tokens, temperature, correction, **_kw):
             corrections_seen.append(correction)
             return "reply"
 
@@ -305,7 +318,7 @@ class SessionRuntimeRunTests(RuntimeTestBase):
     async def test_generation_receives_the_live_world_state_not_the_scene_dict(self):
         seen = []
 
-        async def fake_call(client, character, history, context, model, max_tokens, temperature, correction):
+        async def fake_call(client, character, history, context, model, max_tokens, temperature, correction, **_kw):
             seen.append(context)
             return "reply"
 
