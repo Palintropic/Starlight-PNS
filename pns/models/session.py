@@ -2,9 +2,11 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Sequence
 
 from pns.models.event_store import EventStore
+from pns.models.exposure import ExposureDecision, ExposureLog
+from pns.models.observation import Observation, ObservationLog
 from pns.models.world_state import WorldState
 
 
@@ -119,6 +121,12 @@ class SessionState:
     # 客观世界历史。它不是 turns 的另一种写法：turns 是生成审计记录，
     # events 是"世界上发生过什么"。两者由 atomic_commit() 绑在一起提交。
     events: EventStore = field(default_factory=EventStore)
+    # 角色主观感知。世界历史 ≠ 角色观察：一条事件只在角色确实感知得到时
+    # 才会在这里留下一条投影，绝不按会话名单群发。
+    observations: ObservationLog = field(default_factory=ObservationLog)
+    # 曝光判定的解释日志，含拒绝。系统侧数据，只给测试和调试 UI 看，
+    # 任何渲染角色上下文的路径都不许读它。
+    exposures: ExposureLog = field(default_factory=ExposureLog)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -166,8 +174,30 @@ class SessionState:
     def correction_for(self, character: str) -> Optional[str]:
         return self.pending_corrections[character]
 
-    def record_turn(self, turn: Turn) -> None:
-        """Commit a persisted turn and all session-level consequences."""
+    def record_observations(
+        self,
+        decisions: Sequence[ExposureDecision],
+        observations: Sequence[Observation],
+    ) -> None:
+        """记录一次曝光判定的全部结果（判定日志 + 通过者的观察）。
+
+        只应该由提交边界调用：观察必须和它所投影的那条事件同生共死，绕开
+        atomic_commit() 单独写进来的观察回滚不掉。
+        """
+        for decision in decisions:
+            self.exposures._append(decision)
+        for observation in observations:
+            self.observations._append(observation)
+
+    def record_turn(
+        self, turn: Turn, observations: Optional[Sequence[Observation]] = None
+    ) -> None:
+        """Commit a persisted turn and all session-level consequences.
+
+        observations 给出的是这次发言真正被谁感知到了。给了就按它投影角色
+        历史；给 None 是**遗留兼容路径**（把这句话抄进每个角色的历史），
+        只保留给不经过世界模型的纯记录调用方。运行时不走那条路。
+        """
         if turn.character not in self.characters:
             raise ValueError(f"Turn character is not part of session: {turn.character}")
         if bool(self.histories) != bool(self.pending_corrections):
@@ -190,11 +220,32 @@ class SessionState:
         else:
             self.pending_corrections[turn.character] = None
 
-        line = f"{turn.char_name}：{turn.response}"
-        self.histories[turn.character].append({"role": "assistant", "content": line})
-        for other in self.characters:
-            if other != turn.character:
-                self.histories[other].append({"role": "user", "content": line})
+        if observations is None:
+            # 遗留全知投影：没有曝光信息可依据时，退回旧行为。
+            line = f"{turn.char_name}：{turn.response}"
+            self.histories[turn.character].append(
+                {"role": "assistant", "content": line}
+            )
+            for other in self.characters:
+                if other != turn.character:
+                    self.histories[other].append({"role": "user", "content": line})
+            return
+
+        # 新路径：角色历史是**观察的投影**，不是按会话名单复制文本。
+        # 没有观察的角色，历史里就不会多出这一行。
+        for observation in observations:
+            line = observation.render_line()
+            if line is None:
+                continue
+            observer = observation.observer_id
+            # 观察可能来自世界里存在、但不属于这个会话生成名单的角色。
+            # 他们确实感知到了（观察日志里有记录），只是这个会话不为他们
+            # 生成台词，所以没有对应的历史。用 characters 判断而不是用
+            # histories 有没有这个键 —— 后者会把"状态被改坏了"一起吞掉。
+            if observer not in self.characters:
+                continue
+            role = "assistant" if observer == turn.character else "user"
+            self.histories[observer].append({"role": role, "content": line})
 
     def add_turn(self, turn: Turn) -> None:
         """Backward-compatible alias for the pre-Phase-3 public API."""
@@ -212,6 +263,8 @@ class SessionState:
             world.snapshot_mutable_state() if world is not None else None
         )
         events_length = len(self.events)
+        observations_length = len(self.observations)
+        exposures_length = len(self.exposures)
         turns_length = len(self.turns)
         history_lengths = {cid: len(items) for cid, items in self.histories.items()}
         corrections = dict(self.pending_corrections)
@@ -221,6 +274,8 @@ class SessionState:
             if world_snapshot is not None:
                 world.restore_mutable_state(world_snapshot)
             self.events._rollback_to(events_length)
+            self.observations._rollback_to(observations_length)
+            self.exposures._rollback_to(exposures_length)
             del self.turns[turns_length:]
             for cid in list(self.histories):
                 if cid in history_lengths:
@@ -279,6 +334,8 @@ class SessionState:
             "stats": self.final_stats(),
             "world_state": self.world_state.to_dict() if self.world_state else {},
             "events": self.events.to_dict(),
+            "observations": self.observations.to_dict(),
+            "exposures": self.exposures.to_dict(),
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,

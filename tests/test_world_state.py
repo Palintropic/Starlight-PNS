@@ -186,6 +186,7 @@ class WorldSerializationTests(unittest.TestCase):
                 "channels",
                 "character_locations",
                 "channel_members",
+                "character_availability",
                 "location_state",
                 "metadata",
             },

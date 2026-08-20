@@ -8,6 +8,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Dict, List, Optional, Set
 
 from pns.models.channel import ChannelRegistry
@@ -16,6 +17,26 @@ from pns.models.location import LocationGraph
 
 class WorldStateError(ValueError):
     """对世界状态的非法操作（未知地点/频道、非法角色 ID、时间倒流等）。"""
+
+
+class Availability(str, Enum):
+    """角色当前对外界的感知能力。
+
+    这是 AgentState（后续阶段）的一个最小前身，只放"是否还能感知到外界"
+    这一件事 —— 目标、活动、计划都不在这里。
+
+    三档的区别是刻意的，因为它们在曝光里的后果不同：
+
+      AVAILABLE  正常感知。
+      BUSY       在忙，但仍然感知得到。忙不等于世界没发生过；要不要理会
+                 是 Attention/Agency 的事，不是感知资格的事。
+      ASLEEP     感知不到外界。自己的动作仍然自观察（睡着的人不会发言，
+                 真发言了那就是醒着）。
+    """
+
+    AVAILABLE = "available"
+    BUSY = "busy"
+    ASLEEP = "asleep"
 
 
 @dataclass
@@ -27,6 +48,8 @@ class WorldState:
     channels: ChannelRegistry = field(default_factory=ChannelRegistry)
     character_locations: Dict[str, str] = field(default_factory=dict)
     channel_members: Dict[str, Set[str]] = field(default_factory=dict)
+    # 只存偏离默认值的角色：没有条目就是 AVAILABLE。
+    character_availability: Dict[str, Availability] = field(default_factory=dict)
     location_state: Dict[str, Dict] = field(default_factory=dict)
     metadata: Dict = field(default_factory=dict)
 
@@ -43,6 +66,10 @@ class WorldState:
         self.channel_members = {
             channel_id: set(members)
             for channel_id, members in self.channel_members.items()
+        }
+        self.character_availability = {
+            character_id: Availability(value)
+            for character_id, value in self.character_availability.items()
         }
         self.location_state = deepcopy(self.location_state)
         self.metadata = deepcopy(self.metadata)
@@ -62,6 +89,14 @@ class WorldState:
                 raise WorldStateError(f"频道成员引用了未知的 channel_id: {channel_id}")
             for character_id in members:
                 self._require_character_id(character_id)
+        for character_id, availability in self.character_availability.items():
+            self._require_character_id(character_id)
+            if not isinstance(availability, Availability):
+                # 脏值会让"睡着了感知不到"静默失效 —— 这类失败必须是响亮的。
+                raise WorldStateError(
+                    f"角色 '{character_id}' 的可用性必须是 Availability，"
+                    f"收到 {availability!r}"
+                )
         for location_id, facts in self.location_state.items():
             if not self.locations.has(location_id):
                 raise WorldStateError(
@@ -96,6 +131,7 @@ class WorldState:
 
     def remove_character(self, character_id: str) -> None:
         self.character_locations.pop(character_id, None)
+        self.character_availability.pop(character_id, None)
         for members in self.channel_members.values():
             members.discard(character_id)
 
@@ -145,6 +181,18 @@ class WorldState:
             raise WorldStateError(f"未知的 channel_id: {channel_id}")
         return sorted(self.channel_members.get(channel_id, set()))
 
+    # ── 可用性 ──────────────────────────────────────────────────────────
+    def set_availability(self, character_id: str, availability) -> None:
+        self._require_character_id(character_id)
+        availability = Availability(availability)
+        if availability is Availability.AVAILABLE:
+            self.character_availability.pop(character_id, None)
+        else:
+            self.character_availability[character_id] = availability
+
+    def availability_of(self, character_id: str) -> Availability:
+        return self.character_availability.get(character_id, Availability.AVAILABLE)
+
     # ── 角色 ────────────────────────────────────────────────────────────
     def known_characters(self) -> List[str]:
         """世界当前认识的角色：有物理位置的，或挂在任一频道上的。
@@ -181,6 +229,7 @@ class WorldState:
                 channel_id: set(members)
                 for channel_id, members in self.channel_members.items()
             },
+            "character_availability": dict(self.character_availability),
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
         }
@@ -193,6 +242,7 @@ class WorldState:
             channel_id: set(members)
             for channel_id, members in snapshot["channel_members"].items()
         }
+        self.character_availability = dict(snapshot["character_availability"])
         self.location_state = deepcopy(snapshot["location_state"])
         self.metadata = deepcopy(snapshot["metadata"])
 
@@ -210,6 +260,10 @@ class WorldState:
                 channel_id: sorted(members)
                 for channel_id, members in self.channel_members.items()
             },
+            "character_availability": {
+                character_id: availability.value
+                for character_id, availability in self.character_availability.items()
+            },
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
         }
@@ -225,6 +279,7 @@ class WorldState:
                 channel_id: set(members)
                 for channel_id, members in payload.get("channel_members", {}).items()
             },
+            character_availability=dict(payload.get("character_availability", {})),
             location_state=deepcopy(payload.get("location_state", {})),
             metadata=deepcopy(payload.get("metadata", {})),
         )

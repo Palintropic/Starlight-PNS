@@ -162,6 +162,8 @@ committed to `SessionState` and published over the WebSocket.
 - statistics derived from completed turns
 - the session's single typed `WorldState`
 - the session's single ordered committed event history
+- the session's per-character observation stream
+- the session's exposure decision log (system-side; allows and denies)
 - metadata
 
 `SessionState.world_state` is a typed `WorldState`, attached exactly once by
@@ -178,6 +180,9 @@ the duration of a session:
   rolls the date over instead of discarding it)
 - character physical locations, keyed by stable character ID
 - channel membership, independent of physical location
+- character availability (`available` / `busy` / `asleep`), a minimal precursor
+  to `AgentState` holding only what exposure needs; only non-default entries are
+  stored
 - per-location environment state
 - the session's `LocationGraph` and `ChannelRegistry`
 - metadata, including the provenance of the legacy scene it was built from
@@ -211,8 +216,8 @@ optional participants, optional physical `location_id`, optional `channel_id`,
 validated payload, provenance metadata, and `causation_id`/`correlation_id`.
 
 `EventScope` is a propagation boundary, not a transport. An event is not a
-WebSocket message, and scope does not decide who actually perceived something —
-that is Exposure, and it does not exist yet. The scopes are `private`,
+WebSocket message, and scope does not decide by itself who actually perceived
+something — that is Exposure, described below. The scopes are `private`,
 `participant`, `channel`, `location`, and `public` (`ambient` parses as the same
 scope).
 
@@ -240,8 +245,9 @@ sequence numbers are validated when history is restored rather than silently
 renumbered.
 
 World history is objective and is never copied into character histories. Events
-are not memory: what a character perceived and retained is a separate stream
-that this phase does not build.
+are not memory: what a character perceived is a separate stream, built by the
+exposure layer below, and what a character *retained* is a further stream that
+does not exist yet.
 
 ### The commit boundary
 
@@ -277,6 +283,100 @@ dialogue event, so the two cannot diverge. The legacy `turn` WebSocket message
 is projected from the committed event plus that generation record and carries an
 additional `event_id` linking it back to world history. Markdown history and
 WebSocket messages stay projections; neither is canonical storage.
+
+### Exposure and Observation
+
+Exposure answers exactly one question:
+
+> Could this character perceive this committed event?
+
+It does not decide whether the character cares, responds, or remembers. Those
+are attention, agency, and memory, and none of them exist yet.
+
+`pns/models/exposure.py` holds the result types. `ExposureReason` is a closed set
+of stable reason codes — `self_action`, `explicit_participant`, `channel_member`,
+`same_location`, `audible_from`, `public_visible` allow; `private_scope_denied`,
+`not_a_participant`, `no_channel_access`, `wrong_location`,
+`public_not_perceived`, `unavailable`, `unknown_character` deny. Every code
+corresponds to a branch that actually exists in the rules; a code with no rule
+behind it would misreport coverage. `ExposureDecision` is a frozen, comparable
+record of one character/event judgement, and it derives `exposed` from the reason
+code rather than storing a separate boolean that could disagree with it. Its
+`evaluated_at` is the simulation clock, not wall time, so identical inputs
+produce identical decisions.
+
+`pns/runtime/exposure/rules.py` holds the judgement itself, as a pure function of
+event plus world snapshot. The order is fixed:
+
+1. the actor self-observes, unconditionally (see *Self-Actions*);
+2. a character the world does not know perceives nothing;
+3. an asleep character perceives nothing external — `busy` explicitly does not
+   block perception, because being busy does not mean the event never happened;
+4. the event's scope decides the boundary.
+
+Per scope: `private` and `participant` events reach only the actor and the
+characters the event names; `channel` events reach current channel members,
+regardless of physical distance; `location` events reach characters at exactly
+that location, plus any location listed in the event location's
+`perception.audible_from`. Rooms are closed by default — sound carries only where
+a location declares it, never by parent/child containment, because leaking by
+default is the dangerous direction. `public` means potentially observable, not
+automatically known: this phase exposes a public event only to characters already
+in perceptual range and denies everyone else with `public_not_perceived`, leaving
+feed discovery to a later phase.
+
+`event.participants` is *not* a general exposure grant. For `channel` and
+`location` scope it is a commit-time snapshot of who was present, which is a
+useful historical fact but a bad access rule: a character who has since left
+would still match it. Only `private` and `participant` scope, where the field
+means "the characters this event names", treat it as authoritative.
+
+`pns/models/observation.py` defines `Observation`, the character-specific
+projection of a committed event: source event ID, observer, the reason it was
+perceived, the simulation time, and redacted perceived content. Redaction is a
+whitelist per event type, so a new event type reveals nothing until someone adds
+a line for it. Provenance — which model generated the line, what the Router
+scored it, whether it was flagged OOC — never reaches an observation, because
+system process is not character experience. Neither do `correlation_id`,
+`causation_id`, or the ambient participant roster. A character exposed through a
+channel does not learn the speaker's physical room, and a co-located character
+does not learn the speaker's channel. An `Observation` cannot be constructed from
+a denying reason code at all.
+
+Exposure runs inside the commit boundary, after the event's state effect is
+applied, so no event committed into a session can skip it and no observation can
+survive a failed commit. `commit_event()` itself takes only a world and a store,
+with no session to hold observations, so exposure lives on the two session-level
+entry points instead. Candidates come from `WorldState.known_characters()`, never from
+the session roster: being selected into a session is not perception. The commit
+evaluates every candidate, records all decisions — allows and denies — in
+`SessionState.exposures`, and creates observations only for the allows in
+`SessionState.observations`. Both are covered by `atomic_commit()`.
+
+Because judgement happens at commit time against the world as it then was,
+a character who joins a channel later does not retroactively receive earlier
+events. Re-running the rules over an old event and a newer world snapshot can
+give a different answer by design; that is why observations are recorded once
+rather than recomputed on read.
+
+`SessionState.histories` is now a projection of observations, not a fan-out.
+A character with no observation of a line does not get that line in its prompt
+context, so two characters in a session can hold genuinely different context.
+`record_turn()` still accepts no observations for un-migrated pure-record
+callers and falls back to the legacy copy-to-everyone behaviour; the runtime
+never takes that path. Legacy scene fixtures keep working because
+`scene_compat` explicitly co-locates or channel-joins the characters, not
+because they were selected together.
+
+`pns/runtime/exposure/debug.py` provides the read-only explain path: for any
+committed event it reports every decision, its reason code, its evidence, and
+whether an observation was created. This is system-side data. It is never
+rendered into a character's context — a character not knowing something includes
+not knowing that it was denied.
+
+Exposure creates no memory, chooses no speaker, and does not decide whether to
+respond. The session scheduler is still round-robin; it selects who *speaks*,
+while exposure decides what that character was allowed to hear.
 
 ### Scene compatibility boundary
 
@@ -399,7 +499,13 @@ Router-as-Judge
       └── correction queued for that character
       │
       ▼
-update per-character histories
+commit: apply state effect → append event → evaluate exposure
+      │
+      ▼
+observations for eligible characters only
+      │
+      ▼
+project each character's history from its own observations
       │
       ▼
 next turn

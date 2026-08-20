@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore, EventStoreError
+from pns.models.exposure import ExposureReason
 from pns.models.session import SessionState, Turn
 from pns.models.world_state import WorldState
 from pns.runtime import event_commit
@@ -22,6 +23,7 @@ from pns.runtime.event_commit import (
     dialogue_event_for_turn,
     project_turn_message,
 )
+from pns.runtime.exposure import explain_character, explain_event
 from pns.world.channels import build_default_channel_registry
 from pns.world.locations import build_default_location_graph
 
@@ -546,3 +548,137 @@ class TurnProjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommitTimeExposureTests(unittest.TestCase):
+    """提交边界的第三阶段：每条已提交事件都被曝光判定过，且与事件同生共死。"""
+
+    def setUp(self):
+        self.world = _world()
+        self.state = SessionState(
+            session_id="s1", scene="gate", characters=["mizuki", "ena"]
+        )
+        self.state.attach_world_state(self.world)
+        self.state.initialize_runtime("放学后的校门口")
+
+    def _commit(self, turn=None):
+        turn = turn or _turn()
+        event = dialogue_event_for_turn(self.world, self.state.events, "s1", turn)
+        return commit_dialogue(self.state, turn, event), event
+
+    def test_every_committed_event_is_evaluated_for_every_candidate(self):
+        _, event = self._commit()
+        decisions = self.state.exposures.for_event(event.event_id)
+        self.assertEqual(
+            sorted(d.character_id for d in decisions), ["ena", "mizuki"]
+        )
+
+    def test_only_eligible_characters_get_an_observation(self):
+        self.world.place_character("ena", "city_streets")
+        _, event = self._commit()
+        self.assertEqual(
+            self.state.observations.observers_of(event.event_id), ("mizuki",)
+        )
+        self.assertEqual(
+            self.state.exposures.explain(event.event_id, "ena").reason,
+            ExposureReason.WRONG_LOCATION,
+        )
+
+    def test_the_legacy_history_is_projected_from_observations(self):
+        # 绘名不在场 → 这句话不会出现在她的历史里。这正是要拆掉的全知扇出。
+        self.world.place_character("ena", "city_streets")
+        self._commit()
+        self.assertEqual(len(self.state.histories["mizuki"]), 2)
+        self.assertEqual(len(self.state.histories["ena"]), 1)
+
+    def test_co_located_characters_still_share_the_conversation(self):
+        self._commit()
+        self.assertEqual(self.state.histories["ena"][-1]["role"], "user")
+        # 行格式与遗留全知扇出完全一致：兼容投影没有改变提示词的样子
+        self.assertEqual(
+            self.state.histories["ena"][-1]["content"], "MIZUKI：reply-from-mizuki"
+        )
+        self.assertEqual(self.state.histories["mizuki"][-1]["role"], "assistant")
+
+    def test_a_failed_commit_leaves_no_observation_or_decision(self):
+        turn = _turn(number=99)  # 轮次编号不对，record_turn 会拒绝
+        event = dialogue_event_for_turn(self.world, self.state.events, "s1", turn)
+        with self.assertRaises(ValueError):
+            commit_dialogue(self.state, turn, event)
+        self.assertEqual(len(self.state.events), 0)
+        self.assertEqual(len(self.state.observations), 0)
+        self.assertEqual(len(self.state.exposures), 0)
+
+    def test_non_dialogue_events_are_exposed_too(self):
+        event = Event(
+            event_id="joined",
+            type=EventType.PRESENCE_JOINED_CHANNEL,
+            occurred_at=self.world.clock,
+            scope=EventScope.CHANNEL,
+            actor_id="mizuki",
+            channel_id="nightcord",
+        )
+        commit_session_event(self.state, event)
+        # 判定跑在状态效果之后：瑞希这时已经在频道里了，所以自己观察到了。
+        self.assertEqual(
+            self.state.observations.observers_of("joined"), ("mizuki",)
+        )
+        self.assertEqual(
+            self.state.exposures.explain("joined", "ena").reason,
+            ExposureReason.NO_CHANNEL_ACCESS,
+        )
+
+    def test_joining_later_does_not_backfill_earlier_observations(self):
+        # 观察在提交那一刻一次性落地。后来才入频道的角色不会回溯拿到之前的
+        # 事件 —— 除非以后显式加一条 replay 规则，而本阶段没有。
+        self.world.place_character("ena", "city_streets")
+        _, event = self._commit()
+        self.assertEqual(self.state.observations.for_character("ena"), ())
+
+        self.world.place_character("ena", "kamiyama_high_gate")
+        self.assertEqual(self.state.observations.for_character("ena"), ())
+        self.assertEqual(len(self.state.histories["ena"]), 1)
+
+    def test_the_debug_path_explains_both_sides(self):
+        self.world.place_character("ena", "city_streets")
+        _, event = self._commit()
+        report = explain_event(self.state, event.event_id)
+        by_character = {d["character_id"]: d for d in report["decisions"]}
+        self.assertTrue(by_character["mizuki"]["observation_created"])
+        self.assertFalse(by_character["ena"]["observation_created"])
+        self.assertEqual(by_character["ena"]["reason"], "wrong_location")
+        self.assertEqual(
+            explain_character(self.state, event.event_id, "ena")["exposed"], False
+        )
+        self.assertIsNone(explain_character(self.state, event.event_id, "kanade"))
+
+    def test_debug_data_never_reaches_a_character_history(self):
+        self.world.place_character("ena", "city_streets")
+        self._commit()
+        for history in self.state.histories.values():
+            for item in history:
+                for leaked in ("wrong_location", "exposed", "reason", "event_id"):
+                    self.assertNotIn(leaked, item["content"])
+                self.assertEqual(set(item), {"role", "content"})
+
+    def test_serialization_exposes_both_logs(self):
+        _, event = self._commit()
+        payload = self.state.to_dict()
+        self.assertEqual(len(payload["observations"]["observations"]), 2)
+        self.assertEqual(len(payload["exposures"]["decisions"]), 2)
+        # 序列化结果是新的可变结构，改它影响不到权威状态
+        payload["observations"]["observations"].clear()
+        self.assertEqual(len(self.state.observations), 2)
+
+
+class LegacyRecordPathTests(unittest.TestCase):
+    """不经过世界模型的纯记录调用方仍然走旧的全知投影。"""
+
+    def test_record_turn_without_observations_keeps_the_legacy_fan_out(self):
+        state = SessionState(
+            session_id="s1", scene="gate", characters=["mizuki", "ena"]
+        )
+        state.initialize_runtime("放学后的校门口")
+        state.record_turn(_turn())
+        self.assertEqual(len(state.histories["ena"]), 2)
+        self.assertEqual(len(state.observations), 0)
