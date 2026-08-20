@@ -20,7 +20,6 @@
 #
 # ContentRegistry 是一份不可变快照。会话在 create() 时抓住一份，整个生命周期里
 # 都用同一份 —— 所以重载切换全局引用时，正在跑的会话不会读到撕裂的半新半旧配置。
-import ast
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,8 +31,10 @@ import yaml
 from dotenv import dotenv_values, load_dotenv
 
 from pns.models.channel import ChannelRegistry
+from pns.models.frozen import freeze_json_value, thaw_json_value
 from pns.models.location import LocationGraph
 from pns.world.channels import build_default_channel_registry
+from pns.world.data_module import DataModuleError, evaluate_data_source, require
 from pns.world.characters.registry import CharacterNotReadyError, load_pack_data
 from pns.world.context import render_world_context
 from pns.world.locations import build_default_location_graph
@@ -88,40 +89,31 @@ class ConfigValidationError(ValueError):
 # ── 数据文件读取 ──────────────────────────────────────────────────────────
 
 
-def _exec_data_module(path: Path) -> Dict:
-    """把一个纯数据 .py 文件读成命名空间。
+def _read_data_module(path: Path) -> Dict:
+    """把一个纯数据 .py 文件求值成命名空间。
 
-    禁用 builtins 执行：这些文件只允许出现字面量赋值。之所以不用 importlib，
-    是因为 import 缓存与 reload 会让"半新半旧"成为可能，而这里要的是
-    「读一份新的出来，读失败就整体作废」。
+    走 pns/world/data_module.py 的严格 AST 白名单：源码不会被执行，只有字面量
+    赋值能通过。之所以不用 importlib，是因为 import 缓存与 reload 会让
+    「半新半旧」成为可能，而这里要的是「读一份新的出来，读失败就整体作废」。
     """
     if not path.exists():
         raise ConfigValidationError(f"配置文件不存在：{path}")
-    source = path.read_text(encoding="utf-8")
     try:
-        tree = ast.parse(source, filename=str(path))
-    except SyntaxError as e:
-        raise ConfigValidationError(f"{path.name} 语法错误：{e}") from e
-    namespace: Dict = {}
-    try:
-        exec(compile(tree, str(path), "exec"), {"__builtins__": {}}, namespace)
-    except Exception as e:
-        raise ConfigValidationError(
-            f"{path.name} 执行失败（数据文件里只允许字面量）：{e}"
-        ) from e
-    return namespace
+        return evaluate_data_source(path.read_text(encoding="utf-8"), path.name)
+    except DataModuleError as e:
+        raise ConfigValidationError(str(e)) from e
 
 
 def _require(namespace: Dict, name: str, expected_type, path: Path):
-    if name not in namespace:
-        raise ConfigValidationError(f"{path.name} 里找不到顶层变量 {name}")
-    value = namespace[name]
-    if not isinstance(value, expected_type):
-        raise ConfigValidationError(
-            f"{path.name} 的 {name} 必须是 {expected_type.__name__}，"
-            f"实际是 {type(value).__name__}"
-        )
-    return value
+    try:
+        return require(namespace, name, expected_type, path.name)
+    except DataModuleError as e:
+        raise ConfigValidationError(str(e)) from e
+
+
+def _freeze(value, label: str):
+    """深冻结一份 JSON 数据；不是 JSON 安全的值直接判这次配置不合格。"""
+    return freeze_json_value(value, path=label, error=ConfigValidationError)
 
 
 def _load_settings(path: Path) -> Dict:
@@ -271,7 +263,10 @@ def _build_character(character_id: str, info: Dict, pack_dir: Path) -> Character
 
     return CharacterContent(
         character_id=character_id,
-        metadata=MappingProxyType(dict(info)),
+        # 角色元数据里有 list（别名、标签等），浅冻结挡不住 append —— 深冻。
+        metadata=freeze_json_value(
+            info, path=f"角色 {character_id} 的元数据", error=ConfigValidationError
+        ),
         system_prompt=system_prompt,
         prompt_error=prompt_error,
         compat_prompt=_read_optional(char_dir, info.get("prompt_file_compat")),
@@ -285,7 +280,13 @@ def _build_character(character_id: str, info: Dict, pack_dir: Path) -> Character
 
 @dataclass(frozen=True)
 class ContentRegistry:
-    """一次构建产出的完整内容快照。构建成功之后就是只读的。"""
+    """一次构建产出的完整内容快照。
+
+    构建成功之后是**深度**只读的：scenes / world_facts / settings / 角色元数据
+    全部走 freeze_json_value 递归冻结，嵌套的 dict 变只读视图、list 变 tuple。
+    浅冻结不够 —— `scenes["gate"]["gate_triggers"]["A"] = ...` 这种改法能绕过
+    一层 MappingProxyType，让一份本该稳定的快照在会话跑到一半时变形。
+    """
 
     revision: int
     built_at: str
@@ -298,11 +299,25 @@ class ContentRegistry:
     models: ModelSettings
 
     # ── 场景 ──────────────────────────────────────────────────────────
-    def scene(self, scene_id: Optional[str]) -> Mapping:
-        """取场景；未知 id 回落到默认场景（与重构前的行为一致）。"""
+    #
+    # 注册表内部存的是深冻结视图；对外一律交解冻副本。调用方拿到的东西改坏了
+    # 也只是改坏自己那份，动不到这份快照 —— 会话可以放心地把 scene 当成自己的
+    # 局部数据用，而不必约定"看看就好别改"。
+    def scene(self, scene_id: Optional[str]) -> Dict:
+        """取场景的可变副本；未知 id 回落到默认场景（与重构前的行为一致）。"""
         if scene_id in self.scenes:
-            return self.scenes[scene_id]
-        return self.scenes[self.default_scene]
+            return thaw_json_value(self.scenes[scene_id])
+        return thaw_json_value(self.scenes[self.default_scene])
+
+    def scenes_snapshot(self) -> Dict:
+        """全部场景的可变副本（World Editor 的 GET 用这个）。"""
+        return thaw_json_value(self.scenes)
+
+    def facts_snapshot(self) -> Dict:
+        return thaw_json_value(self.world_facts)
+
+    def settings_snapshot(self) -> Dict:
+        return thaw_json_value(self.settings)
 
     # ── 角色 ──────────────────────────────────────────────────────────
     def has_character(self, character_id: str) -> bool:
@@ -315,7 +330,7 @@ class ContentRegistry:
             raise ValueError(f"Character not found in registry: {character_id}") from None
 
     def character_metadata(self, character_id: str) -> Dict:
-        return dict(self.character(character_id).metadata)
+        return thaw_json_value(self.character(character_id).metadata)
 
     def character_name(self, character_id: str) -> str:
         return self.character(character_id).name
@@ -469,11 +484,11 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
     models = ModelSettings.from_env({**os.environ, **env_file})
     settings = _load_settings(CONFIG_PATH)
 
-    scenes_ns = _exec_data_module(SCENES_PATH)
+    scenes_ns = _read_data_module(SCENES_PATH)
     scenes = _require(scenes_ns, "SCENES", dict, SCENES_PATH)
     default_scene = _require(scenes_ns, "DEFAULT_SCENE", str, SCENES_PATH)
 
-    facts_ns = _exec_data_module(FACTS_PATH)
+    facts_ns = _read_data_module(FACTS_PATH)
     world_facts = _require(facts_ns, "WORLD_FACTS", dict, FACTS_PATH)
 
     # 结构对象属于 cold code，但每次构建都重新构造一遍：构造函数自带引用完整性
@@ -507,10 +522,10 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
         revision=revision,
         built_at=datetime.now().isoformat(timespec="seconds"),
         pack_name=pack["pack_name"],
-        scenes=MappingProxyType({k: MappingProxyType(dict(v)) for k, v in scenes.items()}),
+        scenes=_freeze(scenes, "SCENES"),
         default_scene=default_scene,
-        world_facts=MappingProxyType(dict(world_facts)),
+        world_facts=_freeze(world_facts, "WORLD_FACTS"),
         characters=MappingProxyType(characters),
-        settings=MappingProxyType(settings),
+        settings=_freeze(settings, "config.yaml"),
         models=models,
     )

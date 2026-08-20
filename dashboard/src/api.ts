@@ -132,12 +132,14 @@ export interface ReloadResult {
   revision: number;
   finished_at: string;
   stopped_sessions: string[];
+  pending_sessions: string[];
   error: string | null;
   registry: RegistrySummary | null;
 }
 
 export interface ReloadStatus {
   reloading: boolean;
+  stop_timeout: number;
   accepting_sessions: boolean;
   live_sessions: string[];
   registry: RegistrySummary | null;

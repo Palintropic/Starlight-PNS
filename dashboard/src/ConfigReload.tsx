@@ -1,8 +1,9 @@
 // dashboard/src/ConfigReload.tsx — 后台的「重新加载配置」按钮
 //
-// 点一次 = 关闭准入闸门 → 停掉所有正在跑的会话 → 从磁盘重建并校验全部配置 →
-// 成功就整体切换、失败就继续用上一份可用配置。改 Python 代码不走这里：那属于
-// cold update，必须停服替换文件再重启。
+// 点一次 = 关闭准入闸门 → 停掉所有正在跑的会话并等它们退出 → 从磁盘重建并校验
+// 全部配置 → 成功就整体切换、失败就继续用上一份可用配置。请求会一直挂到重载结束，
+// 所以按钮在这期间是禁用的。改 Python 代码不走这里：那属于 cold update，必须停服
+// 替换文件再重启。
 import { useEffect, useState } from 'react';
 import { fetchReloadStatus, reloadConfig, type ReloadStatus } from './api';
 
@@ -55,7 +56,7 @@ export default function ConfigReload() {
         disabled={outcome.kind === 'running'}
         title={
           live > 0
-            ? `当前有 ${live} 个会话在跑，重新加载会先把它们停掉`
+            ? `当前有 ${live} 个会话在跑，重新加载会先把它们停掉并等它们退出`
             : '从磁盘重新读取并校验全部配置'
         }
       >
@@ -65,7 +66,7 @@ export default function ConfigReload() {
         {outcome.kind === 'idle' && status?.registry
           ? `配置 rev.${status.registry.revision}`
           : null}
-        {outcome.kind === 'running' ? '停止会话并重建配置…' : null}
+        {outcome.kind === 'running' ? '停止会话、等待退出、重建配置…' : null}
         {outcome.kind === 'ok'
           ? `已生效 rev.${outcome.revision}` +
             (outcome.stopped.length ? ` · 停止了 ${outcome.stopped.length} 个会话` : '')

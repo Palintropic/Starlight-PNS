@@ -3,10 +3,14 @@
 # 只替换 scenes.py / facts.py 里目标变量的赋值节点，文件头注释和其余顶层语句原样保留。
 import ast
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import black
+
+from pns.world.data_module import DataModuleError, evaluate_data_source, require
 
 SCENES_PATH = Path(__file__).parent / "scenes.py"
 FACTS_PATH = Path(__file__).parent / "facts.py"
@@ -156,25 +160,32 @@ def format_source(code: str) -> str:
 
 
 def validate_module_source(source: str, expected_name: str) -> dict:
-    """校验一段源码语法合法、且顶层定义了 expected_name 且类型是 dict。
-    用受限命名空间执行（禁用 builtins），只允许字面量赋值，防止意外/恶意代码执行。"""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as e:
-        raise CodegenError(f"Python 语法错误：{e}") from e
+    """校验一段源码只含字面量赋值，且顶层定义了 dict 类型的 expected_name。
 
-    namespace: dict = {}
+    走 pns/world/data_module.py 的严格 AST 白名单求值器 —— 源码从头到尾不会被
+    执行，所以无限循环、函数调用、属性访问这类东西在被"跑一下试试"之前就被拒了。
+    这个接口没有鉴权，写的又是仓库里的 .py 文件，必须是这个强度。
+    """
     try:
-        exec(compile(tree, "<world-editor>", "exec"), {"__builtins__": {}}, namespace)
-    except Exception as e:
-        raise CodegenError(f"源码执行失败：{e}") from e
+        namespace = evaluate_data_source(source, "<world-editor>")
+        return require(namespace, expected_name, dict, "<world-editor>")
+    except DataModuleError as e:
+        raise CodegenError(str(e)) from e
 
-    if expected_name not in namespace:
-        raise CodegenError(f"源码里找不到变量 {expected_name}")
-    value = namespace[expected_name]
-    if not isinstance(value, dict):
-        raise CodegenError(f"{expected_name} 必须是一个 dict，实际是 {type(value).__name__}")
-    return value
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """同目录临时文件 + os.replace：要么是旧内容，要么是新内容，没有中间态。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def backup_file(path: Path) -> None:
@@ -198,25 +209,25 @@ def save_scenes(scenes: dict) -> None:
     new_source = build_scenes_source(scenes)
     validate_module_source(new_source, "SCENES")
     backup_file(SCENES_PATH)
-    SCENES_PATH.write_text(new_source, encoding="utf-8")
+    atomic_write_text(SCENES_PATH, new_source)
 
 
 def save_facts(facts: dict) -> None:
     new_source = build_facts_source(facts)
     validate_module_source(new_source, "WORLD_FACTS")
     backup_file(FACTS_PATH)
-    FACTS_PATH.write_text(new_source, encoding="utf-8")
+    atomic_write_text(FACTS_PATH, new_source)
 
 
 def save_scenes_source(source: str) -> None:
     validate_module_source(source, "SCENES")
     formatted = format_source(source)
     backup_file(SCENES_PATH)
-    SCENES_PATH.write_text(formatted, encoding="utf-8")
+    atomic_write_text(SCENES_PATH, formatted)
 
 
 def save_facts_source(source: str) -> None:
     validate_module_source(source, "WORLD_FACTS")
     formatted = format_source(source)
     backup_file(FACTS_PATH)
-    FACTS_PATH.write_text(formatted, encoding="utf-8")
+    atomic_write_text(FACTS_PATH, formatted)

@@ -9,8 +9,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import pns.logic.router as router_mod
-from oobe import PROVIDERS, write_env
-from pns.runtime.reload import BOUNDARY
+from oobe import ENV_FILE, PROVIDERS, write_env
+from pns.runtime.reload import BOUNDARY, write_and_reload
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -50,20 +50,31 @@ def post_config(payload: ConfigPayload):
 
     generator_model = payload.generator_model or payload.model
     evaluator_model = payload.evaluator_model or payload.model
-    write_env(
-        provider,
-        payload.model,
-        payload.api_key,
-        generator_model=generator_model,
-        evaluator_model=evaluator_model,
-    )
 
-    # .env 属于 reloadable configuration：写盘之后走一次完整重载让它生效。
-    result = BOUNDARY.reload(reason="provider 配置更新")
+    # .env 属于 reloadable configuration：写盘 + 重载作为一次事务，没生效就把
+    # .env 原子恢复成写之前的样子，免得下次重启读到一份没人验证过的配置。
+    result = write_and_reload(
+        BOUNDARY,
+        [ENV_FILE],
+        lambda: write_env(
+            provider,
+            payload.model,
+            payload.api_key,
+            generator_model=generator_model,
+            evaluator_model=evaluator_model,
+        ),
+        reason="provider 配置更新",
+    )
+    if result.status == "busy":
+        raise HTTPException(
+            409,
+            result.error or "已有一次配置重载正在进行，本次保存未写入任何内容。",
+        )
     if result.status == "failed":
         raise HTTPException(
             400,
-            f"配置已写入 .env，但重新加载失败，仍在使用上一份可用配置：{result.error}",
+            f"新配置没通过校验、未生效，.env 已回滚到保存前的内容，"
+            f"仍在使用上一份可用配置：{result.error}",
         )
     return {"configured": True, "reload": result.to_dict()}
 
