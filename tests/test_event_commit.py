@@ -628,6 +628,20 @@ class CommitTimeExposureTests(unittest.TestCase):
             ExposureReason.NO_CHANNEL_ACCESS,
         )
 
+    def test_time_advance_keeps_event_and_exposure_on_one_timestamp(self):
+        event = Event(
+            event_id="tick-1",
+            type=EventType.WORLD_TIME_ADVANCED,
+            occurred_at=self.world.clock,
+            scope=EventScope.PUBLIC,
+            payload={"minutes": 30},
+        )
+        commit_session_event(self.state, event)
+
+        self.assertEqual(self.world.clock, datetime(2026, 8, 20, 2, 30))
+        for decision in self.state.exposures.for_event("tick-1"):
+            self.assertEqual(decision.evaluated_at, event.occurred_at)
+
     def test_joining_later_does_not_backfill_earlier_observations(self):
         # 观察在提交那一刻一次性落地。后来才入频道的角色不会回溯拿到之前的
         # 事件 —— 除非以后显式加一条 replay 规则，而本阶段没有。

@@ -146,8 +146,10 @@ def evaluate_exposure(
         event_id=event.event_id,
         character_id=character_id,
         reason=reason,
-        # 模拟时钟，不是墙上时间：否则"相同输入产出相同决策"当场失效。
-        evaluated_at=world.clock,
+        # 判定属于这条事件，时间也必须跟事件走。提交状态效果可能已经推进
+        # world.clock；若读取当前时钟，world.time_advanced 会让同一条事件的
+        # Event 与 Exposure/Observation 出现两个时间口径。
+        evaluated_at=event.occurred_at,
         detail=detail,
     )
 

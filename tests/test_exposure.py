@@ -382,12 +382,13 @@ class DeterminismTests(unittest.TestCase):
             self.assertEqual(a.detail, b.detail)
             self.assertEqual(hash(a.reason), hash(b.reason))
 
-    def test_evaluation_time_is_the_simulation_clock(self):
+    def test_evaluation_time_is_the_event_time(self):
         world = _world()
-        self.assertEqual(evaluate_exposure(world, _event(), "ena").evaluated_at, CLOCK)
+        event = _event()
+        self.assertEqual(evaluate_exposure(world, event, "ena").evaluated_at, CLOCK)
         world.advance_time(30)
         self.assertEqual(
-            evaluate_exposure(world, _event(), "ena").evaluated_at, world.clock
+            evaluate_exposure(world, event, "ena").evaluated_at, event.occurred_at
         )
 
     def test_decision_order_is_stable(self):
@@ -486,10 +487,29 @@ class ExposureLogTests(unittest.TestCase):
         log = self._log()
         log._rollback_to(1)
         self.assertEqual(len(log), 1)
+        log._append(
+            ExposureDecision(
+                "e2", "ena", ExposureReason.NO_CHANNEL_ACCESS, CLOCK
+            )
+        )
+        self.assertEqual(len(log), 2)
         with self.assertRaises(ExposureError):
             log._rollback_to(5)
         with self.assertRaises(ExposureError):
             log._append("not a decision")
+
+    def test_duplicate_event_character_pair_is_rejected(self):
+        log = self._log()
+        duplicate = ExposureDecision(
+            "e1", "ena", ExposureReason.WRONG_LOCATION, CLOCK
+        )
+        with self.assertRaises(ExposureError):
+            log._append(duplicate)
+
+        payload = log.to_dict()
+        payload["decisions"].append(payload["decisions"][0])
+        with self.assertRaises(ExposureError):
+            ExposureLog.from_dict(payload)
 
     def test_round_trips_through_a_dict(self):
         log = self._log()

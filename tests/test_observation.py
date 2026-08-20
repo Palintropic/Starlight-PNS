@@ -282,10 +282,27 @@ class ObservationLogTests(unittest.TestCase):
         log = self._log()
         log._rollback_to(1)
         self.assertEqual(len(log), 1)
+        log._append(
+            Observation("e2", "ena", ExposureReason.CHANNEL_MEMBER, CLOCK)
+        )
+        self.assertEqual(len(log), 2)
         with self.assertRaises(ObservationError):
             log._rollback_to(9)
         with self.assertRaises(ObservationError):
             log._append("not an observation")
+
+    def test_duplicate_event_observer_pair_is_rejected(self):
+        log = self._log()
+        duplicate = Observation(
+            "e1", "ena", ExposureReason.SAME_LOCATION, CLOCK
+        )
+        with self.assertRaises(ObservationError):
+            log._append(duplicate)
+
+        payload = log.to_dict()
+        payload["observations"].append(payload["observations"][0])
+        with self.assertRaises(ObservationError):
+            ObservationLog.from_dict(payload)
 
     def test_round_trips_through_a_dict(self):
         log = self._log()

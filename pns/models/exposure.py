@@ -13,7 +13,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 from pns.models.frozen import freeze_json_value, thaw_json_value
 
@@ -146,6 +146,7 @@ class ExposureLog:
 
     def __init__(self, decisions: Iterable[ExposureDecision] = ()):
         self._decisions: List[ExposureDecision] = []
+        self._keys: Set[Tuple[str, str]] = set()
         for decision in decisions:
             self._append(decision)
 
@@ -153,7 +154,14 @@ class ExposureLog:
     def _append(self, decision: ExposureDecision) -> int:
         if not isinstance(decision, ExposureDecision):
             raise ExposureError("只能向曝光日志追加 ExposureDecision")
+        key = (decision.event_id, decision.character_id)
+        if key in self._keys:
+            raise ExposureError(
+                "曝光日志里已存在事件 "
+                f"'{decision.event_id}' 对角色 '{decision.character_id}' 的判定"
+            )
         self._decisions.append(decision)
+        self._keys.add(key)
         return len(self._decisions) - 1
 
     def _rollback_to(self, length: int) -> None:
@@ -162,6 +170,10 @@ class ExposureLog:
         if length < 0 or length > len(self._decisions):
             raise ExposureError(f"回滚长度越界: {length}")
         del self._decisions[length:]
+        self._keys = {
+            (decision.event_id, decision.character_id)
+            for decision in self._decisions
+        }
 
     # ── 读取 ────────────────────────────────────────────────────────────
     def __len__(self) -> int:

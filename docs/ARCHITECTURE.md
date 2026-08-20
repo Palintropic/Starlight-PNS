@@ -302,8 +302,10 @@ corresponds to a branch that actually exists in the rules; a code with no rule
 behind it would misreport coverage. `ExposureDecision` is a frozen, comparable
 record of one character/event judgement, and it derives `exposed` from the reason
 code rather than storing a separate boolean that could disagree with it. Its
-`evaluated_at` is the simulation clock, not wall time, so identical inputs
-produce identical decisions.
+`evaluated_at` is the event's simulation timestamp, not wall time or the mutable
+clock value after applying an event's state effect. This keeps an Event, its
+ExposureDecision records, and its Observations on one timestamp even when a
+`world.time_advanced` event moves the world clock during commit.
 
 `pns/runtime/exposure/rules.py` holds the judgement itself, as a pure function of
 event plus world snapshot. The order is fixed:
@@ -351,7 +353,10 @@ entry points instead. Candidates come from `WorldState.known_characters()`, neve
 the session roster: being selected into a session is not perception. The commit
 evaluates every candidate, records all decisions — allows and denies — in
 `SessionState.exposures`, and creates observations only for the allows in
-`SessionState.observations`. Both are covered by `atomic_commit()`.
+`SessionState.observations`. Both are covered by `atomic_commit()`. Both logs
+also enforce one record per event/character pair, including during
+deserialization, so retries or corrupt persisted data cannot make explanation
+lookups ambiguous.
 
 Because judgement happens at commit time against the world as it then was,
 a character who joins a channel later does not retroactively receive earlier

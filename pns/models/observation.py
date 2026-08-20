@@ -10,7 +10,7 @@
 # causation_id —— 一律不进观察：系统过程不等于角色经验。
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 from pns.models.exposure import ExposureReason
 from pns.models.frozen import freeze_json_value, thaw_json_value
@@ -107,6 +107,7 @@ class ObservationLog:
 
     def __init__(self, observations: Iterable[Observation] = ()):
         self._observations: List[Observation] = []
+        self._keys: Set[Tuple[str, str]] = set()
         for observation in observations:
             self._append(observation)
 
@@ -114,7 +115,15 @@ class ObservationLog:
     def _append(self, observation: Observation) -> int:
         if not isinstance(observation, Observation):
             raise ObservationError("只能向观察日志追加 Observation")
+        key = (observation.source_event_id, observation.observer_id)
+        if key in self._keys:
+            raise ObservationError(
+                "观察日志里已存在事件 "
+                f"'{observation.source_event_id}' 对角色 "
+                f"'{observation.observer_id}' 的观察"
+            )
         self._observations.append(observation)
+        self._keys.add(key)
         return len(self._observations) - 1
 
     def _rollback_to(self, length: int) -> None:
@@ -123,6 +132,10 @@ class ObservationLog:
         if length < 0 or length > len(self._observations):
             raise ObservationError(f"回滚长度越界: {length}")
         del self._observations[length:]
+        self._keys = {
+            (observation.source_event_id, observation.observer_id)
+            for observation in self._observations
+        }
 
     # ── 读取 ────────────────────────────────────────────────────────────
     def __len__(self) -> int:
