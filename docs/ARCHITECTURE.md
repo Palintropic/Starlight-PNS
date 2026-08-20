@@ -108,7 +108,16 @@ Starlight-PNS
 │   ├── WorldState
 │   ├── Location / LocationGraph
 │   ├── Channel / ChannelRegistry
+│   ├── Event / EventStore
+│   ├── Exposure / Observation
 │   └── DriftScore
+│
+├── pns/runtime/
+│   ├── SessionRuntime      (session orchestration)
+│   ├── event_commit        (the commit boundary)
+│   ├── exposure/           (eligibility + observation projection)
+│   ├── content_registry    (the single configuration build entry point)
+│   └── reload              (the configuration reload boundary)
 │
 ├── pns/interfaces/
 │   ├── simulation
@@ -406,6 +415,62 @@ placed somewhere arbitrary.
 and nothing else. The rule is one-directional: structured state determines text,
 and text never becomes state. `get_character_system()` still accepts a legacy
 scene dict for un-migrated callers, but the runtime passes the live `WorldState`.
+
+### Configuration reload boundary
+
+Everything the runtime reads is exactly one of three things, and the boundary
+between them is the point of this layer.
+
+**Reloadable configuration** is authored data that can be re-read from disk
+without re-executing any Python: the `SCENES` / `DEFAULT_SCENE` literals in
+`pns/world/scenes.py`, the `WORLD_FACTS` literal in `pns/world/facts.py`,
+`config.yaml`, `.env`, and everything under `packs/<active_pack>/`.
+`pns/runtime/content_registry.py` is the single entry point that turns those
+files into a `ContentRegistry` — an immutable snapshot holding scenes, facts,
+character prompts, and provider settings.
+
+**Cold update** is anything that only takes effect through `import`: Python
+code, domain models, schemas, runtime algorithms, and the structural definitions
+in `locations.py`, `channels.py`, and `SCENE_WORLD_MAP`. Changing those requires
+stopping the service, replacing the files, and restarting the process. The
+runtime never calls `importlib.reload`; a test enforces that by walking the AST
+of every module under `pns/`.
+
+**Runtime authoritative state** is world time, locations, channel membership,
+events, observations, relationships, and memory. `ContentRegistry` carries no
+field for any of them and exposes no method that writes one. Configuration feeds
+the *initial* `WorldState` of a session exactly once, at session creation, and
+there is no reverse channel: a reload cannot reach into a `WorldState` that
+already exists.
+
+`pns/runtime/reload.py` performs one reload as a fixed sequence:
+
+```text
+acquire the reload mutex (non-blocking — a second reload is refused, not queued)
+        ↓
+close the admission gate (no new sessions)
+        ↓
+stop every live session at its next turn boundary
+        ↓
+build and validate a whole new ContentRegistry from disk
+        ↓
+success → swap the reference atomically
+failure → keep the last-known-good snapshot untouched
+        ↓
+reopen the gate (service is usable either way)
+```
+
+Two properties make this safe without any version negotiation. First, a session
+captures its `ContentRegistry` at creation and holds that same snapshot for its
+whole life, so swapping the global reference can never give a running session a
+half-old, half-new view. Second, sessions stop at a turn boundary rather than
+mid-turn, so the commit boundary stays intact — a turn either commits whole or
+never happened.
+
+This is deliberately not hot-swapping. There is no file watching, no rolling
+update, no parallel config versions, no distributed sync, and no database
+version system. An operator clicks a button, running work stops, configuration
+is rebuilt, and work resumes.
 
 ---
 
@@ -1183,11 +1248,13 @@ Recommended order:
         ↓
 6. Introduce Exposure
         ↓
-7. Introduce persistent scheduling
+7. Draw the configuration reload boundary
         ↓
-8. Introduce Agency / Planner
+8. Introduce persistent scheduling
         ↓
-9. Introduce subjective persistent Memory
+9. Introduce Agency / Planner
+        ↓
+10. Introduce subjective persistent Memory
 ```
 
 Memory should not be implemented first simply because it is visible to users.

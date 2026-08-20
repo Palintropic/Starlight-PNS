@@ -25,7 +25,7 @@
 }
 ```
 
-所有字段可省略，缺省值：`scene` = 当前 `DEFAULT_SCENE`，`max_turns=8`，`model` = 环境变量 `GENERATOR_MODEL`（再回退到 `MODEL`），`max_tokens=1024`，`temperature=0.85`，`api_delay=1.0`。Router 评估模型独立读取 `EVALUATOR_MODEL`（再回退到 `MODEL`）。
+所有字段可省略，缺省值：`scene` = 当前 `DEFAULT_SCENE`，`max_turns=8`，`model` = `GENERATOR_MODEL`（再回退到 `MODEL`），`max_tokens=1024`，`temperature=0.85`，`api_delay=1.0`。Router 评估模型独立读取 `EVALUATOR_MODEL`（再回退到 `MODEL`）。这些缺省值取自会话开始那一刻生效的配置快照，并在整个会话生命周期里保持不变——中途重载配置不会改变已经开跑的会话。
 
 > **`scene` 是兼容字段。** 请求里的 `scene` 只用来初始化世界状态：`pns/world/scene_compat.py`
 > 里的 `SCENE_WORLD_MAP` 把它显式映射成角色所在的 `location_id` 和线上频道；初始模拟时间与
@@ -43,8 +43,9 @@
 | `generating` | 角色开始生成这一轮台词前 | `turn`、`character`（`mizuki`/`ena`）、`char_name` |
 | `judging` | 台词生成完毕，Router 开始判分前 | `turn`、`character`、`char_name` |
 | `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version`、`generator_provider`、`generator_model`、`evaluator_provider`、`evaluator_model`、`event_id` |
-| `error` | 角色调用失败／没有 API Key | `turn`（可能没有）、`message` |
-| `done` | 全部轮次结束 | `session_id`、`stats`（`total_turns`/`ooc_count`/`corrections`/`avg_score`/`max_score`）、`history_file` |
+| `error` | 角色调用失败／没有 API Key／重载期间被拒绝开新会话 | `turn`（可能没有）、`message` |
+| `stopped` | 配置重载要求停止本会话，在轮次边界收到 | `session_id`、`turn`（本该开始的那一轮）、`reason` |
+| `done` | 全部轮次结束，或被停止后收尾 | `session_id`、`stats`（`total_turns`/`ooc_count`/`corrections`/`avg_score`/`max_score`）、`history_file` |
 
 `start` 的 `scene` 块字段不变，但 `time` / `location` 现在是当前 `WorldState` 的投影，
 而不是从 `SCENES` 里直接抄出来的静态文本。绝大多数场景两者结果一致；`nightcord` 会出现差异，
@@ -88,6 +89,10 @@
 > `event_id` 指回 `SessionState.events` 里那条事件，用于把一条对白追溯到"世界里发生了什么"。
 
 > `turn` 消息里字段名是 `score`/`is_ooc`（兼容旧前端），而落盘记录使用 `drift_score`/`confidence`。`drift_score` 会被服务端规范为“模型给出的总分”和“七维最高分”中的较高者；任一维度达到 `OOC_THRESHOLD`（默认5）都会使该轮成为OOC。若七维返回不完整，`dimensions_complete=false`，服务端会强制 `needs_human_review=true`。
+
+`stopped` 是附加消息类型，只在有人点了后台的「重新加载配置」时出现（见 4.4）。它出现在两轮之间，
+不会打断已经开始的一轮：已提交的轮次都是完整的，之后照常发 `done` 并写归档，所以只认
+`turn`/`done` 的旧客户端行为不变。重载期间新建的会话会在 `start` 之前就收到一条 `error` 并关闭。
 
 `session_id` 由时间、场景 ID 和随机唯一后缀组成；同一次运行里 markdown 归档（`history/<session_id>.md`）和 `data/drift_scores.jsonl` 里的记录共用这个 ID，方便互相对照。
 
@@ -155,6 +160,8 @@
 ---
 
 ## 3. World Editor
+
+保存接口写盘之后会走一次配置重载（4.4），所以返回的内容就是新生效的配置。如果新内容写进磁盘了但没通过整体校验（例如新增场景在 `SCENE_WORLD_MAP` 里没有映射），接口返回 400，磁盘上是新的、运行中仍是上一份可用配置——按报错提示改完再存一次，或者按 cold update 流程补映射后重启。
 
 > **场景相关接口（3.1 / 3.2）是兼容接口。** 场景是作者写死的叙事 fixture，只作为世界状态的
 > 初始化输入保留；它不是世界模型。新建或改动场景后，还需要在 `pns/world/scene_compat.py` 的
@@ -253,7 +260,7 @@
 
 ## 4. 其余已有接口
 
-### `GET /api/config`
+### 4.1 `GET /api/config`
 
 ```json
 {
@@ -262,11 +269,14 @@
   "generator_model": "gemini-3.1-flash-lite",
   "evaluator_model": "gemini-3.1-pro",
   "api_format": "openai",
-  "default_scene": "gate"
+  "default_scene": "gate",
+  "config_revision": 3
 }
 ```
 
-### `GET /api/config/providers`
+`config_revision` 是当前生效的配置快照版本号，每成功重载一次 +1（见 4.4）。
+
+### 4.2 `GET /api/config/providers`
 
 返回 `oobe.PROVIDERS` 里每个 provider 的展示名和可选模型列表，供 Setup Wizard 的下拉框使用：
 
@@ -277,9 +287,59 @@
 }
 ```
 
-### `POST /api/config`
+### 4.3 `POST /api/config`
 
-写入 `.env`（`provider_key`/`model`/`generator_model`/`evaluator_model`/`api_key`），成功返回 `{"configured": true}`；`generator_model` 和 `evaluator_model` 对旧客户端可省略，此时都回退到 `model`。`provider_key` 不在 `PROVIDERS` 里或必填字段为空时返回 400。
+写入 `.env`（`provider_key`/`model`/`generator_model`/`evaluator_model`/`api_key`），成功返回 `{"configured": true, "reload": {...}}`；`generator_model` 和 `evaluator_model` 对旧客户端可省略，此时都回退到 `model`。`provider_key` 不在 `PROVIDERS` 里或必填字段为空时返回 400。
+
+`.env` 属于可重载配置，所以写盘后会自动走一次完整重载（4.4 描述的那套流程，包括停掉正在跑的会话）让它生效。重载失败时返回 400，`.env` 已写入但仍在使用上一份可用配置。
+
+### 4.4 配置重载 `GET/POST /api/config/reload`
+
+`GET` 返回当前状态：
+
+```json
+{
+  "reloading": false,
+  "accepting_sessions": true,
+  "live_sessions": ["20260821_013648_gate_a1b2c3d4e5f6"],
+  "registry": {
+    "revision": 3,
+    "built_at": "2026-08-21T01:36:48",
+    "pack": "pjsk",
+    "scene_count": 4,
+    "default_scene": "gate",
+    "fact_count": 27,
+    "character_count": 20,
+    "ready_characters": ["airi", "ena", "kanade", "mafuyu", "minori", "mizuki"]
+  },
+  "last_reload": { "status": "ok", "revision": 3, "...": "同下" }
+}
+```
+
+`POST` 触发一次重载（后台「重新加载配置」按钮）。流程是固定的：**关闭准入闸门 → 停止所有正在跑的会话 → 从磁盘完整重建并校验配置 → 成功则原子替换、失败则保留上一份可用配置 → 重新打开闸门**。
+
+成功返回 200：
+
+```json
+{
+  "status": "ok",
+  "revision": 4,
+  "finished_at": "2026-08-21T01:40:12",
+  "stopped_sessions": ["20260821_013648_gate_a1b2c3d4e5f6"],
+  "error": null,
+  "registry": { "revision": 4, "...": "同上" }
+}
+```
+
+| 状态 | HTTP | 含义 |
+|---|---|---|
+| `ok` | 200 | 新配置已生效，`revision` 前进；`stopped_sessions` 是被停掉的会话 |
+| `failed` | 400 | 新配置没通过校验，**未生效**；仍在使用上一份可用配置，服务已恢复可用，`revision` 不变 |
+| `busy` | 409 | 已有一次重载在进行；不排队、不并发执行第二次 |
+
+被停掉的会话在**轮次边界**收尾：WebSocket 上先收到一条 `{"type": "stopped", "session_id", "turn", "reason"}`，再照常收 `done`。已提交的轮次都是完整的，不会留下半条事件。重载期间新建会话会被拒绝，`/ws/run` 返回一条 `{"type": "error"}` 后关闭。
+
+**哪些东西这个按钮改不了**：Python 代码、领域模型、schema、运行算法，以及 `pns/world/locations.py`、`channels.py`、`scene_compat.py` 里的结构定义 —— 这些属于 cold update，必须停服替换文件再重启进程。世界时间、位置、频道成员、事件、观察、关系和记忆属于运行时权威状态，任何配置接口都改不了它们，只能走 WorldState / Event 边界。
 
 ---
 
@@ -292,9 +352,10 @@
 | `history/<session_id>.md` | `/ws/run` 一次完整运行结束后写入 | 人类可读的对话归档，文件名就是 `session_id` |
 | `pns/world/scenes.py.bak` | `POST /api/world/scenes` 或 `/api/world/scenes/source` 写盘前 | 覆盖式单份备份（不是历史版本链，每次保存都会覆盖上一份） |
 | `pns/world/facts.py.bak` | `POST /api/world/facts` 或 `/api/world/facts/source` 写盘前 | 同上 |
+| `.env` | `POST /api/config` 写入 | provider / 模型 / API Key，属于可重载配置 |
 
 ---
 
 ## 6. 鉴权
 
-目前没有。所有接口对能访问到这个端口的任何请求方开放，包括会直接改写仓库里 `.py` 源码的 World Editor 写接口。部署到本机/内网之外之前必须补上这一层。
+目前没有。所有接口对能访问到这个端口的任何请求方开放，包括会直接改写仓库里 `.py` 源码的 World Editor 写接口，以及会停掉所有正在跑的会话的 `POST /api/config/reload`。部署到本机/内网之外之前必须补上这一层。
