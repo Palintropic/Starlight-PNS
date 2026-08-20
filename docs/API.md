@@ -25,7 +25,7 @@
 }
 ```
 
-所有字段可省略，缺省值：`scene` = 当前 `DEFAULT_SCENE`，`max_turns=8`，`model` = 环境变量 `MODEL`，`max_tokens=1024`，`temperature=0.85`，`api_delay=1.0`。
+所有字段可省略，缺省值：`scene` = 当前 `DEFAULT_SCENE`，`max_turns=8`，`model` = 环境变量 `GENERATOR_MODEL`（再回退到 `MODEL`），`max_tokens=1024`，`temperature=0.85`，`api_delay=1.0`。Router 评估模型独立读取 `EVALUATOR_MODEL`（再回退到 `MODEL`）。
 
 **服务端 → 客户端**
 
@@ -34,7 +34,7 @@
 | `start` | 收到参数、确认场景后 | `session_id`、`scene`（`id`/`label`/`trigger`/`time`/`location`）、`max_turns`、`model` |
 | `generating` | 角色开始生成这一轮台词前 | `turn`、`character`（`mizuki`/`ena`）、`char_name` |
 | `judging` | 台词生成完毕，Router 开始判分前 | `turn`、`character`、`char_name` |
-| `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version` |
+| `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version`、`generator_provider`、`generator_model`、`evaluator_provider`、`evaluator_model` |
 | `error` | 角色调用失败／没有 API Key | `turn`（可能没有）、`message` |
 | `done` | 全部轮次结束 | `session_id`、`stats`（`total_turns`/`ooc_count`/`corrections`/`avg_score`/`max_score`）、`history_file` |
 
@@ -69,7 +69,7 @@
 
 > `turn` 消息里字段名是 `score`/`is_ooc`（兼容旧前端），而落盘记录使用 `drift_score`/`confidence`。`drift_score` 会被服务端规范为“模型给出的总分”和“七维最高分”中的较高者；任一维度达到 `OOC_THRESHOLD`（默认5）都会使该轮成为OOC。若七维返回不完整，`dimensions_complete=false`，服务端会强制 `needs_human_review=true`。
 
-`session_id` 格式固定为 `{YYYYMMDD_HHMMSS}_{scene_id}`，同一次运行里 markdown 归档（`history/<session_id>.md`）和 `data/drift_scores.jsonl` 里的记录共用这个 ID，方便互相对照。
+`session_id` 由时间、场景 ID 和随机唯一后缀组成；同一次运行里 markdown 归档（`history/<session_id>.md`）和 `data/drift_scores.jsonl` 里的记录共用这个 ID，方便互相对照。
 
 ---
 
@@ -232,7 +232,14 @@
 ### `GET /api/config`
 
 ```json
-{ "has_key": true, "model": "gemini-3.1-flash-lite", "api_format": "openai", "default_scene": "gate" }
+{
+  "has_key": true,
+  "model": "gemini-3.1-flash-lite",
+  "generator_model": "gemini-3.1-flash-lite",
+  "evaluator_model": "gemini-3.1-pro",
+  "api_format": "openai",
+  "default_scene": "gate"
+}
 ```
 
 ### `GET /api/config/providers`
@@ -248,7 +255,7 @@
 
 ### `POST /api/config`
 
-写入 `.env`（`provider_key`/`model`/`api_key`），成功返回 `{"configured": true}`；`provider_key` 不在 `PROVIDERS` 里或字段为空时返回 400。
+写入 `.env`（`provider_key`/`model`/`generator_model`/`evaluator_model`/`api_key`），成功返回 `{"configured": true}`；`generator_model` 和 `evaluator_model` 对旧客户端可省略，此时都回退到 `model`。`provider_key` 不在 `PROVIDERS` 里或必填字段为空时返回 400。
 
 ---
 

@@ -138,12 +138,22 @@ def input_api_key(key_name: str) -> str:
         print("  API Key 不能为空")
 
 
-def write_env(provider: dict, model: str, api_key: str):
+def write_env(
+    provider: dict,
+    model: str,
+    api_key: str,
+    generator_model: str = None,
+    evaluator_model: str = None,
+):
+    generator_model = generator_model or model
+    evaluator_model = evaluator_model or model
     lines = [
         f"PROVIDER={provider['name']}",
         f"API_FORMAT={provider['format']}",
         f"BASE_URL={provider['base_url']}",
         f"MODEL={model}",
+        f"GENERATOR_MODEL={generator_model}",
+        f"EVALUATOR_MODEL={evaluator_model}",
         f"{provider['key_name']}={api_key}",
         "PNS_API_KEY_NAME=" + provider["key_name"],
     ]
@@ -159,6 +169,7 @@ def write_env(provider: dict, model: str, api_key: str):
                     existing[k.strip()] = v.strip()
 
     managed_keys = {"PROVIDER", "API_FORMAT", "BASE_URL", "MODEL",
+                    "GENERATOR_MODEL", "EVALUATOR_MODEL",
                     provider["key_name"], "PNS_API_KEY_NAME"}
 
     for k, v in existing.items():
@@ -173,15 +184,24 @@ def main():
     print_banner()
 
     provider = choose_provider()
-    model = choose_model(provider)
+    generator_model = choose_model(provider)
+    print("\n  选择 Router 评估模型：")
+    evaluator_model = choose_model(provider)
     api_key = input_api_key(provider["key_name"])
 
-    write_env(provider, model, api_key)
+    write_env(
+        provider,
+        generator_model,
+        api_key,
+        generator_model=generator_model,
+        evaluator_model=evaluator_model,
+    )
 
     print()
     print("  ✅ 配置已保存到 .env")
     print(f"     提供商：{provider['name']}")
-    print(f"     模型：  {model}")
+    print(f"     生成模型：{generator_model}")
+    print(f"     评估模型：{evaluator_model}")
     print(f"     格式：  {provider['format']}")
     print()
     print("  现在可以运行：python scripts/server.py")
