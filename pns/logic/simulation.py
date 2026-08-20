@@ -1,7 +1,9 @@
 # pns/logic/simulation.py — 角色调用 / Router 判分 / 归档写盘
-# 纯业务逻辑，不涉及 WebSocket 或任何具体传输层；调用方（目前是
-# pns.interfaces.simulate 的 /ws/run）只负责把这里的结果转成协议消息。
+# 纯业务逻辑，不涉及 WebSocket 或任何具体传输层；调用方是
+# pns.runtime.session_runtime.SessionRuntime，它负责编排，
+# 结果最终由 pns.interfaces.simulate 转成协议消息发给客户端。
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -81,6 +83,11 @@ async def judge_async(
             correction_applied=correction_applied,
         ),
     )
+
+
+def append_drift_record(path: Path, record: dict) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def save_history(history_dir: Path, session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
