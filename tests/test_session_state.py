@@ -112,6 +112,28 @@ class SessionStateTests(unittest.TestCase):
             self.state.record_turn(skipped_number)
         self.assertEqual(self.state.turns, [])
 
+    def test_legacy_add_turn_works_without_live_runtime_state(self):
+        state = SessionState(
+            session_id="persisted-session",
+            scene="gate",
+            characters=["mizuki", "ena"],
+        )
+        turn = Turn(
+            turn_number=1,
+            character="mizuki",
+            prompt="prompt",
+            response="reply",
+            timestamp="now",
+            score=2,
+        )
+
+        state.add_turn(turn)
+
+        self.assertEqual(state.turns, [turn])
+        self.assertEqual(state.histories, {})
+        self.assertEqual(state.pending_corrections, {})
+        self.assertEqual(state.final_stats()["total_turns"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
