@@ -90,6 +90,7 @@ Starlight-PNS
 │   └── character content
 │
 ├── pns/world/
+│   ├── data_module        (strict AST whitelist for data files)
 │   ├── locations          (seeded location graph)
 │   ├── channels           (seeded online channels)
 │   ├── context            (WorldState -> prompt projection)
@@ -429,6 +430,18 @@ without re-executing any Python: the `SCENES` / `DEFAULT_SCENE` literals in
 files into a `ContentRegistry` — an immutable snapshot holding scenes, facts,
 character prompts, and provider settings.
 
+The `.py` data files are read by `pns/world/data_module.py`, a strict AST
+whitelist evaluator, not by `exec`. Only top-level `NAME = <literal>` assignments
+survive; calls, attribute access, subscripts, imports, comprehensions, loops,
+branches, and definitions are all rejected before anything is evaluated, so a
+`while True:` in a saved file fails fast instead of hanging the process. The
+World Editor's write endpoints share that evaluator — they have no
+authentication in front of them and they write `.py` files into the repository,
+so a weaker check there would be the weakest link. The snapshot itself is deep
+frozen (`pns/models/frozen.py`): nested dicts become read-only views and lists
+become tuples, so `scenes["gate"]["gate_triggers"]["A"] = ...` cannot quietly
+reshape a live configuration. Readers get thawed copies.
+
 **Cold update** is anything that only takes effect through `import`: Python
 code, domain models, schemas, runtime algorithms, and the structural definitions
 in `locations.py`, `channels.py`, and `SCENE_WORLD_MAP`. Changing those requires
@@ -450,7 +463,10 @@ acquire the reload mutex (non-blocking — a second reload is refused, not queue
         ↓
 close the admission gate (no new sessions)
         ↓
-stop every live session at its next turn boundary
+stop every live session, then WAIT until every one of them has exited
+        ↓                                    │
+        │                                    └── timeout → fail, do not build,
+        │                                        do not swap, keep the old config
         ↓
 build and validate a whole new ContentRegistry from disk
         ↓
@@ -460,12 +476,30 @@ failure → keep the last-known-good snapshot untouched
 reopen the gate (service is usable either way)
 ```
 
-Two properties make this safe without any version negotiation. First, a session
+The wait is load-bearing, not a safety margin. Without it the swap would land
+while old-configuration sessions were still running, and "switch the whole
+configuration at once" would be false: two configurations would be live at the
+same time. If the sessions have not exited within `stop_timeout`, the reload
+fails and nothing is swapped — running on the old configuration is strictly
+better than running on two.
+
+Two further properties keep the wait short and the state clean. A session
 captures its `ContentRegistry` at creation and holds that same snapshot for its
-whole life, so swapping the global reference can never give a running session a
-half-old, half-new view. Second, sessions stop at a turn boundary rather than
-mid-turn, so the commit boundary stays intact — a turn either commits whole or
-never happened.
+whole life, so it never observes a half-old, half-new view even in the window
+before it exits. And sessions stop at a turn boundary rather than mid-turn, so
+the commit boundary stays intact — a turn either commits whole or never
+happened.
+
+Writing configuration is a file-level transaction. `ConfigBoundary.write_and_reload()`
+takes the reload mutex, records the current bytes of every file it is about to
+touch, writes the candidate, reloads, and restores the originals with
+`os.replace` if the reload did not succeed. Without that, a save that fails
+validation would leave a broken file on disk: the running process would look
+healthy on its last-known-good snapshot and then refuse to start on the next
+restart. Saves and reloads share one mutex, so they cannot interleave — if they
+could, a concurrent reload might read this save's candidate and swap it in while
+the save believed it had rolled back. A save that cannot take the mutex is
+refused as `busy` without writing a single byte.
 
 This is deliberately not hot-swapping. There is no file watching, no rolling
 update, no parallel config versions, no distributed sync, and no database
