@@ -42,7 +42,7 @@
 | `start` | 收到参数、确认场景后 | `session_id`、`scene`（`id`/`label`/`trigger`/`time`/`location`）、`world`、`max_turns`、`model` |
 | `generating` | 角色开始生成这一轮台词前 | `turn`、`character`（`mizuki`/`ena`）、`char_name` |
 | `judging` | 台词生成完毕，Router 开始判分前 | `turn`、`character`、`char_name` |
-| `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version`、`generator_provider`、`generator_model`、`evaluator_provider`、`evaluator_model` |
+| `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version`、`generator_provider`、`generator_model`、`evaluator_provider`、`evaluator_model`、`event_id` |
 | `error` | 角色调用失败／没有 API Key | `turn`（可能没有）、`message` |
 | `done` | 全部轮次结束 | `session_id`、`stats`（`total_turns`/`ooc_count`/`corrections`/`avg_score`/`max_score`）、`history_file` |
 
@@ -79,9 +79,13 @@
   "dimensions_complete": true,
   "methodology_version": "v3_contextual_multidimensional",
   "correction": null,
-  "needs_human_review": false
+  "needs_human_review": false,
+  "event_id": "20260820_020000_nightcord_ab12cd34ef56:t3:dialogue"
 }
 ```
+
+> `turn` 消息是投影，不是权威存储：它由已提交的世界历史事件加上这一轮的生成记录导出。
+> `event_id` 指回 `SessionState.events` 里那条事件，用于把一条对白追溯到"世界里发生了什么"。
 
 > `turn` 消息里字段名是 `score`/`is_ooc`（兼容旧前端），而落盘记录使用 `drift_score`/`confidence`。`drift_score` 会被服务端规范为“模型给出的总分”和“七维最高分”中的较高者；任一维度达到 `OOC_THRESHOLD`（默认5）都会使该轮成为OOC。若七维返回不完整，`dimensions_complete=false`，服务端会强制 `needs_human_review=true`。
 

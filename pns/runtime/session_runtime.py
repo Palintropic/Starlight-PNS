@@ -20,6 +20,11 @@ from pns.logic.simulation import (
 )
 from pns.models.session import SessionState, Turn
 from pns.models.world_state import WorldState
+from pns.runtime.event_commit import (
+    commit_dialogue,
+    dialogue_event_for_turn,
+    project_turn_message,
+)
 from pns.world.characters import registry as character_registry
 from pns.world.scene_compat import SceneMappingError, build_initial_world_state
 
@@ -282,8 +287,21 @@ class SessionRuntime:
                 yield {"type": "error", "turn": turn, "message": message}
                 break
 
-            self.state.record_turn(completed_turn)
-            yield {"type": "turn", **completed_turn.to_wire_dict()}
+            # 到这里这次输出才算被接受：生成成功、判分成功、审计落盘成功。
+            # 只有被接受的结果进世界历史；上面任何一步失败的候选输出都已经
+            # break 掉了，不会走到这里。
+            try:
+                dialogue_event = dialogue_event_for_turn(
+                    world, self.state.events, self.session_id, completed_turn
+                )
+                committed = commit_dialogue(self.state, completed_turn, dialogue_event)
+            except Exception as e:
+                message = f"事件提交失败: {e}"
+                self.state.record_error(message)
+                yield {"type": "error", "turn": turn, "message": message}
+                break
+
+            yield project_turn_message(committed, completed_turn)
 
             await asyncio.sleep(self.api_delay)
             self.state.advance_character()

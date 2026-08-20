@@ -161,6 +161,7 @@ committed to `SessionState` and published over the WebSocket.
 - lifecycle and latest runtime error
 - statistics derived from completed turns
 - the session's single typed `WorldState`
+- the session's single ordered committed event history
 - metadata
 
 `SessionState.world_state` is a typed `WorldState`, attached exactly once by
@@ -201,6 +202,81 @@ present in the channel at the same time.
 
 `pns/world/locations.py` and `pns/world/channels.py` seed only the locations and
 channels the current fixtures require. They are not an attempt at a complete map.
+
+### `Event` and committed world history
+
+`pns/models/event.py` defines `Event`, the record of an accepted occurrence:
+stable `event_id`, `EventType`, simulation timestamp, actor, `EventScope`,
+optional participants, optional physical `location_id`, optional `channel_id`,
+validated payload, provenance metadata, and `causation_id`/`correlation_id`.
+
+`EventScope` is a propagation boundary, not a transport. An event is not a
+WebSocket message, and scope does not decide who actually perceived something —
+that is Exposure, and it does not exist yet. The scopes are `private`,
+`participant`, `channel`, `location`, and `public` (`ambient` parses as the same
+scope).
+
+`EventType` is deliberately small and holds only types the runtime can validate
+and apply: `dialogue.spoken`, `message.sent`, `presence.joined_channel`,
+`presence.left_channel`, `world.time_advanced`, `character.location_changed`.
+Names without semantics do not belong in it.
+
+Events are effectively immutable. `payload` and `provenance` are deep-frozen at
+construction and rejected outright if they contain anything that is not
+JSON-safe, so a committed event cannot be edited through a reference a caller
+kept. `to_dict()` returns a fresh mutable structure instead.
+
+`pns/models/event_store.py` defines `EventStore`, the session's single
+append-only objective world history, owned by `SessionState.events`. It rejects
+duplicate event IDs and rejects events whose simulation time precedes the last
+committed event; equal timestamps are allowed and keep append order. Ordering is
+therefore deterministic without a re-sort, which matters because the world clock
+does not yet advance during a session.
+
+The store's public surface is read-only. Its internal append/rollback operations
+are reserved for the runtime commit transaction, so callers cannot bypass world
+validation or delete committed history through `SessionState.events`. Serialized
+sequence numbers are validated when history is restored rather than silently
+renumbered.
+
+World history is objective and is never copied into character histories. Events
+are not memory: what a character perceived and retained is a separate stream
+that this phase does not build.
+
+### The commit boundary
+
+`pns/runtime/event_commit.py` is the only place in the runtime where an event is
+accepted and allowed to change the world. It runs in two deliberate stages:
+
+1. validate only — identifier existence against `WorldState`, scope fields, and
+   whether the store can accept the event; event time must match the authoritative
+   world clock, and state-transition events must describe a transition that can
+   actually occur; nothing is mutated;
+2. mutate only — apply the type's declared state effect, then append the event.
+
+Any exception in the second stage restores the world's mutable state and rolls
+the store back, so "world changed but no event recorded" and "event recorded but
+world unchanged" are both unreachable. `SessionState.atomic_commit()` widens the
+same transaction to cover turns, per-character histories, and pending
+corrections.
+
+A payload never mutates `WorldState` on its own. Each event type has a written
+state effect, and arbitrary payload keys reach nothing. Dialogue and message
+events deliberately have no state effect at all: speech is an occurrence, not a
+state change.
+
+Only accepted results reach this boundary. A failed generation, a failed Router
+evaluation, and a failed drift-audit write all end the turn before commit, so
+the candidate output stays in audit and error history and never becomes world
+truth. The Router remains an integrity evaluator: a high drift score queues a
+correction for the next turn, it does not retract a line the character already
+spoke.
+
+`Turn` remains the generation audit record and is committed together with its
+dialogue event, so the two cannot diverge. The legacy `turn` WebSocket message
+is projected from the committed event plus that generation record and carries an
+additional `event_id` linking it back to world history. Markdown history and
+WebSocket messages stay projections; neither is canonical storage.
 
 ### Scene compatibility boundary
 

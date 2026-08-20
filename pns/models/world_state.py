@@ -145,6 +145,18 @@ class WorldState:
             raise WorldStateError(f"未知的 channel_id: {channel_id}")
         return sorted(self.channel_members.get(channel_id, set()))
 
+    # ── 角色 ────────────────────────────────────────────────────────────
+    def known_characters(self) -> List[str]:
+        """世界当前认识的角色：有物理位置的，或挂在任一频道上的。
+
+        事件提交用它判断"这个角色到底存不存在"，因此这里是唯一的判定口径，
+        不去读会话的角色列表 —— 世界不该反过来依赖某个会话选了谁。
+        """
+        known = set(self.character_locations)
+        for members in self.channel_members.values():
+            known |= members
+        return sorted(known)
+
     # ── 地点环境状态 ────────────────────────────────────────────────────
     def set_environment(self, location_id: str, facts: Dict) -> None:
         if not self.locations.has(location_id):
@@ -153,6 +165,36 @@ class WorldState:
 
     def environment_of(self, location_id: str) -> Dict:
         return deepcopy(self.location_state.get(location_id, {}))
+
+    # ── 提交事务支持 ────────────────────────────────────────────────────
+    #
+    # locations/channels 是会话期间的静态结构（WorldState 没有任何方法改它们），
+    # 所以快照只覆盖真正可变的那几项，回滚不需要重建整张位置图。
+    # 这是一条约束而不只是一个观察：以后如果真要在会话中途改位置图/频道表，
+    # 必须先把它们纳入下面这两个方法，否则提交失败时那部分回滚不掉。
+    def snapshot_mutable_state(self) -> Dict:
+        """取一份可变状态快照，供提交失败时整体回滚。"""
+        return {
+            "clock": self.clock,
+            "character_locations": dict(self.character_locations),
+            "channel_members": {
+                channel_id: set(members)
+                for channel_id, members in self.channel_members.items()
+            },
+            "location_state": deepcopy(self.location_state),
+            "metadata": deepcopy(self.metadata),
+        }
+
+    def restore_mutable_state(self, snapshot: Dict) -> None:
+        """就地恢复到 snapshot_mutable_state() 的那一刻。"""
+        self.clock = snapshot["clock"]
+        self.character_locations = dict(snapshot["character_locations"])
+        self.channel_members = {
+            channel_id: set(members)
+            for channel_id, members in snapshot["channel_members"].items()
+        }
+        self.location_state = deepcopy(snapshot["location_state"])
+        self.metadata = deepcopy(snapshot["metadata"])
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:

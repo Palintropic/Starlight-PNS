@@ -1,7 +1,10 @@
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
+from pns.models.event_store import EventStore
 from pns.models.world_state import WorldState
 
 
@@ -47,7 +50,8 @@ class Turn:
             "reason": self.reason,
             "correction": self.correction,
             "needs_human_review": self.needs_human_review,
-            "dimensions": self.dimensions,
+            # 深拷贝：投影不能把 Turn 的内部字典按引用交出去。
+            "dimensions": deepcopy(self.dimensions),
             "dimensions_complete": self.dimensions_complete,
             "methodology_version": self.methodology_version,
             "generator_provider": self.generator_provider,
@@ -73,7 +77,7 @@ class Turn:
             "scene_id": self.scene_id,
             "lore_tag": self.lore_tag,
             "router_reference_status": self.router_reference_status,
-            "dimensions": self.dimensions,
+            "dimensions": deepcopy(self.dimensions),
             "dimensions_complete": self.dimensions_complete,
             "methodology_version": self.methodology_version,
             "generator_provider": self.generator_provider,
@@ -112,6 +116,9 @@ class SessionState:
     histories: Dict[str, List[Dict]] = field(default_factory=dict)
     pending_corrections: Dict[str, Optional[str]] = field(default_factory=dict)
     world_state: Optional[WorldState] = None
+    # 客观世界历史。它不是 turns 的另一种写法：turns 是生成审计记录，
+    # events 是"世界上发生过什么"。两者由 atomic_commit() 绑在一起提交。
+    events: EventStore = field(default_factory=EventStore)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -193,6 +200,37 @@ class SessionState:
         """Backward-compatible alias for the pre-Phase-3 public API."""
         self.record_turn(turn)
 
+    @contextmanager
+    def atomic_commit(self) -> Iterator["SessionState"]:
+        """把一次提交里的世界状态、事件历史、轮次和角色历史绑成一个整体。
+
+        块内任何一步抛异常，这四者都会一起回到进入时的样子：不会出现
+        "世界改了但事件没记下"、"事件记下了但轮次没落地" 这种半提交状态。
+        """
+        world = self.world_state
+        world_snapshot = (
+            world.snapshot_mutable_state() if world is not None else None
+        )
+        events_length = len(self.events)
+        turns_length = len(self.turns)
+        history_lengths = {cid: len(items) for cid, items in self.histories.items()}
+        corrections = dict(self.pending_corrections)
+        try:
+            yield self
+        except BaseException:
+            if world_snapshot is not None:
+                world.restore_mutable_state(world_snapshot)
+            self.events._rollback_to(events_length)
+            del self.turns[turns_length:]
+            for cid in list(self.histories):
+                if cid in history_lengths:
+                    del self.histories[cid][history_lengths[cid]:]
+                else:
+                    del self.histories[cid]
+            self.pending_corrections.clear()
+            self.pending_corrections.update(corrections)
+            raise
+
     def advance_character(self) -> None:
         self.current_character_index = (
             self.current_character_index + 1
@@ -234,12 +272,15 @@ class SessionState:
             "turns": [turn.to_dict() for turn in self.turns],
             "current_character_index": self.current_character_index,
             "current_character": self.current_character,
-            "histories": self.histories,
-            "pending_corrections": self.pending_corrections,
+            # 全部深拷贝：序列化结果不能是内部可变状态的引用，否则调用方改一下
+            # 返回的字典就等于改了权威状态。
+            "histories": deepcopy(self.histories),
+            "pending_corrections": dict(self.pending_corrections),
             "stats": self.final_stats(),
             "world_state": self.world_state.to_dict() if self.world_state else {},
+            "events": self.events.to_dict(),
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
-            "metadata": self.metadata,
+            "metadata": deepcopy(self.metadata),
         }
