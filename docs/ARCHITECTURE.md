@@ -233,6 +233,12 @@ committed event; equal timestamps are allowed and keep append order. Ordering is
 therefore deterministic without a re-sort, which matters because the world clock
 does not yet advance during a session.
 
+The store's public surface is read-only. Its internal append/rollback operations
+are reserved for the runtime commit transaction, so callers cannot bypass world
+validation or delete committed history through `SessionState.events`. Serialized
+sequence numbers are validated when history is restored rather than silently
+renumbered.
+
 World history is objective and is never copied into character histories. Events
 are not memory: what a character perceived and retained is a separate stream
 that this phase does not build.
@@ -243,7 +249,9 @@ that this phase does not build.
 accepted and allowed to change the world. It runs in two deliberate stages:
 
 1. validate only — identifier existence against `WorldState`, scope fields, and
-   whether the store can accept the event; nothing is mutated;
+   whether the store can accept the event; event time must match the authoritative
+   world clock, and state-transition events must describe a transition that can
+   actually occur; nothing is mutated;
 2. mutate only — apply the type's declared state effect, then append the event.
 
 Any exception in the second stage restores the world's mutable state and rolls

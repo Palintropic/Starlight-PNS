@@ -137,6 +137,13 @@ class CommitReferenceValidationTests(unittest.TestCase):
         commit_event(world, self.store, event)
         self.assertEqual(len(self.store), 1)
 
+    def test_event_time_must_match_the_authoritative_world_clock(self):
+        future = _dialogue(occurred_at=datetime(2030, 1, 1))
+        with self.assertRaises(EventCommitError):
+            commit_event(self.world, self.store, future)
+        self.assertEqual(self.world.clock, CLOCK)
+        self.assertEqual(len(self.store), 0)
+
 
 class CommitStateEffectTests(unittest.TestCase):
     def setUp(self):
@@ -191,6 +198,44 @@ class CommitStateEffectTests(unittest.TestCase):
         commit_event(self.world, self.store, leave)
         self.assertFalse(self.world.is_in_channel("mizuki", "nightcord"))
         self.assertEqual(len(self.store), 2)
+
+    def test_presence_events_reject_transitions_that_did_not_happen(self):
+        leave = Event(
+            event_id="leave-without-membership",
+            type=EventType.PRESENCE_LEFT_CHANNEL,
+            occurred_at=CLOCK,
+            scope=EventScope.CHANNEL,
+            actor_id="mizuki",
+            channel_id="nightcord",
+        )
+        with self.assertRaises(EventCommitError):
+            commit_event(self.world, self.store, leave)
+
+        self.world.join_channel("mizuki", "nightcord")
+        duplicate_join = Event(
+            event_id="duplicate-join",
+            type=EventType.PRESENCE_JOINED_CHANNEL,
+            occurred_at=CLOCK,
+            scope=EventScope.CHANNEL,
+            actor_id="mizuki",
+            channel_id="nightcord",
+        )
+        with self.assertRaises(EventCommitError):
+            commit_event(self.world, self.store, duplicate_join)
+        self.assertEqual(len(self.store), 0)
+
+    def test_location_change_rejects_a_noop_transition(self):
+        event = Event(
+            event_id="move-nowhere",
+            type=EventType.CHARACTER_LOCATION_CHANGED,
+            occurred_at=CLOCK,
+            scope=EventScope.LOCATION,
+            actor_id="mizuki",
+            location_id="kamiyama_high_gate",
+        )
+        with self.assertRaises(EventCommitError):
+            commit_event(self.world, self.store, event)
+        self.assertEqual(len(self.store), 0)
 
     def test_speech_is_an_occurrence_not_a_state_change(self):
         before = self.world.to_dict()
@@ -254,7 +299,7 @@ class CommitAtomicityTests(unittest.TestCase):
             scope=EventScope.PUBLIC,
             payload={"minutes": 15},
         )
-        with self.assertRaises(EventStoreError):
+        with self.assertRaises(EventCommitError):
             commit_event(self.world, self.store, stale)
         self.assertEqual(self.world.clock, CLOCK)
         self.assertEqual(len(self.store), 1)
@@ -285,7 +330,7 @@ class CommitAtomicityTests(unittest.TestCase):
         )
         before = self.world.to_dict()
         with patch.object(
-            EventStore, "append", side_effect=RuntimeError("append boom")
+            EventStore, "_append", side_effect=RuntimeError("append boom")
         ), self.assertRaises(RuntimeError):
             commit_event(self.world, self.store, move)
 
@@ -339,7 +384,7 @@ class SessionCommitTests(unittest.TestCase):
     def test_a_rejected_event_leaves_no_turn(self):
         turn = _turn()
         event = dialogue_event_for_turn(self.world, self.state.events, "s1", turn)
-        self.state.events.append(event)  # 先把 ID 占掉
+        self.state.events._append(event)  # 模拟内部历史里已经存在同 ID
         with self.assertRaises(EventStoreError):
             commit_dialogue(self.state, turn, event)
         self.assertEqual(len(self.state.turns), 0)
@@ -350,7 +395,7 @@ class SessionCommitTests(unittest.TestCase):
         before = self.world.to_dict()
         with self.assertRaises(RuntimeError), self.state.atomic_commit():
             self.world.advance_time(60)
-            self.state.events.append(_dialogue("e1"))
+            self.state.events._append(_dialogue("e1"))
             self.state.record_turn(_turn())
             raise RuntimeError("boom")
 
@@ -377,7 +422,7 @@ class SessionCommitTests(unittest.TestCase):
     def test_commit_session_event_is_atomic_as_well(self):
         before = self.world.to_dict()
         with patch.object(
-            EventStore, "append", side_effect=RuntimeError("boom")
+            EventStore, "_append", side_effect=RuntimeError("boom")
         ), self.assertRaises(RuntimeError):
             commit_session_event(self.state, _dialogue())
         self.assertEqual(self.world.to_dict(), before)
@@ -466,7 +511,7 @@ class DialogueEventDerivationTests(unittest.TestCase):
         world = _world()
         store = EventStore()
         first = dialogue_event_for_turn(world, store, "s1", _turn(1))
-        store.append(first)
+        store._append(first)
         second = dialogue_event_for_turn(world, store, "s1", _turn(2, "ena"))
         self.assertIsNone(first.causation_id)
         self.assertEqual(second.causation_id, first.event_id)

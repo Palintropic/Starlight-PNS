@@ -56,6 +56,32 @@ def validate_against_world(world: WorldState, event: Event) -> None:
             f"事件 '{event.event_id}' 引用了未知的 channel_id: {event.channel_id}"
         )
 
+    if event.occurred_at != world.clock:
+        raise EventCommitError(
+            f"事件 '{event.event_id}' 的时间 {event.occurred_at.isoformat()} "
+            f"与当前世界时钟 {world.clock.isoformat()} 不一致"
+        )
+
+    if event.type is EventType.PRESENCE_JOINED_CHANNEL and world.is_in_channel(
+        event.actor_id, event.channel_id
+    ):
+        raise EventCommitError(
+            f"角色 '{event.actor_id}' 已经在频道 '{event.channel_id}' 中"
+        )
+    if event.type is EventType.PRESENCE_LEFT_CHANNEL and not world.is_in_channel(
+        event.actor_id, event.channel_id
+    ):
+        raise EventCommitError(
+            f"角色 '{event.actor_id}' 不在频道 '{event.channel_id}' 中，不能离开"
+        )
+    if (
+        event.type is EventType.CHARACTER_LOCATION_CHANGED
+        and world.location_of(event.actor_id) == event.location_id
+    ):
+        raise EventCommitError(
+            f"角色 '{event.actor_id}' 已经位于 '{event.location_id}'"
+        )
+
 
 # ── 阶段二：状态效果 ────────────────────────────────────────────────────
 #
@@ -116,16 +142,16 @@ def commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
         raise EventCommitError("世界历史必须是 EventStore")
 
     validate_against_world(world, event)
-    store.check_can_append(event)
+    store._check_can_append(event)
 
     snapshot = world.snapshot_mutable_state()
     length = len(store)
     try:
         apply_event(world, event)
-        sequence = store.append(event)
+        sequence = store._append(event)
     except BaseException:
         world.restore_mutable_state(snapshot)
-        store.rollback_to(length)
+        store._rollback_to(length)
         raise
 
     return {"sequence": sequence, **event.to_dict()}

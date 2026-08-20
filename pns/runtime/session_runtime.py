@@ -18,11 +18,9 @@ from pns.logic.simulation import (
     judge_async,
     save_history,
 )
-from pns.models.event_store import EventStoreError
 from pns.models.session import SessionState, Turn
-from pns.models.world_state import WorldState, WorldStateError
+from pns.models.world_state import WorldState
 from pns.runtime.event_commit import (
-    EventCommitError,
     commit_dialogue,
     dialogue_event_for_turn,
     project_turn_message,
@@ -297,7 +295,7 @@ class SessionRuntime:
                     world, self.state.events, self.session_id, completed_turn
                 )
                 committed = commit_dialogue(self.state, completed_turn, dialogue_event)
-            except (EventCommitError, EventStoreError, WorldStateError) as e:
+            except Exception as e:
                 message = f"事件提交失败: {e}"
                 self.state.record_error(message)
                 yield {"type": "error", "turn": turn, "message": message}

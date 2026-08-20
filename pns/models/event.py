@@ -218,8 +218,8 @@ class Event:
             minutes = self.payload.get("minutes")
             if isinstance(minutes, bool) or not isinstance(minutes, int):
                 raise EventError("world.time_advanced 的 payload.minutes 必须是整数")
-            if minutes < 0:
-                raise EventError("world.time_advanced 的 payload.minutes 不能为负")
+            if minutes <= 0:
+                raise EventError("world.time_advanced 的 payload.minutes 必须大于 0")
         elif self.type is EventType.CHARACTER_LOCATION_CHANGED:
             self._require_actor()
             if self.location_id is None:

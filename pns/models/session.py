@@ -220,7 +220,7 @@ class SessionState:
         except BaseException:
             if world_snapshot is not None:
                 world.restore_mutable_state(world_snapshot)
-            self.events.rollback_to(events_length)
+            self.events._rollback_to(events_length)
             del self.turns[turns_length:]
             for cid in list(self.histories):
                 if cid in history_lengths:

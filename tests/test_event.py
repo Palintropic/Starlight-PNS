@@ -145,7 +145,7 @@ class EventTypeValidationTests(unittest.TestCase):
                 actor_id="mizuki",
                 payload={"minutes": 5},
             )
-        for minutes in (-1, "5", True, None):
+        for minutes in (-1, 0, "5", True, None):
             with self.subTest(minutes=minutes), self.assertRaises(EventError):
                 Event(
                     event_id="e1",
@@ -232,32 +232,32 @@ class EventStoreTests(unittest.TestCase):
         self.store = EventStore()
 
     def test_append_returns_the_sequence_number(self):
-        self.assertEqual(self.store.append(_dialogue("e1")), 0)
-        self.assertEqual(self.store.append(_dialogue("e2")), 1)
+        self.assertEqual(self.store._append(_dialogue("e1")), 0)
+        self.assertEqual(self.store._append(_dialogue("e2")), 1)
         self.assertEqual(len(self.store), 2)
         self.assertEqual(self.store.sequence_of("e2"), 1)
         self.assertEqual(self.store.latest().event_id, "e2")
 
     def test_duplicate_event_ids_are_rejected(self):
-        self.store.append(_dialogue("e1"))
+        self.store._append(_dialogue("e1"))
         with self.assertRaises(EventStoreError):
-            self.store.append(_dialogue("e1", payload={"text": "另一句"}))
+            self.store._append(_dialogue("e1", payload={"text": "另一句"}))
         self.assertEqual(len(self.store), 1)
 
     def test_only_events_can_be_appended(self):
         with self.assertRaises(EventStoreError):
-            self.store.append({"event_id": "e1"})
+            self.store._append({"event_id": "e1"})
 
     def test_world_history_cannot_run_backwards(self):
-        self.store.append(_dialogue("e1", clock=datetime(2026, 8, 20, 2, 0)))
+        self.store._append(_dialogue("e1", clock=datetime(2026, 8, 20, 2, 0)))
         with self.assertRaises(EventStoreError):
-            self.store.append(_dialogue("e2", clock=datetime(2026, 8, 20, 1, 59)))
+            self.store._append(_dialogue("e2", clock=datetime(2026, 8, 20, 1, 59)))
         self.assertEqual(len(self.store), 1)
 
     def test_equal_timestamps_keep_append_order(self):
         # P5 的时钟在会话内不推进，所以"同一时刻的多条事件"是常态而非边角。
         for index in range(5):
-            self.store.append(_dialogue(f"e{index}"))
+            self.store._append(_dialogue(f"e{index}"))
         self.assertEqual(
             [event.event_id for event in self.store.events()],
             ["e0", "e1", "e2", "e3", "e4"],
@@ -268,40 +268,55 @@ class EventStoreTests(unittest.TestCase):
         )
 
     def test_events_accessor_does_not_expose_the_internal_list(self):
-        self.store.append(_dialogue("e1"))
+        self.store._append(_dialogue("e1"))
         events = self.store.events()
         self.assertIsInstance(events, tuple)
         list(self.store)  # 迭代拿到的是快照，迭代中追加不会炸
-        self.store.append(_dialogue("e2"))
+        self.store._append(_dialogue("e2"))
         self.assertEqual(len(events), 1)
 
     def test_serialization_round_trip(self):
-        self.store.append(_dialogue("e1"))
-        self.store.append(_dialogue("e2", scope=EventScope.PUBLIC))
+        self.store._append(_dialogue("e1"))
+        self.store._append(_dialogue("e2", scope=EventScope.PUBLIC))
         restored = EventStore.from_dict(self.store.to_dict())
         self.assertEqual(restored.to_dict(), self.store.to_dict())
 
     def test_serialization_does_not_leak_mutable_references(self):
-        self.store.append(_dialogue("e1", payload={"text": "喵？", "n": {"a": 1}}))
+        self.store._append(_dialogue("e1", payload={"text": "喵？", "n": {"a": 1}}))
         payload = self.store.to_dict()
         payload["events"][0]["payload"]["n"]["a"] = 99
         self.assertEqual(self.store.get("e1").payload["n"]["a"], 1)
 
     def test_rollback_releases_the_ids_it_removed(self):
-        self.store.append(_dialogue("e1"))
-        self.store.append(_dialogue("e2"))
-        self.store.rollback_to(1)
+        self.store._append(_dialogue("e1"))
+        self.store._append(_dialogue("e2"))
+        self.store._rollback_to(1)
         self.assertEqual(len(self.store), 1)
         self.assertFalse(self.store.has("e2"))
         # 回滚掉的 ID 必须能重新使用，否则重试会被自己的残留挡住
-        self.store.append(_dialogue("e2"))
+        self.store._append(_dialogue("e2"))
         self.assertTrue(self.store.has("e2"))
 
     def test_rollback_rejects_out_of_range_lengths(self):
-        self.store.append(_dialogue("e1"))
+        self.store._append(_dialogue("e1"))
         for bad in (-1, 2, "1", True):
             with self.subTest(bad=bad), self.assertRaises(EventStoreError):
-                self.store.rollback_to(bad)
+                self.store._rollback_to(bad)
+
+    def test_public_store_surface_is_read_only(self):
+        self.assertFalse(hasattr(self.store, "append"))
+        self.assertFalse(hasattr(self.store, "rollback_to"))
+
+    def test_restore_rejects_missing_or_tampered_sequence(self):
+        payload = EventStore([_dialogue("e1"), _dialogue("e2")]).to_dict()
+        payload["events"][1]["sequence"] = 9
+        with self.assertRaises(EventStoreError):
+            EventStore.from_dict(payload)
+
+        payload = EventStore([_dialogue("e1")]).to_dict()
+        del payload["events"][0]["sequence"]
+        with self.assertRaises(EventStoreError):
+            EventStore.from_dict(payload)
 
     def test_constructor_rejects_a_duplicated_history(self):
         with self.assertRaises(EventStoreError):

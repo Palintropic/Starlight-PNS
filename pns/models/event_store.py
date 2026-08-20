@@ -16,16 +16,19 @@ class EventStoreError(ValueError):
 
 
 class EventStore:
-    """一个会话里唯一一份只追加的已提交事件历史。"""
+    """一个会话里唯一一份只追加的已提交事件历史。
+
+    对外只提供读取；带下划线的写入/回滚方法只供 runtime 提交事务使用。
+    """
 
     def __init__(self, events: Iterable[Event] = ()):
         self._events: List[Event] = []
         self._ids: Set[str] = set()
         for event in events:
-            self.append(event)
+            self._append(event)
 
     # ── 追加 ────────────────────────────────────────────────────────────
-    def check_can_append(self, event: Event) -> None:
+    def _check_can_append(self, event: Event) -> None:
         """提交前的纯校验：只看能不能追加，不改任何状态。"""
         if not isinstance(event, Event):
             raise EventStoreError("只能向世界历史追加 Event")
@@ -38,14 +41,14 @@ class EventStore:
                 f"{self._events[-1].occurred_at.isoformat()}"
             )
 
-    def append(self, event: Event) -> int:
-        """追加一条已被接受的事件，返回它的序号。"""
-        self.check_can_append(event)
+    def _append(self, event: Event) -> int:
+        """提交边界内部追加一条已验证事件，返回它的序号。"""
+        self._check_can_append(event)
         self._events.append(event)
         self._ids.add(event.event_id)
         return len(self._events) - 1
 
-    def rollback_to(self, length: int) -> None:
+    def _rollback_to(self, length: int) -> None:
         """中止一次进行中的提交时回退到之前的长度。
 
         这不是"编辑历史"的接口 —— 只有提交事务在失败路径上才允许调用它，
@@ -103,5 +106,24 @@ class EventStore:
 
     @classmethod
     def from_dict(cls, payload: Dict) -> "EventStore":
-        entries = payload.get("events", []) if isinstance(payload, dict) else []
-        return cls(Event.from_dict(entry) for entry in entries)
+        if not isinstance(payload, dict):
+            raise EventStoreError("事件历史必须是字典")
+        entries = payload.get("events", [])
+        if not isinstance(entries, list):
+            raise EventStoreError("事件历史的 events 必须是数组")
+
+        restored = []
+        for expected, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise EventStoreError(f"事件历史第 {expected} 项必须是字典")
+            sequence = entry.get("sequence")
+            if (
+                not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+                or sequence != expected
+            ):
+                raise EventStoreError(
+                    f"事件历史 sequence 不连续：第 {expected} 项收到 {sequence!r}"
+                )
+            restored.append(Event.from_dict(entry))
+        return cls(restored)

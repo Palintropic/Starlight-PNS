@@ -480,6 +480,24 @@ class SessionRuntimeEventTests(RuntimeTestBase):
             len(self.drift_file.read_text(encoding="utf-8").strip().splitlines()), 1
         )
 
+    async def test_an_unexpected_commit_failure_is_closed_by_the_wire_protocol(self):
+        runtime = self._create(max_turns=1)
+        with patch("pns.runtime.session_runtime.call_character_async", self._reply()), \
+             patch("pns.runtime.session_runtime.judge_async", self._accepting_judge()), \
+             patch(
+                 "pns.runtime.session_runtime.commit_dialogue",
+                 side_effect=RuntimeError("unexpected commit boom"),
+             ):
+            messages = await _run(runtime)
+
+        self.assertEqual(
+            [message["type"] for message in messages],
+            ["start", "generating", "judging", "error", "done"],
+        )
+        self.assertIn("unexpected commit boom", messages[-2]["message"])
+        self.assertEqual(runtime.state.turns, [])
+        self.assertEqual(len(runtime.state.events), 0)
+
     async def test_world_history_is_not_copied_into_character_histories(self):
         runtime, _ = await self._run_accepted(max_turns=2)
 
