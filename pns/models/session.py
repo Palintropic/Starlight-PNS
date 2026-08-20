@@ -161,14 +161,22 @@ class SessionState:
 
     def record_turn(self, turn: Turn) -> None:
         """Commit a persisted turn and all session-level consequences."""
-        if turn.character not in self.histories:
+        if turn.character not in self.characters:
             raise ValueError(f"Turn character is not part of session: {turn.character}")
+        if bool(self.histories) != bool(self.pending_corrections):
+            raise RuntimeError("SessionState runtime state is only partially initialized")
         expected_turn = len(self.turns) + 1
         if turn.turn_number != expected_turn:
             raise ValueError(
                 f"Turn number must be {expected_turn}, got {turn.turn_number}"
             )
         self.turns.append(turn)
+
+        # A SessionState may also be used as a simple persisted record without
+        # live LLM histories. Runtime-created states initialize both mappings
+        # and therefore continue through the live-state updates below.
+        if not self.histories:
+            return
 
         if turn.is_ooc:
             self.pending_corrections[turn.character] = turn.correction
@@ -180,6 +188,10 @@ class SessionState:
         for other in self.characters:
             if other != turn.character:
                 self.histories[other].append({"role": "user", "content": line})
+
+    def add_turn(self, turn: Turn) -> None:
+        """Backward-compatible alias for the pre-Phase-3 public API."""
+        self.record_turn(turn)
 
     def advance_character(self) -> None:
         self.current_character_index = (
