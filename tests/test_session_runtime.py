@@ -11,7 +11,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pns.models.event import EventScope, EventType
 from pns.models.world_state import WorldState
+from pns.runtime.event_commit import EventCommitError
 from pns.runtime.session_runtime import SessionRuntime, SessionSetupError
 from pns.world.characters import registry as character_registry
 from pns.world.context import render_session_location
@@ -81,7 +83,9 @@ class SessionSetupTests(unittest.TestCase):
         self.assertNotEqual(first.session_id, second.session_id)
 
 
-class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
+class RuntimeTestBase(unittest.IsolatedAsyncioTestCase):
+    """共享的 SessionRuntime 夹具：临时归档目录 + 打掉真实 API 的两个补丁。"""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.history_dir = Path(self._tmp.name) / "history"
@@ -104,6 +108,8 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
         base.update(params)
         return SessionRuntime.create(base, history_dir=self.history_dir, drift_scores_file=self.drift_file)
 
+
+class SessionRuntimeRunTests(RuntimeTestBase):
     async def test_happy_path_message_sequence_and_persistence(self):
         async def fake_call(client, character, history, scene, model, max_tokens, temperature, correction):
             return f"reply-from-{character}"
@@ -345,6 +351,161 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
         await stream.aclose()
         self.assertEqual(runtime.state.status, "cancelled")
 
+
+class SessionRuntimeEventTests(RuntimeTestBase):
+    """被接受的发言进世界历史；被拒绝或失败的候选输出永远不进。"""
+
+    @staticmethod
+    def _accepting_judge():
+        async def fake_judge(*args, **kwargs):
+            return {"drift_score": 1, "is_ooc": False}
+
+        return fake_judge
+
+    @staticmethod
+    def _reply():
+        async def fake_call(client, character, *args, **kwargs):
+            return f"reply-from-{character}"
+
+        return fake_call
+
+    async def _run_accepted(self, **params):
+        runtime = self._create(**params)
+        with patch("pns.runtime.session_runtime.call_character_async", self._reply()), \
+             patch("pns.runtime.session_runtime.judge_async", self._accepting_judge()):
+            messages = await _run(runtime)
+        return runtime, messages
+
+    async def test_accepted_dialogue_becomes_exactly_one_committed_event(self):
+        runtime, messages = await self._run_accepted(max_turns=2)
+
+        events = runtime.state.events.events()
+        self.assertEqual(len(events), 2)
+        self.assertEqual(len(runtime.state.turns), 2)
+        self.assertEqual([e.actor_id for e in events], ["mizuki", "ena"])
+        self.assertEqual(events[0].payload["text"], "reply-from-mizuki")
+        self.assertEqual(events[0].type, EventType.DIALOGUE_SPOKEN)
+        self.assertEqual(events[0].scope, EventScope.LOCATION)
+        self.assertEqual(events[0].location_id, "kamiyama_high_gate")
+        # 同一模拟时刻的多条事件按提交顺序排列
+        self.assertEqual(events[0].occurred_at, events[1].occurred_at)
+        self.assertEqual(events[1].causation_id, events[0].event_id)
+
+    async def test_the_turn_message_projects_the_committed_event(self):
+        runtime, messages = await self._run_accepted(max_turns=2)
+
+        turn_messages = [m for m in messages if m["type"] == "turn"]
+        self.assertEqual(
+            [m["event_id"] for m in turn_messages],
+            [event.event_id for event in runtime.state.events.events()],
+        )
+        # 遗留字段一个没少
+        for message, turn in zip(turn_messages, runtime.state.turns):
+            for key, value in turn.to_wire_dict().items():
+                self.assertEqual(message[key], value, key)
+
+    async def test_online_sessions_commit_channel_scoped_events(self):
+        runtime, _ = await self._run_accepted(scene="nightcord", max_turns=1)
+
+        event = runtime.state.events.latest()
+        self.assertEqual(event.scope, EventScope.CHANNEL)
+        self.assertEqual(event.channel_id, "nightcord")
+        self.assertEqual(event.location_id, "mizuki_home_room")
+
+    async def test_failed_generation_commits_no_event(self):
+        async def failing_call(*args, **kwargs):
+            raise ValueError("boom")
+
+        runtime = self._create()
+        with patch("pns.runtime.session_runtime.call_character_async", failing_call):
+            await _run(runtime)
+        self.assertEqual(len(runtime.state.events), 0)
+
+    async def test_failed_judgement_commits_no_event(self):
+        async def failing_judge(*args, **kwargs):
+            raise RuntimeError("judge boom")
+
+        runtime = self._create()
+        with patch("pns.runtime.session_runtime.call_character_async", self._reply()), \
+             patch("pns.runtime.session_runtime.judge_async", failing_judge):
+            await _run(runtime)
+        self.assertEqual(len(runtime.state.events), 0)
+
+    async def test_failed_audit_write_commits_no_event(self):
+        runtime = self._create()
+        runtime.drift_scores_file = Path(self._tmp.name)  # 目录，写盘必失败
+        with patch("pns.runtime.session_runtime.call_character_async", self._reply()), \
+             patch("pns.runtime.session_runtime.judge_async", self._accepting_judge()):
+            await _run(runtime)
+        self.assertEqual(len(runtime.state.events), 0)
+        self.assertEqual(runtime.state.turns, [])
+
+    async def test_an_ooc_line_still_happened_in_the_world(self):
+        # Router 是完整性评估器，不是事件权威：判高分只会排队 correction，
+        # 不代表这句话没被说出口。真正的拒绝走的是上面那三条失败路径。
+        async def ooc_judge(*args, **kwargs):
+            return {"drift_score": 8, "is_ooc": True, "correction": "回到角色"}
+
+        runtime = self._create(max_turns=1)
+        with patch("pns.runtime.session_runtime.call_character_async", self._reply()), \
+             patch("pns.runtime.session_runtime.judge_async", ooc_judge):
+            await _run(runtime)
+
+        self.assertEqual(len(runtime.state.events), 1)
+        self.assertTrue(runtime.state.events.latest().provenance["is_ooc"])
+
+    async def test_a_failed_commit_publishes_no_turn_and_leaves_no_half_state(self):
+        async def fake_judge(*args, **kwargs):
+            return {"drift_score": 1, "is_ooc": False}
+
+        runtime = self._create(max_turns=2)
+        with patch("pns.runtime.session_runtime.call_character_async", self._reply()), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge), \
+             patch(
+                 "pns.runtime.session_runtime.commit_dialogue",
+                 side_effect=EventCommitError("commit boom"),
+             ):
+            messages = await _run(runtime)
+
+        self.assertEqual(
+            [m["type"] for m in messages],
+            ["start", "generating", "judging", "error", "done"],
+        )
+        self.assertIn("commit boom", messages[-2]["message"])
+        self.assertEqual(runtime.state.turns, [])
+        self.assertEqual(len(runtime.state.events), 0)
+        self.assertEqual(messages[-1]["stats"]["total_turns"], 0)
+        # 审计历史里仍然留有这次尝试 —— 失败的候选属于审计，不属于世界历史
+        self.assertEqual(
+            len(self.drift_file.read_text(encoding="utf-8").strip().splitlines()), 1
+        )
+
+    async def test_world_history_is_not_copied_into_character_histories(self):
+        runtime, _ = await self._run_accepted(max_turns=2)
+
+        for history in runtime.state.histories.values():
+            for item in history:
+                self.assertNotIn("event_id", item)
+                self.assertNotIn("scope", item)
+        self.assertEqual(len(runtime.state.events), 2)
+
+    async def test_two_sessions_do_not_share_event_history(self):
+        first, _ = await self._run_accepted(max_turns=1)
+        second = self._create(max_turns=1)
+
+        self.assertIsNot(first.state.events, second.state.events)
+        self.assertEqual(len(first.state.events), 1)
+        self.assertEqual(len(second.state.events), 0)
+
+    async def test_session_serialization_exposes_the_committed_history(self):
+        runtime, _ = await self._run_accepted(max_turns=1)
+
+        payload = runtime.state.to_dict()
+        self.assertEqual(len(payload["events"]["events"]), 1)
+        self.assertEqual(payload["events"]["events"][0]["sequence"], 0)
+        self.assertEqual(
+            payload["events"]["events"][0]["actor_id"], runtime.state.turns[0].character
+        )
 
 if __name__ == "__main__":
     unittest.main()
