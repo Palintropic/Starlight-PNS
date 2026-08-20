@@ -12,9 +12,10 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from types import MappingProxyType
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 from uuid import uuid4
+
+from pns.models.frozen import freeze_json_value, thaw_json_value
 
 
 class EventError(ValueError):
@@ -58,37 +59,13 @@ class EventType(str, Enum):
 
 # payload/provenance 只允许放 JSON 安全的值。这不是洁癖：任何别的对象都可能
 # 是外部还持有引用的可变结构，放进事件就等于在不可变历史里开了个后门。
-_SCALARS = (str, int, float, bool, type(None))
-
-
+# 深冻结/解冻的实现见 pns/models/frozen.py（曝光决策与观察投影共用同一份）。
 def _freeze(value, *, path: str = "payload"):
-    """把嵌套结构深冻结成只读视图；遇到不安全的值直接报错。"""
-    if isinstance(value, _SCALARS):
-        return value
-    if isinstance(value, Mapping):
-        frozen = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise EventError(f"{path} 的键必须是字符串，收到 {key!r}")
-            frozen[key] = _freeze(item, path=f"{path}.{key}")
-        return MappingProxyType(frozen)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return tuple(
-            _freeze(item, path=f"{path}[{index}]") for index, item in enumerate(value)
-        )
-    raise EventError(
-        f"{path} 只能包含 JSON 安全的值（字符串/数字/布尔/None/字典/列表），"
-        f"收到 {type(value).__name__}"
-    )
+    return freeze_json_value(value, path=path, error=EventError)
 
 
 def _thaw(value):
-    """把冻结视图还原成普通可变结构，供序列化与外部使用。"""
-    if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw(item) for item in value]
-    return value
+    return thaw_json_value(value)
 
 
 def new_event_id(prefix: str = "evt") -> str:

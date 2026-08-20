@@ -12,13 +12,15 @@
 #
 # 另一条边界同样重要：只有被接受的结果才走到这里。生成失败、判分失败、
 # 漂移记录写盘失败的候选输出留在审计/错误历史里，永远不进世界历史。
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from pns.models.channel import ChannelKind
 from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore
+from pns.models.observation import Observation
 from pns.models.session import SessionState, Turn
 from pns.models.world_state import WorldState
+from pns.runtime.exposure import evaluate_event_exposure, observations_for
 
 
 class EventCommitError(ValueError):
@@ -157,21 +159,46 @@ def commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
     return {"sequence": sequence, **event.to_dict()}
 
 
+# ── 阶段三：曝光 ────────────────────────────────────────────────────────
+#
+# 事件被接受之后，逐个候选角色判定"能不能感知到"，通过的才生成观察。这一步
+# 在提交边界里做，而不是留给调用方，因为它必须满足两条：
+#
+#   1. 进了会话的已提交事件没有一条能跳过曝光判定 —— 跳过就等于回到全知。
+#      （commit_event() 本身只认 world + store 这一对，没有会话可以承载观察，
+#      所以它不做曝光；会话路径只有下面两个入口，都走判定。）
+#   2. 判定结果和事件同生共死 —— 提交失败时观察不能留下。
+#
+# 判定跑在**状态效果应用之后**：事件被接受之后的世界才是它发生的那个世界。
+# 于是"某人进了房间"这件事由房间里现在的人感知到。反过来，"某人离开了"
+# 目前只有一条事件、一个落点，原地的人感知不到离开 —— 那需要一条独立的
+# 离开事件，属于后续阶段，不在这里偷偷补。
+def _record_exposure(state: SessionState, event: Event) -> Tuple[Observation, ...]:
+    decisions = evaluate_event_exposure(state.world_state, event)
+    observations = observations_for(event, decisions)
+    state.record_observations(decisions, observations)
+    return observations
+
+
 def commit_session_event(state: SessionState, event: Event) -> Dict:
     """在一个会话里提交事件，失败时连会话状态一起回滚。"""
     with state.atomic_commit():
-        return commit_event(state.world_state, state.events, event)
+        projection = commit_event(state.world_state, state.events, event)
+        _record_exposure(state, event)
+    return projection
 
 
 def commit_dialogue(state: SessionState, turn: Turn, event: Event) -> Dict:
     """提交一次被接受的发言：世界历史里的事件 + 生成审计里的 Turn。
 
-    两者要么都落地，要么都不落地 —— 不允许出现一条没有对应事件的 turn，
-    也不允许出现一条没有对应生成记录的发言事件。
+    三者要么都落地，要么都不落地 —— 不允许出现一条没有对应事件的 turn，
+    不允许出现一条没有对应生成记录的发言事件，也不允许出现一条没被任何人
+    感知过、却已经抄进所有人历史的台词。
     """
     with state.atomic_commit():
         projection = commit_event(state.world_state, state.events, event)
-        state.record_turn(turn)
+        observations = _record_exposure(state, event)
+        state.record_turn(turn, observations)
     return projection
 
 

@@ -78,7 +78,15 @@ def render_world_context(world: WorldState, character_id: Optional[str] = None) 
     if location_id is not None:
         place = render_location(world, location_id)
         environment = render_environment(world, location_id)
+    elif character_id is not None:
+        # 角色视角下不能回落到全会话摘要：那会把别人在哪、有哪些频道活着
+        # 一起写进这个角色的提示词，而它并不在任何地方，感知不到这些。
+        # 不知道自己在哪，就只说不知道。
+        place = "未定位"
+        environment = ""
     else:
+        # character_id 为 None 是系统/研究者视角（起始消息、归档表头），
+        # 那里看到全局摘要是对的。
         place = render_session_location(world)
         environment = ""
         for candidate in world.character_locations.values():

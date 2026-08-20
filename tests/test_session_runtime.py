@@ -12,7 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pns.models.event import EventScope, EventType
-from pns.models.world_state import WorldState
+from pns.models.exposure import ExposureReason
+from pns.models.world_state import Availability, WorldState
 from pns.runtime.event_commit import EventCommitError
 from pns.runtime.session_runtime import SessionRuntime, SessionSetupError
 from pns.world.characters import registry as character_registry
@@ -524,6 +525,167 @@ class SessionRuntimeEventTests(RuntimeTestBase):
         self.assertEqual(
             payload["events"]["events"][0]["actor_id"], runtime.state.turns[0].character
         )
+
+class SessionRuntimeExposureTests(RuntimeTestBase):
+    """会话里的角色知识来自观察，不再来自"被选进了同一个会话"。"""
+
+    async def _run_capturing(self, runtime):
+        """跑一遍并录下每一轮真正喂给模型的那份历史。"""
+        seen = []
+
+        async def fake_call(client, character, history, *args, **kwargs):
+            seen.append((character, [dict(item) for item in history]))
+            return f"reply-from-{character}"
+
+        async def fake_judge(*args, **kwargs):
+            return {"drift_score": 1, "is_ooc": False}
+
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge):
+            messages = await _run(runtime)
+        return seen, messages
+
+    @staticmethod
+    def _contents(history):
+        return [item["content"] for item in history]
+
+    async def test_every_committed_turn_produces_observations(self):
+        runtime = self._create(max_turns=2)
+        await self._run_capturing(runtime)
+
+        state = runtime.state
+        self.assertEqual(len(state.events), 2)
+        # 校门口两个人同处一地：每条事件两条观察（说话的人自观察 + 在场的人）
+        self.assertEqual(len(state.observations), 4)
+        self.assertEqual(len(state.exposures), 4)
+        for event in state.events.events():
+            self.assertEqual(
+                sorted(state.observations.observers_of(event.event_id)),
+                ["ena", "mizuki"],
+            )
+
+    async def test_a_co_located_legacy_scene_still_shares_the_conversation(self):
+        # 兼容性底线：遗留 fixture 靠的是 scene_compat 把两个人显式放在同一个
+        # 地点，而不是靠"被选进同一个会话"。所以对话仍然连得上。
+        runtime = self._create(max_turns=2)
+        seen, messages = await self._run_capturing(runtime)
+
+        self.assertEqual([m["type"] for m in messages][-1], "done")
+        second_character, second_history = seen[1]
+        self.assertEqual(second_character, "ena")
+        self.assertIn(
+            "暁山瑞希：reply-from-mizuki",
+            [item["content"] for item in second_history],
+        )
+
+    async def test_a_character_elsewhere_never_sees_the_line(self):
+        runtime = self._create(max_turns=2)
+        runtime.world.place_character("ena", "city_streets")
+        seen, _ = await self._run_capturing(runtime)
+
+        _, ena_history = seen[1]
+        for content in self._contents(ena_history):
+            self.assertNotIn("reply-from-mizuki", content)
+        self.assertEqual(
+            runtime.state.exposures.explain(
+                runtime.state.events.events()[0].event_id, "ena"
+            ).reason,
+            ExposureReason.WRONG_LOCATION,
+        )
+
+    async def test_prompt_context_differs_between_characters(self):
+        runtime = self._create(max_turns=3)
+        runtime.world.place_character("ena", "city_streets")
+        seen, _ = await self._run_capturing(runtime)
+
+        # 第三轮又轮到瑞希：她听得见自己说过的话，听不见绘名在街上说的。
+        third_character, third_history = seen[2]
+        self.assertEqual(third_character, "mizuki")
+        contents = self._contents(third_history)
+        self.assertTrue(any("reply-from-mizuki" in c for c in contents))
+        self.assertFalse(any("reply-from-ena" in c for c in contents))
+        # 两个角色拿到的上下文确实不是同一份
+        self.assertNotEqual(self._contents(seen[1][1]), contents)
+
+    async def test_an_online_session_keeps_people_together_across_rooms(self):
+        # Nightcord 场景：人在各自房间，靠频道成员身份而不是物理位置连上。
+        runtime = self._create(max_turns=2, scene="nightcord")
+        self.assertNotEqual(
+            runtime.world.location_of("mizuki"), runtime.world.location_of("ena")
+        )
+        seen, _ = await self._run_capturing(runtime)
+
+        self.assertEqual(runtime.state.events.events()[0].scope, EventScope.CHANNEL)
+        self.assertIn(
+            "暁山瑞希：reply-from-mizuki", self._contents(seen[1][1])
+        )
+        self.assertEqual(
+            runtime.state.exposures.explain(
+                runtime.state.events.events()[0].event_id, "ena"
+            ).reason,
+            ExposureReason.CHANNEL_MEMBER,
+        )
+
+    async def test_leaving_the_channel_stops_the_line_from_arriving(self):
+        runtime = self._create(max_turns=1, scene="nightcord")
+        runtime.world.leave_channel("ena", "nightcord")
+        await self._run_capturing(runtime)
+
+        event = runtime.state.events.events()[0]
+        self.assertEqual(runtime.state.observations.observers_of(event.event_id), ("mizuki",))
+        self.assertEqual(len(runtime.state.histories["ena"]), 1)
+
+    async def test_an_asleep_character_perceives_nothing(self):
+        runtime = self._create(max_turns=1)
+        runtime.world.set_availability("ena", Availability.ASLEEP)
+        await self._run_capturing(runtime)
+
+        event = runtime.state.events.events()[0]
+        self.assertEqual(
+            runtime.state.exposures.explain(event.event_id, "ena").reason,
+            ExposureReason.UNAVAILABLE,
+        )
+        self.assertEqual(len(runtime.state.histories["ena"]), 1)
+
+    async def test_the_runtime_never_takes_the_legacy_fan_out_path(self):
+        # 每个角色的历史长度 = 开场白 + 它自己那些观察，一条不多。
+        runtime = self._create(max_turns=2)
+        runtime.world.place_character("ena", "city_streets")
+        await self._run_capturing(runtime)
+
+        state = runtime.state
+        for character_id in state.characters:
+            self.assertEqual(
+                len(state.histories[character_id]),
+                1 + len(state.observations.for_character(character_id)),
+                character_id,
+            )
+
+    async def test_observations_carry_no_system_side_evidence(self):
+        async def ooc_judge(*args, **kwargs):
+            return {"drift_score": 9, "is_ooc": True, "correction": "回到角色"}
+
+        runtime = self._create(max_turns=1)
+        with patch("pns.runtime.session_runtime.call_character_async", self._reply_for(runtime)), \
+             patch("pns.runtime.session_runtime.judge_async", ooc_judge):
+            await _run(runtime)
+
+        event = runtime.state.events.events()[0]
+        # 事件的 provenance 里留着 Router 的判分（审计需要）……
+        self.assertTrue(event.provenance["is_ooc"])
+        # ……但角色的观察里一个字都没有。
+        for observation in runtime.state.observations:
+            payload = observation.to_dict()["perceived"]
+            for leaked in ("is_ooc", "drift_score", "generator_model"):
+                self.assertNotIn(leaked, payload)
+
+    @staticmethod
+    def _reply_for(runtime):
+        async def fake_call(client, character, *args, **kwargs):
+            return f"reply-from-{character}"
+
+        return fake_call
+
 
 if __name__ == "__main__":
     unittest.main()
