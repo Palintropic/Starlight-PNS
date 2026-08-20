@@ -127,9 +127,9 @@ Generation therefore remains a PNS responsibility.
 
 ### `pns.interfaces.simulate`
 
-The WebSocket layer currently owns more than transport.
+The WebSocket layer is now a transport adapter around `SessionRuntime`.
 
-It also maintains:
+The runtime's authoritative `SessionState` maintains:
 
 - selected character pool
 - per-character conversation histories
@@ -137,25 +137,29 @@ It also maintains:
 - pending correction per character
 - turn progression
 - session statistics
-- drift-record persistence
+- completed turn records and derived statistics
 
-This works for the current research demo, but some of those responsibilities belong conceptually to a runtime/session layer rather than a transport interface.
-
-They should move gradually, not through a rewrite.
+Drift persistence remains an execution-side effect performed before a turn is
+committed to `SessionState` and published over the WebSocket.
 
 ### `SessionState`
 
-`SessionState` already provides an explicit representation of:
+`SessionState` is the authoritative live-session representation of:
 
 - session identifier
 - current scene
 - participating characters
-- turns
+- completed turns and their Router/provenance data
+- per-character LLM histories and pending corrections
+- current round-robin position
+- lifecycle and latest runtime error
+- statistics derived from completed turns
 - world state
-- status
 - metadata
 
-It is currently foundational rather than authoritative.
+The `world_state` field remains foundational and intentionally unconnected until
+the WorldState phase. Authored Scene fixtures are still owned separately by the
+runtime.
 
 ### `WorldState`
 
