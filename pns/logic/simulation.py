@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pns.world import get_character_system
+from pns.world.context import render_clock, render_session_location
 from pns.world.characters import registry as character_registry
 import pns.logic.router as router_mod
 
@@ -20,12 +21,17 @@ def _strip_prefix(text: str, char_name: str) -> str:
 
 
 async def call_character_async(
-    client, character: str, history: list, scene: dict, model: str,
+    client, character: str, history: list, context, model: str,
     max_tokens: int, temperature: float, correction: str = None,
 ) -> str:
+    """调用角色模型。
+
+    context 是权威的 WorldState（新路径）或遗留 scene dict（兼容路径）；
+    两种都只被渲染成提示词文本，不反向影响世界状态。
+    """
     use_compat = "flash-lite" in model.lower()
     try:
-        system = get_character_system(character, scene, compat=use_compat)
+        system = get_character_system(character, context, compat=use_compat)
     except ValueError as e:
         # 角色存在于 pack 但还没有 prompt（not_ready/partial 且未补内容）
         raise character_registry.CharacterNotReadyError(character, str(e)) from e
@@ -91,7 +97,20 @@ def append_drift_record(path: Path, record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def save_history(history_dir: Path, session_id: str, scene: dict, model: str, turns: list, stats: dict) -> Path:
+def save_history(
+    history_dir: Path,
+    session_id: str,
+    scene: dict,
+    model: str,
+    turns: list,
+    stats: dict,
+    world=None,
+) -> Path:
+    """把一次会话写成人类可读的 Markdown 投影。
+
+    标题和开场白仍来自遗留 scene（它就是这份记录的叙事来源），但时间/地点
+    在传入 world 时改从权威 WorldState 投影 —— 归档不再自己留一份世界状态。
+    """
     history_dir.mkdir(parents=True, exist_ok=True)
 
     filename = history_dir / f"{session_id}.md"
@@ -103,8 +122,13 @@ def save_history(history_dir: Path, session_id: str, scene: dict, model: str, tu
     lines.append(f"")
     lines.append(f"| | |")
     lines.append(f"|---|---|")
-    lines.append(f"| 时间 | {scene['time']} |")
-    lines.append(f"| 地点 | {scene['location']} |")
+    if world is not None:
+        world_time = render_clock(world.clock)
+        world_place = render_session_location(world)
+    else:
+        world_time, world_place = scene["time"], scene["location"]
+    lines.append(f"| 时间 | {world_time} |")
+    lines.append(f"| 地点 | {world_place} |")
     lines.append(f"| 模型 | {model} |")
     lines.append(f"| 生成时间 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} |")
     lines.append(f"")

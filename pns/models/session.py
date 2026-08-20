@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from pns.models.world_state import WorldState
+
 
 @dataclass
 class Turn:
@@ -109,11 +111,22 @@ class SessionState:
     current_character_index: int = 0
     histories: Dict[str, List[Dict]] = field(default_factory=dict)
     pending_corrections: Dict[str, Optional[str]] = field(default_factory=dict)
-    world_state: Dict = field(default_factory=dict)
+    world_state: Optional[WorldState] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
+
+    def attach_world_state(self, world_state: WorldState) -> None:
+        """绑定本会话唯一一份权威 WorldState（只允许一次）。
+
+        运行时和 SessionState 拿到的必须是同一个对象，不允许各存一份副本。
+        """
+        if not isinstance(world_state, WorldState):
+            raise TypeError("world_state 必须是 WorldState 实例")
+        if self.world_state is not None:
+            raise RuntimeError("SessionState 已经绑定过 WorldState")
+        self.world_state = world_state
 
     def initialize_runtime(self, scene_trigger: str) -> None:
         """Initialize per-character runtime state exactly once."""
@@ -224,7 +237,7 @@ class SessionState:
             "histories": self.histories,
             "pending_corrections": self.pending_corrections,
             "stats": self.final_stats(),
-            "world_state": self.world_state,
+            "world_state": self.world_state.to_dict() if self.world_state else {},
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,

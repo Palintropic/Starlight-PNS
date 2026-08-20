@@ -27,16 +27,32 @@
 
 所有字段可省略，缺省值：`scene` = 当前 `DEFAULT_SCENE`，`max_turns=8`，`model` = 环境变量 `GENERATOR_MODEL`（再回退到 `MODEL`），`max_tokens=1024`，`temperature=0.85`，`api_delay=1.0`。Router 评估模型独立读取 `EVALUATOR_MODEL`（再回退到 `MODEL`）。
 
+> **`scene` 是兼容字段。** 请求里的 `scene` 只用来初始化世界状态：`pns/world/scene_compat.py`
+> 里的 `SCENE_WORLD_MAP` 把它显式映射成角色所在的 `location_id` 和线上频道；初始模拟时间与
+> 环境仍读取兼容 scene 的 `time` / `weather` 字段，避免 World Editor 与运行时产生两份事实来源。
+> 之后运行时的世界真相就是 `WorldState`，场景里的 `trigger`/`auto_next`/`auto_turns` 不再参与。
+> `scene` 传了未知 id 仍然回退到 `DEFAULT_SCENE`（行为不变）；但如果一个已存在的场景在
+> `SCENE_WORLD_MAP` 里没有映射（例如刚从 World Editor 里新建的场景），会话不会带着错误的
+> 地点开跑，而是立即返回一条 `error` 消息说明要补哪条映射。
+
 **服务端 → 客户端**
 
 | `type` | 时机 | 字段 |
 |---|---|---|
-| `start` | 收到参数、确认场景后 | `session_id`、`scene`（`id`/`label`/`trigger`/`time`/`location`）、`max_turns`、`model` |
+| `start` | 收到参数、确认场景后 | `session_id`、`scene`（`id`/`label`/`trigger`/`time`/`location`）、`world`、`max_turns`、`model` |
 | `generating` | 角色开始生成这一轮台词前 | `turn`、`character`（`mizuki`/`ena`）、`char_name` |
 | `judging` | 台词生成完毕，Router 开始判分前 | `turn`、`character`、`char_name` |
 | `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version`、`generator_provider`、`generator_model`、`evaluator_provider`、`evaluator_model` |
 | `error` | 角色调用失败／没有 API Key | `turn`（可能没有）、`message` |
 | `done` | 全部轮次结束 | `session_id`、`stats`（`total_turns`/`ooc_count`/`corrections`/`avg_score`/`max_score`）、`history_file` |
+
+`start` 的 `scene` 块字段不变，但 `time` / `location` 现在是当前 `WorldState` 的投影，
+而不是从 `SCENES` 里直接抄出来的静态文本。绝大多数场景两者结果一致；`nightcord` 会出现差异，
+因为"各自房间 · Nightcord 语音频道"被拆成了各自的物理房间 + 一个线上频道。
+
+`start` 另外新增一个 `world` 块（附加字段，不影响既有客户端），是会话初始 `WorldState`
+的完整序列化：`clock`/`date`/`time`、`locations`（位置图）、`channels`（频道表）、
+`character_locations`（角色 ID → `location_id`）、`channel_members`、`location_state`、`metadata`。
 
 示例（`turn` 消息）：
 
@@ -136,6 +152,10 @@
 
 ## 3. World Editor
 
+> **场景相关接口（3.1 / 3.2）是兼容接口。** 场景是作者写死的叙事 fixture，只作为世界状态的
+> 初始化输入保留；它不是世界模型。新建或改动场景后，还需要在 `pns/world/scene_compat.py` 的
+> `SCENE_WORLD_MAP` 里补上对应的位置/频道映射，会话才能跑起来。事实接口（3.3）不受影响。
+
 图形化编辑 `pns/world/scenes.py` / `pns/world/facts.py`。写回逻辑在 `pns/world/codegen.py`：只替换目标变量（`SCENES`/`WORLD_FACTS`）的赋值范围，文件头注释和其他顶层语句原样保留；写盘前用 `black` 格式化，写盘前把原文件备份成同目录下的 `*.py.bak`（见第 4 节）；`POST` 成功后服务端会 `importlib.reload` 相关模块，正在运行的进程无需重启即可读到新内容。
 
 校验失败（语法错误、缺变量、类型不对、`id` 与 dict key 不一致等）一律返回 **HTTP 400**，body 形如 `{"detail": "错误信息"}`，不会写盘。
@@ -175,8 +195,8 @@
 | `scene_type` | string | 目前只有 `area_talk`，留作可扩展 |
 | `gate_triggers` | `{A,B,C: string}` 或 `null` | 可选，`null`/缺失时整个 key 不写回源码 |
 | `gate_opening_note` | string 或 `null` | 可选，同上 |
-| `auto_next` | string（其他 scene 的 id）或 `null` | 可选 |
-| `auto_turns` | number 或 `null` | 可选 |
+| `auto_next` | string（其他 scene 的 id）或 `null` | 可选；已废弃，不驱动世界模型 |
+| `auto_turns` | number 或 `null` | 可选；已废弃，不驱动世界模型 |
 
 **`POST`** body 是编辑后的完整 dict（同上结构，key 为 scene id），响应是写盘后重新读取的 `SCENES`。
 

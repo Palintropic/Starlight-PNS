@@ -19,7 +19,9 @@ from pns.logic.simulation import (
     save_history,
 )
 from pns.models.session import SessionState, Turn
+from pns.models.world_state import WorldState
 from pns.world.characters import registry as character_registry
+from pns.world.scene_compat import SceneMappingError, build_initial_world_state
 
 # 不从 pns.interfaces.paths 导入：pns.interfaces 包的 __init__ 会连带拉起
 # app.py -> config.py -> oobe，这条链只在服务器自己的启动上下文里能跑通。
@@ -41,6 +43,7 @@ class SessionRuntime:
         session_id: str,
         scene: dict,
         character_ids: list,
+        world_state: WorldState,
         client,
         model: str,
         generator_provider: str,
@@ -65,11 +68,19 @@ class SessionRuntime:
         self.state = SessionState(
             session_id=session_id, scene=scene["id"], characters=list(character_ids)
         )
+        # 权威世界状态只在 create() 里造一次，运行时不再另存副本：
+        # self.world 始终就是 self.state.world_state 那一个对象。
+        self.state.attach_world_state(world_state)
         self.state.initialize_runtime(scene["trigger"])
 
     @property
     def session_id(self) -> str:
         return self.state.session_id
+
+    @property
+    def world(self) -> WorldState:
+        """本会话唯一的权威 WorldState。"""
+        return self.state.world_state
 
     @classmethod
     def create(
@@ -120,6 +131,12 @@ class SessionRuntime:
         if not api_key:
             raise SessionSetupError("找不到 API Key，请刷新页面完成配置向导，或运行 python oobe.py")
 
+        # 遗留 scene 只在这里投影成初始世界状态一次，之后 scene 不再是世界真相。
+        try:
+            world_state = build_initial_world_state(scene, character_ids)
+        except SceneMappingError as e:
+            raise SessionSetupError(str(e)) from e
+
         client = router_mod.create_client(api_key)
         session_id = (
             f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{scene['id']}_{uuid4().hex[:12]}"
@@ -129,6 +146,7 @@ class SessionRuntime:
             session_id=session_id,
             scene=scene,
             character_ids=character_ids,
+            world_state=world_state,
             client=client,
             model=model,
             generator_provider=generator_provider,
@@ -150,17 +168,21 @@ class SessionRuntime:
 
     async def _run(self) -> AsyncIterator[dict]:
         scene = self.scene
+        world = self.world
 
         yield {
             "type": "start",
             "session_id": self.session_id,
+            # 遗留 scene 块的形状不变，但 time/location 现在是当前世界状态的
+            # 投影，而不是从 scene 字典里直接抄出来的静态文本。
             "scene": {
                 "id": scene["id"],
                 "label": scene["label"],
                 "trigger": scene["trigger"],
-                "time": scene["time"],
-                "location": scene["location"],
+                "time": world_mod.render_clock(world.clock),
+                "location": world_mod.render_session_location(world),
             },
+            "world": world.to_dict(),
             "max_turns": self.max_turns,
             "model": self.model,
         }
@@ -185,7 +207,7 @@ class SessionRuntime:
 
             try:
                 reply = await call_character_async(
-                    self.client, current, generation_history, scene, self.model,
+                    self.client, current, generation_history, world, self.model,
                     self.max_tokens, self.temperature, correction_applied,
                 )
             except character_registry.CharacterNotReadyError as e:
@@ -278,6 +300,7 @@ class SessionRuntime:
                     self.model,
                     [turn.to_wire_dict() for turn in self.state.turns],
                     final_stats,
+                    world=world,
                 )
             except Exception as e:
                 self.state.record_error(f"历史记录保存失败: {e}")
