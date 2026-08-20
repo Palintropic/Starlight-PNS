@@ -150,17 +150,17 @@ Router 属于**完整性/一致性层（integrity layer）**，不是 Agency 层
 
 `pns.logic.simulation` 负责组装角色上下文、调用生成模型、把生成结果交给 Router 评估，并归档会话结果。
 
-当前 WebSocket 模拟路径还维护：
+`SessionRuntime` 现在通过唯一权威的 `SessionState` 编排 WebSocket 模拟；该状态对象维护：
 
 - 入选角色
 - 每个角色各自的对话历史
 - 轮转位置
 - 每个角色各自的待注入纠正
-- session id
-- turn log
-- 运行统计
+- session identity 与 lifecycle
+- 已完成的 `Turn` 记录
+- 从这些 Turn 派生的运行统计
 
-仓库中还已经存在显式的 `SessionState` 和 `WorldState` 数据模型。它们目前还不是实时 WebSocket 运行路径的权威状态源，但已经构成未来持久 Runtime 的早期基础。
+`WorldState` 仍是显式的基础模型，但尚未接入实时 runtime。Scene fixture 在 WorldState 阶段之前继续保持独立。
 
 ---
 
@@ -338,9 +338,10 @@ PNS 不在框架代码中定义固定角色阵容。系统从当前启用的可�
 - [x] Router 动态加载每个角色的 `_router_reference.md`
 - [x] Router 注入原始任务 / 最近历史 / 纠正状态
 - [x] 七维验收与逐角色纠正队列
-- [x] 面向会话的生成 / Router 编排已抽到 `pns.logic.simulation`
+- [x] 面向会话的生成 / Router 编排已抽到 `pns.runtime.SessionRuntime`
 - [x] `SessionState` 与 `WorldState` 基础数据模型
-- [ ] 将 `SessionState` / `WorldState` 接入实时运行路径并成为权威状态
+- [x] 让 `SessionState` 成为实时 runtime 的权威状态
+- [ ] 将 `WorldState` 接入实时 runtime
 - [x] 分离生成模型与评估模型的配置 / provenance
 - [ ] Event model
 - [ ] Exposure / perceptual gate

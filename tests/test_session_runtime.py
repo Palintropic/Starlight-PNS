@@ -111,6 +111,19 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runtime.state.turns), 2)
         self.assertEqual(runtime.state.turns[0].character, "mizuki")
         self.assertEqual(runtime.state.status, "completed")
+        self.assertEqual(runtime.state.current_character_index, 0)
+        self.assertEqual(len(runtime.state.histories["mizuki"]), 3)
+        self.assertEqual(runtime.state.final_stats(), done["stats"])
+        self.assertEqual(runtime.state.to_dict()["stats"], done["stats"])
+        for duplicate in (
+            "_histories",
+            "_stats",
+            "_current_idx",
+            "_pending_corrections",
+            "_turn_log",
+            "_has_run",
+        ):
+            self.assertFalse(hasattr(runtime, duplicate), duplicate)
 
     async def test_generation_error_still_emits_done(self):
         # 保留原 simulate.py 的既有行为：轮内异常 break 出循环，但仍然会
@@ -189,6 +202,39 @@ class SessionRuntimeRunTests(unittest.IsolatedAsyncioTestCase):
             await _run(runtime)
         with self.assertRaises(RuntimeError):
             await _run(runtime)
+
+    async def test_state_owns_pending_corrections(self):
+        corrections_seen = []
+
+        async def fake_call(client, character, history, scene, model, max_tokens, temperature, correction):
+            corrections_seen.append(correction)
+            return "reply"
+
+        async def fake_judge(client, character, message, turn, scene, **kwargs):
+            if turn == 1:
+                return {"drift_score": 6, "is_ooc": True, "correction": "stay in character"}
+            return {"drift_score": 1, "is_ooc": False}
+
+        runtime = self._create(max_turns=3)
+        with patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+             patch("pns.runtime.session_runtime.judge_async", fake_judge):
+            await _run(runtime)
+
+        self.assertEqual(corrections_seen, [None, None, "stay in character"])
+        self.assertIsNone(runtime.state.pending_corrections["mizuki"])
+        self.assertEqual(runtime.state.final_stats()["ooc_count"], 1)
+        self.assertEqual(runtime.state.final_stats()["corrections"], 1)
+
+    async def test_closing_run_marks_authoritative_state_cancelled(self):
+        runtime = self._create()
+        stream = runtime.run()
+
+        start = await anext(stream)
+        self.assertEqual(start["type"], "start")
+        self.assertEqual(runtime.state.status, "active")
+
+        await stream.aclose()
+        self.assertEqual(runtime.state.status, "cancelled")
 
 
 if __name__ == "__main__":

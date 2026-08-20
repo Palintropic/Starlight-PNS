@@ -51,9 +51,7 @@ class SessionRuntime:
         history_dir: Path = _DEFAULT_HISTORY_DIR,
         drift_scores_file: Path = _DEFAULT_DRIFT_SCORES_FILE,
     ):
-        self.session_id = session_id
         self.scene = scene
-        self.character_ids = character_ids
         self.client = client
         self.model = model
         self.generator_provider = generator_provider
@@ -67,21 +65,11 @@ class SessionRuntime:
         self.state = SessionState(
             session_id=session_id, scene=scene["id"], characters=list(character_ids)
         )
+        self.state.initialize_runtime(scene["trigger"])
 
-        self._histories = {
-            cid: [
-                {
-                    "role": "user",
-                    "content": f"【场景】{scene['trigger']}" + ("\n请开始对话。" if i == 0 else ""),
-                }
-            ]
-            for i, cid in enumerate(character_ids)
-        }
-        self._stats = {"ooc_count": 0, "scores": [], "corrections": 0}
-        self._current_idx = 0
-        self._pending_corrections = {cid: None for cid in character_ids}
-        self._turn_log = []
-        self._has_run = False
+    @property
+    def session_id(self) -> str:
+        return self.state.session_id
 
     @classmethod
     def create(
@@ -153,9 +141,14 @@ class SessionRuntime:
         )
 
     async def run(self) -> AsyncIterator[dict]:
-        if self._has_run:
-            raise RuntimeError("SessionRuntime.run() 只能调用一次")
-        self._has_run = True
+        self.state.start()
+        try:
+            async for message in self._run():
+                yield message
+        finally:
+            self.state.cancel()
+
+    async def _run(self) -> AsyncIterator[dict]:
         scene = self.scene
 
         yield {
@@ -173,15 +166,13 @@ class SessionRuntime:
         }
 
         for turn in range(1, self.max_turns + 1):
-            current = self.character_ids[self._current_idx]
+            current = self.state.current_character
             char_key = current
             meta = character_registry.get_character_metadata(current)
             char_name = meta.get("name", current)
-            others = [cid for cid in self.character_ids if cid != current]
-
             yield {"type": "generating", "turn": turn, "character": char_key, "char_name": char_name}
 
-            generation_history = list(self._histories[current])
+            generation_history = list(self.state.history_for(current))
             original_request = next(
                 (
                     item.get("content", "")
@@ -190,7 +181,7 @@ class SessionRuntime:
                 ),
                 scene.get("trigger", ""),
             )
-            correction_applied = self._pending_corrections[current]
+            correction_applied = self.state.correction_for(current)
 
             try:
                 reply = await call_character_async(
@@ -198,18 +189,18 @@ class SessionRuntime:
                     self.max_tokens, self.temperature, correction_applied,
                 )
             except character_registry.CharacterNotReadyError as e:
+                message = f"角色 '{current}' 尚未准备好：{e.detail}"
+                self.state.record_error(message)
                 yield {
                     "type": "error", "turn": turn, "character": current,
-                    "message": f"角色 '{current}' 尚未准备好：{e.detail}",
+                    "message": message,
                 }
                 break
             except Exception as e:
-                yield {"type": "error", "turn": turn, "message": str(e)}
+                message = str(e)
+                self.state.record_error(message)
+                yield {"type": "error", "turn": turn, "message": message}
                 break
-
-            self._histories[current].append({"role": "assistant", "content": f"{char_name}：{reply}"})
-            for other in others:
-                self._histories[other].append({"role": "user", "content": f"{char_name}：{reply}"})
 
             yield {"type": "judging", "turn": turn, "character": char_key, "char_name": char_name}
 
@@ -225,106 +216,74 @@ class SessionRuntime:
                     correction_applied=correction_applied,
                 )
             except Exception as e:
-                yield {"type": "error", "turn": turn, "message": str(e)}
+                message = str(e)
+                self.state.record_error(message)
+                yield {"type": "error", "turn": turn, "message": message}
                 break
             score = result.get("drift_score", 0)
             is_ooc = result.get("is_ooc", False)
 
-            turn_data = {
-                "turn": turn,
-                "character": char_key,
-                "char_name": char_name,
-                "reply": reply,
-                "score": score,
-                "is_ooc": is_ooc,
-                "drift_type": result.get("drift_type", ""),
-                "reason": result.get("reason", ""),
-                "correction": result.get("correction"),
-                "needs_human_review": result.get("needs_human_review", False),
-                "dimensions": result.get("dimensions", {}),
-                "dimensions_complete": result.get("dimensions_complete", False),
-                "methodology_version": result.get("methodology_version", ""),
-                "generator_provider": self.generator_provider,
-                "generator_model": self.model,
-                "evaluator_provider": result.get("evaluator_provider", ""),
-                "evaluator_model": result.get("evaluator_model", ""),
-            }
-            drift_record = {
-                "session_id": self.session_id,
-                "turn": turn,
-                "character": char_key,
-                "char_name": char_name,
-                "text": reply,
-                "drift_score": score,
-                "confidence": result.get("confidence", 0.0),
-                "drift_type": result.get("drift_type", ""),
-                "reason": result.get("reason", ""),
-                "needs_human_review": result.get("needs_human_review", False),
-                "correction": result.get("correction"),
-                "scene_id": result.get("scene_id", ""),
-                "lore_tag": result.get("lore_tag", ""),
-                "router_reference_status": result.get("router_reference_status", ""),
-                "dimensions": result.get("dimensions", {}),
-                "dimensions_complete": result.get("dimensions_complete", False),
-                "methodology_version": result.get("methodology_version", ""),
-                "generator_provider": self.generator_provider,
-                "generator_model": self.model,
-                "evaluator_provider": result.get("evaluator_provider", ""),
-                "evaluator_model": result.get("evaluator_model", ""),
-                "original_request": original_request,
-                "correction_applied": correction_applied,
-                "timestamp": datetime.now().isoformat(),
-            }
+            completed_turn = Turn(
+                turn_number=turn,
+                character=char_key,
+                prompt=original_request,
+                response=reply,
+                timestamp=datetime.now().isoformat(),
+                char_name=char_name,
+                score=score,
+                is_ooc=is_ooc,
+                confidence=result.get("confidence", 0.0),
+                drift_type=result.get("drift_type", ""),
+                reason=result.get("reason", ""),
+                correction=result.get("correction"),
+                correction_applied=correction_applied,
+                needs_human_review=result.get("needs_human_review", False),
+                dimensions=result.get("dimensions", {}),
+                dimensions_complete=result.get("dimensions_complete", False),
+                methodology_version=result.get("methodology_version", ""),
+                scene_id=result.get("scene_id", ""),
+                lore_tag=result.get("lore_tag", ""),
+                router_reference_status=result.get("router_reference_status", ""),
+                generator_provider=self.generator_provider,
+                generator_model=self.model,
+                evaluator_provider=result.get("evaluator_provider", ""),
+                evaluator_model=result.get("evaluator_model", ""),
+            )
             try:
-                append_drift_record(self.drift_scores_file, drift_record)
+                append_drift_record(
+                    self.drift_scores_file,
+                    completed_turn.to_drift_record(self.session_id),
+                )
             except Exception as e:
-                yield {"type": "error", "turn": turn, "message": f"漂移记录保存失败: {e}"}
+                message = f"漂移记录保存失败: {e}"
+                self.state.record_error(message)
+                yield {"type": "error", "turn": turn, "message": message}
                 break
 
-            self._stats["scores"].append(score)
-            if is_ooc:
-                self._stats["ooc_count"] += 1
-                self._pending_corrections[current] = result.get("correction")
-                if self._pending_corrections[current]:
-                    self._stats["corrections"] += 1
-            else:
-                self._pending_corrections[current] = None
-
-            self._turn_log.append(turn_data)
-            self.state.add_turn(
-                Turn(
-                    turn_number=turn,
-                    character=current,
-                    prompt=original_request,
-                    response=reply,
-                    timestamp=datetime.now().isoformat(),
-                )
-            )
-            yield {"type": "turn", **turn_data}
+            self.state.record_turn(completed_turn)
+            yield {"type": "turn", **completed_turn.to_wire_dict()}
 
             await asyncio.sleep(self.api_delay)
-            self._current_idx = (self._current_idx + 1) % len(self.character_ids)
+            self.state.advance_character()
 
-        scores = self._stats["scores"]
-        avg_score = sum(scores) / len(scores) if scores else 0
-        final_stats = {
-            "total_turns": len(scores),
-            "ooc_count": self._stats["ooc_count"],
-            "corrections": self._stats["corrections"],
-            "avg_score": round(avg_score, 2),
-            "max_score": max(scores) if scores else 0,
-        }
+        final_stats = self.state.final_stats()
 
         saved_path: Optional[Path] = None
-        if self._turn_log:
+        if self.state.turns:
             try:
                 saved_path = save_history(
-                    self.history_dir, self.session_id, scene, self.model, self._turn_log, final_stats
+                    self.history_dir,
+                    self.session_id,
+                    scene,
+                    self.model,
+                    [turn.to_wire_dict() for turn in self.state.turns],
+                    final_stats,
                 )
             except Exception as e:
+                self.state.record_error(f"历史记录保存失败: {e}")
                 print(f"[server] 历史记录保存失败: {e}")
 
-        self.state.status = "completed"
+        self.state.complete()
         yield {
             "type": "done",
             "session_id": self.session_id,

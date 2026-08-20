@@ -144,17 +144,19 @@ The current implementation already contains runtime responsibilities.
 
 `pns.logic.simulation` assembles character context, invokes the generation model, passes generated output into Router evaluation and archives session results.
 
-The WebSocket simulation path currently maintains:
+`SessionRuntime` now orchestrates the WebSocket simulation using one
+authoritative `SessionState`, which maintains:
 
 - selected characters
 - per-character conversation history
 - round-robin position
 - per-character pending corrections
-- session identifiers
-- turn logs
-- runtime statistics
+- session identity and lifecycle
+- completed `Turn` records
+- statistics derived from those turns
 
-`SessionState` and `WorldState` also exist as explicit data models. They are not yet the authoritative state path for the live WebSocket runner, but they provide an early foundation for a more persistent runtime.
+`WorldState` remains an explicit foundational model, but is not connected to the
+live runtime yet. Scene fixtures remain separate until the WorldState phase.
 
 ---
 
@@ -334,9 +336,10 @@ Stage: Active development — Demo v6 complete
 - [x] Router dynamic loading of per-character `_router_reference.md`
 - [x] Router context injection (original request, recent history, correction state)
 - [x] Seven-dimension evaluation and per-character correction queues
-- [x] Session-oriented generation / Router orchestration extracted into `pns.logic.simulation`
+- [x] Session-oriented generation / Router orchestration extracted into `pns.runtime.SessionRuntime`
 - [x] `SessionState` and `WorldState` foundational data models
-- [ ] Integrate `SessionState` / `WorldState` into the authoritative live runtime path
+- [x] Make `SessionState` authoritative in the live runtime path
+- [ ] Integrate `WorldState` into the live runtime path
 - [x] Separate generation-model and evaluator-model configuration / provenance
 - [ ] Event model
 - [ ] Exposure / perceptual gate
