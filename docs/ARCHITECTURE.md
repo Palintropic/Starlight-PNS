@@ -90,7 +90,11 @@ Starlight-PNS
 │   └── character content
 │
 ├── pns/world/
-│   ├── scenes
+│   ├── locations          (seeded location graph)
+│   ├── channels           (seeded online channels)
+│   ├── context            (WorldState -> prompt projection)
+│   ├── scene_compat       (legacy scene -> initial WorldState)
+│   ├── scenes             (compatibility fixtures)
 │   ├── facts
 │   ├── character registry
 │   └── character-system assembly
@@ -102,6 +106,8 @@ Starlight-PNS
 ├── pns/models/
 │   ├── SessionState
 │   ├── WorldState
+│   ├── Location / LocationGraph
+│   ├── Channel / ChannelRegistry
 │   └── DriftScore
 │
 ├── pns/interfaces/
@@ -147,33 +153,78 @@ committed to `SessionState` and published over the WebSocket.
 `SessionState` is the authoritative live-session representation of:
 
 - session identifier
-- current scene
+- originating legacy scene id (compatibility provenance only)
 - participating characters
 - completed turns and their Router/provenance data
 - per-character LLM histories and pending corrections
 - current round-robin position
 - lifecycle and latest runtime error
 - statistics derived from completed turns
-- world state
+- the session's single typed `WorldState`
 - metadata
 
-The `world_state` field remains foundational and intentionally unconnected until
-the WorldState phase. Authored Scene fixtures are still owned separately by the
-runtime.
+`SessionState.world_state` is a typed `WorldState`, attached exactly once by
+`SessionRuntime.create()` through `SessionState.attach_world_state()`. The
+runtime does not keep a parallel copy: `SessionRuntime.world` is a property
+returning that same object.
 
 ### `WorldState`
 
-`WorldState` already models:
+`WorldState` is the authoritative representation of mutable world reality for
+the duration of a session:
 
-- current scene
-- simulated time
-- character locations
-- active characters
-- applied world-fact version
-- metadata
-- time advancement
+- a simulation clock carrying both date and time (advancing across midnight
+  rolls the date over instead of discarding it)
+- character physical locations, keyed by stable character ID
+- channel membership, independent of physical location
+- per-location environment state
+- the session's `LocationGraph` and `ChannelRegistry`
+- metadata, including the provenance of the legacy scene it was built from
 
-It is also foundational rather than the authoritative state path used by the current WebSocket runner.
+`WorldState` deliberately has no `current_scene` and no cast list: a world can
+hold agents standing in several different locations at once, and "the current
+scene" is not a property of the world.
+
+### `LocationGraph` and `ChannelRegistry`
+
+Physical locations and communication channels are separate concepts and live in
+separate models.
+
+`pns/models/location.py` defines `Location` (stable `location_id`, display name,
+kind, optional parent, connections with travel duration, access and static
+perception metadata) and `LocationGraph`, which rejects duplicate IDs, dangling
+parent or connection references, self-references, and parent cycles.
+
+`pns/models/channel.py` defines `Channel` and `ChannelRegistry`. Nightcord is a
+channel, not a physical location: a character can be in their own room and
+present in the channel at the same time.
+
+`pns/world/locations.py` and `pns/world/channels.py` seed only the locations and
+channels the current fixtures require. They are not an attempt at a complete map.
+
+### Scene compatibility boundary
+
+`pns/world/scene_compat.py` is the only place in the runtime allowed to derive
+world state from `SCENES`. It projects an authored scene into an initial
+`WorldState` exactly once, at session creation:
+
+- simulation date and time
+- initial character placement (explicit `SCENE_WORLD_MAP` entries, no runtime
+  fuzzy matching of prose location names)
+- channel membership
+- per-location environment facts
+
+Everything after that belongs to `WorldState`. `trigger`, `auto_next`, and
+`auto_turns` are deprecated and do not drive the world model. A scene with no
+`SCENE_WORLD_MAP` entry raises a setup error naming the scene rather than being
+placed somewhere arbitrary.
+
+### Prompt context is a projection
+
+`pns/world/context.py` renders character-facing world context from `WorldState`
+and nothing else. The rule is one-directional: structured state determines text,
+and text never becomes state. `get_character_system()` still accepts a legacy
+scene dict for un-migrated callers, but the runtime passes the live `WorldState`.
 
 ---
 
@@ -765,13 +816,15 @@ WorldState
 └── mutable world variables
 ```
 
-The current `scenes.py` model remains useful for:
+The current `scenes.py` model is compatibility-only. It remains useful as an
+authored initializer for:
 
 - controlled research scenes
 - benchmark fixtures
 - authored scenarios
 
-Persistent state does not need to replace authored scenes.
+An authored scene may seed a world; it is not itself world state, and it cannot
+mutate the world after initialization.
 
 A scene can be viewed as a structured snapshot or scenario imposed on the world for a controlled run.
 
@@ -939,17 +992,15 @@ Recommended order:
         ↓
 4. Connect WorldState to the active execution path
         ↓
-5. Separate generator and evaluator configuration
+5. Introduce Event
         ↓
-6. Introduce Event
+6. Introduce Exposure
         ↓
-7. Introduce Exposure
+7. Introduce persistent scheduling
         ↓
-8. Introduce persistent scheduling
+8. Introduce Agency / Planner
         ↓
-9. Introduce Agency / Planner
-        ↓
-10. Introduce subjective persistent Memory
+9. Introduce subjective persistent Memory
 ```
 
 Memory should not be implemented first simply because it is visible to users.
