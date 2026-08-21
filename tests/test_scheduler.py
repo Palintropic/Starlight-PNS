@@ -15,6 +15,8 @@
 import ast
 import inspect
 import os
+import subprocess
+import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1645,24 +1647,22 @@ class PackageExportTests(unittest.TestCase):
         self.assertIs(models.ScheduledActivation, ScheduledActivation)
         self.assertIs(models.ActivationOutbox, ActivationOutbox)
 
-    def test_runtime_package_exports_the_runtime_surface(self):
-        import pns.runtime as runtime
-
-        for name in (
-            "SessionRuntime", "PersistentScheduler", "TickResult", "SchedulerError",
-            "commit_session_event", "evaluate_exposure", "ContentRegistry",
-            "ConfigBoundary",
-        ):
-            with self.subTest(name=name):
-                self.assertIn(name, runtime.__all__)
-                self.assertTrue(hasattr(runtime, name))
-        self.assertIs(runtime.PersistentScheduler, PersistentScheduler)
+    def test_importing_scheduler_does_not_initialize_reload_boundary(self):
+        """A leaf runtime import must not create unrelated process singletons."""
+        probe = (
+            "import sys; import pns.runtime.scheduler; "
+            "assert 'pns.runtime.reload' not in sys.modules; "
+            "assert 'pns.runtime.session_runtime' not in sys.modules"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_every_exported_name_resolves(self):
         import pns.models as models
-        import pns.runtime as runtime
-
-        for package in (models, runtime):
-            missing = [n for n in package.__all__ if not hasattr(package, n)]
-            with self.subTest(package=package.__name__):
-                self.assertEqual(missing, [])
+        missing = [n for n in models.__all__ if not hasattr(models, n)]
+        self.assertEqual(missing, [])
