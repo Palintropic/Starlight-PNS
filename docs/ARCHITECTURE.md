@@ -111,6 +111,7 @@ Starlight-PNS
 │   ├── Channel / ChannelRegistry
 │   ├── Event / EventStore
 │   ├── Exposure / Observation
+│   ├── ScheduledActivation / ActivationQueue
 │   └── DriftScore
 │
 ├── pns/runtime/
@@ -118,7 +119,8 @@ Starlight-PNS
 │   ├── event_commit        (the commit boundary)
 │   ├── exposure/           (eligibility + observation projection)
 │   ├── content_registry    (the single configuration build entry point)
-│   └── reload              (the configuration reload boundary)
+│   ├── reload              (the configuration reload boundary)
+│   └── scheduler           (simulated time + due activations)
 │
 ├── pns/interfaces/
 │   ├── simulation
@@ -506,6 +508,91 @@ update, no parallel config versions, no distributed sync, and no database
 version system. An operator clicks a button, running work stops, configuration
 is rebuilt, and work resumes.
 
+### Persistent scheduler boundary
+
+`pns/runtime/scheduler.py` answers exactly one question: **simulated time moved
+forward, so what became eligible to happen?** It does not answer whether a
+character wants to act, what they would do, or who speaks next — those belong to
+Agency and the generation layer. The only thing a due activation produces is an
+`ActivationDue` record, which deliberately carries no text, no action and no
+goal.
+
+The domain surface is small on purpose. `ScheduledActivation`
+(`pns/models/activation.py`) is an immutable item with a stable id, a
+timezone-naive due time on a whole minute, an optional recurrence interval in
+minutes, and a frozen JSON payload. `ActivationKind` has exactly one member,
+`character.activation`, because a kind counts as implemented only when the
+scheduler knows what to emit when it comes due; placeholder kinds would make
+callers believe scheduling them does something.
+
+`ActivationQueue` (`pns/models/activation_queue.py`) holds the items that have
+not fired yet, and its order is explicit rather than incidental:
+
+```text
+order = (due_at, sequence)
+```
+
+`sequence` is registration order, assigned when the item is queued and kept for
+the item's whole life — a recurring activation keeps its number when it is
+rescheduled. So two activations due at the same instant always fire in the order
+they were registered, and that result does not depend on dict iteration order,
+on sort stability, or on surviving a serialization round trip.
+
+Time advances in exactly one way:
+
+```text
+scheduler.advance_by / advance_to / advance_to_next_due
+        ↓
+plan what would come due at the target   (pure — reads nothing it will mutate)
+        ↓
+commit a world.time_advanced Event through the session commit boundary
+        ↓                                   │
+        │                                   └── the event's state effect is the
+        │                                       only thing that moves the clock
+        ↓
+verify the clock landed exactly on the target
+        ↓
+drain one-shots, reschedule recurring items, emit ActivationDue records
+```
+
+The whole sequence is one transaction. The clock, the event store, the exposure
+log, the activation queue and the emitted due records either all survive or all
+roll back to the instant before the tick; a test patches each mutation step in
+turn to prove it. The scheduler never calls `WorldState.advance_time()` itself —
+that would be a clock change with no record in world history, and world history
+has to be able to explain why the clock reads what it reads. A test walks the
+module's AST to keep it that way.
+
+A clock tick is scoped `public` with no location and no channel, so the exposure
+layer decides that nobody perceived it. Characters perceive events, not time.
+
+Recurrence is interval arithmetic from the item's original due time, never from
+"now", so a daily 07:00 activation stays at 07:00 instead of drifting later every
+time it fires; midnight, month, year and leap-day boundaries are ordinary
+`timedelta` arithmetic with no special cases. When one advance steps over several
+occurrences they are coalesced into a single due record whose
+`missed_occurrences` says how many were passed — skipped occurrences are stated,
+never silent. Cancellation is explicit and idempotent: `cancel()` returns `True`
+when it removed a pending item and `False` when there was nothing to remove
+(never scheduled, already fired, already cancelled), and it never reaches back
+into due records or events that already happened.
+
+Scheduler state is **runtime authoritative state**, not configuration. Each
+session owns one `PersistentScheduler` over its own `SessionState`; there is no
+process-level queue, `ContentRegistry` has no field that holds one and no method
+that writes one, and a reload — successful or failed — cannot alter a live queue
+or clock. A serialized scheduler names the session and the clock it was taken
+at, and restoring it into a different session, against a different clock, with a
+reordered queue, with duplicate ids or sequences, or with an activation that is
+not strictly in the future all fail loudly instead of restoring a queue that
+quietly disagrees with the world.
+
+The deterministic research round robin is untouched. `SessionRuntime` owns a
+scheduler because scheduler state is per-session runtime state, but the turn loop
+does not consult it: reproducible research runs depend on the clock standing
+still and turn order following the character list, and "the moment arrived, does
+this character act?" is an Agency question rather than a scheduling one.
+
 ---
 
 ## 4. Architectural Principle
@@ -768,12 +855,19 @@ Purpose:
 
 ### 10.2 Persistent Scheduler
 
-Future runtime responsibility.
+Implemented as a foundation: `pns/runtime/scheduler.py` decides when simulated
+time advances and which scheduled activations become due, and emits typed
+due records for a later stage to act on. See "Persistent scheduler boundary" in
+§3 for the guarantees it makes.
 
-It may consider:
+It currently considers:
 
 - simulated time
-- character schedule
+- a per-session queue of scheduled activations, with recurrence
+
+It may later also consider:
+
+- character schedule as authored content
 - queued events
 - location
 - availability
@@ -785,7 +879,8 @@ It may consider:
 
 The persistent scheduler is an evolution of runtime scheduling.
 
-It is not a reason to remove or duplicate the existing research scheduler.
+It is not a reason to remove or duplicate the existing research scheduler, and
+the round robin still runs unchanged next to it.
 
 ---
 
