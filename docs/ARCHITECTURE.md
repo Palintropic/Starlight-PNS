@@ -112,6 +112,8 @@ Starlight-PNS
 │   ├── Event / EventStore
 │   ├── Exposure / Observation
 │   ├── ScheduledActivation / ActivationQueue / ActivationOutbox
+│   ├── Action catalogue / ActionProposal
+│   ├── AgencyRecord / AgencyLog / AgencyBudget
 │   └── DriftScore
 │
 ├── pns/runtime/
@@ -120,7 +122,8 @@ Starlight-PNS
 │   ├── exposure/           (eligibility + observation projection)
 │   ├── content_registry    (the single configuration build entry point)
 │   ├── reload              (the configuration reload boundary)
-│   └── scheduler           (simulated time + due activations)
+│   ├── scheduler           (simulated time + due activations)
+│   └── agency/             (declared actions: propose, validate, commit)
 │
 ├── pns/interfaces/
 │   ├── simulation
@@ -177,6 +180,8 @@ committed to `SessionState` and published over the WebSocket.
 - the session's per-character observation stream
 - the session's exposure decision log (system-side; allows and denies)
 - the session's activation queue and its due-activation outbox
+- the session's Agency audit log (system-side; one record per evaluated
+  activation, including deliberate inaction)
 - metadata
 
 `SessionState.world_state` is a typed `WorldState`, attached exactly once by
@@ -632,6 +637,183 @@ scheduler because scheduler state is per-session runtime state, but the turn loo
 does not consult it: reproducible research runs depend on the clock standing
 still and turn order following the character list, and "the moment arrived, does
 this character act?" is an Agency question rather than a scheduling one.
+
+### Agency boundary
+
+`pns/runtime/agency/` answers exactly one question: **given what this character
+currently perceives and is eligible to do, do they choose to act, and which
+declared action do they propose?** The scheduler decides when the question is
+asked, Exposure decides what the character could perceive, and the Router
+evaluates behaviour that has already been produced. None of those collapse into
+this layer, and none of them collapse into a single model call.
+
+Actions come from a typed catalogue, never from a dictionary.
+`pns/models/action.py` defines `ActionId` — `speak.here`, `message.send`,
+`presence.join_channel`, `presence.leave_channel`, `movement.move_to` — and one
+`ActionDefinition` per member declaring the event type it commits, its
+propagation scope, its target kind (`none` / `location` / `channel`), its
+preconditions, and the payload keys it accepts. A proposal carrying a key the
+definition does not declare is refused outright rather than silently trimmed, and
+the event builder filters by the same declaration, so "an arbitrary dictionary
+cannot mutate `WorldState`" holds at two independent points. The catalogue stays
+small for the same reason `EventType` does: an action counts as implemented only
+when the commit boundary knows what the world should look like afterwards.
+
+Preconditions are a closed enum in the model layer and a single evaluator per
+member in `pns/runtime/agency/preconditions.py`, mirroring how `ExposureReason`
+and the exposure rules are split. Legal options are enumerated by running those
+same evaluators over catalogue × candidate targets, so the enumerated set is by
+construction exactly the set whose preconditions pass — there is no second,
+faster path that could disagree with the first. Ordering is `(action_id,
+target_id)` and does not depend on dict iteration.
+
+`AgencyContext` is character-scoped by construction. It is built from a world, a
+character id, that character's eligible `ActivationDue`, and **that character's
+own observations** — nothing else is passed in, so the builder has no session to
+reach through. It therefore cannot read the exposure decision log (a denial
+reason is itself information: not knowing something has to include not knowing
+that you were denied) and cannot read the omniscient event store. An AST test
+keeps `context.py` free of both attribute names, and keeps the exposure log out
+of the whole package.
+
+Proposal and commitment are separate calls, not separate comments.
+`AgencyEngine.propose()` is pure: it builds the context, asks the policy, checks
+legality, and returns a `ProposalPlan`. Nothing is written — the due record stays
+pending, and a plan that is never committed leaves no trace. `commit()` is the
+transaction. The split is what makes "a proposal is not world truth" a callable
+boundary rather than a description, and it is also why every gate is rechecked at
+commit time: because a caller may legitimately propose a batch and commit it
+item by item, a check performed only during `propose()` can be walked straight
+past.
+
+At commit, four things are re-decided against the live world: the session action
+ceiling, whether the clock still reads what it read when the plan was made,
+whether the proposal's identity has since been claimed, and whether the declared
+preconditions still hold. A moved character, a changed channel roster, a sleeping
+actor, or an advanced clock all produce `rejected_stale`. The clock rule is
+deliberate: an activation asks "at *that* moment, do you act?", and answering it
+after time has moved would execute an old decision the character never had a
+chance to revisit.
+
+Outcomes are a closed set — `acted`, `abstained`, `rejected_illegal`,
+`rejected_stale`, `rejected_budget`, `rejected_policy_error` — and every rejection
+has identical consequences for the world: no event, no observation, no partial
+state. They are distinguished so that *why* nothing happened is a fact that can
+be looked up. "Do nothing" is `abstained`: a valid outcome, not an error and not
+a fabricated line. It is recorded, because "evaluated and chose not to act" and
+"never evaluated" are different facts for everything downstream.
+
+Policies propose; they never decide. `AgencyPolicy.decide()` receives the
+immutable context and returns a `PolicyDecision`, and deterministic
+implementations (`AbstainPolicy` — the default, `FirstLegalActionPolicy`,
+`ScriptedPolicy`) exist so tests and research runs never depend on a model.
+`ModelBackedPolicy` is an adapter over a caller-supplied selector: it translates
+the selector's raw shape into proposals and does not judge legality, because
+legality is the engine's job and having two places decide what is acceptable —
+one of them fed by a model — is how the authority leaks. It is constructed with a
+callable and nothing else, so it holds no session, no world, and no ability to
+commit. A selector that returns garbage, names an unknown action, or raises
+becomes a recorded rejection, never an exception through the transaction.
+
+Budgets are explicit, deterministic, and each one has a branch behind it:
+proposals accepted per activation, the size of the legal-action enumeration
+handed to a policy (truncation is deterministic and flagged in the context, so
+"did not choose" never quietly becomes "was not offered"), how many observations
+a policy sees, and how many actions a session may commit in total. That last
+count is derived from the audit log rather than kept in a counter, so an archive
+round trip cannot hand a restored session a fresh allowance.
+
+Actions that require authored text — `speak.here` and `message.send` — have **no
+commit path in this phase**, and that is a boundary rather than a default. A line
+becomes world truth through generation → Router evaluation → drift audit →
+commit; that chain is not wired into the agency path yet, so committing an
+authored line here would put dialogue into world history that no consistency
+evaluation ever saw, which is exactly what the commit boundary excludes
+elsewhere. There is deliberately no flag that reopens it: a safety boundary a
+caller can flip is not a boundary, and "the caller accepts the gap" is not an
+authority the caller has. The refusal exists at three points — the policy's
+proposal is rejected, a hand-built plan is rejected at commit, and
+`agency_event_fields()` (the only function that builds an agency event) refuses
+outright, so no code path exists at all. The action schema stays in the catalogue
+and stays in the legal enumeration, because the generation layer will wire into
+it unchanged and the gate disappears on its own at that point; deterministic
+policies simply never select an action that needs a line they would have to
+invent.
+
+Scheduler-to-agency handoff happens exactly once. The engine only accepts an
+`ActivationDue` that is present in this session's outbox, still matches the
+stored record field for field, and has not been acknowledged; the audit record's
+identity *is* the `due_id`. Acknowledgement and the audit write happen inside the
+same `SessionState.atomic_commit()` as the committed event, so a failure anywhere
+leaves the due pending and retryable, and success makes a second evaluation
+impossible. Note that `due_id` derives from activation id and firing time and
+carries no session number: two identically-stated sessions produce identical due
+records, and in that case the engine still consumes the one in its own outbox.
+
+Ownership follows the scheduler. The `AgencyLog` belongs to `SessionState`, the
+engine is a service over it, and a session binds exactly one — two engines would
+give one eligibility two mutually invisible conclusions, with the first to land
+having already acknowledged it. The archive shape is defined once, in
+`SessionState.agency_archive()`, and `session.to_dict()["agency"]` is that
+section. An archive missing the section is refused rather than restored as "never
+evaluated anything".
+
+Restoring validates against the rest of the session, not just against itself. A
+record may not be decided after the world clock or before its own activation
+fired, must reference a due record this session actually produced and
+acknowledged, and must agree with that due record about which character it
+concerns. For an `acted` record it is not enough that the referenced event
+exists, or even that its id matches the one derived from the proposal: the id is
+*derived from* `proposal_id`, so keeping it correct while rewriting the event's
+actor, type, scope, landing point, payload or provenance produces an archive
+where the audit says one thing, world history says another, and both agree on the
+identifier. Restore therefore checks the event's **content**, through
+`verify_agency_event()`, which rebuilds the expected fields with
+`agency_event_fields()` — the same function that constructed the event in the
+first place — and compares them. There is one definition of what an agency event
+must look like, so verification cannot drift looser than construction without
+construction drifting with it. Actor, event type, scope, landing point, payload,
+`correlation_id`, the occurrence time (which must equal the decision time), and
+every field of the agency provenance block — `due_id`, `activation_id`,
+`proposal_id`, `action_id`, `session_id`, `policy` — are all checked.
+
+Two things genuinely cannot be re-derived from an archive: where a no-target
+action's actor was standing, and the commit-time presence roster. Verification
+does not replay state effects to recover them — replaying would ask "does the
+world still turn out this way?", which is both dangerous and meaningless once the
+world has moved on. Instead each is constrained by rule and then taken as given.
+`ActionDefinition.participants_from` declares where a roster comes from
+(`none` / `channel_members` / `location_occupants`), the builder and the verifier
+both read that declaration, an empty roster is checked exactly, and a snapshot
+roster is still constrained by the action's own preconditions: an action
+requiring "already in the channel" cannot have produced an event whose snapshot
+omits its actor, and one requiring "not yet in the channel" cannot have produced
+one that includes it. `causation_id` is excluded from the comparison — it links
+world history rather than describing the action, and `EventStore` already owns
+ordering.
+
+Agency is a **separate runtime path**, not a new step in the research loop.
+`pns/runtime/session_runtime.py` does not import it — an AST test enforces that —
+and the deterministic round robin, its turn order, and its standing clock are
+unchanged. A research session's archive simply carries an empty agency section.
+Driving characters autonomously means constructing an `AgencyEngine` explicitly
+with a policy and calling `evaluate_pending()`; unlike the scheduler, the engine
+is not created for every session, because the state it manages already lives on
+`SessionState` and choosing a policy is not a decision the research path should
+make on the caller's behalf.
+
+Agency code and schema are **cold update**. `ContentRegistry` has no field
+holding a log, policy, or budget and no method that writes one; a reload —
+successful or failed — cannot alter a live engine, its log, or the world it
+judges against. Editable action *descriptions* could become reloadable content
+later; the authoritative catalogue, the preconditions, and the commit rules
+cannot.
+
+What this phase deliberately does not contain: no persistent subjective memory or
+recall, no long-horizon goal decomposition (the Planner surface here is the
+catalogue's declared targets and scopes, nothing more), no relationship or
+emotion model, no feed or Sekai Times projection, and no path by which the Router
+decides whether a character acts.
 
 ---
 
