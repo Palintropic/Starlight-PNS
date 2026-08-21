@@ -29,6 +29,7 @@ from .agency import (
     AgencyOutcome,
     AgencyRecord,
 )
+from .authored import AuthoredTextError, GenerationAudit
 from .drift_score import DriftScore
 from .event import Event, EventError, EventScope, EventType, new_event_id
 from .event_store import EventStore, EventStoreError
@@ -68,6 +69,7 @@ __all__ = [
     'LegalAction', 'Precondition', 'TargetKind',
     'action_definition', 'catalogue', 'catalogue_ids', 'new_proposal_id',
     'AgencyBudget', 'AgencyError', 'AgencyLog', 'AgencyOutcome', 'AgencyRecord',
+    'AuthoredTextError', 'GenerationAudit',
     'Event', 'EventError', 'EventScope', 'EventType', 'new_event_id',
     'EventStore', 'EventStoreError',
     'ExposureDecision', 'ExposureError', 'ExposureLog', 'ExposureReason',

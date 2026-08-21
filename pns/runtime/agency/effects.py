@@ -92,6 +92,7 @@ def event_for_proposal(
     proposal: ActionProposal,
     *,
     policy: str = "",
+    audit=None,
 ) -> Event:
     """把一条已经通过校验的提案表示成一条待提交事件。
 
@@ -99,8 +100,9 @@ def event_for_proposal(
     东西。事件能不能被接受，由 P5 的提交边界再判一次（引用完整性、时钟一致、
     状态转移是否可能）—— Agency 不越过它，也不重复它。
 
-    需要台词的动作在这里就走不通：`agency_event_fields()` 直接拒绝，因为生成
-    与 Router 判分链还没接进来。那不是可配置的，是这一阶段没有那条路径。
+    需要台词的动作只有带着一份被接受、且绑定到这一句的 GenerationAudit 才走
+    得通：`agency_event_fields()` 直接拒绝没有凭据的台词。那不是可配置的，
+    是这一层唯一的构造函数自己拒绝。
     """
     if not isinstance(proposal, ActionProposal):
         raise AgencyEffectError("只能翻译 ActionProposal")
@@ -120,6 +122,7 @@ def event_for_proposal(
             channel_id=channel_id,
             participants=participants,
             policy=policy,
+            audit=audit,
         ),
         causation_id=latest.event_id if latest is not None else None,
     )

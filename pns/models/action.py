@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Dict, Mapping, Optional, Tuple
 from uuid import uuid4
 
+from pns.models.authored import AuthoredTextError, GenerationAudit
 from pns.models.event import EventScope, EventType
 from pns.models.frozen import freeze_json_value, thaw_json_value
 
@@ -442,20 +443,45 @@ class ActionEventMismatch(ActionError):
     """一条事件与它声称的提案对不上（字段被改过，或者两段状态被拼在了一起）。"""
 
 
-def _require_committable(definition: ActionDefinition) -> None:
-    """需要台词的动作在本阶段**没有**可提交路径。
+def _require_committable(
+    definition: ActionDefinition,
+    proposal: "ActionProposal",
+    audit: Optional[GenerationAudit],
+) -> None:
+    """需要台词的动作，只有带着一份**被接受且绑定到这一句**的审计才可提交。
 
-    一句台词要成为世界真相，该走的是 角色生成 → Router 判分 → 漂移审计落盘
-    → 提交 那条链；那条链还没接到 Agency 这一侧来。所以这里不是"默认关着、
-    调用方可以打开"的开关，而是一条结构性的缺口：构造这类事件的函数只有这
-    一个，它直接拒绝，于是运行时里根本不存在把未判分台词写进世界历史的路径。
+    P9 时这里是一条结构性的缺口：生成 → Router 判分 → 漂移审计 → 提交那条链
+    还没接上，所以运行时里根本不存在把未判分台词写进世界历史的代码路径。
+    P11 把链接上了，缺口于是被替换成一道闸 —— 但它仍然不是"默认关着、调用方
+    可以打开"的开关。开关是布尔量，谁都能翻；这里要的是一份类型化的凭据，
+    而凭据必须判的就是这条提案里逐字相同的那句话（GenerationAudit.binds）。
 
-    动作 schema 保留在目录里，等生成层接上来之后这道闸自然消失。
+    反过来同样拦：不需要台词的动作**不许**带审计。那说明有人拿一句判过分的
+    台词，去给一个跟台词无关的动作背书 —— 借来的通行证也是通行证，必须响亮
+    地失败，而不是"多给一个字段没关系"。
     """
-    if definition.requires_authored_text:
+    if not definition.requires_authored_text:
+        if audit is not None:
+            raise ActionEventMismatch(
+                f"动作 '{definition.action_id.value}' 不需要台词，不该带判分审计"
+            )
+        return
+    if audit is None:
         raise ActionEventMismatch(
-            f"动作 '{definition.action_id.value}' 需要外部提供台词，而生成与"
-            "Router 判分链还没接入 Agency，本阶段没有它的提交路径"
+            f"动作 '{definition.action_id.value}' 需要外部提供台词，没有 Router "
+            "判分审计就没有提交路径"
+        )
+    if not isinstance(audit, GenerationAudit):
+        raise ActionEventMismatch("判分审计必须是 GenerationAudit")
+    try:
+        audit.require_binding(proposal)
+    except AuthoredTextError as e:
+        raise ActionEventMismatch(str(e)) from e
+    if not audit.accepted:
+        raise ActionEventMismatch(
+            f"提案 '{proposal.proposal_id}' 的台词没有通过 Router 判分"
+            f"（drift_score={audit.drift_score}，阈值 {audit.threshold}，"
+            f"needs_human_review={audit.needs_human_review}），不能提交"
         )
 
 
@@ -469,15 +495,19 @@ def agency_event_fields(
     channel_id: Optional[str],
     participants: Tuple[str, ...] = (),
     policy: str = "",
+    audit: Optional[GenerationAudit] = None,
 ) -> Dict:
     """一条被接受的提案该产出的事件字段（不含 causation_id）。
 
     causation_id 是世界历史的链接簿记（上一条事件是谁），跟提案无关，也无法
     从存档里重新推导，所以不在这份声明里，也不参与校验 —— EventStore 自己
     管顺序。
+
+    audit 是需要台词的动作的通行证：它进 provenance，因此"这句话被谁按什么
+    阈值判成了多少分"跟事件同生共死，存档校验能按同一份声明重建它。
     """
     definition = proposal.definition
-    _require_committable(definition)
+    _require_committable(definition, proposal, audit)
     if definition.event_scope in (EventScope.PRIVATE, EventScope.PARTICIPANT):
         # 这两档的 participants 是授权依据，必须由动作显式声明收件人，不能从
         # 在场快照里推。目录现在没有这两档的动作。
@@ -505,6 +535,7 @@ def agency_event_fields(
             "proposal_id": proposal.proposal_id,
             "action_id": definition.action_id.value,
             "policy": policy,
+            **({"audit": audit.to_dict()} if audit is not None else {}),
         },
         "correlation_id": session_id,
     }
@@ -602,6 +633,7 @@ def verify_agency_event(
     *,
     occurred_at,
     policy: str = "",
+    audit: Optional[GenerationAudit] = None,
 ) -> None:
     """核对一条已提交事件确实是这条提案 + 这条到期资格产出的。
 
@@ -625,6 +657,7 @@ def verify_agency_event(
         channel_id=channel_id,
         participants=participants,
         policy=policy,
+        audit=audit,
     )
     actual = {
         "event_id": event.event_id,
