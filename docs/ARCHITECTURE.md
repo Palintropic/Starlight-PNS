@@ -1135,25 +1135,50 @@ as still pending rather than dropping it. Retry counts live in the process, not
 the archive — cross-restart persistence is P12 — and losing them restarts the
 budget, not the commit, which is fenced separately.
 
-**Stop and commit admission are linearized.** `stop()` is idempotent and keeps
-the *first* reason, since later ones are its consequences. Re-checking a running
-flag after each slow call is not enough, and review found the gap: between that
-check and entering the transaction there is a window in which a stop can land and
-an already-judged proposal still commits. So admission is itself a locked
-decision — the check and the write happen under one hold of the same lock that
-`stop()` takes. The observable guarantee is the one worth stating: **after
-`stop()` returns, no further commit can land; a commit that landed before it
-returned had already begun.** The checks after generation and judging remain, but
-only as an optimisation that skips a doomed round trip; the authoritative refusal
-is the locked one.
+**The lifecycle has one linearization boundary.** `start()`, `stop()` and "may
+this write proceed" all take the same lock, and each does its check *and* its flip
+under a single hold. Checking outside the lock is not enough, and review found
+both halves of that: a `stop()` landing between `start()`'s check and its flip
+yields a runtime that is running and stopped at once, and two concurrent
+`start()` calls both succeed. Re-checking a running flag after each slow call has
+the same shape of hole on the commit path — between that check and entering the
+transaction a stop can land and an already-judged proposal still commits. So
+admission is a locked decision too. The checks after generation and judging
+remain, but only as an optimisation that skips a doomed round trip; the
+authoritative refusal is the locked one.
 
 Slow calls hold nothing. Generation and judging run outside the lock, so a hung
 model call cannot block a shutdown — a deterministic test parks a worker inside
-the generator and asserts `stop()` still returns promptly. The mirror case is
-tested too: park a worker *inside* the transaction and `stop()` blocks until it
-finishes, because tearing an in-flight commit open would leave half an event,
-which is worse than stopping one activation late. The lock is reentrant, so code
-that calls `stop()` from within a transaction does not deadlock itself.
+the generator and asserts `stop()` still returns promptly.
+
+**`stop()` has two returns, and the difference is the whole contract.** An
+*effective* stop reports `running: False`, and the guarantee is exact: after it
+returns, no further commit can land — not the event, not the agency record, not
+the acknowledgement. It gets that by waiting on the lock until any transaction in
+flight has completely finished, because all three of those writes live inside it.
+Every call from outside a transaction is this kind.
+
+A *deferred* stop reports `running: True` with `stop_requested: True` and
+`stopping: True`. It happens only when the caller is already inside the
+transaction, where waiting would mean waiting on itself. Review found the earlier
+code claiming an immediate stop there: reentrancy let `stop()` return at once
+while the enclosing commit went on to write the agency record and the
+acknowledgement — a stop that returned, followed by a commit. Deferral is the
+honest answer. The request is recorded, the transaction runs to completion
+(tearing it open would leave half an event, which is worse than stopping one
+activation late), and the stop takes effect the instant that transaction ends —
+including when it ends by rolling back, because it was still requested. Only then
+does `running` go false, and only then are new activations refused.
+
+So the invariant holds in one sentence either way: **`running` is false only at a
+point after which nothing more can commit.**
+
+`status()` is read under the same lock and is therefore a consistent snapshot —
+it never shows `stopping` disagreeing with `stop_requested and running`, or a
+runtime that is running without having started. The bare `running` and
+`stop_reason` properties deliberately do not take the lock: they are instantaneous
+reads, and locking them would make "is a commit in flight?" unanswerable, since
+asking would block behind that very commit.
 
 The same lock also registers in-flight activations, so one due cannot be
 processed twice concurrently — that would not double-commit (handoff is

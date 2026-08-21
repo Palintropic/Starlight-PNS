@@ -20,12 +20,17 @@
 #   3. **一次处理是一个事务。** Agency 提交（事件 + 曝光 + 观察 + 审计 +
 #      交接确认）与记忆编码落在**同一个** atomic_commit() 里。中途任何一步
 #      失败，世界回到处理之前的样子，到期记录仍然待处理，可以重来。
-#   4. **停机与提交许可是线性化的。** 光在慢调用之后"再查一次 _running"是不够
-#      的：查完到真正进事务之间还有一段窗口，另一个线程在那一瞬间停机，这条
-#      已经判过分的提案照样会提交。所以"许可"本身是一次加锁判断 —— 提交在
-#      持锁期间完成，stop() 也要拿同一把锁。慢调用（生成、判分）**绝不持锁**，
-#      于是停机不会被一个卡住的模型调用挡住。放手不消耗重试预算 —— 停机不是
-#      失败。
+#   4. **生命周期状态只在一条线性化边界上变。** start()、stop() 和"这次写入
+#      准不准"共用同一把闸门锁，所以不存在"检查通过了、翻转之前被人插进来"
+#      的窗口：并发的 start/stop 不会得到一个既在跑、又已经被要求停止的运行时。
+#      慢调用（生成、判分）**绝不持锁** —— 一个卡住的模型调用不该让停机也跟着
+#      卡住。放手不消耗重试预算，停机不是失败。
+#   4b. **停机有两种返回，而且必须分清楚。** 外部线程调用的 stop() 会在闸门上
+#      等到在跑的那次提交**整个结束**（含 Agency 记录与交接确认）才返回，所以
+#      它返回之后没有任何提交能落地。事务**内部**调用的 stop() 没法等自己跑完，
+#      于是它只**登记**：立刻返回，但如实报告 running 仍然是 True、停机尚未
+#      生效；它在当前事务结束的那一刻才真正生效。把这两种混成一个"立刻返回
+#      且立刻生效"，就会出现"stop() 已经返回、Agency 记录随后才落地"。
 #   5. **每条到期都有交代。** 要么留下一条耐久的终局记录（Agency 日志里有它、
 #      投递箱里它被确认了），要么明确地仍然待处理。没有第三种状态，也没有
 #      "无限期悬着"——重试预算用完就写终局失败记录。
@@ -33,6 +38,7 @@
 # 研究会话的 /ws/run 确定性 round robin 跟这里没有任何关系：那条路上时钟不动，
 # 什么都不会到期，而且 session_runtime.py 不 import 这个包（有 AST 测试盯着）。
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List, Mapping, Optional, Set, Tuple
 
@@ -136,6 +142,11 @@ class AutonomousRuntime:
         self._started = False
         self._running = False
         self._stop_reason: Optional[str] = None
+        # 事务内部请求的停机：登记在这里，事务结束时才翻转 _running。
+        self._stop_deferred = False
+        # 谁正在事务里、嵌了几层。提交全程持锁，所以同一时刻至多一个线程。
+        self._committing_thread: Optional[int] = None
+        self._committing_depth = 0
         # 正在处理中的到期资格。同一条被两个线程同时处理不会重复提交（交接
         # 是一次性的，提案身份也是推导出来的），但会白跑两次生成和两次判分，
         # 而且第二个线程会在提交那一刻拿到一个含义不明的交接错误。响亮拒绝
@@ -196,7 +207,27 @@ class AutonomousRuntime:
 
     @property
     def running(self) -> bool:
+        """此刻还接不接受新的写入。
+
+        这是一次**瞬时读取**，不是快照：读完的下一纳秒它就可能变了，而且它
+        刻意不拿闸门 —— 拿了的话，"提交进行中吗"这个问题就永远问不出来（问的
+        人会被那次提交挡住）。需要一致快照的用 status()。
+        """
         return self._running
+
+    @property
+    def stop_requested(self) -> bool:
+        """有没有被要求停止过。
+
+        它跟 `running` 不是一回事：事务内部登记的停机会让这个为 True、而
+        `running` 暂时仍然是 True，直到那个事务结束。
+        """
+        return self._stop_reason is not None
+
+    @property
+    def stopping(self) -> bool:
+        """已经登记、但还没生效的停机。"""
+        return self.stop_requested and self._running
 
     @property
     def stop_reason(self) -> Optional[str]:
@@ -211,37 +242,78 @@ class AutonomousRuntime:
         停止过"，不是"现在跑没跑"——只看后者的话，先 stop 再 start 会得到一个
         既有停机理由、又自称在跑的运行时。要接着跑，就从存档恢复出一个新的
         协调器。
+
+        检查与翻转在**同一次持锁**里完成，跟 stop() 走同一条边界。分开的话，
+        两者之间的那一瞬间就是一个竞态：start() 查完发现没停过，stop() 在这时
+        落地，start() 接着把 running 翻成 True —— 于是运行时既在跑、又带着一个
+        停机理由。两个并发的 start() 也会双双"成功"。
         """
-        if self._started:
-            raise AutonomyError("自主运行时已经启动过了")
-        if self._stop_reason is not None:
-            raise AutonomyError(
-                f"自主运行时已经被要求停止（{self._stop_reason}），不能启动"
-            )
-        self._started = True
-        self._running = True
-        return self.status()
+        with self._gate:
+            if self._started:
+                raise AutonomyError("自主运行时已经启动过了")
+            if self._stop_reason is not None:
+                raise AutonomyError(
+                    f"自主运行时已经被要求停止（{self._stop_reason}），不能启动"
+                )
+            self._started = True
+            self._running = True
+            return self._status_locked()
 
     def stop(self, reason: str = "stopped") -> Dict:
         """请求停止。幂等，而且**保留第一个理由**。
 
-        第一个理由才是真正的原因，后来的都是它的后果。停止立即生效在下面
-        这几个安全边界上：新的到期不再开始处理；已经在跑的慢调用回来之后
-        发现已经停了，就放手不提交。
+        第一个理由才是真正的原因，后来的都是它的后果。
 
-        一次已经进了 atomic_commit() 的提交不会被打断 —— 那会撕开 P5 的提交
-        边界，留下半条事件。协调器宁可让那一次提交跑完，于是 stop() 会在闸门
-        上**等它跑完再返回**。这正是"线性化"的可观察含义：stop() 返回之后，
-        不可能再有任何一次提交落地；stop() 返回之前落地的那一次，是在它之前
-        就已经开始的。
+        返回值有两种，靠 `running` 区分，而且这个区分是本方法的全部要害：
+
+        **已生效**（`running=False`）。外部线程调用一律是这一种。stop() 会在
+        闸门上等在跑的那次提交**整个结束**——包括 Agency 记录和交接确认，它们
+        都在那个事务里面。于是这句话是真的：*stop() 返回之后，没有任何提交能
+        再落地*。
+
+        **已登记、尚未生效**（`running=True`，`stop_requested=True`）。只在
+        事务**内部**调用时发生（比如提交路径上的代码发现了必须停机的情况）。
+        它没法等自己跑完 —— 那是在等自己，只能死锁 —— 所以它登记下来，在当前
+        事务结束的那一刻生效。这时如实报告 running 仍然是 True：谎称已经停了，
+        紧接着又把 Agency 记录和确认写下去，正是这条契约要防的事。
+
+        两种都不会打断一个已经进了 atomic_commit() 的事务：撕开它会留下半条
+        事件，比晚停一次严重得多。
         """
         if not isinstance(reason, str) or not reason:
             raise AutonomyError("stop 的理由必须是非空字符串")
         with self._gate:
-            self._running = False
             if self._stop_reason is None:
                 self._stop_reason = reason
-        return self.status()
+            if self._committing_depth and self._committing_thread == (
+                threading.get_ident()
+            ):
+                # 拿得到闸门、而且事务是自己开的 —— 只能登记，不能等。
+                self._stop_deferred = True
+            else:
+                # 走到这里说明闸门在手，因此没有任何事务在跑（提交全程持锁）。
+                self._running = False
+            return self._status_locked()
+
+    @contextmanager
+    def _committing(self):
+        """标记本线程正处在提交事务里。调用方已经持着闸门。
+
+        它存在只为一件事：让事务内部调用的 stop() 认出"这是我自己"，从而
+        登记而不是空等。事务结束（无论成功还是回滚）时，登记过的停机在这里
+        真正生效 —— 这一刻已经在 Agency 记录和交接确认之后。
+        """
+        self._committing_thread = threading.get_ident()
+        self._committing_depth += 1
+        try:
+            yield
+        finally:
+            self._committing_depth -= 1
+            if self._committing_depth == 0:
+                self._committing_thread = None
+                if self._stop_deferred:
+                    self._stop_deferred = False
+                    self._running = False
 
     # ── 处理一条到期资格 ────────────────────────────────────────────────
     def process_due(self, due: ActivationDue) -> ActivationResult:
@@ -486,6 +558,17 @@ class AutonomousRuntime:
         as_failure: bool = False,
     ) -> ActivationResult:
         """已经拿到许可、并且正持着闸门的那次写入。"""
+        with self._committing():
+            return self._commit_transaction(due, plan, attempt, as_failure=as_failure)
+
+    def _commit_transaction(
+        self,
+        due: ActivationDue,
+        plan: ProposalPlan,
+        attempt: int,
+        *,
+        as_failure: bool = False,
+    ) -> ActivationResult:
         state = self._state
         try:
             with state.atomic_commit():
@@ -614,7 +697,16 @@ class AutonomousRuntime:
 
     # ── 服务 API（给 WEB-1 用的最小面） ─────────────────────────────────
     def status(self) -> Dict:
-        """运行时此刻的样子。每次返回全新的结构。"""
+        """运行时此刻的样子。**一致快照**，而且每次返回全新的结构。
+
+        整份在一次持锁里读出来，所以里面几个字段互相自洽 —— 不会出现"跨着
+        一次 stop 读到一半"拼出来的那种 running=True 却已经停了的画面。
+        代价是它会被一次进行中的提交挡住；要瞬时读取就用 running 属性。
+        """
+        with self._gate:
+            return self._status_locked()
+
+    def _status_locked(self) -> Dict:
         state = self._state
         log = state.agency
         return {
@@ -622,6 +714,10 @@ class AutonomousRuntime:
             "name": self._name,
             "started": self._started,
             "running": self._running,
+            # stop_requested 与 running 可以同时为 True：那就是"事务里登记了
+            # 停机、还没生效"这个中间态，stopping 把它单独点出来。
+            "stop_requested": self._stop_reason is not None,
+            "stopping": self._stop_reason is not None and self._running,
             "stop_reason": self._stop_reason,
             "clock": self.clock.isoformat(),
             "scheduled": len(state.activations),
@@ -635,24 +731,17 @@ class AutonomousRuntime:
             "events": len(state.events),
             "memories": len(state.memories),
             "retry": self._retry.to_dict(),
-            "in_flight_due_ids": self._in_flight_ids(),
-            "outcomes": self._outcome_counts(),
+            "in_flight_due_ids": sorted(self._in_flight),
+            "outcomes": {
+                outcome.value: sum(
+                    1 for result in self._results if result.outcome is outcome
+                )
+                for outcome in ActivationOutcome
+            },
             "agency_outcomes": {
                 outcome.value: len(log.for_outcome(outcome))
                 for outcome in AgencyOutcome
             },
-        }
-
-    def _in_flight_ids(self) -> List[str]:
-        with self._gate:
-            return sorted(self._in_flight)
-
-    def _outcome_counts(self) -> Dict:
-        with self._gate:
-            results = list(self._results)
-        return {
-            outcome.value: sum(1 for result in results if result.outcome is outcome)
-            for outcome in ActivationOutcome
         }
 
     def positions(self) -> Dict:

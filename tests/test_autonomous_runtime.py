@@ -1191,7 +1191,8 @@ class StopBoundaryTests(unittest.TestCase):
         self.assertIs(result.outcome, ActivationOutcome.ACTED)
         self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
         self.assertTrue(state.activation_outbox.is_acknowledged(due.due_id))
-        # 但下一条就不再开始了。
+        # 停机在事务结束时生效，所以下一条不再开始。
+        self.assertFalse(runtime.running)
         self.assertIs(
             runtime.process_due(_due(scheduler, "next", minutes=5)).outcome,
             ActivationOutcome.STOPPED,
@@ -1380,7 +1381,19 @@ class StopCommitLinearizationTests(unittest.TestCase):
         worker, worker_box = self._run_in_thread(lambda: runtime.process_due(due))
         self.assertTrue(entered.wait(self.TIMEOUT), "没走进事务")
 
-        stopper, stopper_box = self._run_in_thread(lambda: runtime.stop("事务里停机"))
+        def stop_and_snapshot():
+            status = runtime.stop("事务里停机")
+            # 就在 stop() 返回的这一刻抓一份：契约说的是"返回之后没有提交能
+            # 落地"，那么返回的这一刻，那次提交必须**整个**已经写完 ——
+            # 事件、Agency 记录、交接确认，一样都不能还在路上。
+            return {
+                "status": status,
+                "events": len(state.events.by_type(EventType.MESSAGE_SENT)),
+                "agency": len(state.agency),
+                "acknowledged": state.activation_outbox.is_acknowledged(due.due_id),
+            }
+
+        stopper, stopper_box = self._run_in_thread(stop_and_snapshot)
         stopper.join(0.3)
         self.assertTrue(
             stopper.is_alive(), "事务还在跑，stop() 却先返回了 —— 没有线性化"
@@ -1389,30 +1402,138 @@ class StopCommitLinearizationTests(unittest.TestCase):
 
         release.set()
         result = self._join(worker, worker_box, "工作线程")
-        self._join(stopper, stopper_box, "事务结束后的 stop()")
+        snapshot = self._join(stopper, stopper_box, "事务结束后的 stop()")
 
         self.assertIs(result.outcome, ActivationOutcome.ACTED)
-        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
-        self.assertTrue(state.activation_outbox.is_acknowledged(due.due_id))
+        self.assertEqual(snapshot["events"], 1)
+        self.assertEqual(snapshot["agency"], 1, "stop() 返回时 Agency 记录还没写")
+        self.assertTrue(snapshot["acknowledged"], "stop() 返回时交接还没确认")
+        self.assertFalse(snapshot["status"]["running"])
         self.assertFalse(runtime.running)
 
-    def test_stop_from_inside_the_transaction_does_not_deadlock(self):
-        # 同一个线程在事务里回头调 stop()。可重入锁必须放行，否则那次提交
-        # 会把自己锁死在半截 —— 正是这把锁本来要防的事。
+    def test_a_stop_from_inside_the_transaction_is_deferred_not_immediate(self):
+        # 事务内部调 stop() 没法等自己跑完，所以它只能**登记**。要害在于它
+        # 必须如实说自己还没生效：谎称已经停了、紧接着又把 Agency 记录和交接
+        # 确认写下去，正是"stop 返回后不再落提交"这条契约要防的事。
         state, scheduler, runtime = _rig()
         due = _due(scheduler)
         record_observations = state.record_observations
+        seen = {}
 
         def stopping(decisions, observations):
-            runtime.stop("事务中途")
+            seen["status"] = runtime.stop("事务中途")
+            seen["running"] = runtime.running
+            # 这一刻 Agency 记录和确认都还没写 —— 正是那段"之后"。
+            seen["agency"] = len(state.agency)
+            seen["acknowledged"] = state.activation_outbox.is_acknowledged(due.due_id)
             return record_observations(decisions, observations)
 
         state.record_observations = stopping
         worker, box = self._run_in_thread(lambda: runtime.process_due(due))
         result = self._join(worker, box, "事务里自调 stop 的线程")
+
+        # 登记那一刻：如实报告"还在跑、已登记、尚未生效"。
+        self.assertEqual(seen["agency"], 0)
+        self.assertFalse(seen["acknowledged"])
+        self.assertTrue(seen["running"], "事务里的 stop() 不该立刻宣称已停")
+        self.assertTrue(seen["status"]["running"])
+        self.assertTrue(seen["status"]["stop_requested"])
+        self.assertTrue(seen["status"]["stopping"])
+        self.assertEqual(seen["status"]["stop_reason"], "事务中途")
+
+        # 事务照常跑完（撕开它会留下半条事件），然后停机才生效。
         self.assertIs(result.outcome, ActivationOutcome.ACTED)
         self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
+        self.assertEqual(len(state.agency), 1)
+        self.assertTrue(state.activation_outbox.is_acknowledged(due.due_id))
         self.assertFalse(runtime.running)
+        self.assertFalse(runtime.stopping)
+        status = runtime.status()
+        self.assertFalse(status["running"])
+        self.assertTrue(status["stop_requested"])
+
+        # 生效之后就真的不再接活了。
+        self.assertIs(
+            runtime.process_due(_due(scheduler, "next", minutes=5)).outcome,
+            ActivationOutcome.STOPPED,
+        )
+
+    def test_nothing_lands_after_an_external_stop_returns(self):
+        # 契约的最强形式：在 stop() 返回的那一刻抓一份世界快照，再等一切结束
+        # 之后抓一份 —— 两份必须**一模一样**。事件、Agency 记录、交接确认，
+        # 任何一样在 stop() 返回之后才补上，都算违反。
+        for trial in range(50):
+            state, scheduler, runtime = _rig()
+            due = _due(scheduler)
+            worker, worker_box = self._run_in_thread(
+                lambda: runtime.process_due(due)
+            )
+
+            status = runtime.stop("契约")
+            at_return = (
+                len(state.events.by_type(EventType.MESSAGE_SENT)),
+                len(state.agency),
+                state.activation_outbox.is_acknowledged(due.due_id),
+            )
+            self._join(worker, worker_box, f"第 {trial} 轮的工作线程")
+            after = (
+                len(state.events.by_type(EventType.MESSAGE_SENT)),
+                len(state.agency),
+                state.activation_outbox.is_acknowledged(due.due_id),
+            )
+
+            # 外部线程的 stop 一律是"已生效"那一种。
+            self.assertFalse(status["running"], f"第 {trial} 轮返回时还在跑")
+            self.assertFalse(status["stopping"])
+            self.assertEqual(
+                at_return, after, f"第 {trial} 轮 stop() 返回之后状态还在变"
+            )
+
+    def test_an_external_stop_waits_for_a_deferred_stop_to_settle(self):
+        # 事务里已经登记了停机，另一个线程这时也来 stop() —— 它必须等那个事务
+        # 结束，不能抢先宣布已停（那又会变成"宣布停了、记录随后才落"）。
+        state, scheduler, runtime = _rig()
+        due = _due(scheduler)
+        record_observations = state.record_observations
+        seen = {}
+
+        def stopping(decisions, observations):
+            runtime.stop("事务内登记")
+            outer, outer_box = self._run_in_thread(lambda: runtime.stop("外部"))
+            outer.join(0.3)
+            seen["outer_blocked"] = outer.is_alive()
+            seen["outer"] = (outer, outer_box)
+            return record_observations(decisions, observations)
+
+        state.record_observations = stopping
+        result = runtime.process_due(due)
+        outer, outer_box = seen["outer"]
+        outer_status = self._join(outer, outer_box, "事务外的 stop()")
+
+        self.assertTrue(seen["outer_blocked"], "外部 stop 没有等事务跑完")
+        self.assertIs(result.outcome, ActivationOutcome.ACTED)
+        self.assertFalse(outer_status["running"])
+        # 第一个理由才是真正的原因。
+        self.assertEqual(runtime.stop_reason, "事务内登记")
+        self.assertEqual(len(state.agency), 1)
+        self.assertTrue(state.activation_outbox.is_acknowledged(due.due_id))
+
+    def test_a_deferred_stop_still_takes_effect_when_the_transaction_rolls_back(self):
+        # 登记过的停机不该因为那次事务失败就一起消失 —— 它是被请求过的。
+        state, scheduler, runtime = _rig()
+        due = _due(scheduler)
+
+        def stopping(decisions, observations):
+            runtime.stop("事务中途")
+            raise RuntimeError("提交炸了")
+
+        state.record_observations = stopping
+        result = runtime.process_due(due)
+        self.assertIs(result.outcome, ActivationOutcome.FAILED_RETRYABLE)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertEqual(len(state.agency), 0)
+        self.assertFalse(runtime.running, "回滚之后登记过的停机仍然要生效")
+        self.assertIn(due, state.activation_outbox.pending())
 
     def test_stopping_between_the_tick_and_the_processing_loses_nothing(self):
         # 时钟推进是调度器自己的事务，已经落地了；停机发生在它之后、处理
@@ -1464,6 +1585,178 @@ class StopCommitLinearizationTests(unittest.TestCase):
             runtime.advance(10)
         self.assertEqual(state.world_state.clock, clock)
         self.assertEqual(len(state.events), 0)
+
+
+class LifecycleLinearizationTests(unittest.TestCase):
+    """start()、stop() 和提交许可必须走同一条边界。
+
+    确定性做法：测试线程自己持住那把闸门锁，把两个竞争者精确地堵在门外，
+    再放行 —— 于是"它们是不是真的走同一道闸"是可断言的，而不是靠反复跑碰
+    运气。
+    """
+
+    TIMEOUT = 5
+
+    def _racers(self, runtime, calls):
+        threads, boxes = [], []
+        for call in calls:
+            box = {}
+
+            def run(call=call, box=box):
+                try:
+                    box["result"] = call()
+                except BaseException as e:
+                    box["error"] = e
+
+            thread = threading.Thread(target=run, daemon=True)
+            threads.append(thread)
+            boxes.append(box)
+        return threads, boxes
+
+    def test_start_does_not_flip_state_outside_the_gate(self):
+        # 这条才是有判别力的那条：闸门在测试线程手上时，start() 一个字节都
+        # 不该翻过去。它光"最后被挡住"是不够的 —— 只要检查与翻转在闸门之外
+        # 完成，stop() 就能插在两者之间，于是运行时既在跑、又已被要求停止。
+        state, scheduler, runtime = _rig(start=False)
+        threads, boxes = self._racers(runtime, [runtime.start])
+        with runtime._gate:
+            threads[0].start()
+            threads[0].join(0.3)
+            self.assertTrue(threads[0].is_alive(), "start() 没有被闸门拦住")
+            self.assertFalse(
+                runtime._started, "闸门在别人手上，start() 却已经翻了 started"
+            )
+            self.assertFalse(
+                runtime.running, "闸门在别人手上，start() 却已经翻了 running"
+            )
+        threads[0].join(self.TIMEOUT)
+        self.assertFalse(threads[0].is_alive())
+        self.assertTrue(runtime.running)
+        self.assertNotIn("error", boxes[0])
+
+    def test_stop_does_not_flip_state_outside_the_gate(self):
+        state, scheduler, runtime = _rig()
+        threads, _ = self._racers(runtime, [lambda: runtime.stop("并发停")])
+        with runtime._gate:
+            threads[0].start()
+            threads[0].join(0.3)
+            self.assertTrue(threads[0].is_alive(), "stop() 没有被闸门拦住")
+            self.assertTrue(
+                runtime.running, "闸门在别人手上，stop() 却已经翻了 running"
+            )
+            self.assertIsNone(runtime.stop_reason)
+        threads[0].join(self.TIMEOUT)
+        self.assertFalse(threads[0].is_alive())
+        self.assertFalse(runtime.running)
+        self.assertEqual(runtime.stop_reason, "并发停")
+
+    def test_two_concurrent_starts_produce_exactly_one_winner(self):
+        state, scheduler, runtime = _rig(start=False)
+        threads, boxes = self._racers(runtime, [runtime.start, runtime.start])
+        with runtime._gate:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(0.3)
+                self.assertTrue(thread.is_alive(), "start 没有走闸门")
+        for thread in threads:
+            thread.join(self.TIMEOUT)
+            self.assertFalse(thread.is_alive())
+
+        winners = [box for box in boxes if "result" in box]
+        losers = [box for box in boxes if "error" in box]
+        self.assertEqual(len(winners), 1, "两个 start 都成功了")
+        self.assertEqual(len(losers), 1)
+        self.assertIsInstance(losers[0]["error"], AutonomyError)
+        self.assertTrue(runtime.running)
+        self.assertFalse(runtime.stop_requested)
+
+    def test_a_start_racing_a_stop_never_yields_a_running_stopped_runtime(self):
+        # 上面两条锁住了"翻转必须在闸门里"；这条按不变量对撞，盯的是结果本身。
+        # 用 barrier 让两个线程尽量同一瞬间起跑，免得 stop 总是先跑完。
+        for trial in range(200):
+            state, scheduler, runtime = _rig(start=False)
+            gun = threading.Barrier(2, timeout=self.TIMEOUT)
+
+            def stop_racer():
+                gun.wait()
+                runtime.stop("对撞")
+
+            def start_racer():
+                gun.wait()
+                try:
+                    runtime.start()
+                except AutonomyError:
+                    pass
+
+            threads = [
+                threading.Thread(target=stop_racer, daemon=True),
+                threading.Thread(target=start_racer, daemon=True),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(self.TIMEOUT)
+                self.assertFalse(thread.is_alive())
+            status = runtime.status()
+            self.assertFalse(
+                status["running"] and status["stop_requested"],
+                f"第 {trial} 轮拼出了一个既在跑、又已被要求停止的运行时: {status}",
+            )
+            self.assertFalse(runtime.running)
+
+    def test_status_is_a_consistent_snapshot_under_concurrent_lifecycle_changes(self):
+        state, scheduler, runtime = _rig()
+        dues = [
+            _due(scheduler, f"s{index}", character_id=("mizuki", "ena")[index % 2],
+                 minutes=2)
+            for index in range(6)
+        ]
+        torn = []
+        done = threading.Event()
+
+        def churn():
+            try:
+                for due in dues:
+                    runtime.process_due(due)
+            finally:
+                runtime.stop("收尾")
+                done.set()
+
+        def read():
+            while not done.is_set():
+                status = runtime.status()
+                # 快照内部必须自洽：stopping 恰好是"已请求且还在跑"。
+                if status["stopping"] != (
+                    status["stop_requested"] and status["running"]
+                ):
+                    torn.append(status)
+                # 没请求过就不可能有理由。
+                if status["stop_requested"] != (status["stop_reason"] is not None):
+                    torn.append(status)
+                # 还没启动就不可能在跑。
+                if status["running"] and not status["started"]:
+                    torn.append(status)
+
+        threads = [
+            threading.Thread(target=churn, daemon=True),
+            threading.Thread(target=read, daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(torn[:3], [], "读到了自相矛盾的状态快照")
+
+    def test_stop_before_start_stays_refused_after_the_gate_change(self):
+        state, scheduler, runtime = _rig(start=False)
+        runtime.stop("还没开就先停了")
+        self.assertFalse(runtime.running)
+        self.assertTrue(runtime.stop_requested)
+        self.assertFalse(runtime.stopping)
+        with self.assertRaises(AutonomyError):
+            runtime.start()
 
 
 class ConcurrentProcessingTests(unittest.TestCase):
