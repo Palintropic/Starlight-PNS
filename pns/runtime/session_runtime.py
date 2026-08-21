@@ -25,6 +25,7 @@ from pns.runtime.event_commit import (
     project_turn_message,
 )
 from pns.runtime.reload import BOUNDARY, SessionAdmissionClosed, SessionSupervisor
+from pns.runtime.scheduler import PersistentScheduler
 from pns.world.characters import registry as character_registry
 from pns.world.context import render_clock, render_session_location
 from pns.world.scene_compat import SceneMappingError
@@ -89,6 +90,14 @@ class SessionRuntime:
         # self.world 始终就是 self.state.world_state 那一个对象。
         self.state.attach_world_state(world_state)
         self.state.initialize_runtime(scene["trigger"])
+        # 本会话私有的排期与时间推进服务。它是运行时权威状态的一部分：每个
+        # 会话一份，不共享、不来自配置，重载换不掉它。
+        #
+        # 研究会话的 round robin **不**调用它，这是刻意的：确定性轮转的可复现性
+        # 依赖"一局里时间不动、轮次顺序只由角色列表决定"，而"到点了角色要不要
+        # 真的行动"本来就是 P9 的判断，不是调度器的。调度器决定的是时间什么时候
+        # 往前走、什么变得可以发生。
+        self.scheduler = PersistentScheduler(self.state)
 
     @property
     def session_id(self) -> str:
