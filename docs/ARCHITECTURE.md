@@ -1008,6 +1008,161 @@ and no path by which memory mutates events or observations.
 
 ---
 
+### Autonomous runtime boundary
+
+`pns/runtime/autonomy/` is the one coordinator that connects P4–P10 into a loop:
+
+```text
+scheduled activation
+  → character-scoped agency proposal
+  → generation, when the action requires authored text
+  → Router evaluation and generation audit
+  → validated event commit
+  → exposure / observation
+  → subjective memory encoding
+  → a terminal outcome for that activation
+```
+
+It **integrates** those authorities rather than replacing them. Scheduler, agency,
+event commit, exposure and memory keep their own state, their own validation and
+their own transaction boundaries; the coordinator owns none of them. It cannot
+even store an activation — that lives in `SessionState`. A session binds exactly
+one coordinator, for the same reason it binds one scheduler, one engine and one
+encoder: two of them would draw from the same outbox, run generation twice and
+commit into the same history, and "how was this activation handled" would have
+two self-described authoritative answers.
+
+**Authored text now has exactly one path, and it is a credential, not a switch.**
+Through P10 there was a structural gap: `_require_committable()` refused every
+action needing authored text, because the generation → Router → audit → commit
+chain did not exist, so no code path could write an unjudged line into world
+history. P11 builds that chain, so the gap becomes a gate — but not a boolean
+one, because a boolean is something a caller can flip, which makes it a
+suggestion rather than a boundary. What the gate demands is a typed
+`GenerationAudit` that
+
+1. **binds** to the proposal — same proposal id, same character, and the
+   **whole payload** byte for byte; and
+2. is **accepted** — score below threshold and not flagged for human review.
+
+Binding covers the entire payload, not just the line. Adversarial review found
+the narrower version: with only `text` bound, an audited line could keep its text
+and have `char_name` swapped, and since observers render `char_name` as the
+speaker, every observation of that event named the wrong character. The line was
+judged; the identity attached to it was not. Binding the payload closes that and
+covers any authored key added later.
+
+The verdict is **derived, never assigned**: `is_ooc` is recomputed from score and
+threshold, and the judge's own `is_ooc` has no storage location at all, so a
+judge claiming a 9-point line is fine changes nothing. The scale is capped at 10
+and so is the threshold, so no threshold setting accepts a 10. A line the judge
+itself flags for human review is not accepted either: the research path has a
+person watching the screen and records OOC turns with a correction, and the
+autonomous path does not, so an uncertainty there cannot be silently promoted to
+certainty. Audit failure is never audit success — a judge that raises, or returns
+something that is not a credential, produces a recorded failure, never a pass.
+
+Three gates enforce this, and only the innermost one is structural:
+`AgencyEngine.propose()` deliberately does *not* refuse authored proposals (the
+judge has to see the line, so the line must be proposed first); `commit()`
+refuses any authored proposal whose credential is missing, unbound, unaccepted or
+from another clock; and `agency_event_fields()` — the single function that turns
+a proposal into an event — refuses again. So `AgencyEngine.evaluate()`, which is
+propose-plus-commit with no audit step in between, still reaches exactly the P9
+conclusion for dialogue: `rejected_illegal / authored_text_not_committable`. The
+direct agency path did not gain a way to speak.
+
+The credential is persisted twice on purpose: in the event's `provenance` and in
+the agency record's `detail`. Restore rebuilds the provenance from the record's
+copy through the same construction code, so softening the score on either side,
+or deleting it from either side, produces a mismatch. What no in-session check
+can catch is a caller who fabricates an accepted credential in the first place,
+or an archive rewritten consistently on both sides — the Router's judgement is
+not re-derivable offline. That is the same class of residual as the unverified
+`policy` string in the agency log and the `encoder` name in memory provenance,
+and it is recorded here rather than implied.
+
+**Model input is character-scoped, model output is untrusted.**
+`GenerationContext` is built by transcription only, from an already-narrowed
+`AgencyContext` plus that character's own recall; it takes no `SessionState`, so
+there is no path to another character's memory, to the exposure log, or to
+omniscient event payloads. AST tests keep `.events`, `.exposures`, `.memories`,
+`.agency` and the name `SessionState` out of the module. Its `to_dict()` is a
+whitelist, not `Observation.to_dict()`: review found the raw projection carried
+the exposure reason code. That code is never a denial — a denial produces no
+observation — but it is still exposure bookkeeping rather than character
+experience (§15), the same reason the memory prompt projection drops provenance.
+Going the other way, output is one line and nothing else: a plain string or
+`{"text": ...}`, with any other key refused rather than dropped, capped in length,
+and never carrying `character_id` or `char_name` — a model that names itself is a
+model choosing who it is playing, and the display name comes from configuration.
+The parsed line becomes an `ActionProposal`, which the engine then revalidates for
+identity, action, target, preconditions and budget like any other.
+
+**One activation is one transaction.** Generation and judging are pure and happen
+*outside* any transaction, so slow calls never hold one open. Everything
+authoritative — event, exposure decisions, observations, agency record,
+acknowledgement, and memory encoding — goes inside a single
+`SessionState.atomic_commit()`. Fault injection at the event append, the agency
+append, exposure, memory and acknowledgement each leaves the world byte-identical
+to before, with the activation still pending. Retrying then commits exactly once:
+proposal ids are derived from the due id, event ids from proposal ids, and the
+handoff is single-use, so duplication is refused by construction rather than by a
+guard.
+
+**Every due activation gets an answer.** The outcome codes are `acted`,
+`abstained`, `rejected`, `failed_retryable`, `failed_terminal` and `stopped`. The
+first four of those are terminal; the durable form of a terminal outcome is not
+the result object but the session itself — an agency record exists for that due
+and the outbox has acknowledged it. `failed_retryable` and `stopped` are exactly
+the absence of both, so in an archive they appear as "still pending" and are
+picked up again, never silently lost. `stopped` is a sixth code rather than being
+folded into `failed_retryable` because a deliberate shutdown is not a failure, and
+merging them would make the status panel lie. The retry budget is explicit and
+finite; when it runs out the coordinator writes a terminal-failure record and
+acknowledges, because "did not succeed" is an acceptable ending and "nobody knows"
+is not. If even that recording fails, the result says `stuck` and reports the due
+as still pending rather than dropping it. Retry counts live in the process, not
+the archive — cross-restart persistence is P12 — and losing them restarts the
+budget, not the commit, which is fenced separately.
+
+**Stop takes effect at documented boundaries.** `stop()` is idempotent and keeps
+the *first* reason, since later ones are its consequences. No new activation
+starts after it; the runtime refuses to advance the clock; and the two slow calls
+are followed by a re-check, so a generation or a judgement that returns after the
+stop is abandoned without committing or acknowledging, and without spending
+retry budget — abandonment is not failure. A transaction already under way runs
+to completion: tearing it open would leave half an event, which is worse than
+stopping one activation late. A runtime that was stopped can never be started,
+including one stopped before it ever ran — the test is whether a stop was ever
+requested, not whether it is currently running, because the weaker test yields a
+runtime that is simultaneously running and stopped.
+
+**The research path is untouched.** `session_runtime.py` does not import this
+package (an AST test enforces it), and the stronger statement also holds: a
+coordinator attached to a live research session's `SessionState` changes not one
+WebSocket message, turn, history entry or clock value of that session's
+deterministic round robin, because the round robin never advances the clock and
+therefore nothing ever falls due. Importing the package initializes no reload
+boundary, holds no module-level live state, and pulls in no HTTP or model SDK:
+generators and judges are injected, so the complete loop runs offline and
+deterministically, and the determinism claim covers the real adapters because they
+travel the same parsing and validation channel as the scripted ones.
+
+Orchestration is **cold update**: `ContentRegistry` has no field that reaches a
+coordinator, a scheduler, an engine or an encoder, so a reload — successful or
+failed — cannot alter a world already running.
+
+What this phase deliberately does not contain: no WordPress or Sekai Times
+publishing, no Dashboard redesign (the service surface here is start / stop /
+status / simulated clock / positions / recent outcomes and events, and nothing
+more), no concrete 25ji content or schedules, no cross-restart persistence of
+in-flight activations, no relationship or emotion simulation, and no path by
+which the coordinator writes state that its constituent services do not already
+own.
+
+---
+
 ## 4. Architectural Principle
 
 The primary rule is:
