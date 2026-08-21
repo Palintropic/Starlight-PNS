@@ -307,14 +307,12 @@ class AgencyEngine:
                 "reason": "duplicate_proposal_id",
                 "proposal_id": proposal.proposal_id,
             }
-        if (
-            proposal.definition.requires_authored_text
-            and not self._budget.allow_authored_text
-        ):
+        if proposal.definition.requires_authored_text:
             # 台词属于角色生成层，而生成 → Router 判分 → 审计落盘那条链在
-            # Agency 这一侧还没接上。默认拒绝，而不是"先让它说，回头再补审计"。
+            # Agency 这一侧还没接上。**无条件**拒绝：没有开关，也没有"调用方
+            # 自行承担"——那不是边界。
             return {
-                "reason": "authored_text_not_permitted",
+                "reason": "authored_text_not_committable",
                 "action_id": proposal.action_id.value,
             }
         if not context.has_legal(proposal.action_id, proposal.target_id):
@@ -453,14 +451,12 @@ class AgencyEngine:
                 "clock": self.clock.isoformat(),
             }
         proposal = plan.proposal
-        if (
-            proposal.definition.requires_authored_text
-            and not self._budget.allow_authored_text
-        ):
+        if proposal.definition.requires_authored_text:
             # 提交期也拦一次：手工拼出来的 ACTED 计划根本没经过 propose()，
-            # 只在那边设闸等于没设。
-            return AgencyOutcome.REJECTED_BUDGET, {
-                "reason": "authored_text_not_permitted",
+            # 只在那边设闸等于没设。这是拒绝，不是超预算 —— 再多预算也不会
+            # 让它变得可提交。事件构造那一层还有第三道结构性的拒绝。
+            return AgencyOutcome.REJECTED_ILLEGAL, {
+                "reason": "authored_text_not_committable",
                 "action_id": proposal.action_id.value,
             }
         if proposal.proposal_id in self._state.agency.proposal_ids():

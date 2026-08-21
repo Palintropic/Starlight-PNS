@@ -69,6 +69,23 @@ class Precondition(str, Enum):
     ACTOR_NOT_IN_TARGET_CHANNEL = "actor_not_in_target_channel"
 
 
+class ParticipantSource(str, Enum):
+    """一个动作产出的事件，participants 从哪里来。
+
+    participants 在 channel / location 两档里是**提交那一刻的在场快照**，
+    不是访问规则（P6 已经写死了这一条）。声明它的来源是为了让存档校验知道
+    哪一部分可以重新推导、哪一部分只能按规则约束：
+
+      NONE                必须是空的，可以精确校验。
+      CHANNEL_MEMBERS     提交那一刻的频道成员，事后不可重新推导。
+      LOCATION_OCCUPANTS  提交那一刻的在场者，事后不可重新推导。
+    """
+
+    NONE = "none"
+    CHANNEL_MEMBERS = "channel_members"
+    LOCATION_OCCUPANTS = "location_occupants"
+
+
 class ActionId(str, Enum):
     """本阶段有完整、已实现语义的动作。
 
@@ -96,6 +113,8 @@ class ActionDefinition:
     required_payload_keys: Tuple[str, ...] = ()
     # 可以出现、但不强制的 payload 键。两个元组之外的键一律拒绝。
     optional_payload_keys: Tuple[str, ...] = ()
+    # 事件的 participants 从哪儿来。构造和校验读的是同一条声明。
+    participants_from: ParticipantSource = ParticipantSource.NONE
 
     @property
     def allowed_payload_keys(self) -> Tuple[str, ...]:
@@ -120,6 +139,7 @@ class ActionDefinition:
             "preconditions": [p.value for p in self.preconditions],
             "required_payload_keys": list(self.required_payload_keys),
             "optional_payload_keys": list(self.optional_payload_keys),
+            "participants_from": self.participants_from.value,
             "requires_authored_text": self.requires_authored_text,
         }
 
@@ -136,6 +156,7 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
         preconditions=_ACTOR_BASE + (Precondition.ACTOR_HAS_LOCATION,),
         required_payload_keys=("text",),
         optional_payload_keys=("char_name",),
+        participants_from=ParticipantSource.LOCATION_OCCUPANTS,
     ),
     ActionId.SEND_CHANNEL_MESSAGE: ActionDefinition(
         action_id=ActionId.SEND_CHANNEL_MESSAGE,
@@ -149,6 +170,7 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
         ),
         required_payload_keys=("text",),
         optional_payload_keys=("char_name",),
+        participants_from=ParticipantSource.CHANNEL_MEMBERS,
     ),
     ActionId.JOIN_CHANNEL: ActionDefinition(
         action_id=ActionId.JOIN_CHANNEL,
@@ -160,6 +182,7 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
             Precondition.TARGET_CHANNEL_EXISTS,
             Precondition.ACTOR_NOT_IN_TARGET_CHANNEL,
         ),
+        participants_from=ParticipantSource.CHANNEL_MEMBERS,
     ),
     ActionId.LEAVE_CHANNEL: ActionDefinition(
         action_id=ActionId.LEAVE_CHANNEL,
@@ -171,6 +194,7 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
             Precondition.TARGET_CHANNEL_EXISTS,
             Precondition.ACTOR_IN_TARGET_CHANNEL,
         ),
+        participants_from=ParticipantSource.CHANNEL_MEMBERS,
     ),
     ActionId.MOVE_TO: ActionDefinition(
         action_id=ActionId.MOVE_TO,
@@ -184,6 +208,9 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
             Precondition.TARGET_LOCATION_IS_ELSEWHERE,
             Precondition.TARGET_LOCATION_REACHABLE,
         ),
+        # 目的地的在场名单在状态效果应用之后立刻作废，写一份注定过期的
+        # 花名册不如不写 —— 于是它也是唯一一档可以被精确校验的。
+        participants_from=ParticipantSource.NONE,
     ),
 }
 
@@ -396,3 +423,227 @@ class ActionProposal:
             target_id=payload.get("target_id"),
             payload=payload.get("payload", {}),
         )
+
+
+# ── 提案 → 事件：构造与校验的单一语义 ──────────────────────────────────
+#
+# 下面这两个函数是**同一条语义的两个方向**：agency_event_fields() 说"一条被
+# 接受的提案该产出什么样的事件"，verify_agency_event() 拿这条声明去核对一条
+# 已经存在的事件。它们共用同一份目录声明和同一段构造代码，所以不可能出现
+# "构造时按一套规则、校验时按另一套（更松的）规则"。
+#
+# 为什么校验不能只看 event_id：event_id 是从 proposal_id 推导的，把它保持
+# 正确、却改掉事件的 actor、类型、scope、落点、payload 或 provenance，得到的
+# 是一份"审计说角色做了 A、世界历史说发生了 B"的存档，而两边的 ID 对得上。
+#
+# 校验刻意**不重放状态效果**：那会把"这条记录是不是自洽"变成"把世界再改一遍
+# 看看像不像"，而后者在恢复一份历史存档时既危险又不成立（世界早就往前走了）。
+class ActionEventMismatch(ActionError):
+    """一条事件与它声称的提案对不上（字段被改过，或者两段状态被拼在了一起）。"""
+
+
+def _require_committable(definition: ActionDefinition) -> None:
+    """需要台词的动作在本阶段**没有**可提交路径。
+
+    一句台词要成为世界真相，该走的是 角色生成 → Router 判分 → 漂移审计落盘
+    → 提交 那条链；那条链还没接到 Agency 这一侧来。所以这里不是"默认关着、
+    调用方可以打开"的开关，而是一条结构性的缺口：构造这类事件的函数只有这
+    一个，它直接拒绝，于是运行时里根本不存在把未判分台词写进世界历史的路径。
+
+    动作 schema 保留在目录里，等生成层接上来之后这道闸自然消失。
+    """
+    if definition.requires_authored_text:
+        raise ActionEventMismatch(
+            f"动作 '{definition.action_id.value}' 需要外部提供台词，而生成与"
+            "Router 判分链还没接入 Agency，本阶段没有它的提交路径"
+        )
+
+
+def agency_event_fields(
+    session_id: str,
+    due,
+    proposal: "ActionProposal",
+    *,
+    occurred_at,
+    location_id: Optional[str],
+    channel_id: Optional[str],
+    participants: Tuple[str, ...] = (),
+    policy: str = "",
+) -> Dict:
+    """一条被接受的提案该产出的事件字段（不含 causation_id）。
+
+    causation_id 是世界历史的链接簿记（上一条事件是谁），跟提案无关，也无法
+    从存档里重新推导，所以不在这份声明里，也不参与校验 —— EventStore 自己
+    管顺序。
+    """
+    definition = proposal.definition
+    _require_committable(definition)
+    if definition.event_scope in (EventScope.PRIVATE, EventScope.PARTICIPANT):
+        # 这两档的 participants 是授权依据，必须由动作显式声明收件人，不能从
+        # 在场快照里推。目录现在没有这两档的动作。
+        raise ActionEventMismatch(
+            f"动作 '{definition.action_id.value}' 声明的 scope "
+            f"{definition.event_scope.value} 还没有已实现的参与者语义"
+        )
+    return {
+        "event_id": proposal.derived_event_id(session_id),
+        "type": definition.event_type,
+        "occurred_at": occurred_at,
+        "scope": definition.event_scope,
+        "actor_id": proposal.character_id,
+        "participants": tuple(participants),
+        "location_id": location_id,
+        "channel_id": channel_id,
+        "payload": proposal.event_payload(),
+        # 系统侧簿记：这条事件是哪次到期、哪条提案、哪个策略产出的。
+        # provenance 从不进任何角色的观察（P6 的投影白名单挡着）。
+        "provenance": {
+            "kind": "agency",
+            "session_id": session_id,
+            "due_id": due.due_id,
+            "activation_id": due.activation_id,
+            "proposal_id": proposal.proposal_id,
+            "action_id": definition.action_id.value,
+            "policy": policy,
+        },
+        "correlation_id": session_id,
+    }
+
+
+def _borrowed_anchor(definition: ActionDefinition, proposal, event):
+    """落点：能推导的精确核对，不能推导的按规则约束之后原样借用。
+
+    有目标的动作，落点**就是**目标，可以精确核对。目标类型为 none 的动作
+    （现在只有 speak.here）落在角色当时所在的房间，那是提交那一刻的世界状态，
+    存档里再也算不出来 —— 但它仍然必须是一个非空地点、且不带频道。
+    """
+    kind = definition.target_kind
+    if kind is TargetKind.CHANNEL:
+        if event.channel_id != proposal.target_id:
+            raise ActionEventMismatch(
+                f"事件 '{event.event_id}' 落在频道 {event.channel_id!r}，"
+                f"提案的目标是 {proposal.target_id!r}"
+            )
+        if event.location_id is not None:
+            raise ActionEventMismatch(
+                f"频道动作产出的事件 '{event.event_id}' 不该带地点 "
+                f"{event.location_id!r}"
+            )
+        return None, proposal.target_id
+    if kind is TargetKind.LOCATION:
+        if event.location_id != proposal.target_id:
+            raise ActionEventMismatch(
+                f"事件 '{event.event_id}' 落在地点 {event.location_id!r}，"
+                f"提案的目标是 {proposal.target_id!r}"
+            )
+        if event.channel_id is not None:
+            raise ActionEventMismatch(
+                f"地点动作产出的事件 '{event.event_id}' 不该带频道 "
+                f"{event.channel_id!r}"
+            )
+        return proposal.target_id, None
+    if event.channel_id is not None:
+        raise ActionEventMismatch(
+            f"无目标动作产出的事件 '{event.event_id}' 不该带频道 "
+            f"{event.channel_id!r}"
+        )
+    if not isinstance(event.location_id, str) or not event.location_id:
+        raise ActionEventMismatch(
+            f"事件 '{event.event_id}' 没有落点，无目标动作必须落在角色当时"
+            "所在的地点上"
+        )
+    return event.location_id, None
+
+
+def _borrowed_participants(
+    definition: ActionDefinition, proposal, event
+) -> Tuple[str, ...]:
+    """在场名单：空名单可以精确核对，快照名单只能按前置条件约束。
+
+    快照本身事后不可重新推导，但它跟动作的前置条件之间有一条硬关系：一个
+    "必须已在频道里"的动作，产出事件的成员快照里不可能没有它的执行者；一个
+    "必须还不在频道里"的动作，快照里不可能有它。这条关系是从声明推出来的，
+    不是重放状态效果。
+    """
+    actor = proposal.character_id
+    if definition.participants_from is ParticipantSource.NONE:
+        if event.participants:
+            raise ActionEventMismatch(
+                f"动作 '{definition.action_id.value}' 声明不带在场名单，事件 "
+                f"'{event.event_id}' 却带了 {list(event.participants)}"
+            )
+        return ()
+    present = actor in event.participants
+    if Precondition.ACTOR_IN_TARGET_CHANNEL in definition.preconditions and not present:
+        raise ActionEventMismatch(
+            f"事件 '{event.event_id}' 的在场名单里没有执行者 '{actor}'，"
+            f"而 '{definition.action_id.value}' 要求它当时就在里面"
+        )
+    if Precondition.ACTOR_NOT_IN_TARGET_CHANNEL in definition.preconditions and present:
+        raise ActionEventMismatch(
+            f"事件 '{event.event_id}' 的在场名单里有执行者 '{actor}'，"
+            f"而 '{definition.action_id.value}' 要求它当时还不在里面"
+        )
+    if (
+        definition.participants_from is ParticipantSource.LOCATION_OCCUPANTS
+        and not present
+    ):
+        raise ActionEventMismatch(
+            f"事件 '{event.event_id}' 的在场名单里没有执行者 '{actor}'"
+        )
+    return tuple(event.participants)
+
+
+def verify_agency_event(
+    event,
+    session_id: str,
+    due,
+    proposal: "ActionProposal",
+    *,
+    occurred_at,
+    policy: str = "",
+) -> None:
+    """核对一条已提交事件确实是这条提案 + 这条到期资格产出的。
+
+    做法是**按声明重建一遍再逐字段比对**，而不是逐条写"某某字段应该等于某某"：
+    重建走的就是 agency_event_fields()，也就是当初构造它的那段代码，所以校验
+    松不下来 —— 想放宽校验就得先放宽构造。
+
+    只有两处无法从存档重新推导：无目标动作的落点，以及提交那一刻的在场快照。
+    这两处先各自按规则约束（见上面两个辅助函数），再原样借用去重建。
+    """
+    definition = proposal.definition
+    location_id, channel_id = _borrowed_anchor(definition, proposal, event)
+    participants = _borrowed_participants(definition, proposal, event)
+
+    expected = agency_event_fields(
+        session_id,
+        due,
+        proposal,
+        occurred_at=occurred_at,
+        location_id=location_id,
+        channel_id=channel_id,
+        participants=participants,
+        policy=policy,
+    )
+    actual = {
+        "event_id": event.event_id,
+        "type": event.type,
+        "occurred_at": event.occurred_at,
+        "scope": event.scope,
+        "actor_id": event.actor_id,
+        "participants": tuple(event.participants),
+        "location_id": event.location_id,
+        "channel_id": event.channel_id,
+        "payload": thaw_json_value(event.payload),
+        "provenance": thaw_json_value(event.provenance),
+        "correlation_id": event.correlation_id,
+    }
+    for name, wanted in expected.items():
+        got = actual[name]
+        if got != wanted:
+            raise ActionEventMismatch(
+                f"事件 '{event.event_id}' 的 {name} 与提案 "
+                f"'{proposal.proposal_id}' 声明的不一致：期望 {wanted!r}，"
+                f"实际 {got!r}"
+            )

@@ -3,20 +3,27 @@
 # 这是 Agency 和 P5 提交边界之间**唯一**的接合处。一条提案要变成世界真相，
 # 只有这一条路：在这里被翻译成 Event，然后交给 commit_session_event()。
 #
-# 翻译规则全部来自目录声明，不来自提案自己：
+# 事件长什么样不由这里决定，由目录声明决定 —— 具体的字段构造在
+# `pns.models.action.agency_event_fields()`，会话存档恢复时的核对走的是同一
+# 段代码的反方向。这个模块只负责它自己那份**世界相关**的输入：
 #
-#   事件类型 / 传播 scope   目录说了算，提案没有字段能影响它
-#   落点（地点 / 频道）      由目标类型决定，目标本身已经过前置条件校验
-#   payload                只搬目录声明过的键
+#   落点        由目标类型决定；无目标的动作落在角色当时所在的地点
+#   在场名单     由目录声明的来源决定，取提交那一刻的快照
+#   causation   世界历史里的上一条事件
 #
-# 于是"任意字典改不动 WorldState"这句话有两道锁：提案构造时未声明的键就被
-# 拒了，这里再按目录过一遍。第二道锁不是冗余 —— 它保证的是"就算以后有人
-# 造出一条绕过构造校验的提案，也搬不出多余的键"。
+# 于是"任意字典改不动 WorldState"有两道锁：提案构造时未声明的键就被拒了，
+# `event_payload()` 再按目录过一遍；而"事件内容必须是这条提案产出的"这件事，
+# 构造和校验共用同一份声明，松不下来。
 from typing import Dict, Optional, Tuple
 
-from pns.models.action import ActionId, ActionProposal, TargetKind
+from pns.models.action import (
+    ActionProposal,
+    ParticipantSource,
+    TargetKind,
+    agency_event_fields,
+)
 from pns.models.activation import ActivationDue
-from pns.models.event import Event, EventScope
+from pns.models.event import Event
 from pns.models.event_store import EventStore
 from pns.models.world_state import WorldState
 
@@ -29,8 +36,7 @@ def _anchor(
     world: WorldState, proposal: ActionProposal
 ) -> Tuple[Optional[str], Optional[str]]:
     """算出这条动作落在哪个地点 / 哪个频道上。"""
-    definition = proposal.definition
-    kind = definition.target_kind
+    kind = proposal.definition.target_kind
     if kind is TargetKind.CHANNEL:
         # 频道动作不带地点：从频道里发生的事不透出发起者坐在哪个房间。
         return None, proposal.target_id
@@ -52,22 +58,30 @@ def _anchor(
 def _participants(
     world: WorldState, proposal: ActionProposal, channel_id, location_id
 ) -> Tuple[str, ...]:
-    """提交那一刻的在场快照。
+    """提交那一刻的在场快照，来源由目录声明。
 
     这是历史事实，不是访问规则：曝光层对 channel / location 档从不拿
     participants 当授权依据（P6 已经写死了这一条），它在这两档里只用来说明
     "被接受的时候屋里/频道里有谁"。
-
-    移动动作不给名单：它的 location_id 是**目的地**，而状态效果还没应用，
-    此刻那份名单马上就会作废，写下一份注定过期的花名册不如不写。
     """
-    if proposal.action_id is ActionId.MOVE_TO:
+    source = proposal.definition.participants_from
+    if source is ParticipantSource.NONE:
         return ()
-    if channel_id is not None:
+    if source is ParticipantSource.CHANNEL_MEMBERS:
+        if channel_id is None:
+            raise AgencyEffectError(
+                f"动作 '{proposal.action_id.value}' 声明从频道成员取在场名单，"
+                "却没有频道落点"
+            )
         return tuple(world.channel_participants(channel_id))
-    if location_id is not None:
+    if source is ParticipantSource.LOCATION_OCCUPANTS:
+        if location_id is None:
+            raise AgencyEffectError(
+                f"动作 '{proposal.action_id.value}' 声明从在场者取名单，"
+                "却没有地点落点"
+            )
         return tuple(world.characters_at(location_id))
-    return ()
+    raise AgencyEffectError(f"未知的在场名单来源: {source!r}")
 
 
 def event_for_proposal(
@@ -81,53 +95,33 @@ def event_for_proposal(
 ) -> Event:
     """把一条已经通过校验的提案表示成一条待提交事件。
 
-    这个函数是纯的：它只读世界和事件历史来算落点与因果链，不改任何东西。
-    事件能不能被接受，由 P5 的提交边界再判一次（引用完整性、时钟一致、
+    这个函数是纯的：它只读世界和事件历史来算落点、在场名单与因果链，不改任何
+    东西。事件能不能被接受，由 P5 的提交边界再判一次（引用完整性、时钟一致、
     状态转移是否可能）—— Agency 不越过它，也不重复它。
+
+    需要台词的动作在这里就走不通：`agency_event_fields()` 直接拒绝，因为生成
+    与 Router 判分链还没接进来。那不是可配置的，是这一阶段没有那条路径。
     """
     if not isinstance(proposal, ActionProposal):
         raise AgencyEffectError("只能翻译 ActionProposal")
     if not isinstance(world, WorldState):
         raise AgencyEffectError("翻译提案需要一份权威 WorldState")
 
-    definition = proposal.definition
     location_id, channel_id = _anchor(world, proposal)
     participants = _participants(world, proposal, channel_id, location_id)
-
-    scope = definition.event_scope
-    if scope in (EventScope.PRIVATE, EventScope.PARTICIPANT):
-        # 目录里现在没有这两档的动作；真加了的话，参与者名单必须由动作显式
-        # 声明，而不是从在场快照里推 —— 那两档的 participants 是授权依据。
-        raise AgencyEffectError(
-            f"动作 '{definition.action_id.value}' 声明的 scope {scope.value} "
-            "还没有已实现的参与者语义"
-        )
-
     latest = store.latest()
     return Event(
-        event_id=proposal.derived_event_id(session_id),
-        type=definition.event_type,
-        occurred_at=world.clock,
-        scope=scope,
-        actor_id=proposal.character_id,
-        participants=participants,
-        location_id=location_id,
-        channel_id=channel_id,
-        payload=proposal.event_payload(),
-        # 系统侧簿记：这条事件是哪次到期、哪条提案、哪个策略产出的。
-        # provenance 从不进任何角色的观察（P6 的投影白名单挡着），所以角色
-        # 不会因此知道"我这一步是被某个策略选出来的"。
-        provenance={
-            "kind": "agency",
-            "session_id": session_id,
-            "due_id": due.due_id,
-            "activation_id": due.activation_id,
-            "proposal_id": proposal.proposal_id,
-            "action_id": definition.action_id.value,
-            "policy": policy,
-        },
+        **agency_event_fields(
+            session_id,
+            due,
+            proposal,
+            occurred_at=world.clock,
+            location_id=location_id,
+            channel_id=channel_id,
+            participants=participants,
+            policy=policy,
+        ),
         causation_id=latest.event_id if latest is not None else None,
-        correlation_id=session_id,
     )
 
 
@@ -141,7 +135,9 @@ def debug_projection(world: WorldState, proposal: ActionProposal) -> Dict:
         "event_scope": definition.event_scope.value,
         "location_id": location_id,
         "channel_id": channel_id,
+        "participants_from": definition.participants_from.value,
         "payload_keys": sorted(proposal.event_payload()),
+        "committable": not definition.requires_authored_text,
     }
 
 

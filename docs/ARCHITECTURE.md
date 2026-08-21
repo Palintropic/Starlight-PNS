@@ -723,13 +723,22 @@ a policy sees, and how many actions a session may commit in total. That last
 count is derived from the audit log rather than kept in a counter, so an archive
 round trip cannot hand a restored session a fresh allowance.
 
-One budget is a safety gate rather than a limit. `allow_authored_text` defaults
-to **off**, which closes `speak.here` and `message.send`. A line becomes world
-truth through generation → Router evaluation → drift audit → commit, and that
-chain is not wired into the agency path in this phase; committing an authored
-line here would put dialogue into world history that no consistency evaluation
-ever saw, which is exactly what the commit boundary excludes elsewhere. Opening
-the gate is possible and explicit, and it means the caller accepts that gap.
+Actions that require authored text — `speak.here` and `message.send` — have **no
+commit path in this phase**, and that is a boundary rather than a default. A line
+becomes world truth through generation → Router evaluation → drift audit →
+commit; that chain is not wired into the agency path yet, so committing an
+authored line here would put dialogue into world history that no consistency
+evaluation ever saw, which is exactly what the commit boundary excludes
+elsewhere. There is deliberately no flag that reopens it: a safety boundary a
+caller can flip is not a boundary, and "the caller accepts the gap" is not an
+authority the caller has. The refusal exists at three points — the policy's
+proposal is rejected, a hand-built plan is rejected at commit, and
+`agency_event_fields()` (the only function that builds an agency event) refuses
+outright, so no code path exists at all. The action schema stays in the catalogue
+and stays in the legal enumeration, because the generation layer will wire into
+it unchanged and the gate disappears on its own at that point; deterministic
+policies simply never select an action that needs a line they would have to
+invent.
 
 Scheduler-to-agency handoff happens exactly once. The engine only accepts an
 `ActivationDue` that is present in this session's outbox, still matches the
@@ -746,12 +755,42 @@ engine is a service over it, and a session binds exactly one — two engines wou
 give one eligibility two mutually invisible conclusions, with the first to land
 having already acknowledged it. The archive shape is defined once, in
 `SessionState.agency_archive()`, and `session.to_dict()["agency"]` is that
-section. Restoring validates against the rest of the session, not just against
-itself: a record may not be decided after the world clock or before its own
-activation fired, must reference a due record this session actually produced and
-acknowledged, and an `acted` record must point at an event that exists in world
-history. An archive missing the section is refused rather than restored as "never
+section. An archive missing the section is refused rather than restored as "never
 evaluated anything".
+
+Restoring validates against the rest of the session, not just against itself. A
+record may not be decided after the world clock or before its own activation
+fired, must reference a due record this session actually produced and
+acknowledged, and must agree with that due record about which character it
+concerns. For an `acted` record it is not enough that the referenced event
+exists, or even that its id matches the one derived from the proposal: the id is
+*derived from* `proposal_id`, so keeping it correct while rewriting the event's
+actor, type, scope, landing point, payload or provenance produces an archive
+where the audit says one thing, world history says another, and both agree on the
+identifier. Restore therefore checks the event's **content**, through
+`verify_agency_event()`, which rebuilds the expected fields with
+`agency_event_fields()` — the same function that constructed the event in the
+first place — and compares them. There is one definition of what an agency event
+must look like, so verification cannot drift looser than construction without
+construction drifting with it. Actor, event type, scope, landing point, payload,
+`correlation_id`, the occurrence time (which must equal the decision time), and
+every field of the agency provenance block — `due_id`, `activation_id`,
+`proposal_id`, `action_id`, `session_id`, `policy` — are all checked.
+
+Two things genuinely cannot be re-derived from an archive: where a no-target
+action's actor was standing, and the commit-time presence roster. Verification
+does not replay state effects to recover them — replaying would ask "does the
+world still turn out this way?", which is both dangerous and meaningless once the
+world has moved on. Instead each is constrained by rule and then taken as given.
+`ActionDefinition.participants_from` declares where a roster comes from
+(`none` / `channel_members` / `location_occupants`), the builder and the verifier
+both read that declaration, an empty roster is checked exactly, and a snapshot
+roster is still constrained by the action's own preconditions: an action
+requiring "already in the channel" cannot have produced an event whose snapshot
+omits its actor, and one requiring "not yet in the channel" cannot have produced
+one that includes it. `causation_id` is excluded from the comparison — it links
+world history rather than describing the action, and `EventStore` already owns
+ordering.
 
 Agency is a **separate runtime path**, not a new step in the research loop.
 `pns/runtime/session_runtime.py` does not import it — an AST test enforces that —

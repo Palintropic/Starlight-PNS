@@ -7,6 +7,7 @@ from typing import Dict, Iterator, List, Mapping, Optional, Sequence
 from pns.models.activation import ActivationError
 from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
+from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog
 from pns.models.event_store import EventStore
 from pns.models.exposure import ExposureDecision, ExposureLog
@@ -749,26 +750,41 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
             raise SessionStateError(
                 f"到期资格 '{record.due_id}' 有 Agency 记录却没有被确认"
             )
-        fired_at = outbox.get(record.due_id).fired_at
-        if record.decided_at < fired_at:
+        due = outbox.get(record.due_id)
+        if record.decided_at < due.fired_at:
             # 在这条资格到期之前就"决定"过它 —— 那不是一个更早的决定，
             # 那是两段来自不同时刻的状态被拼在了一起。
             raise SessionStateError(
                 f"Agency 记录 '{record.due_id}' 的决定时间 "
                 f"{record.decided_at.isoformat()} 早于它的触发时间 "
-                f"{fired_at.isoformat()}"
+                f"{due.fired_at.isoformat()}"
             )
-        if record.event_id is not None:
-            if not state.events.has(record.event_id):
-                raise SessionStateError(
-                    f"Agency 记录 '{record.due_id}' 指向了世界历史里不存在的事件: "
-                    f"{record.event_id}"
-                )
-            expected = record.proposal.derived_event_id(state.session_id)
-            if record.event_id != expected:
-                # 只查"这条事件存在"是不够的：把 event_id 改成世界历史里
-                # 随便另一条真实事件，审计就会说这个动作产出了一件它没做过的事。
-                raise SessionStateError(
-                    f"Agency 记录 '{record.due_id}' 指向的事件 "
-                    f"'{record.event_id}' 不是它的提案产出的（应为 '{expected}'）"
-                )
+        if due.character_id is not None and due.character_id != record.character_id:
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 记的是角色 "
+                f"'{record.character_id}'，而这条到期资格属于 "
+                f"'{due.character_id}'"
+            )
+        if record.event_id is None:
+            continue
+        if not state.events.has(record.event_id):
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 指向了世界历史里不存在的事件: "
+                f"{record.event_id}"
+            )
+        # 光对上 ID 是不够的：event_id 从 proposal_id 推导，把它保持正确、
+        # 却改掉事件的 actor、类型、scope、落点、payload 或 provenance，就能
+        # 拼出一份"审计说做了 A、世界历史说发生了 B"而两边 ID 又对得上的存档。
+        # 所以这里核对的是**事件的实际内容**，走的是当初构造它的那段声明
+        # （pns/models/action.py），不是另写一套更松的规则，也不重放状态效果。
+        try:
+            verify_agency_event(
+                state.events.get(record.event_id),
+                state.session_id,
+                due,
+                record.proposal,
+                occurred_at=record.decided_at,
+                policy=record.policy,
+            )
+        except ActionEventMismatch as e:
+            raise SessionStateError(str(e)) from e

@@ -28,12 +28,16 @@ from unittest.mock import patch
 from pns.models.action import (
     ActionDefinition,
     ActionError,
+    ActionEventMismatch,
     ActionId,
     ActionProposal,
     LegalAction,
     Precondition,
+    ParticipantSource,
     TargetKind,
     action_definition,
+    agency_event_fields,
+    verify_agency_event,
     catalogue,
     catalogue_ids,
     new_proposal_id,
@@ -50,6 +54,7 @@ from pns.models.event import Event, EventScope, EventType
 from pns.models.session import SessionState, SessionStateError
 from pns.models.world_state import Availability, WorldState
 from pns.runtime.agency import context as context_mod
+from pns.runtime.agency import effects as effects_mod
 from pns.runtime.agency import engine as engine_mod
 from pns.runtime.agency.context import AgencyContextError, build_agency_context
 from pns.runtime.agency.effects import AgencyEffectError, event_for_proposal
@@ -999,83 +1004,6 @@ class BudgetTests(unittest.TestCase):
         self.assertTrue(context.observations_truncated)
         self.assertEqual(context.observations[0].source_event_id, "e2")
 
-    def test_authored_text_actions_are_closed_by_default(self):
-        # 一句台词要成为世界真相，该走生成 → Router 判分 → 审计落盘那条链，
-        # 而那条链在 Agency 这一侧还不存在。默认拒绝，不是"先说了再补审计"。
-        state, scheduler, engine = _rig(
-            policy=_MovePolicy(),  # 占位，下面直接手工提案
-        )
-        due = _due(scheduler)
-        plan = ProposalPlan(
-            due=due,
-            character_id="mizuki",
-            policy="manual",
-            proposed_at=state.world_state.clock,
-            verdict=AgencyOutcome.ACTED,
-            proposal=ActionProposal(
-                proposal_id="p1",
-                character_id="mizuki",
-                action_id=ActionId.SPEAK_HERE,
-                payload={"text": "我说了算"},
-            ),
-        )
-        record = engine.commit(plan)
-        self.assertIs(record.outcome, AgencyOutcome.REJECTED_BUDGET)
-        self.assertEqual(record.detail["reason"], "authored_text_not_permitted")
-        self.assertEqual(state.events.by_type(EventType.DIALOGUE_SPOKEN), ())
-
-    def test_a_policy_proposing_dialogue_is_refused_at_proposal_time(self):
-        class _Talker(AgencyPolicy):
-            name = "talker"
-
-            def decide(self, context):
-                return PolicyDecision(
-                    proposals=(
-                        ActionProposal(
-                            proposal_id="p1",
-                            character_id=context.character_id,
-                            action_id=ActionId.SPEAK_HERE,
-                            payload={"text": "こんばんは"},
-                        ),
-                    )
-                )
-
-        state, scheduler, engine = _rig(policy=_Talker())
-        record = engine.evaluate(_due(scheduler))
-        self.assertIs(record.outcome, AgencyOutcome.REJECTED_ILLEGAL)
-        self.assertEqual(record.detail["reason"], "authored_text_not_permitted")
-        self.assertEqual(len(state.observations), 0)
-
-    def test_opting_in_lets_an_authored_line_through(self):
-        state, scheduler, engine = _rig(
-            policy=ScriptedPolicy({}),
-            budget=AgencyBudget(allow_authored_text=True),
-        )
-        due = _due(scheduler)
-        plan = ProposalPlan(
-            due=due,
-            character_id="mizuki",
-            policy="manual",
-            proposed_at=state.world_state.clock,
-            verdict=AgencyOutcome.ACTED,
-            proposal=ActionProposal(
-                proposal_id="p1",
-                character_id="mizuki",
-                action_id=ActionId.SPEAK_HERE,
-                payload={"text": "こんばんは", "char_name": "瑞希"},
-            ),
-        )
-        record = engine.commit(plan)
-        self.assertIs(record.outcome, AgencyOutcome.ACTED)
-        event = state.events.get(record.event_id)
-        self.assertEqual(event.payload["text"], "こんばんは")
-        # 缺口是明说的：这条事件的 provenance 里没有任何判分记录。
-        self.assertNotIn("drift_score", dict(event.provenance))
-
-    def test_allow_authored_text_must_be_a_boolean(self):
-        with self.assertRaises(AgencyError):
-            AgencyBudget(allow_authored_text=1)
-
     def test_the_policy_is_consulted_exactly_once_per_activation(self):
         counting = _CountingPolicy(FirstLegalActionPolicy())
         state, scheduler, engine = _rig(policy=counting)
@@ -1259,6 +1187,368 @@ class DuplicateIdentityTests(unittest.TestCase):
                 proposal=proposal,
                 event_id="e1",
             )
+
+
+# ── 台词动作：结构性关闭，不是可配置的 ──────────────────────────────────
+class AuthoredTextIsNotCommittableTests(unittest.TestCase):
+    """需要台词的动作在本阶段**没有提交路径**。
+
+    不是"默认关着"：一句台词要成为世界真相，该走 生成 → Router 判分 →
+    漂移审计落盘 → 提交 那条链，而它还没接到 Agency 这一侧。安全边界不能是
+    一个调用方翻得动的布尔量 —— 那样它就不是边界，只是一句建议。
+    """
+
+    class _Talker(AgencyPolicy):
+        name = "talker"
+
+        def decide(self, context):
+            return PolicyDecision(
+                proposals=(
+                    ActionProposal(
+                        proposal_id="p1",
+                        character_id=context.character_id,
+                        action_id=ActionId.SPEAK_HERE,
+                        payload={"text": "こんばんは"},
+                    ),
+                )
+            )
+
+    def test_a_policy_proposing_dialogue_is_refused(self):
+        state, scheduler, engine = _rig(policy=self._Talker())
+        record = engine.evaluate(_due(scheduler))
+        self.assertIs(record.outcome, AgencyOutcome.REJECTED_ILLEGAL)
+        self.assertEqual(record.detail["reason"], "authored_text_not_committable")
+        self.assertEqual(state.events.by_type(EventType.DIALOGUE_SPOKEN), ())
+        self.assertEqual(len(state.observations), 0)
+
+    def test_a_hand_built_plan_cannot_smuggle_dialogue_past_propose(self):
+        state, scheduler, engine = _rig(policy=ScriptedPolicy({}))
+        due = _due(scheduler)
+        plan = ProposalPlan(
+            due=due,
+            character_id="mizuki",
+            policy="manual",
+            proposed_at=state.world_state.clock,
+            verdict=AgencyOutcome.ACTED,
+            proposal=ActionProposal(
+                proposal_id="p1",
+                character_id="mizuki",
+                action_id=ActionId.SPEAK_HERE,
+                payload={"text": "我说了算"},
+            ),
+        )
+        record = engine.commit(plan)
+        self.assertIs(record.outcome, AgencyOutcome.REJECTED_ILLEGAL)
+        self.assertEqual(record.detail["reason"], "authored_text_not_committable")
+        self.assertEqual(state.events.by_type(EventType.DIALOGUE_SPOKEN), ())
+
+    def test_a_channel_message_is_equally_uncommittable(self):
+        state, scheduler, engine = _rig(policy=ScriptedPolicy({}))
+        due = _due(scheduler)
+        plan = ProposalPlan(
+            due=due,
+            character_id="mizuki",
+            policy="manual",
+            proposed_at=state.world_state.clock,
+            verdict=AgencyOutcome.ACTED,
+            proposal=ActionProposal(
+                proposal_id="p1",
+                character_id="mizuki",
+                action_id=ActionId.SEND_CHANNEL_MESSAGE,
+                target_id="nightcord",
+                payload={"text": "在吗"},
+            ),
+        )
+        self.assertIs(engine.commit(plan).outcome, AgencyOutcome.REJECTED_ILLEGAL)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+
+    def test_the_event_builder_itself_has_no_path_for_authored_text(self):
+        # 第三道闸，也是结构性的那道：构造 agency 事件的函数只有一个，它直接
+        # 拒绝。所以运行时里不存在把未判分台词写进世界历史的代码路径。
+        state, scheduler, engine = _rig()
+        due = _due(scheduler)
+        proposal = ActionProposal(
+            proposal_id="p1",
+            character_id="mizuki",
+            action_id=ActionId.SPEAK_HERE,
+            payload={"text": "hi"},
+        )
+        with self.assertRaises(ActionEventMismatch):
+            event_for_proposal(
+                state.world_state, state.events, "s1", due, proposal
+            )
+        with self.assertRaises(ActionEventMismatch):
+            agency_event_fields(
+                "s1",
+                due,
+                proposal,
+                occurred_at=state.world_state.clock,
+                location_id="mizuki_home_room",
+                channel_id=None,
+            )
+
+    def test_no_budget_field_or_keyword_can_reopen_it(self):
+        fields = {f.name for f in AgencyBudget.__dataclass_fields__.values()}
+        self.assertEqual(
+            [name for name in fields if "text" in name or "allow" in name], []
+        )
+        with self.assertRaises(TypeError):
+            AgencyBudget(allow_authored_text=True)
+
+    def test_the_switch_does_not_exist_anywhere_in_the_package(self):
+        # 这条盯的是它别悄悄回来。
+        for path in sorted(Path(engine_mod.__file__).resolve().parent.parent.parent.rglob("*.py")):
+            self.assertNotIn(
+                "allow_authored_text",
+                path.read_text(encoding="utf-8"),
+                f"{path} 里又出现了那个开关",
+            )
+
+    def test_the_action_schema_is_kept_for_later_wiring(self):
+        # 保留 schema 是刻意的：生成层接上来之后，这两个动作原样可用，
+        # 那时这道闸自然消失。它们现在仍然出现在合法枚举里，只是不可提交。
+        for action_id in (ActionId.SPEAK_HERE, ActionId.SEND_CHANNEL_MESSAGE):
+            self.assertIn(action_id, catalogue())
+            self.assertTrue(action_definition(action_id).requires_authored_text)
+        state, scheduler, engine = _rig()
+        context = engine.context_for(_due(scheduler))
+        self.assertTrue(context.has_legal(ActionId.SPEAK_HERE))
+        # 但确定性策略挑不到它们。
+        self.assertNotIn(
+            ActionId.SPEAK_HERE,
+            [legal.action_id for legal in context.legal_without_authored_text()],
+        )
+
+
+# ── 存档里的事件被改过 ──────────────────────────────────────────────────
+class ArchiveEventTamperingTests(unittest.TestCase):
+    """acted 记录指着的那条事件，内容必须真的是这条提案 + 这条到期产出的。
+
+    只核对 event_id 是不够的：它从 proposal_id 推导，保持它正确、改掉事件的
+    actor / 类型 / scope / 落点 / payload / provenance，就能拼出一份"审计说
+    做了 A、世界历史说发生了 B"而两边 ID 又对得上的存档。
+    """
+
+    class _JoinPolicy(AgencyPolicy):
+        name = "join"
+
+        def decide(self, context):
+            return PolicyDecision(
+                proposals=(
+                    ActionProposal(
+                        proposal_id="p1",
+                        character_id=context.character_id,
+                        action_id=ActionId.JOIN_CHANNEL,
+                        target_id="nightcord",
+                    ),
+                )
+            )
+
+    def setUp(self):
+        # ena 不在频道里，所以"加入频道"合法；它不需要台词，落点是频道，
+        # 在场名单是提交那一刻的成员快照。
+        self.state, self.scheduler, self.engine = _rig(policy=self._JoinPolicy())
+        self.due = _due(self.scheduler, character_id="ena")
+        self.record = self.engine.evaluate(self.due)
+        self.assertIs(self.record.outcome, AgencyOutcome.ACTED)
+        self.archive = self.state.to_dict()
+
+    def _tampered(self, mutate):
+        archive = deepcopy(self.archive)
+        for entry in archive["events"]["events"]:
+            if entry["event_id"] == self.record.event_id:
+                mutate(entry)
+                break
+        else:
+            self.fail("存档里找不到那条 agency 事件")
+        return archive
+
+    def _assert_refused(self, mutate):
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(self._tampered(mutate))
+
+    def test_the_untampered_archive_restores(self):
+        restored = SessionState.from_dict(deepcopy(self.archive))
+        self.assertEqual(restored.to_dict(), self.archive)
+
+    def test_a_tampered_actor_is_refused(self):
+        def swap_actor(event):
+            event["actor_id"] = "mizuki"
+
+        self._assert_refused(swap_actor)
+
+    def test_a_tampered_event_type_is_refused(self):
+        # 换成一个**结构上同样合法**的类型：join → leave 只差一个词，
+        # Event 自己校验不出来，世界历史里却是完全相反的一件事。
+        def swap_type(event):
+            event["type"] = EventType.PRESENCE_LEFT_CHANNEL.value
+
+        self._assert_refused(swap_type)
+
+    def test_a_tampered_scope_is_refused(self):
+        def widen_scope(event):
+            event["scope"] = EventScope.PUBLIC.value
+
+        self._assert_refused(widen_scope)
+
+    def test_a_tampered_target_landing_is_refused(self):
+        def move_channel(event):
+            event["channel_id"] = "some_other_channel"
+
+        self._assert_refused(move_channel)
+
+    def test_a_smuggled_location_on_a_channel_action_is_refused(self):
+        def add_location(event):
+            event["location_id"] = "city_streets"
+
+        self._assert_refused(add_location)
+
+    def test_a_tampered_payload_is_refused(self):
+        # 这个动作的目录声明不接受任何 payload 键。塞一句话进去，恢复出来的
+        # 世界历史里就多了一句谁也没审计过的台词。
+        def inject_text(event):
+            event["payload"] = {"text": "我其实说了这句"}
+
+        self._assert_refused(inject_text)
+
+    def test_a_tampered_participant_roster_is_refused(self):
+        # join 的前置条件是"当时还不在频道里"，所以快照里不可能有它自己。
+        # 快照本身事后不可重新推导，但这条关系是从声明推出来的。
+        def add_actor(event):
+            event["participants"] = sorted(set(event["participants"]) | {"ena"})
+
+        self._assert_refused(add_actor)
+
+    def test_a_roster_missing_a_required_actor_is_refused(self):
+        # 在场名单的约束是双向的：join 要求执行者当时不在里面，leave 要求它
+        # 当时就在。只盯住一个方向，另一个方向的篡改就能过。
+        state, scheduler, engine = _rig(
+            policy=ScriptedPolicy({}),
+        )
+        due = _due(scheduler)
+        record = engine.commit(
+            ProposalPlan(
+                due=due,
+                character_id="mizuki",
+                policy="manual",
+                proposed_at=state.world_state.clock,
+                verdict=AgencyOutcome.ACTED,
+                proposal=ActionProposal(
+                    proposal_id="p1",
+                    character_id="mizuki",
+                    action_id=ActionId.LEAVE_CHANNEL,
+                    target_id="nightcord",
+                ),
+            )
+        )
+        self.assertIs(record.outcome, AgencyOutcome.ACTED)
+        archive = state.to_dict()
+        for entry in archive["events"]["events"]:
+            if entry["event_id"] == record.event_id:
+                self.assertEqual(entry["participants"], ["mizuki"])
+                entry["participants"] = []
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(archive)
+
+    def test_a_tampered_occurrence_time_is_refused(self):
+        def shift_earlier(event):
+            event["occurred_at"] = "2026-08-21T23:55:00"
+
+        self._assert_refused(shift_earlier)
+
+    def test_a_tampered_correlation_id_is_refused(self):
+        def other_session(event):
+            event["correlation_id"] = "some_other_session"
+
+        self._assert_refused(other_session)
+
+    def test_every_agency_provenance_field_is_checked(self):
+        forgeries = {
+            "kind": "generation",
+            "session_id": "some_other_session",
+            "due_id": "ghost@2026-08-22T00:00:00",
+            "activation_id": "some_other_activation",
+            "proposal_id": "some_other_proposal",
+            "action_id": ActionId.MOVE_TO.value,
+            "policy": "some_other_policy",
+        }
+        for key, forged in forgeries.items():
+            with self.subTest(provenance=key):
+                def forge(event, key=key, forged=forged):
+                    event["provenance"] = {**event["provenance"], key: forged}
+
+                self._assert_refused(forge)
+
+    def test_a_dropped_provenance_field_is_refused(self):
+        def drop(event):
+            provenance = dict(event["provenance"])
+            provenance.pop("proposal_id")
+            event["provenance"] = provenance
+
+        self._assert_refused(drop)
+
+    def test_a_record_whose_due_belongs_to_another_character_is_refused(self):
+        archive = deepcopy(self.archive)
+        archive["agency"]["log"]["records"][0]["character_id"] = "mizuki"
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(archive)
+
+    def test_a_tampered_policy_name_on_the_record_is_refused(self):
+        # 记录里的策略名和事件 provenance 里的必须是同一个：只改一边，审计就
+        # 会说这个动作是另一个策略选的。
+        archive = deepcopy(self.archive)
+        archive["agency"]["log"]["records"][0]["policy"] = "someone_else"
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(archive)
+
+    def test_construction_and_verification_share_one_definition(self):
+        # 校验走的就是当初构造它的那段声明：想放宽校验，得先放宽构造。
+        event = self.state.events.get(self.record.event_id)
+        verify_agency_event(
+            event,
+            self.state.session_id,
+            self.due,
+            self.record.proposal,
+            occurred_at=self.record.decided_at,
+            policy=self.record.policy,
+        )
+        rebuilt = agency_event_fields(
+            self.state.session_id,
+            self.due,
+            self.record.proposal,
+            occurred_at=self.record.decided_at,
+            location_id=None,
+            channel_id="nightcord",
+            participants=tuple(event.participants),
+            policy=self.record.policy,
+        )
+        self.assertEqual(rebuilt["payload"], dict(event.payload))
+        self.assertEqual(rebuilt["provenance"], dict(event.provenance))
+        self.assertEqual(rebuilt["event_id"], event.event_id)
+
+
+class ParticipantSourceTests(unittest.TestCase):
+    """在场名单的来源是声明出来的，构造和校验读的是同一条。"""
+
+    def test_every_action_declares_where_its_roster_comes_from(self):
+        for action_id in catalogue_ids():
+            definition = action_definition(action_id)
+            self.assertIsInstance(definition.participants_from, ParticipantSource)
+
+    def test_a_move_declares_an_empty_roster_and_it_is_checkable(self):
+        self.assertIs(
+            action_definition(ActionId.MOVE_TO).participants_from,
+            ParticipantSource.NONE,
+        )
+        state, scheduler, engine = _rig(policy=FirstLegalActionPolicy())
+        record = engine.evaluate(_due(scheduler))
+        self.assertEqual(state.events.get(record.event_id).participants, ())
+        archive = state.to_dict()
+        for entry in archive["events"]["events"]:
+            if entry["event_id"] == record.event_id:
+                entry["participants"] = ["ena"]
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(archive)
 
 
 # ── AC11 归属与隔离 ─────────────────────────────────────────────────────
@@ -1479,26 +1769,31 @@ class EffectTests(unittest.TestCase):
             ActionProposal(
                 proposal_id="p",
                 character_id="mizuki",
-                action_id=ActionId.SEND_CHANNEL_MESSAGE,
+                action_id=ActionId.LEAVE_CHANNEL,
                 target_id="nightcord",
-                payload={"text": "hi"},
             )
         )
         self.assertEqual(event.channel_id, "nightcord")
         self.assertIsNone(event.location_id)
         self.assertIs(event.scope, EventScope.CHANNEL)
+        # 频道成员快照，按目录声明取。
+        self.assertEqual(event.participants, ("mizuki",))
 
-    def test_a_spoken_action_lands_on_the_current_location(self):
-        event = self._event(
+    def test_a_no_target_action_lands_on_the_current_location(self):
+        # speak.here 本阶段不可提交，但它的落点推导仍然要正确 —— 生成层接上
+        # 来之后走的就是这条。只读投影不经过构造闸门，所以能单独验它。
+        projection = effects_mod.debug_projection(
+            self.state.world_state,
             ActionProposal(
                 proposal_id="p",
                 character_id="mizuki",
                 action_id=ActionId.SPEAK_HERE,
                 payload={"text": "hi"},
-            )
+            ),
         )
-        self.assertEqual(event.location_id, "mizuki_home_room")
-        self.assertIsNone(event.channel_id)
+        self.assertEqual(projection["location_id"], "mizuki_home_room")
+        self.assertIsNone(projection["channel_id"])
+        self.assertFalse(projection["committable"])
 
     def test_a_move_carries_no_participant_roster(self):
         # location_id 是目的地，而状态效果还没应用：写一份注定作废的名单
@@ -1540,13 +1835,14 @@ class EffectTests(unittest.TestCase):
     def test_an_action_without_a_landing_place_refuses_to_become_an_event(self):
         self.state.world_state.remove_character("mizuki")
         with self.assertRaises(AgencyEffectError):
-            self._event(
+            effects_mod.debug_projection(
+                self.state.world_state,
                 ActionProposal(
                     proposal_id="p",
                     character_id="mizuki",
                     action_id=ActionId.SPEAK_HERE,
                     payload={"text": "hi"},
-                )
+                ),
             )
 
     def test_a_scope_without_participant_semantics_is_refused(self):
@@ -1570,7 +1866,7 @@ class EffectTests(unittest.TestCase):
         with patch.object(
             ActionProposal, "definition", property(lambda self: private)
         ):
-            with self.assertRaises(AgencyEffectError):
+            with self.assertRaises(ActionEventMismatch):
                 self._event(proposal)
 
 
@@ -1582,26 +1878,20 @@ class ExposureIntegrationTests(unittest.TestCase):
         world = _world(join_nightcord=("mizuki", "ena"))
         state = _session(world)
         scheduler = PersistentScheduler(state)
-        engine = AgencyEngine(
-            state,
-            policy=ScriptedPolicy({}),
-            # 台词动作默认是关着的；这里显式打开，代表调用方自己承担
-            # "这句话没经过 Router 判分"这个缺口。
-            budget=AgencyBudget(allow_authored_text=True),
-        )
-        due = _due(scheduler)
+        world.leave_channel("ena", "nightcord")
+        engine = AgencyEngine(state, policy=ScriptedPolicy({}))
+        due = _due(scheduler, character_id="ena")
         plan = ProposalPlan(
             due=due,
-            character_id="mizuki",
+            character_id="ena",
             policy="manual",
             proposed_at=world.clock,
             verdict=AgencyOutcome.ACTED,
             proposal=ActionProposal(
                 proposal_id="p1",
-                character_id="mizuki",
-                action_id=ActionId.SEND_CHANNEL_MESSAGE,
+                character_id="ena",
+                action_id=ActionId.JOIN_CHANNEL,
                 target_id="nightcord",
-                payload={"text": "在吗", "char_name": "瑞希"},
             ),
         )
         record = engine.commit(plan)

@@ -94,21 +94,14 @@ class AgencyBudget:
     max_observations: int = 64
     # 一个会话累计能提交的动作数。
     max_committed_actions_per_session: int = 128
-    # 允不允许提交"需要外部提供台词"的动作（speak.here / message.send）。
-    #
-    # 默认**关着**，而且这是本阶段最重要的一条闸门：一句台词要成为世界真相，
-    # 该走的是角色生成层 → Router 判分 → 漂移审计落盘 → 提交，而那条链在
-    # Agency 这一侧还不存在。开着它就等于让一句没经过任何一致性评估的话直接
-    # 进世界历史，P5 边界特意排除掉的正是这种东西。
-    #
-    # 需要真的说话时显式打开它，代表调用方自己承担那次审计缺口。
-    allow_authored_text: bool = False
+
+    # 这里**没有**"允许提交台词动作"的开关，而且不该有：需要台词的动作在本
+    # 阶段没有提交路径（见 pns/models/action.py 的 _require_committable），
+    # 因为生成 → Router 判分 → 漂移审计那条链还没接进来。安全边界不是预算，
+    # 预算是"最多做多少"，边界是"根本不能做"；把边界做成一个调用方能翻的
+    # 布尔量，等于没有边界。
 
     def __post_init__(self) -> None:
-        if not isinstance(self.allow_authored_text, bool):
-            raise AgencyError(
-                f"allow_authored_text 必须是布尔值，收到 {self.allow_authored_text!r}"
-            )
         for name in (
             "max_proposals_per_activation",
             "max_legal_actions",
@@ -130,7 +123,6 @@ class AgencyBudget:
             "max_committed_actions_per_session": (
                 self.max_committed_actions_per_session
             ),
-            "allow_authored_text": self.allow_authored_text,
         }
 
 
