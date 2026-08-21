@@ -10,6 +10,12 @@
 #     这种第三态，因为半截内容永远待在临时文件里，而临时文件不叫 world.json。
 #   * 失败会如实报告有没有留下需要人处理的残留（临时文件）。清理不掉就说
 #     清理不掉，不假装干净。
+#   * `os.replace` 让新存档**可见**，`fsync` 目录让那次改名**耐久**。两件事
+#     不是一件事：目录同步失败之后，读者读到的已经是新存档，可掉电之后回来
+#     的可能还是旧的。所以目录同步失败**不算成功保存** —— 它抛
+#     ArchiveNotDurable，而不是被吞掉。平台/文件系统压根不支持目录同步是另一
+#     档：那是"这里拿不到更强的保证"，不是"这次同步失败了"，它照常成功，但在
+#     SaveResult 里明说 directory_sync_supported=False。
 #   * 崩溃恢复读到的是**最后一次成功 replace 的那一份**。残留的临时文件被
 #     报告，但绝不会被当成存档读回来。
 #
@@ -20,6 +26,7 @@
 # 路径安全：world_id 先过 naming.validate_world_id，然后再用 realpath 判一次
 # 目录是不是真的落在存档根之下。两道是刻意的 —— 第一道挡文本，第二道挡软链，
 # 它们挡的不是同一种攻击。
+import errno
 import json
 import os
 import tempfile
@@ -33,6 +40,7 @@ from pns.runtime.persistence.naming import WorldIdError, validate_world_id
 from pns.runtime.persistence.ownership import OwnershipHandle, acquire_world
 
 __all__ = [
+    "ArchiveNotDurable",
     "ArchiveNotFound",
     "FileWorldStore",
     "SaveResult",
@@ -40,6 +48,21 @@ __all__ = [
     "WorldIdError",
     "WorldStore",
 ]
+
+
+# 目录同步拿不到、但**不代表磁盘出问题**的 errno。它们的共同含义是"这个平台
+# 或文件系统不提供这个能力"：Windows 打不开目录句柄（EACCES / EISDIR / EPERM），
+# 一些文件系统对目录 fd 的 fsync 直接回 EINVAL / ENOTSUP / ENOSYS。
+# 名单是白名单而不是黑名单：不认识的 errno 一律当成真失败 —— 在耐久性这件事
+# 上，猜错的方向必须是"多报一次问题"，不是"少报一次"。
+_UNSUPPORTED_SYNC_ERRNOS = frozenset(
+    value
+    for value in (
+        getattr(errno, name, None)
+        for name in ("EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EACCES", "EPERM", "EISDIR")
+    )
+    if value is not None
+)
 
 
 class StorageError(RuntimeError):
@@ -58,15 +81,41 @@ class ArchiveNotFound(StorageError):
     """这个世界还没有任何一份完整存档。"""
 
 
+class ArchiveNotDurable(StorageError):
+    """新存档已经在位、读得回来，但它的耐久性没能证实。
+
+    只有一种情况会走到这里：内容写好了、fsync 过了、`os.replace` 也成功了 ——
+    所以**磁盘上确实已经是这一版**，任何读者现在读到的都是它 —— 但那次改名
+    所在的目录同步失败了。掉电之后回来的可能还是上一版。
+
+    它跟 StorageError 的其余用法方向相反，所以必须单独一档：那些是"这次保存
+    没发生"，这一档是"发生了，但保证不到"。调用方的账要按**已经发生**记
+    （修订号得往前走，不然下一次会拿同一个号写不同的内容），而对外的话要按
+    **保证不到**说（不许宣布干净、不许宣布耐久）。
+    """
+
+    def __init__(self, message: str, *, revision: int, path: str) -> None:
+        super().__init__(message)
+        self.revision = revision
+        self.path = path
+
+
 @dataclass(frozen=True)
 class SaveResult:
-    """一次成功保存的结果。"""
+    """一次成功保存的结果。
+
+    `directory_synced` 为 False 只有一种合法原因：这个平台/文件系统给不了目录
+    同步（`directory_sync_supported` 同时为 False）。真正的同步失败不会走到
+    这里 —— 那是 ArchiveNotDurable。
+    """
 
     world_id: str
     path: str
     revision: int
     bytes_written: int
     residue: Tuple[str, ...] = ()
+    directory_synced: bool = True
+    directory_sync_supported: bool = True
 
 
 class WorldStore(ABC):
@@ -262,12 +311,16 @@ class FileWorldStore(WorldStore):
                 + (f"（残留待处理: {', '.join(residue)}）" if residue else ""),
                 residue=residue,
             ) from e
-        self._sync_dir(directory)
+        # 走到这里新存档已经可见了。剩下的只有"那次改名耐不耐得住掉电"，
+        # 而它有可能失败 —— 失败就必须说出来，见 ArchiveNotDurable。
+        supported = self._sync_dir(directory, archive)
         return SaveResult(
             world_id=archive.world_id,
             path=str(target),
             revision=archive.revision,
             bytes_written=len(payload),
+            directory_synced=supported,
+            directory_sync_supported=supported,
         )
 
     def acquire(self, world_id: str) -> OwnershipHandle:
@@ -303,16 +356,49 @@ class FileWorldStore(WorldStore):
             return (tmp_name,)
         return ()
 
-    @staticmethod
-    def _sync_dir(directory: Path) -> None:
-        """把目录项也刷下去。不支持就算了 —— 它是加固，不是原子性的前提。"""
+    @classmethod
+    def _sync_dir(cls, directory: Path, archive: WorldArchive) -> bool:
+        """把改名所在的目录项刷下去。返回"这个平台支不支持"。
+
+        两种失败必须分开，因为它们对调用方意味着完全相反的事：
+
+        * **不支持**（见 _UNSUPPORTED_SYNC_ERRNOS）—— 这个平台或文件系统压根
+          不提供目录同步。那是"这里拿不到更强的保证"，不是"这次同步失败了"。
+          返回 False，保存照常算成功，SaveResult 里写明。
+        * **真的失败**（EIO、ENOSPC、EROFS……）—— 磁盘在出问题。新存档已经可见，
+          但那次改名可能扛不住掉电。抛 ArchiveNotDurable，绝不吞掉：吞掉就等于
+          在一块正在坏的盘上宣布"存好了"。
+        """
         try:
             dir_fd = os.open(str(directory), os.O_RDONLY)
-        except OSError:  # pragma: no cover - 平台差异
-            return
+        except OSError as e:
+            if cls._is_unsupported(e):
+                # Windows 上根本打不开目录句柄，属于"这里就没有这个能力"。
+                return False
+            raise ArchiveNotDurable(
+                f"世界 '{archive.world_id}' 的第 {archive.revision} 版已经写在"
+                f"磁盘上、读得回来，但存档目录打不开、那次改名的耐久性无法证实"
+                f"（掉电之后可能回到上一版）: {e}",
+                revision=archive.revision,
+                path=str(directory / cls.ARCHIVE_NAME),
+            ) from e
         try:
             os.fsync(dir_fd)
-        except OSError:  # pragma: no cover - 平台差异
-            pass
+        except OSError as e:
+            if cls._is_unsupported(e):
+                return False
+            raise ArchiveNotDurable(
+                f"世界 '{archive.world_id}' 的第 {archive.revision} 版已经写在"
+                f"磁盘上、读得回来，但存档目录同步失败、那次改名的耐久性无法"
+                f"证实（掉电之后可能回到上一版）: {e}",
+                revision=archive.revision,
+                path=str(directory / cls.ARCHIVE_NAME),
+            ) from e
         finally:
             os.close(dir_fd)
+        return True
+
+    @staticmethod
+    def _is_unsupported(error: OSError) -> bool:
+        """这个 OSError 是"这里没有这个能力"，还是"这次操作失败了"。"""
+        return error.errno in _UNSUPPORTED_SYNC_ERRNOS

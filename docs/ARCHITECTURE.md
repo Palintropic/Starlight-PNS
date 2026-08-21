@@ -1253,6 +1253,24 @@ reports whether temporary material remains that a human has to clear. Crash
 recovery reads the last successfully replaced archive and ignores — but reports —
 incomplete temporaries.
 
+**Visible and durable are two different claims, so they get two different
+answers.** `os.replace` makes the new archive visible; the directory `fsync`
+makes that rename survive a power loss. When the directory sync genuinely fails
+— `EIO`, `ENOSPC` — the save does not return success: it raises
+`ArchiveNotDurable`, which says exactly what happened, namely that this revision
+*is* on disk and readable but may not come back after a power loss. That is a
+different shape from every other storage failure, so the lifecycle books it
+differently: the revision advances, because the disk really does hold that
+revision and reusing the number would let two different contents share it, while
+`durable: false` and the error stay in the status and the close refuses to call
+itself clean. A platform or filesystem that simply has no directory `fsync`
+(Windows cannot even open a directory handle; some filesystems answer `EINVAL`)
+is the other case entirely — nothing failed, the capability is absent — so the
+save succeeds and says `directory_sync_supported: false`. The errno list that
+separates the two is a whitelist: an unrecognized errno counts as a real failure,
+because on durability the safe direction to guess wrong is toward reporting a
+problem.
+
 **The recovery boundary is the last successful checkpoint. Nothing more.** There
 is no WAL, no event-sourced replay and no zero-loss crash guarantee, and the
 implementation does not pretend otherwise. Work committed after the last
@@ -1275,17 +1293,35 @@ A crashed owner leaves its record behind, so the next owner knows it took over a
 crashed world and reports `recovered_from`; a clean release rewrites that record,
 so there is nothing to report.
 
-**Checkpoints observe one coherent state.** A checkpoint takes the coordinator's
-gate — the same one `start`, `stop` and commit admission share — and then asks the
-session itself whether any transaction is open. Both questions are necessary, and
-adversarial review is what proved it: the gate covers commits the coordinator
-starts, but the scheduler's time advance and the event commit layer open
-`SessionState.atomic_commit()` directly. Snapshotting inside such a transaction
+**Checkpoints observe one coherent state, and the exclusion is real.** A
+checkpoint takes two locks in one fixed order: the coordinator's gate — the same
+one `start`, `stop` and commit admission share — and then the session's own
+exclusive boundary, which is the very lock `SessionState.atomic_commit()` holds
+for the whole of a transaction. Both are necessary. The gate only covers commits
+the coordinator starts, while the scheduler's time advance and the event commit
+layer open `atomic_commit()` directly; snapshotting inside such a transaction
 produced an archive in which the clock had advanced, a one-shot activation had
 been taken off the queue, and its due record had not yet reached the outbox —
-that activation was gone for good, and the archive passed every validation. The
-snapshot is taken inside the boundary; serialization and the write happen outside
-it, so one `fsync` never blocks a shutdown.
+that activation was gone for good, and the archive passed every validation.
+
+Asking *whether* a transaction is open is not enough, which is the second thing
+review established. A question is answered at an instant; between the answer and
+the first byte of `to_dict()` a time advance can start and run alongside the
+snapshot, and the archive is torn exactly as before — only now in the other
+direction, with the snapshot first. So the two operations share one lock and
+serialize: a checkpoint waits for a running transaction to finish rather than
+refusing, and a transaction cannot start while a snapshot is in flight. The lock
+is taken before `atomic_commit()` builds its rollback snapshots, not after, so
+there is no window in which a commit is already underway and the state still
+looks idle. Nesting still works (a commit inside a commit) and a snapshot from
+inside one's own transaction is refused rather than admitted by re-entrancy.
+
+The order — gate, then session boundary — is the one global rule, and it is
+enforced by a bounded wait rather than by hope: a path that violates it would
+otherwise hang forever, so the snapshot gives the boundary a deadline, and on
+expiry it fails loudly, releases the gate and lets the system unwind. The
+snapshot itself is taken inside the boundary; serialization and the write happen
+outside it, so one `fsync` never blocks a shutdown.
 
 **Shutdown order is fixed**: stop admission, wait for the running transaction to
 settle, checkpoint the final state, mark the handle closed, release ownership. A

@@ -42,6 +42,7 @@ from pns.runtime.persistence.ownership import (
     owned_world_paths,
 )
 from pns.runtime.persistence.store import (
+    ArchiveNotDurable,
     ArchiveNotFound,
     FileWorldStore,
     SaveResult,
@@ -54,6 +55,7 @@ __all__ = [
     "WORLD_ARCHIVE_VERSION",
     "ArchiveCorrupt",
     "ArchiveError",
+    "ArchiveNotDurable",
     "ArchiveNotFound",
     "CheckpointError",
     "CheckpointPolicy",

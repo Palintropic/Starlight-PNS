@@ -19,21 +19,26 @@
 #
 # 运行: python -m unittest tests.test_world_lifecycle -v
 import ast
+import errno
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.activation_outbox import ActivationOutbox
+from pns.models.activation_queue import ActivationQueue
 from pns.models.event import EventType
-from pns.models.session import SessionState
+from pns.models.session import SessionState, TransactionBoundaryError
 from pns.models.world_state import WorldState
 from pns.runtime.autonomy.audit import ScriptedAuditor
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
@@ -63,6 +68,7 @@ from pns.runtime.persistence.ownership import (
     owned_world_paths,
 )
 from pns.runtime.persistence.store import (
+    ArchiveNotDurable,
     ArchiveNotFound,
     FileWorldStore,
     StorageError,
@@ -114,6 +120,22 @@ def _adapters(lines=None, **kwargs):
         ),
         **kwargs,
     )
+
+
+def _dir_fsync(error):
+    """只让**目录**那次 fsync 失败，文件那次照常放行。
+
+    两次 fsync 的意思完全不同：文件那次决定内容在不在盘上，目录那次决定那次
+    改名扛不扛得住掉电。测试必须能分别打中它们。
+    """
+    real = os.fsync
+
+    def patched(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise error
+        return real(fd)
+
+    return patched
 
 
 def _due(scheduler, activation_id="wake", *, character_id="mizuki", minutes=10):
@@ -395,6 +417,65 @@ class AtomicSaveTests(WorldTestCase):
         self.assertEqual(self.store.load("nightcord").revision, 2)
         status = world.status()
         self.assertIn(residue.name, [Path(item).name for item in status["residue"]])
+
+    # ── 目录同步：可见 ≠ 耐久 ───────────────────────────────────────────
+    def test_a_directory_sync_that_really_fails_is_not_reported_as_success(self):
+        # os.replace 让新存档**可见**，fsync 目录让那次改名**耐久**。两件事不是
+        # 一件事：目录同步失败之后，读者读到的已经是新存档，可掉电之后回来的
+        # 可能还是旧的。吞掉它就等于在一块正在坏的盘上宣布"存好了"。
+        self.store.save(self._archive(1))
+        newer = self._archive(2, clock=CLOCK + timedelta(minutes=30))
+        with patch.object(
+            store_mod.os, "fsync", _dir_fsync(OSError(errno.EIO, "I/O error"))
+        ):
+            with self.assertRaises(ArchiveNotDurable) as caught:
+                self.store.save(newer)
+        self.assertEqual(caught.exception.revision, 2)
+        self.assertEqual(caught.exception.path, str(self.archive_path()))
+        # 新存档确实已经在位了 —— 这正是它必须单独一档、不能报成"保存失败"
+        # 的原因。
+        self.assertEqual(self.store.load("nightcord").revision, 2)
+        self.assertEqual(self.store.residue("nightcord"), ())
+
+    def test_a_platform_without_directory_sync_still_saves_successfully(self):
+        # "这里没有这个能力"跟"这次同步失败了"是两回事。前者照常成功，
+        # 但在结果里明说。
+        for code in (errno.EINVAL, errno.ENOTSUP, errno.EACCES):
+            with self.subTest(errno=code):
+                with patch.object(
+                    store_mod.os, "fsync", _dir_fsync(OSError(code, "nope"))
+                ):
+                    result = self.store.save(self._archive(1))
+                self.assertFalse(result.directory_sync_supported)
+                self.assertFalse(result.directory_synced)
+                self.assertEqual(self.store.load("nightcord").revision, 1)
+
+    def test_a_directory_that_cannot_even_be_opened_is_classified_too(self):
+        real_open = os.open
+
+        def refuse(path, flags, *args):
+            if os.path.isdir(path):
+                raise OSError(errno.EIO, "I/O error")
+            return real_open(path, flags, *args)
+
+        with patch.object(store_mod.os, "open", refuse):
+            with self.assertRaises(ArchiveNotDurable):
+                self.store.save(self._archive(1))
+        self.assertEqual(self.store.load("nightcord").revision, 1)
+
+    def test_an_unknown_errno_counts_as_a_real_failure(self):
+        # 白名单而不是黑名单：不认识的 errno 一律当成真失败。在耐久性这件事
+        # 上，猜错的方向必须是"多报一次问题"。
+        with patch.object(
+            store_mod.os, "fsync", _dir_fsync(OSError(errno.ENOSPC, "full"))
+        ):
+            with self.assertRaises(ArchiveNotDurable):
+                self.store.save(self._archive(1))
+
+    def test_a_successful_save_says_the_directory_was_synced(self):
+        result = self.store.save(self._archive(1))
+        self.assertTrue(result.directory_synced)
+        self.assertTrue(result.directory_sync_supported)
 
     def test_loading_a_world_that_was_never_saved_is_a_named_failure(self):
         with self.assertRaises(ArchiveNotFound):
@@ -904,6 +985,48 @@ class CheckpointBoundaryTests(WorldTestCase):
         # 下一次成功的 checkpoint 接着上一个成功的号往下走。
         self.assertEqual(world.checkpoint()["revision"], 2)
         self.assertIsNone(world.status()["last_error"])
+
+    def test_a_checkpoint_that_cannot_prove_durability_advances_but_admits_it(self):
+        world = self.created()
+        world.runtime.process_due(_due(world.runtime.scheduler))
+        with patch.object(
+            store_mod.os,
+            "fsync",
+            _dir_fsync(OSError(errno.EIO, "I/O error")),
+        ):
+            with self.assertRaises(CheckpointError) as caught:
+                world.checkpoint()
+        self.assertIsInstance(caught.exception.__cause__, ArchiveNotDurable)
+        status = world.status()
+        # 账按"已经发生"记：那一版确实在磁盘上，修订号必须跟着走，否则下一次
+        # checkpoint 会拿同一个号写不一样的内容。
+        self.assertEqual(status["revision"], 2)
+        self.assertEqual(self.archive_json()["revision"], 2)
+        self.assertFalse(status["dirty"])
+        # 话按"保证不到"说。
+        self.assertFalse(status["durable"])
+        self.assertFalse(status["directory_synced"])
+        self.assertIn("ArchiveNotDurable", status["last_error"])
+        # 下一次成功的 checkpoint 用的是下一个号，而且把耐久性说回来。
+        self.assertEqual(world.checkpoint()["revision"], 3)
+        self.assertTrue(world.status()["durable"])
+
+    def test_a_close_whose_final_save_is_not_durable_is_not_clean(self):
+        world = self.created()
+        world.runtime.process_due(_due(world.runtime.scheduler))
+        with patch.object(
+            store_mod.os,
+            "fsync",
+            _dir_fsync(OSError(errno.EIO, "I/O error")),
+        ):
+            with self.assertRaises(CheckpointError):
+                world.close()
+            self.assertFalse(world.status()["closed"])
+            self.assertTrue(world.status()["owned"])
+            status = world.close(force=True)
+        self.assertTrue(status["closed"])
+        self.assertFalse(status["clean"])
+        self.assertFalse(status["durable"])
 
     def test_a_checkpoint_captures_work_committed_before_it(self):
         world = self.created()
@@ -1522,6 +1645,8 @@ class LifecycleServiceTests(WorldTestCase):
             "residue",
             "running",
             "clock",
+            "durable",
+            "directory_synced",
             "archive_path",
             "boundaries_since_checkpoint",
         ):
@@ -1605,23 +1730,30 @@ class AdversarialRegressionTests(WorldTestCase):
       3. 文件系统说不的时候漏出原始 OSError，调用方接不住。
     """
 
-    def test_a_checkpoint_racing_a_transaction_outside_the_gate_is_refused(self):
-        # 攻击复现：scheduler.advance_by() 直接开事务，不经过协调器闸门。
-        # 在"时钟推了、一次性激活已经从队列里摘掉、到期记录还没落进投递箱"
-        # 这一刻取快照，会存下一份**那条激活凭空消失**的世界 —— 而且它能通过
-        # 全部校验，看起来完好无损。
+    def _queued_world(self, activation_id="wake", minutes=10):
+        """一个排着一条激活、已经存过一次的世界。"""
         world = self.created()
         scheduler = world.runtime.scheduler
         scheduler.schedule(
             ScheduledActivation(
-                activation_id="wake",
+                activation_id=activation_id,
                 kind=ActivationKind.CHARACTER_ACTIVATION,
-                due_at=scheduler.clock + timedelta(minutes=10),
+                due_at=scheduler.clock + timedelta(minutes=minutes),
                 character_id="mizuki",
             )
         )
         world.checkpoint()
+        return world, scheduler
 
+    def test_a_checkpoint_waits_for_a_transaction_outside_the_gate(self):
+        # 攻击复现（正向）：scheduler.advance_by() 直接开事务，不经过协调器
+        # 闸门。在"时钟推了、一次性激活已经从队列里摘掉、到期记录还没落进
+        # 投递箱"这一刻取快照，会存下一份**那条激活凭空消失**的世界 —— 而且
+        # 它能通过全部校验，看起来完好无损。
+        #
+        # 边界是互斥而不是一次检查，所以这里的正确行为是**等**：等到那次事务
+        # 整个做完，再存下一份完整的后续状态。
+        world, scheduler = self._queued_world()
         inside = threading.Event()
         release = threading.Event()
         real_append = ActivationOutbox._append
@@ -1631,28 +1763,333 @@ class AdversarialRegressionTests(WorldTestCase):
             release.wait(30)
             return real_append(self_outbox, record)
 
+        done = threading.Event()
+        errors = []
+
+        def checkpoint():
+            try:
+                world.checkpoint(reason="racing-a-tick")
+            except BaseException as e:  # pragma: no cover - 只在失败时才有内容
+                errors.append(e)
+            finally:
+                done.set()
+
         with patch.object(ActivationOutbox, "_append", slow_append):
             ticker = threading.Thread(target=lambda: scheduler.advance_by(10))
             ticker.start()
             self.assertTrue(inside.wait(30))
-            with self.assertRaises(CheckpointError) as caught:
-                world.checkpoint(reason="racing-a-tick")
+            checkpointer = threading.Thread(target=checkpoint)
+            checkpointer.start()
+            # 事务还开着，快照必须还在等 —— 既不能存下半截，也不能提前失败。
+            self.assertFalse(done.wait(0.5))
             release.set()
             ticker.join(30)
+            checkpointer.join(30)
 
-        self.assertIn("提交", str(caught.exception))
+        self.assertEqual(errors, [])
         stored = self.archive_json()["state"]
-        # 存档停在推进之前：时钟没动，那条激活还在队列里。
+        # 存下来的是那次推进**做完之后**的样子：时钟到位、队列空了、到期记录
+        # 在投递箱里。三者是同一次事务的三个后果，缺一份都说明快照撕开了它。
+        self.assertEqual(
+            stored["world_state"]["clock"], (CLOCK + timedelta(minutes=10)).isoformat()
+        )
+        self.assertEqual(stored["scheduler"]["queue"]["activations"], [])
+        self.assertEqual(
+            [item["activation_id"] for item in stored["scheduler"]["outbox"]["records"]],
+            ["wake"],
+        )
+
+    def test_a_transaction_cannot_start_while_a_snapshot_is_in_flight(self):
+        """反向 barrier：快照先进去，事务后来。
+
+        只查一次 `in_transaction` 的实现在这个方向上是**完全没有防护**的：
+        查的时候确实没人在事务里，查完之后那次时间推进照样开起来，跟 to_dict()
+        并排跑 —— 存下去的仍然是一份撕开的世界。
+        """
+        world, scheduler = self._queued_world()
+        snapshotting = threading.Event()
+        release = threading.Event()
+        real_world_to_dict = WorldState.to_dict
+        first = threading.Event()
+
+        def slow_to_dict(self_world):
+            if not first.is_set():
+                first.set()
+                snapshotting.set()
+                release.wait(30)
+            return real_world_to_dict(self_world)
+
+        ticked = threading.Event()
+        checkpointed = threading.Event()
+
+        with patch.object(WorldState, "to_dict", slow_to_dict):
+            checkpointer = threading.Thread(
+                target=lambda: (world.checkpoint(reason="slow"), checkpointed.set())
+            )
+            checkpointer.start()
+            self.assertTrue(snapshotting.wait(30))
+            ticker = threading.Thread(
+                target=lambda: (scheduler.advance_by(10), ticked.set())
+            )
+            ticker.start()
+            # 快照还在进行，那次推进必须一步都还没走。
+            self.assertFalse(ticked.wait(0.5))
+            self.assertEqual(world.state.world_state.clock, CLOCK)
+            release.set()
+            checkpointer.join(30)
+            ticker.join(30)
+
+        self.assertTrue(checkpointed.is_set())
+        self.assertTrue(ticked.is_set())
+        # 存档是推进**之前**那一刻：时钟没动，激活还在队列里，投递箱空的。
+        stored = self.archive_json()["state"]
         self.assertEqual(stored["world_state"]["clock"], CLOCK.isoformat())
         self.assertEqual(
             [item["activation_id"] for item in stored["scheduler"]["queue"]["activations"]],
             ["wake"],
         )
-        # 而活状态里推进确实完成了 —— 被拒绝的是快照，不是那次事务。
+        self.assertEqual(stored["scheduler"]["outbox"]["records"], [])
+        # 而推进本身确实在快照之后完成了，一条都没丢。
         self.assertEqual(
             world.state.world_state.clock, CLOCK + timedelta(minutes=10)
         )
         self.assertEqual(len(world.state.activation_outbox.pending()), 1)
+
+    def test_a_transaction_excludes_a_snapshot_from_before_its_first_mutation(self):
+        """事务的记账必须在它**建回滚快照之前**，不是之后。
+
+        建快照那几行本身不改状态，但"已经决定要提交、正在建快照"这段时间里，
+        状态不能看起来还是空闲的：放一次快照进来，它会跟紧随其后的第一次改动
+        并排跑。这里卡在 ActivationQueue._snapshot()（事务体之前的最后几步之一）
+        上验证这一点。
+        """
+        world, scheduler = self._queued_world()
+        inside = threading.Event()
+        release = threading.Event()
+        real_snapshot = ActivationQueue._snapshot
+
+        def slow_snapshot(self_queue):
+            inside.set()
+            release.wait(30)
+            return real_snapshot(self_queue)
+
+        done = threading.Event()
+
+        with patch.object(ActivationQueue, "_snapshot", slow_snapshot):
+            ticker = threading.Thread(target=lambda: scheduler.advance_by(10))
+            ticker.start()
+            self.assertTrue(inside.wait(30))
+            checkpointer = threading.Thread(
+                target=lambda: (world.checkpoint(reason="early"), done.set())
+            )
+            checkpointer.start()
+            self.assertFalse(done.wait(0.5))
+            release.set()
+            ticker.join(30)
+            checkpointer.join(30)
+
+        self.assertTrue(done.is_set())
+        self.assertEqual(
+            self.archive_json()["state"]["world_state"]["clock"],
+            (CLOCK + timedelta(minutes=10)).isoformat(),
+        )
+
+    def test_two_transactions_on_one_session_never_overlap(self):
+        # 两个线程同时在同一份状态上开事务，会各自建一份回滚快照、再互相覆盖
+        # 对方的回滚 —— 那不是竞态，是两份都不成立的事务。边界现在把它们排开。
+        state = _cold_state()
+        log = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def commit(tag):
+            barrier.wait()
+            with state.atomic_commit():
+                with lock:
+                    log.append(("enter", tag))
+                time.sleep(0.05)
+                with lock:
+                    log.append(("exit", tag))
+
+        threads = [threading.Thread(target=commit, args=(tag,)) for tag in "ab"]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(len(log), 4)
+        self.assertEqual([kind for kind, _ in log], ["enter", "exit", "enter", "exit"])
+        self.assertFalse(state.in_transaction)
+
+    def test_a_snapshot_that_cannot_get_the_boundary_in_time_fails_loudly(self):
+        # 违反锁顺序本该是一次死锁。等不到就放手，把它变成一次能定位的失败：
+        # 磁盘不动、修订号不动、错误留在状态里。
+        world = self.service.create(
+            "slowworld",
+            _cold_state(session_id="s3"),
+            adapters=_adapters(),
+            snapshot_timeout=0.2,
+        )
+        self.addCleanup(world.release)
+        before = world.status()["revision"]
+        release = threading.Event()
+        holding = threading.Event()
+
+        def hold():
+            with world.state.atomic_commit():
+                holding.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            self.assertTrue(holding.wait(30))
+            with self.assertRaises(CheckpointError) as caught:
+                world.checkpoint(reason="will-time-out")
+        finally:
+            release.set()
+            holder.join(30)
+        self.assertIn("0.2", str(caught.exception))
+        self.assertEqual(world.status()["revision"], before)
+        self.assertEqual(self.archive_json("slowworld")["revision"], before)
+        self.assertIn("TransactionBoundaryError", world.status()["last_error"])
+        # 事务让开之后，同一个世界照样存得下去。
+        self.assertEqual(world.checkpoint()["revision"], before + 1)
+
+    def test_a_snapshot_from_inside_a_foreign_transaction_is_refused_not_deadlocked(self):
+        # 事务不是协调器开的（所以协调器那道 in_transaction 认不出它），但取
+        # 快照的是**同一个线程** —— 可重入锁会放行，会话必须自己拦下来。
+        world = self.created()
+        state = world.state
+        with state.atomic_commit():
+            with self.assertRaises(CheckpointError):
+                world.checkpoint(reason="from-inside-a-foreign-transaction")
+            with self.assertRaises(TransactionBoundaryError):
+                with state.snapshot_boundary():
+                    pass
+        self.assertEqual(world.status()["revision"], 1)
+        self.assertEqual(world.checkpoint()["revision"], 2)
+
+    def test_a_lock_order_violation_times_out_instead_of_hanging(self):
+        """反序拿锁本该是一次死锁，这里必须变成一次能定位的失败。
+
+        全局锁顺序是**协调器闸门 → 会话边界**。一个不是协调器开的事务（比如
+        调度器的时间推进）如果在里面回头去拿闸门，就是反序：checkpoint 攥着
+        闸门等会话边界，它攥着会话边界等闸门。等不到就放手，把闸门还回去，
+        系统自己解开。
+        """
+        world = self.service.create(
+            "slowworld",
+            _cold_state(session_id="s3"),
+            adapters=_adapters(),
+            snapshot_timeout=0.5,
+        )
+        self.addCleanup(world.release)
+        in_transaction = threading.Event()
+        holds_the_gate = threading.Event()
+        stopped = threading.Event()
+        real_boundary = SessionState.snapshot_boundary
+
+        @contextmanager
+        def announcing(self_state, timeout=None):
+            # 这一刻 checkpoint 已经攥着协调器闸门（lifecycle_boundary 先拿它），
+            # 马上就要卡在会话边界上。信号在这里发，碰撞才是确定的。
+            holds_the_gate.set()
+            with real_boundary(self_state, timeout) as state:
+                yield state
+
+        def offender():
+            with world.state.atomic_commit():
+                in_transaction.set()
+                holds_the_gate.wait(30)
+                world.runtime.stop("from-a-foreign-transaction")
+                stopped.set()
+
+        outcome = []
+
+        def checkpointer():
+            in_transaction.wait(30)
+            with patch.object(SessionState, "snapshot_boundary", announcing):
+                try:
+                    world.checkpoint(reason="deadlocking")
+                except BaseException as e:
+                    outcome.append(e)
+
+        threads = [threading.Thread(target=offender), threading.Thread(target=checkpointer)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+
+        self.assertFalse([t for t in threads if t.is_alive()], "挂死了")
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], CheckpointError)
+        self.assertIn("0.5", str(outcome[0]))
+        self.assertEqual(self.archive_json("slowworld")["revision"], 1)
+
+    def test_status_stays_answerable_when_the_world_cannot_be_read_cleanly(self):
+        # 状态查询刻意不拿边界，所以它有可能撞上一次正在改的世界。撞上了要
+        # 按"不确定 → 脏"回答，不能把整个状态面炸掉。
+        world = self.created()
+        self.assertFalse(world.status()["dirty"])
+        torn = RuntimeError("dictionary changed size during iteration")
+        with patch.object(WorldState, "to_dict", side_effect=torn):
+            status = world.status()
+        self.assertTrue(status["dirty"])
+        self.assertEqual(status["revision"], 1)
+        # 而在独占边界之内还读不出一致状态，就说明有人绕过事务在改它 ——
+        # 那份快照不可信，绝不许存下去。
+        with patch.object(WorldState, "to_dict", side_effect=torn):
+            with self.assertRaises(CheckpointError):
+                world.checkpoint()
+        self.assertEqual(self.archive_json()["revision"], 1)
+
+    def test_status_survives_a_storm_of_concurrent_commits(self):
+        world = self.created()
+        state = world.state
+        stop = threading.Event()
+        problems = []
+
+        def churn():
+            index = 0
+            while not stop.is_set():
+                index += 1
+                try:
+                    with state.atomic_commit():
+                        state.world_state.metadata[f"hot{index}"] = index
+                        state.world_state.metadata.pop(f"hot{index - 1}", None)
+                except BaseException as e:  # pragma: no cover - 只在失败时才有内容
+                    problems.append(e)
+                    return
+
+        def read():
+            while not stop.is_set():
+                try:
+                    world.status()
+                except BaseException as e:  # pragma: no cover
+                    problems.append(e)
+                    return
+
+        threads = [threading.Thread(target=churn) for _ in range(2)]
+        threads += [threading.Thread(target=read) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        time.sleep(1.0)
+        stop.set()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(problems, [])
+
+    def test_a_nonsense_snapshot_deadline_is_refused(self):
+        state = _cold_state()
+        for bad in (-1, -0.5, "快点", True, object()):
+            with self.subTest(timeout=bad):
+                with self.assertRaises(TransactionBoundaryError):
+                    with state.snapshot_boundary(bad):
+                        pass
+        # 0 是合法的：它的意思是"拿不到就立刻放弃"。
+        with state.snapshot_boundary(0):
+            pass
 
     def test_the_session_reports_a_transaction_in_flight(self):
         state = _cold_state()

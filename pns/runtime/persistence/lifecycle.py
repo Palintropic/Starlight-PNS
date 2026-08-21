@@ -11,19 +11,30 @@
 #
 # 七条硬约束：
 #
-#   1. **快照只在一条安全边界上取。** checkpoint 先拿协调器那把闸门（start、
-#      stop 和"这次写入准不准"共用的同一把），拿到之后再问会话本人"有没有
-#      别人正开着事务"。两问缺一不可：闸门管得住协调器发起的提交，管不住
-#      调度器的时间推进和事件提交层 —— 它们直接开 atomic_commit()。任何一种
-#      事务的中途取快照，存下去的都是一份不存在过的世界（比如时钟推了、
-#      一次性激活已经从队列里摘掉、到期记录还没落进投递箱：那条激活从此凭空
-#      消失，而存档还能通过全部校验）。事务**内部**调用也一律拒绝 —— 闸门是
-#      可重入的，会放行自己，而放行等于存下半截。
+#   1. **快照只在一条安全边界上取，而且那是互斥、不是一次检查。** checkpoint
+#      按固定顺序拿两把锁：协调器闸门（start、stop 和"这次写入准不准"共用的
+#      那把），然后是会话自己的独占边界 —— 也就是 atomic_commit() 全程攥着的
+#      同一把锁。两把都要：闸门管得住协调器发起的提交，管不住调度器的时间
+#      推进和事件提交层，它们直接开 atomic_commit()。
+#      "查一下有没有人在事务里"是不够的：查是一个时刻的观察，查完到 to_dict()
+#      之间那段窗口里，一次时间推进照样能开起来跟快照并排跑，撕开的方向只是
+#      反过来而已。所以两件事共用一把锁、互相排队：有事务在跑就等它做完，
+#      有快照在跑就开不了事务。锁是在 atomic_commit() 建回滚快照**之前**拿的，
+#      不是之后 —— 否则"已经决定要提交、正在建快照"那段时间里状态看起来还是
+#      空闲的。事务**内部**取快照一律拒绝：两把锁都可重入，会放行自己，而那
+#      一刻的世界是半截的。
+#      锁顺序（全局唯一一条）：**闸门 → 会话边界**。反过来拿本该是一次死锁，
+#      所以等边界带**上限**：等不到就响亮失败、把闸门还回去，让系统自己解开，
+#      而不是永远挂着。
 #   2. **快照在边界里取，写盘在边界外做。** 一次 fsync 不该让停机跟着卡住。
 #      边界里只做 to_dict()（确定性、纯内存），序列化和写盘在外面。
 #   3. **保存失败绝不推进修订号。** 修订号是"磁盘上那一份是第几版"，不是
 #      "我打算写第几版"。失败之后修订号原地不动、错误留在 last_error 里，
 #      dirty 继续如实回答"状态跟磁盘上那一份一不一样"。
+#      **唯一的例外方向相反**：目录同步失败（ArchiveNotDurable）时那一版
+#      **已经在磁盘上、读者已经读得到**，所以账必须按"已经发生"记 —— 修订号
+#      照常往前走，否则下一次会拿同一个号写不一样的内容。但话按"保证不到"
+#      说：durable 记 False、错误留着、照样抛，没人能把它当成干净的一次保存。
 #   4. **写之前先确认所有权仍然成立。** 锁挂在 inode 上：锁文件被删掉之后，
 #      下一个进程一拿就拿到，而这一个还以为自己是唯一的写手。防不住那次删除，
 #      但能把"两个写手静静互相覆盖"变成"第二笔就响亮失败"。
@@ -49,7 +60,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Optional, Tuple
 
-from pns.models.session import SessionState
+from pns.models.session import SessionState, TransactionBoundaryError
 from pns.runtime.agency.engine import AgencyEngine
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.memory.encoder import MemoryEncoder
@@ -60,7 +71,12 @@ from pns.runtime.persistence.ownership import (
     OwnershipHandle,
     WorldAlreadyOwned,
 )
-from pns.runtime.persistence.store import ArchiveNotFound, StorageError, WorldStore
+from pns.runtime.persistence.store import (
+    ArchiveNotDurable,
+    ArchiveNotFound,
+    StorageError,
+    WorldStore,
+)
 from pns.runtime.scheduler import PersistentScheduler
 
 
@@ -180,8 +196,8 @@ class CheckpointPolicy:
         }
 
 
-def _fingerprint(state: SessionState) -> Tuple:
-    """一份"权威状态变过没有"的指纹。
+def _fingerprint(state: SessionState) -> Optional[Tuple]:
+    """一份"权威状态变过没有"的指纹。读不到一致的一份就返回 None。
 
     它由两部分组成，而且两部分都可以论证：
 
@@ -193,9 +209,20 @@ def _fingerprint(state: SessionState) -> Tuple:
         走一次哈希。
     """
     world = state.world_state
-    digest = hashlib.sha256(
-        json.dumps(world.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    try:
+        digest = hashlib.sha256(
+            json.dumps(
+                world.to_dict(), ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+        ).hexdigest()
+    except (RuntimeError, TypeError, ValueError):
+        # 状态查询刻意不拿边界（拿了的话，一次进行中的提交会把"现在怎么样"
+        # 这个问题也堵住），所以这一遍有可能撞上一次正在改的世界，比如
+        # "dictionary changed size during iteration"。
+        #
+        # 这里返回 None，调用方把它当成"不确定 → 按脏算"。方向是刻意的：
+        # 宁可多报一次"有没存的工作"，也不能在读不准的时候说"干净"。
+        return None
     return (
         world.clock.isoformat(),
         state.status,
@@ -233,6 +260,7 @@ class PersistentWorld:
         saved_at: Optional[str],
         checkpoint_policy: CheckpointPolicy,
         service: Optional["WorldLifecycleService"] = None,
+        snapshot_timeout: Optional[float] = None,
     ) -> None:
         self._world_id = world_id
         self._store = store
@@ -243,6 +271,8 @@ class PersistentWorld:
         self._saved_at = saved_at
         self._policy = checkpoint_policy
         self._service = service
+        # 等一次事务让路的上限。None 用 SessionState 那边的默认值。
+        self._snapshot_timeout = snapshot_timeout
         self._lock = threading.RLock()
         self._closed = False
         self._clean = False
@@ -251,6 +281,10 @@ class PersistentWorld:
         self._boundaries = 0
         self._last_checkpoint_at: Optional[datetime] = None
         self._fingerprint = _fingerprint(state)
+        # 最后一次成功保存的耐久性。durable=False 只有一种来路：那一版写下去了、
+        # 读得回来，但目录同步失败了（见 ArchiveNotDurable）。
+        self._durable = True
+        self._directory_synced = True
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -312,38 +346,91 @@ class PersistentWorld:
         # 下一个进程照样能拿到这个世界 —— 那一刻两个进程都以为自己是拥有者。
         # 这一步把"两个写手静静互相覆盖"变成"第二笔就响亮失败"。
         self._ownership.verify()
-        # 边界之内：只取快照。确定性、纯内存，不做 I/O。
-        try:
-            with self._runtime.lifecycle_boundary():
-                payload = self._state.to_dict()
-                fingerprint = _fingerprint(self._state)
-        except AutonomyError as e:
-            # 边界拒绝了这次快照（有事务正开着）。什么都没写，磁盘不动。
-            self._last_error = f"{type(e).__name__}: {e}"
-            raise CheckpointError(
-                f"世界 '{self._world_id}' 此刻取不到一致快照，磁盘上仍然是第 "
-                f"{self._revision} 版: {e}"
-            ) from e
+        payload, fingerprint = self._snapshot_locked()
         # 边界之外：序列化 + 写盘。一次 fsync 不该让停机跟着卡住。
+        archive = None
         try:
             archive = WorldArchive.from_state_payload(
                 self._world_id, payload, revision=revision
             )
-            self._store.save(archive)
+            result = self._store.save(archive)
+        except ArchiveNotDurable as e:
+            # 特殊的一档，而且方向跟下面那档相反：这一版**已经在磁盘上**、
+            # 读者现在读到的就是它，只是那次改名扛不扛得住掉电证实不了。
+            #
+            # 所以账要按"已经发生"记 —— 修订号必须往前走，否则下一次
+            # checkpoint 会用同一个号写不一样的内容，而修订号本该能认出内容。
+            # 话要按"保证不到"说 —— durable 记 False，错误留着，而且照样抛，
+            # 于是没有任何人能把这次 checkpoint 当成干净的。
+            self._adopt(archive, fingerprint, reason, durable=False, synced=False)
+            self._last_error = f"{type(e).__name__}: {e}"
+            raise CheckpointError(
+                f"世界 '{self._world_id}' 的第 {revision} 版已经写下去了，但它的"
+                f"耐久性证实不了: {e}"
+            ) from e
         except (StorageError, ArchiveError) as e:
             self._last_error = f"{type(e).__name__}: {e}"
             raise CheckpointError(
                 f"世界 '{self._world_id}' 的 checkpoint 失败，磁盘上仍然是第 "
                 f"{self._revision} 版: {e}"
             ) from e
-        self._revision = revision
+        self._adopt(
+            archive,
+            fingerprint,
+            reason,
+            durable=True,
+            synced=result.directory_synced,
+        )
+        return self._status_locked()
+
+    def _snapshot_locked(self) -> Tuple[Dict, Tuple]:
+        """在独占边界之内取一份一致快照。调用方持着世界锁。
+
+        边界是**互斥**，不是一次检查：进得去就说明没有任何事务在跑，而且块
+        结束之前也开不起来。有事务正在跑就在这里等它做完。
+
+        取快照过程里的任何失败都翻译成 CheckpointError —— 等不到边界、边界内
+        仍然读不出一致状态、序列化炸了，对调用方都是同一件事：**这次没存成，
+        磁盘一个字节没动**。让原始异常漏出去只会逼调用方去 catch 一堆东西。
+        """
+        try:
+            with self._runtime.lifecycle_boundary(self._snapshot_timeout):
+                payload = self._state.to_dict()
+                fingerprint = _fingerprint(self._state)
+                if fingerprint is None:
+                    # 边界攥着的时候不该发生。真发生了就说明有代码绕过
+                    # atomic_commit() 在改状态 —— 那这份快照本身也不可信。
+                    raise TransactionBoundaryError(
+                        f"世界 '{self._world_id}' 在独占边界内仍然读不出一致"
+                        "状态：有代码绕过 atomic_commit() 在改它"
+                    )
+                return payload, fingerprint
+        except Exception as e:
+            self._last_error = f"{type(e).__name__}: {e}"
+            raise CheckpointError(
+                f"世界 '{self._world_id}' 此刻取不到一致快照，磁盘上仍然是第 "
+                f"{self._revision} 版: {e}"
+            ) from e
+
+    def _adopt(
+        self,
+        archive: WorldArchive,
+        fingerprint: Tuple,
+        reason: str,
+        *,
+        durable: bool,
+        synced: bool,
+    ) -> None:
+        """把"磁盘上现在是哪一版"记下来。调用方持着世界锁。"""
+        self._revision = archive.revision
         self._saved_at = archive.saved_at
         self._fingerprint = fingerprint
         self._boundaries = 0
         self._last_checkpoint_at = datetime.now()
         self._last_error = None
         self._last_reason = reason
-        return self._status_locked()
+        self._durable = durable
+        self._directory_synced = synced
 
     # ── 关闭 ────────────────────────────────────────────────────────────
     def close(self, reason: str = "closed", *, force: bool = False) -> Dict:
@@ -436,6 +523,7 @@ class PersistentWorld:
             # 能恢复到的那一版。正常情况下跟 revision 一样；放弃一个存不下去的
             # 世界之后，它就是那句实话。
             "durable_revision": self._revision,
+            # 读不出一致指纹时按脏算（_fingerprint 返回 None）。
             "dirty": _fingerprint(self._state) != self._fingerprint,
             "closed": self._closed,
             "clean": self._clean,
@@ -444,6 +532,12 @@ class PersistentWorld:
             "recovered_from": recovered.to_dict() if recovered is not None else None,
             "last_saved_at": self._saved_at,
             "last_checkpoint_reason": self._last_reason,
+            # 磁盘上那一版的耐久性。False 的意思很具体：它在那儿、读得回来，
+            # 但掉电之后可能回到上一版。
+            "durable": self._durable,
+            # 目录项到底同步过没有。它可以在 durable=True 时为 False —— 那说明
+            # 这个平台/文件系统给不了目录同步，而不是同步失败了。
+            "directory_synced": self._directory_synced,
             "last_error": self._last_error,
             "error": None,
             "residue": list(self._store.residue(self._world_id)),
@@ -473,17 +567,18 @@ class PersistentWorld:
         """创建时的第一份存档（第 1 版）。失败由调用方负责还所有权。"""
         with self._lock:
             self._ownership.verify()
-            with self._runtime.lifecycle_boundary():
-                payload = self._state.to_dict()
-                fingerprint = _fingerprint(self._state)
+            payload, fingerprint = self._snapshot_locked()
             archive = WorldArchive.from_state_payload(
                 self._world_id, payload, revision=self._revision
             )
-            self._store.save(archive)
-            self._saved_at = archive.saved_at
-            self._fingerprint = fingerprint
-            self._last_checkpoint_at = datetime.now()
-            self._last_reason = "created"
+            result = self._store.save(archive)
+            self._adopt(
+                archive,
+                fingerprint,
+                "created",
+                durable=True,
+                synced=result.directory_synced,
+            )
 
 
 class WorldLifecycleService:
@@ -516,6 +611,7 @@ class WorldLifecycleService:
         *,
         adapters: RuntimeAdapters,
         checkpoint_policy: Optional[CheckpointPolicy] = None,
+        snapshot_timeout: Optional[float] = None,
         start: bool = True,
     ) -> PersistentWorld:
         """建一个新世界，并且当场写下第 1 版存档。
@@ -561,6 +657,7 @@ class WorldLifecycleService:
                 saved_at=None,
                 checkpoint_policy=policy,
                 service=self,
+                snapshot_timeout=snapshot_timeout,
             )
             world._first_save()
             if start:
@@ -576,6 +673,7 @@ class WorldLifecycleService:
         *,
         adapters: RuntimeAdapters,
         checkpoint_policy: Optional[CheckpointPolicy] = None,
+        snapshot_timeout: Optional[float] = None,
         start: bool = True,
     ) -> PersistentWorld:
         """把最后一次成功 checkpoint 的那个世界拿回来，并且重新跑起来。
@@ -608,6 +706,7 @@ class WorldLifecycleService:
                 saved_at=archive.saved_at,
                 checkpoint_policy=policy,
                 service=self,
+                snapshot_timeout=snapshot_timeout,
             )
             if start:
                 runtime.start()
@@ -651,6 +750,8 @@ class WorldLifecycleService:
             "recovered_from": None,
             "last_saved_at": None,
             "last_checkpoint_reason": None,
+            "durable": None,
+            "directory_synced": None,
             "last_error": None,
             "error": None,
             "residue": [],

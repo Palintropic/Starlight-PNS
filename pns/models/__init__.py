@@ -1,5 +1,10 @@
 # pns/models/__init__.py
-from .session import SessionState, SessionStateError, Turn
+from .session import (
+    SessionState,
+    SessionStateError,
+    TransactionBoundaryError,
+    Turn,
+)
 from .activation import (
     ActivationDue,
     ActivationError,
@@ -59,7 +64,7 @@ from .location import (
 from .world_state import Availability, WorldState, WorldStateError
 
 __all__ = [
-    'SessionState', 'SessionStateError', 'Turn',
+    'SessionState', 'SessionStateError', 'TransactionBoundaryError', 'Turn',
     'DriftScore', 'WorldState', 'WorldStateError', 'Availability',
     'ScheduledActivation', 'ActivationKind', 'ActivationDue', 'ActivationError',
     'new_activation_id',
