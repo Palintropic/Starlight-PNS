@@ -62,6 +62,16 @@ class Observation:
         return hash((self.source_event_id, self.observer_id))
 
     @property
+    def observation_id(self) -> str:
+        """这条观察的身份：由 (观察者, 事件) 推导，不另存一个字段。
+
+        记忆层要指回"我是从哪条观察记住这件事的"，而观察的身份本来就是这一对
+        （日志对它有唯一性约束）。推导而不是新增字段，是为了让存档往返之后它
+        还是同一个 ID，也不会出现"存了个 ID 却跟字段对不上"的记录。
+        """
+        return f"{self.observer_id}@{self.source_event_id}"
+
+    @property
     def is_self_observation(self) -> bool:
         return self.reason is ExposureReason.SELF_ACTION
 
@@ -156,6 +166,20 @@ class ObservationLog:
 
     def observers_of(self, event_id: str) -> Tuple[str, ...]:
         return tuple(o.observer_id for o in self.for_event(event_id))
+
+    def find(self, observer_id: str, source_event_id: str) -> Optional[Observation]:
+        """某个角色对某条事件的观察；同一对只会有一条，没有就返回 None。
+
+        记忆层用它来确认一条观察确实是本会话产出的那一条 —— 手工拼出来的
+        观察不该能长出记忆。
+        """
+        for observation in self._observations:
+            if (
+                observation.observer_id == observer_id
+                and observation.source_event_id == source_event_id
+            ):
+                return observation
+        return None
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
