@@ -38,6 +38,14 @@ from .exposure import (
     ExposureLog,
     ExposureReason,
 )
+from .memory import (
+    ClassBehavior,
+    MemoryClass,
+    MemoryError,
+    MemoryMismatch,
+    MemoryRecord,
+    MemoryStore,
+)
 from .observation import Observation, ObservationError, ObservationLog
 from .channel import Channel, ChannelKind, ChannelRegistry, ChannelRegistryError
 from .location import (
@@ -64,6 +72,8 @@ __all__ = [
     'EventStore', 'EventStoreError',
     'ExposureDecision', 'ExposureError', 'ExposureLog', 'ExposureReason',
     'Observation', 'ObservationError', 'ObservationLog',
+    'ClassBehavior', 'MemoryClass', 'MemoryError', 'MemoryMismatch',
+    'MemoryRecord', 'MemoryStore',
     'Location', 'LocationKind', 'LocationGraph', 'LocationGraphError', 'Connection',
     'Channel', 'ChannelKind', 'ChannelRegistry', 'ChannelRegistryError',
 ]

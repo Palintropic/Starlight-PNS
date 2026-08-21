@@ -11,6 +11,14 @@ from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog
 from pns.models.event_store import EventStore
 from pns.models.exposure import ExposureDecision, ExposureLog
+from pns.models.memory import (
+    MEMORY_ARCHIVE_VERSION,
+    MemoryError,
+    MemoryMismatch,
+    MemoryRecord,
+    MemoryStore,
+    verify_memory_against_observation,
+)
 from pns.models.observation import Observation, ObservationLog
 from pns.models.world_state import WorldState
 
@@ -180,6 +188,10 @@ class SessionState:
     # 跟排期状态同一种归属 —— 它归会话所有，引擎只是它上面的服务。它是审计
     # 记录而不是世界真相：世界真相只有 events。
     agency: AgencyLog = field(default_factory=AgencyLog)
+    # 角色主观记忆。它跟观察是两件事：观察是"感知到了什么"，记忆是"留下了
+    # 什么"。同一种归属 —— 存储归会话所有，编码器只是它上面的服务。世界真相
+    # 仍然只有 events，记忆改不动它，也改不动观察。
+    memories: MemoryStore = field(default_factory=MemoryStore)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -192,6 +204,9 @@ class SessionState:
     # 同理，绑定在本会话上的 Agency 引擎实例。类型同样不写死：models 不许
     # import runtime，而"一个会话只有一个引擎"必须由会话自己判定。
     agency_engine: Optional[object] = field(default=None, repr=False, compare=False)
+    # 同理，绑定在本会话上的记忆编码器实例。两个编码器各自带着自己的预算和
+    # 别名表往同一份存储里写，"这条观察记过没有"就有两个都自称权威的答案。
+    memory_encoder: Optional[object] = field(default=None, repr=False, compare=False)
 
     def attach_world_state(self, world_state: WorldState) -> None:
         """绑定本会话唯一一份权威 WorldState（只允许一次）。
@@ -232,6 +247,19 @@ class SessionState:
             if not callable(getattr(engine, required, None)):
                 raise TypeError(f"Agency 引擎必须提供 {required}()")
         self.agency_engine = engine
+
+    def attach_memory(self, encoder) -> None:
+        """绑定本会话唯一一份记忆编码器（只允许一次）。
+
+        第二次绑定必须失败。两个编码器会用各自的预算和别名表往同一份存储里
+        写，于是"这条观察记过没有""这个会话还能记多少条"都有两个互相看不见的
+        答案，而先落地的那个已经把记忆写进去了。
+        """
+        if self.memory_encoder is not None:
+            raise RuntimeError("SessionState 已经绑定过记忆编码器")
+        if not callable(getattr(encoder, "encode", None)):
+            raise TypeError("记忆编码器必须提供 encode()")
+        self.memory_encoder = encoder
 
     def initialize_runtime(self, scene_trigger: str) -> None:
         """Initialize per-character runtime state exactly once."""
@@ -278,6 +306,15 @@ class SessionState:
             self.exposures._append(decision)
         for observation in observations:
             self.observations._append(observation)
+
+    def record_memories(self, records: Sequence[MemoryRecord]) -> None:
+        """把一批已经构造好的记忆写进存储。
+
+        只应该由编码事务调用：记忆必须和它所依据的那条观察同生共死，绕开
+        atomic_commit() 单独写进来的记忆回滚不掉。
+        """
+        for record in records:
+            self.memories._append(record)
 
     def record_turn(
         self, turn: Turn, observations: Optional[Sequence[Observation]] = None
@@ -346,10 +383,11 @@ class SessionState:
         """把一次提交里的会话可变状态绑成一个整体。
 
         覆盖：世界状态、事件历史、观察、曝光判定、轮次、角色历史、待纠正，
-        调度器的排期队列与到期投递箱，以及 Agency 审计日志。块内任何一步抛
-        异常，它们会一起回到进入时的样子：不会出现"世界改了但事件没记下"、
-        "事件记下了但轮次没落地"、"时间走了但队列没动"、"队列摘了但到期记录
-        没落箱"、"动作提交了但审计没写"这些半提交状态中的任何一种。
+        调度器的排期队列与到期投递箱、Agency 审计日志，以及角色记忆。块内
+        任何一步抛异常，它们会一起回到进入时的样子：不会出现"世界改了但事件
+        没记下"、"事件记下了但轮次没落地"、"时间走了但队列没动"、"队列摘了但
+        到期记录没落箱"、"动作提交了但审计没写"、"记忆写了一半而观察没留下"
+        这些半提交状态中的任何一种。
         """
         world = self.world_state
         world_snapshot = (
@@ -366,6 +404,8 @@ class SessionState:
         # 和 restore_agency_archive 会整个换掉这几个容器），只回滚内容会留下
         # 换过之后的那一份。
         agency = self.agency
+        memories = self.memories
+        memories_length = len(memories)
         activations = self.activations
         activations_snapshot = activations._snapshot()
         outbox = self.activation_outbox
@@ -380,6 +420,8 @@ class SessionState:
             self.exposures._rollback_to(exposures_length)
             self.agency = agency
             agency._rollback_to(agency_length)
+            self.memories = memories
+            memories._rollback_to(memories_length)
             self.activations = activations
             activations._restore(activations_snapshot)
             self.activation_outbox = outbox
@@ -543,6 +585,72 @@ class SessionState:
         _validate_agency_against_session(self, log, clock)
         self.agency = log
 
+    # ── 记忆存档 ────────────────────────────────────────────────────────
+    def memory_archive(self) -> Dict:
+        """角色记忆的持久化形状：存储、格式版本，以及它对应的那一刻时钟。
+
+        跟调度/Agency 存档同一条规矩 —— 这是**唯一**一处定义这个形状的地方。
+        version 是必需的：恢复时会拿当前的推导规则去核对记忆内容，所以推导
+        规则本身就属于存档格式，换了规则就必须换版本号（迁移说明见
+        docs/ARCHITECTURE.md）。
+        """
+        return {
+            "session_id": self.session_id,
+            "version": MEMORY_ARCHIVE_VERSION,
+            "clock": (
+                self.world_state.clock.isoformat()
+                if self.world_state is not None
+                else None
+            ),
+            "store": self.memories.to_dict(),
+        }
+
+    def restore_memory_archive(self, payload) -> None:
+        """按存档就地恢复记忆存储。
+
+        跨部分的一致性在这里判，因为只有会话同时看得见记忆、观察和事件历史。
+        六类不自洽一律拒绝：会话对不上、版本不认识、时钟对不上、记忆晚于时钟、
+        记忆指向一条本会话不存在的观察（或那条观察属于别人）、记忆内容与它
+        自称的源观察对不上。
+
+        少了任何一条都能拼出一份"每一部分单独看都合法、合起来自相矛盾"的存档：
+        角色记得一件它从没感知过的事。
+        """
+        if not isinstance(payload, Mapping):
+            raise SessionStateError("记忆存档必须是字典")
+        if payload.get("session_id") != self.session_id:
+            raise SessionStateError(
+                f"记忆存档属于会话 '{payload.get('session_id')}'，不能恢复进会话 "
+                f"'{self.session_id}'"
+            )
+        version = payload.get("version")
+        if version != MEMORY_ARCHIVE_VERSION:
+            # 不认识的版本宁可响亮失败：旧版本的记忆内容可能是按另一套规则
+            # 推导出来的，静默放行等于把校验关掉。
+            raise SessionStateError(
+                f"记忆存档版本 {version!r} 不受支持，本运行时只认 "
+                f"{MEMORY_ARCHIVE_VERSION}"
+            )
+
+        clock = _parse_clock(payload.get("clock"), "记忆存档的 clock")
+        world_clock = self.world_state.clock if self.world_state is not None else None
+        if clock != world_clock:
+            raise SessionStateError(
+                f"记忆存档的时钟 {clock} 与世界时钟 {world_clock} 不一致"
+            )
+
+        raw_store = payload.get("store")
+        if not isinstance(raw_store, Mapping):
+            # 少了就当空的，等于一份丢了内容的存档能安静地恢复成"什么都没记住"。
+            raise SessionStateError("记忆存档缺少 store")
+        try:
+            store = MemoryStore.from_dict(dict(raw_store))
+        except MemoryError as e:
+            raise SessionStateError(str(e)) from e
+
+        _validate_memories_against_session(self, store, clock)
+        self.memories = store
+
     @classmethod
     def from_dict(cls, payload: Dict) -> "SessionState":
         """从 to_dict() 的形状恢复一份权威会话状态。
@@ -559,8 +667,28 @@ class SessionState:
         """
         if not isinstance(payload, Mapping):
             raise SessionStateError("会话存档必须是字典")
-        for required in ("session_id", "scene", "characters", "scheduler", "agency"):
+        for required in (
+            "session_id",
+            "scene",
+            "characters",
+            "scheduler",
+            "agency",
+            "memory",
+        ):
             if required not in payload:
+                if required == "memory":
+                    # P10 之前的存档没有这一段。兼容策略是**明确拒绝**，不是
+                    # 静默当成"什么都没记住"：后者会让一份真的丢了记忆的存档
+                    # 安静地恢复成一个失忆的角色，而这跟"这个角色本来就没记过
+                    # 任何东西"看起来一模一样。跟 scheduler / agency 两段同一
+                    # 条规矩。升级方式是显式补一段空的（见下面的形状），这件事
+                    # 必须由人做一次决定，而不是由恢复路径替他决定。
+                    raise SessionStateError(
+                        "会话存档缺少 memory 段（P10 之前的存档会这样）。"
+                        '升级方式：补上 {"session_id": <本会话>, "version": '
+                        f'{MEMORY_ARCHIVE_VERSION}, "clock": <世界时钟>, '
+                        '"store": {"records": []}}'
+                    )
                 raise SessionStateError(f"会话存档缺少必填字段: {required}")
 
         characters = payload["characters"]
@@ -626,8 +754,10 @@ class SessionState:
         _validate_history_against_clock(state, clock)
 
         state.restore_scheduler_archive(payload["scheduler"])
-        # Agency 审计放在最后恢复：它的校验要同时看得见投递箱和事件历史。
+        # Agency 审计放在后面恢复：它的校验要同时看得见投递箱和事件历史。
         state.restore_agency_archive(payload["agency"])
+        # 记忆放在最后：它的校验要看得见观察日志和事件历史。
+        state.restore_memory_archive(payload["memory"])
 
         created_at = payload.get("created_at")
         if created_at is not None:
@@ -656,6 +786,7 @@ class SessionState:
             "exposures": self.exposures.to_dict(),
             "scheduler": self.scheduler_archive(),
             "agency": self.agency_archive(),
+            "memory": self.memory_archive(),
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
@@ -788,3 +919,81 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
             )
         except ActionEventMismatch as e:
             raise SessionStateError(str(e)) from e
+
+
+def _validate_memories_against_session(
+    state: "SessionState", store: MemoryStore, clock
+) -> None:
+    """记忆必须跟这个会话的时钟、观察日志和世界历史自洽。"""
+    if clock is None:
+        # 没有世界就没有模拟时间，也就不可能感知过、记住过任何东西。
+        if len(store):
+            raise SessionStateError("没有世界状态的会话不能持有记忆")
+        return
+    for record in store.records():
+        if record.encoded_at > clock:
+            raise SessionStateError(
+                f"记忆 '{record.memory_id}' 的编码时间 "
+                f"{record.encoded_at.isoformat()} 晚于世界时钟 {clock.isoformat()}"
+            )
+        if not state.events.has(record.source_event_id):
+            raise SessionStateError(
+                f"记忆 '{record.memory_id}' 指向了世界历史里不存在的事件: "
+                f"{record.source_event_id}"
+            )
+        observation = state.observations.find(
+            record.owner_id, record.source_event_id
+        )
+        if observation is None:
+            # 记住了一件自己从没感知过的事。这是这一层最严重的损坏。
+            raise SessionStateError(
+                f"记忆 '{record.memory_id}' 指向了本会话不存在的观察: "
+                f"{record.source_observation_id}"
+            )
+        # 光对上 ID 是不够的：ID 由字段推导，把它保持正确、却改掉记忆内容
+        # （谁说的、说了什么、事实取值），就能拼出一份"记忆说 A、观察说 B"
+        # 而两边 ID 又对得上的存档。所以核对的是内容，走的是当初构造它的
+        # 那段声明（pns/models/memory.py 的 memory_content）。
+        # 资格是从观察推导出来的，所以只核对"记忆 ↔ 观察"还不够：把伪造往下
+        # 挪一层 —— 改掉存档里那条观察的台词，让伪造的类别真的变得"有资格"，
+        # 记忆与观察就又自洽了。来源链必须一路核到事件为止。
+        #
+        # 这里只核对资格规则真正读到的那几样（类型、行动者、台词、被点名的
+        # 参与者），而且它们在曝光投影里是原样复制过去的，所以可以精确比对。
+        _validate_observation_against_event(
+            observation, state.events.get(record.source_event_id)
+        )
+        try:
+            verify_memory_against_observation(record, observation)
+        except MemoryMismatch as e:
+            raise SessionStateError(str(e)) from e
+
+
+def _validate_observation_against_event(observation, event) -> None:
+    """一条观察里"记忆据以判定资格"的那几个字段，必须与它投影的那条事件一致。
+
+    这不是完整的观察校验（那属于曝光层），而是记忆这条来源链上必需的一段：
+    没有它，把存档里那条观察的台词改成一句带承诺标记的话，就能让一条伪造的
+    承诺重新变得"有资格"，而记忆与观察之间又完全自洽。
+    """
+    perceived = observation.perceived
+    if perceived.get("type") != event.type.value:
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的类型 "
+            f"{perceived.get('type')!r} 与事件的 '{event.type.value}' 不一致"
+        )
+    if perceived.get("actor_id") != event.actor_id:
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的行动者 "
+            f"{perceived.get('actor_id')!r} 与事件的 {event.actor_id!r} 不一致"
+        )
+    if "text" in perceived and perceived.get("text") != event.payload.get("text"):
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的台词与事件里的原文不一致"
+        )
+    if "participants" in perceived and tuple(
+        perceived.get("participants") or ()
+    ) != event.participants:
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的参与者名单与事件的不一致"
+        )

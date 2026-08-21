@@ -114,6 +114,7 @@ Starlight-PNS
 │   ├── ScheduledActivation / ActivationQueue / ActivationOutbox
 │   ├── Action catalogue / ActionProposal
 │   ├── AgencyRecord / AgencyLog / AgencyBudget
+│   ├── MemoryRecord / MemoryStore / MemoryClass
 │   └── DriftScore
 │
 ├── pns/runtime/
@@ -123,7 +124,8 @@ Starlight-PNS
 │   ├── content_registry    (the single configuration build entry point)
 │   ├── reload              (the configuration reload boundary)
 │   ├── scheduler           (simulated time + due activations)
-│   └── agency/             (declared actions: propose, validate, commit)
+│   ├── agency/             (declared actions: propose, validate, commit)
+│   └── memory/             (encoding, recall, prompt projection)
 │
 ├── pns/interfaces/
 │   ├── simulation
@@ -182,6 +184,8 @@ committed to `SessionState` and published over the WebSocket.
 - the session's activation queue and its due-activation outbox
 - the session's Agency audit log (system-side; one record per evaluated
   activation, including deliberate inaction)
+- the session's memory store (subjective; every record owned by exactly one
+  character and derived from that character's own observation)
 - metadata
 
 `SessionState.world_state` is a typed `WorldState`, attached exactly once by
@@ -814,6 +818,193 @@ recall, no long-horizon goal decomposition (the Planner surface here is the
 catalogue's declared targets and scopes, nothing more), no relationship or
 emotion model, no feed or Sekai Times projection, and no path by which the Router
 decides whether a character acts.
+
+---
+
+### Subjective memory boundary
+
+`pns/runtime/memory/` answers two questions and keeps them apart: **what did
+this character retain from what it perceived**, and **what comes to mind now**.
+Four data products stay separate — world history (what happened), observation
+(what this character perceived), memory (what it retained), recall (what surfaces
+in this context). Collapsing any pair of them is how characters end up as skins
+over one omniscient database.
+
+The only legal input is one of the character's **own observations**. Not the
+event store — the perceivable part of an event is already in the observation, and
+the rest is precisely what the character cannot know. Not the exposure log — a
+denial reason is itself information, and not knowing something has to include not
+knowing you were denied. Not another character's observations or memories. The
+encoder takes `Observation` objects and refuses any that is not field-for-field
+the one this session's `ObservationLog` holds, so a hand-built observation, a
+tampered one, or one belonging to another session cannot grow a memory. AST tests
+keep `.exposures`, `ExposureLog` and `ExposureDecision` out of the whole package,
+and keep `.events` out of the rule, recall and projection layers.
+
+Memory classes are a closed set and each one has behaviour, not just a label.
+`MemoryClass` declares, per member, a decay window, whether recall budget may
+evict it, and its recall weight:
+
+```text
+working      decays after 120 simulated minutes   weight 10
+episodic     no decay                             weight 20
+semantic     no decay                             weight 25
+relational   no decay                             weight 30
+identity     no decay, pinned                     weight 50
+commitment   no decay, pinned                     weight 60
+```
+
+Every member has a real encoding rule behind it, a real prompt tag, and tests
+that produce each one from an actual observation. Encoding is a whitelist over
+observed event types: dialogue, messages, channel presence and movement encode;
+anything unregistered encodes nothing and says so with a reason code. A clock
+tick never even reaches this layer — exposure produces no observation for it.
+
+Eligibility, content and salience are all computed from the observation alone,
+and all three are declared **in the model layer** next to the record type, not in
+the encoder. That placement is the point: restore has to re-decide eligibility,
+restore lives in `SessionState`, and models may not import runtime. One
+declaration, used by construction and by verification, so verification cannot
+drift looser than construction.
+
+Every rule input therefore has to be recoverable from the observation. An earlier
+draft let the encoder hold an owner-alias table so that "was this said to me"
+could recognise display names; that was removed, because a signal only the
+encoding moment knows cannot be recomputed at restore, which silently makes that
+class's eligibility *whatever the archive says*. Addressing is currently
+recognised by character id in the observed text or by explicit participant
+naming; for display names to count, they must first become a verifiable part of
+the observation rather than a table in the encoder's hand.
+
+An overheard line leaves only a short-term trace; being addressed, acting
+yourself, or uttering a declared commitment marker raises salience past the
+episodic threshold and adds the durable classes. The commitment detector is a
+**declared marker table**, not semantic understanding: it is deliberately shallow
+so that it is deterministic and testable, and the cost — rephrasing evades it,
+quoting someone trips it — is written down rather than implied.
+
+Stored text is never a transcript, and that holds for short lines too. A memory
+keeps a structural description of what was said (its scale) plus at most a
+bounded distinctive fragment: `memory_fragment()` caps the fragment at
+`FRAGMENT_CHARS`, *and* at half the original, *and* drops it entirely below
+`MIN_FRAGMENT`, so no utterance of any length can be reconstructed from memory.
+"Fits under the cap" is not a licence to copy — the exact text lives in world
+history for auditing, which is a different data product (§18).
+
+Identity is derived, never random: `owner@event#class`, with the source
+observation identified as `observer@event`. Re-encoding the same observation
+therefore computes the same id and the store's uniqueness constraint turns a
+retry into a recorded `skipped_duplicate` — idempotency by construction rather
+than by a flag. World facts get a second idempotency rule keyed by `(owner, fact,
+value)`: re-observing that a character is still where you already thought they
+were stores nothing; a changed value is a new memory.
+
+Encoding and recall are separate steps, and the split is enforced rather than
+described. Stored records are immutable and the store is append-only, so a prompt
+asking differently cannot rewrite what was stored. **Decay happens at projection
+time**: an expired working trace stays in the store byte-for-byte and simply
+stops being returned. Nothing in the recall path writes.
+
+Recall is character-scoped by construction. `recall()` takes a sequence of
+memories and a query, and raises if a record belongs to anyone but the querying
+owner — the narrowing to `store.for_owner(...)` is one explicit, auditable line
+in the service, the same shape as `build_agency_context`. Scoring is integer-only
+(class weight, salience, recency band, cue hits capped, counterpart match) and
+ordering is a total order — score, then age, then id — so there are no ties and
+no dependence on dict iteration or floating point. The budget is explicit: total
+items, items per class, and slots reserved for the pinned classes, with a two-pass
+selection so a tight budget cannot squeeze out a commitment. Truncation is
+flagged, because "did not come to mind" and "never happened" are different facts.
+
+The prompt projection is a whitelist. Memory and event ids, exposure reason
+codes, salience and scores, and provenance never appear in it — system process is
+not character experience. One observation legitimately produces several typed
+memories with different persistence behaviour, but repeating the same sentence
+once per class is worthless in a prompt, so the projection collapses identical
+bodies into one line and merges their tags. The collapse is presentational; the
+store keeps every record.
+
+Memory writes participate in the same atomic boundary as the observations they
+come from. `SessionState.atomic_commit()` now covers the memory store as well,
+and `MemoryEncoder.commit_and_encode()` puts commit and encoding inside one
+transaction: if encoding fails, the event, its observations and its exposure
+decisions roll back with it, and a rolled-back memory cannot reach a prompt
+because the projection reads the store. A session binds exactly one encoder, for
+the same reason it binds one scheduler and one agency engine.
+
+The archive section is versioned. `session.to_dict()["memory"]` carries
+`version`, the clock it belongs to, and the store; `MEMORY_ARCHIVE_VERSION` is
+currently `2`. Restore refuses an unknown version outright rather than trusting
+records that may have been derived under different rules — **the derivation rules
+are part of the storage format**, so changing `memory_content()`, the fragment
+rule, the eligibility rules or the salience formula requires bumping the version
+and writing a migration note here.
+
+- **1 → 2**: fragments replaced verbatim short summaries, and restore began
+  re-deciding eligibility and salience. Version 1 existed only on this unmerged
+  branch and was never released, so it is refused rather than upgraded in place.
+- **Archives predating this phase** have no `memory` section at all. The policy is
+  deliberate refusal, not a silent default: restoring them as "remembered nothing"
+  makes a session that lost its memory indistinguishable from one that never
+  encoded any. The error names the stanza to add — `{"session_id": …, "version":
+  2, "clock": …, "store": {"records": []}}` — which is exactly what a session that
+  never encoded anything produces, so upgrading is a decision a person makes once
+  rather than one the restore path makes on their behalf.
+
+Restore validates against the rest of the session, not just against itself. A
+record may not be encoded after the world clock or before its own observation,
+must reference an event this session actually committed and an observation this
+session actually produced for that owner, and must appear in non-decreasing
+encoded order. As with the agency log, matching ids is not enough: ids are
+*derived from* the fields, so keeping them correct while rewriting what was
+remembered produces an archive where memory says one thing, the observation says
+another, and both agree on the identifier. Restore therefore checks, through
+`verify_memory_against_observation()`, four things — and leaving out any one of
+them admits a forgery that looks legal field by field:
+
+1. identity and timing (whose memory, which event, when it was perceived);
+2. **class eligibility**, recomputed with `eligible_classes()`. Content alone is
+   not enough: `memory_content()` will happily produce a valid-looking
+   `commitment` body for *any* utterance, so relabelling an overheard remark and
+   recomputing its id and content yields a never-decaying, budget-proof "promise"
+   whose every field checks out. Independent review found exactly that;
+3. **content**, rebuilt with `memory_content()` — the same function that
+   constructed it;
+4. **salience**, recomputed with `derived_salience()`. It is derived, not
+   assigned, so forcing it to 100 to dominate recall is caught too. Only the
+   `encoder` name in provenance stays unverified, the way `policy` does in the
+   agency log; the perception channel it records is checked against the
+   observation.
+
+Because eligibility is derived from the observation, the source chain has to be
+verified one step further down as well. Rewriting the *observation's* line in an
+archive would make a forged class genuinely eligible and leave memory and
+observation perfectly consistent with each other, so restore also checks the
+fields the rules read — type, actor, text, participant list — against the
+committed event they were projected from. What remains outside any in-session
+check is an archive whose event history was rewritten wholesale and made
+self-consistent throughout; that needs provenance stronger than validation, and
+is recorded here rather than implied.
+
+Memory is a **separate runtime path**. `pns/runtime/session_runtime.py` does not
+import it — an AST test enforces that — and the deterministic round robin, its
+turn order and its standing clock are unchanged; a research session's archive
+simply carries an empty memory section. Encoding means constructing a
+`MemoryEncoder` explicitly. Memory schema and algorithms are **cold update**:
+`ContentRegistry` has no field holding a store, budget or threshold and no
+method that writes one, so a reload — successful or failed — cannot alter a live
+memory. Editable thresholds or prompt templates could become reloadable content
+later; the record schema, the derivation rules and the archive validation cannot,
+because P7 replaces configuration snapshots and must never replace live memory
+state.
+
+What this phase deliberately does not contain: no vector database or embedding
+retrieval (nothing here needs approximate similarity yet, and an opaque index
+would end the determinism guarantees), no LLM-driven encoding or recall decisions,
+no emotion or relationship simulator (`relational` records who did what to whom,
+it does not model how anyone feels), no consolidation or forgetting beyond the
+declared decay window, no social feed, media generation or Sekai Times projection,
+and no path by which memory mutates events or observations.
 
 ---
 
