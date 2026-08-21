@@ -1263,13 +1263,18 @@ different shape from every other storage failure, so the lifecycle books it
 differently: the revision advances, because the disk really does hold that
 revision and reusing the number would let two different contents share it, while
 `durable: false` and the error stay in the status and the close refuses to call
-itself clean. A platform or filesystem that simply has no directory `fsync`
+itself clean. That evidence belongs to the live filesystem operation, not to the
+archive payload: after a later restore, `durable` and `directory_synced` are
+`null` (unknown) until this process completes another checkpoint. Merely being
+able to read an archive must not silently upgrade a previously unproven save to
+durable. A platform or filesystem that simply has no directory `fsync`
 (Windows cannot even open a directory handle; some filesystems answer `EINVAL`)
 is the other case entirely — nothing failed, the capability is absent — so the
 save succeeds and says `directory_sync_supported: false`. The errno list that
 separates the two is a whitelist: an unrecognized errno counts as a real failure,
 because on durability the safe direction to guess wrong is toward reporting a
-problem.
+problem. Permission errors such as `EACCES` and `EPERM` are real failures, not
+evidence that the platform lacks the capability.
 
 **The recovery boundary is the last successful checkpoint. Nothing more.** There
 is no WAL, no event-sourced replay and no zero-loss crash guarantee, and the

@@ -211,9 +211,9 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
     world = state.world_state
     try:
         digest = hashlib.sha256(
-            json.dumps(
-                world.to_dict(), ensure_ascii=False, sort_keys=True
-            ).encode("utf-8")
+            json.dumps(world.to_dict(), ensure_ascii=False, sort_keys=True).encode(
+                "utf-8"
+            )
         ).hexdigest()
     except (RuntimeError, TypeError, ValueError):
         # 状态查询刻意不拿边界（拿了的话，一次进行中的提交会把"现在怎么样"
@@ -261,6 +261,8 @@ class PersistentWorld:
         checkpoint_policy: CheckpointPolicy,
         service: Optional["WorldLifecycleService"] = None,
         snapshot_timeout: Optional[float] = None,
+        durable: Optional[bool] = None,
+        directory_synced: Optional[bool] = None,
     ) -> None:
         self._world_id = world_id
         self._store = store
@@ -281,10 +283,11 @@ class PersistentWorld:
         self._boundaries = 0
         self._last_checkpoint_at: Optional[datetime] = None
         self._fingerprint = _fingerprint(state)
-        # 最后一次成功保存的耐久性。durable=False 只有一种来路：那一版写下去了、
-        # 读得回来，但目录同步失败了（见 ArchiveNotDurable）。
-        self._durable = True
-        self._directory_synced = True
+        # 最后一次保存的耐久性证据。True/False 只由本进程亲自完成的保存得出；
+        # 从存档恢复时没有携带这份文件系统证据，因此必须是 None（未知），不能
+        # 因为文件此刻读得出来就把过去一次未经目录同步的保存重新说成耐久。
+        self._durable = durable
+        self._directory_synced = directory_synced
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -533,10 +536,10 @@ class PersistentWorld:
             "last_saved_at": self._saved_at,
             "last_checkpoint_reason": self._last_reason,
             # 磁盘上那一版的耐久性。False 的意思很具体：它在那儿、读得回来，
-            # 但掉电之后可能回到上一版。
+            # 但掉电之后可能回到上一版；None 表示这份句柄由存档恢复而来，存档
+            # 本身没有携带可验证的目录同步证据。
             "durable": self._durable,
-            # 目录项到底同步过没有。它可以在 durable=True 时为 False —— 那说明
-            # 这个平台/文件系统给不了目录同步，而不是同步失败了。
+            # 目录项到底同步过没有。None 同样表示恢复路径无法证明。
             "directory_synced": self._directory_synced,
             "last_error": self._last_error,
             "error": None,
@@ -723,7 +726,9 @@ class WorldLifecycleService:
     def checkpoint(self, world_id: str, reason: str = "manual") -> Dict:
         return self._require_open(world_id).checkpoint(reason)
 
-    def close(self, world_id: str, reason: str = "closed", *, force: bool = False) -> Dict:
+    def close(
+        self, world_id: str, reason: str = "closed", *, force: bool = False
+    ) -> Dict:
         return self._require_open(world_id).close(reason, force=force)
 
     def status(self, world_id: str) -> Dict:

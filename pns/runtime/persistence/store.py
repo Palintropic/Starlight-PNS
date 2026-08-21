@@ -51,15 +51,16 @@ __all__ = [
 
 
 # 目录同步拿不到、但**不代表磁盘出问题**的 errno。它们的共同含义是"这个平台
-# 或文件系统不提供这个能力"：Windows 打不开目录句柄（EACCES / EISDIR / EPERM），
-# 一些文件系统对目录 fd 的 fsync 直接回 EINVAL / ENOTSUP / ENOSYS。
+# 或文件系统不提供这个能力"：一些平台打不开目录句柄（EISDIR），一些文件系统
+# 对目录 fd 的 fsync 直接回 EINVAL / ENOTSUP / ENOSYS。EACCES / EPERM 不在
+# 这里：它们也可能是一次真实的权限故障，不能被降级成“平台不支持”。
 # 名单是白名单而不是黑名单：不认识的 errno 一律当成真失败 —— 在耐久性这件事
 # 上，猜错的方向必须是"多报一次问题"，不是"少报一次"。
 _UNSUPPORTED_SYNC_ERRNOS = frozenset(
     value
     for value in (
         getattr(errno, name, None)
-        for name in ("EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EACCES", "EPERM", "EISDIR")
+        for name in ("EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EISDIR")
     )
     if value is not None
 )

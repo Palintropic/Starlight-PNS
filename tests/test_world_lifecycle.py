@@ -220,15 +220,9 @@ class ArchiveEnvelopeTests(WorldTestCase):
         world.checkpoint()
         restored = self.store.load("nightcord").restore_state()
         self.assertIsInstance(restored, SessionState)
-        self.assertEqual(
-            restored.events.to_dict(), world.state.events.to_dict()
-        )
-        self.assertEqual(
-            restored.memories.to_dict(), world.state.memories.to_dict()
-        )
-        self.assertEqual(
-            restored.agency.to_dict(), world.state.agency.to_dict()
-        )
+        self.assertEqual(restored.events.to_dict(), world.state.events.to_dict())
+        self.assertEqual(restored.memories.to_dict(), world.state.memories.to_dict())
+        self.assertEqual(restored.agency.to_dict(), world.state.agency.to_dict())
         # 恢复出来的是一份**没有**服务的冷状态：服务绑定是另一步。
         self.assertIsNone(restored.scheduler)
         self.assertIsNone(restored.agency_engine)
@@ -241,7 +235,12 @@ class ArchiveEnvelopeTests(WorldTestCase):
         for forbidden in ("scheduler_instance", "api_key", "<object", "<function"):
             self.assertNotIn(forbidden, blob)
         payload = self.archive_json()["state"]
-        for service_field in ("scheduler_object", "agency_engine", "memory_encoder", "autonomy"):
+        for service_field in (
+            "scheduler_object",
+            "agency_engine",
+            "memory_encoder",
+            "autonomy",
+        ):
             self.assertNotIn(service_field, payload)
 
     def test_capturing_a_state_that_smuggled_a_live_object_is_refused(self):
@@ -317,7 +316,14 @@ class ArchiveEnvelopeTests(WorldTestCase):
     def test_missing_envelope_fields_are_refused_one_by_one(self):
         state = _cold_state()
         complete = WorldArchive.capture("nightcord", state, revision=1).to_dict()
-        for field in ("world_id", "session_id", "revision", "clock", "state", "version"):
+        for field in (
+            "world_id",
+            "session_id",
+            "revision",
+            "clock",
+            "state",
+            "version",
+        ):
             payload = dict(complete)
             payload.pop(field)
             with self.assertRaises(ArchiveError, msg=field):
@@ -379,9 +385,7 @@ class AtomicSaveTests(WorldTestCase):
     def test_a_failed_replace_keeps_the_previous_complete_archive(self):
         self.store.save(self._archive(1))
         newer = self._archive(2, clock=CLOCK + timedelta(minutes=30))
-        with patch.object(
-            store_mod.os, "replace", side_effect=OSError("disk full")
-        ):
+        with patch.object(store_mod.os, "replace", side_effect=OSError("disk full")):
             with self.assertRaises(StorageError):
                 self.store.save(newer)
         self.assertEqual(self.archive_json()["revision"], 1)
@@ -412,7 +416,11 @@ class AtomicSaveTests(WorldTestCase):
     def test_residue_is_reported_in_status_and_ignored_by_load(self):
         world = self.created()
         world.checkpoint()
-        residue = self.root / "nightcord" / ("world.json.leftover" + FileWorldStore.TMP_SUFFIX)
+        residue = (
+            self.root
+            / "nightcord"
+            / ("world.json.leftover" + FileWorldStore.TMP_SUFFIX)
+        )
         residue.write_text("{ truncated", encoding="utf-8")
         self.assertEqual(self.store.load("nightcord").revision, 2)
         status = world.status()
@@ -440,7 +448,7 @@ class AtomicSaveTests(WorldTestCase):
     def test_a_platform_without_directory_sync_still_saves_successfully(self):
         # "这里没有这个能力"跟"这次同步失败了"是两回事。前者照常成功，
         # 但在结果里明说。
-        for code in (errno.EINVAL, errno.ENOTSUP, errno.EACCES):
+        for code in (errno.EINVAL, errno.ENOTSUP, errno.EISDIR):
             with self.subTest(errno=code):
                 with patch.object(
                     store_mod.os, "fsync", _dir_fsync(OSError(code, "nope"))
@@ -449,6 +457,15 @@ class AtomicSaveTests(WorldTestCase):
                 self.assertFalse(result.directory_sync_supported)
                 self.assertFalse(result.directory_synced)
                 self.assertEqual(self.store.load("nightcord").revision, 1)
+
+    def test_a_permission_error_is_not_mislabeled_as_unsupported(self):
+        for code in (errno.EACCES, errno.EPERM):
+            with self.subTest(errno=code):
+                with patch.object(
+                    store_mod.os, "fsync", _dir_fsync(OSError(code, "denied"))
+                ):
+                    with self.assertRaises(ArchiveNotDurable):
+                        self.store.save(self._archive(1))
 
     def test_a_directory_that_cannot_even_be_opened_is_classified_too(self):
         real_open = os.open
@@ -537,9 +554,9 @@ class ArchivePathSafetyTests(WorldTestCase):
         "trailing ",
         "trailing.",
         "-leading-dash",
-        "Nightcord",        # 大小写不敏感的文件系统上会跟 nightcord 撞成同一个目录
+        "Nightcord",  # 大小写不敏感的文件系统上会跟 nightcord 撞成同一个目录
         "NIGHTCORD",
-        "caf\u00e9",        # 非 ASCII：NFC / NFD 两种写法在磁盘上会归一成同一个目录
+        "caf\u00e9",  # 非 ASCII：NFC / NFD 两种写法在磁盘上会归一成同一个目录
         "cafe\u0301",
         "x" * 65,
         "~root",
@@ -566,9 +583,7 @@ class ArchivePathSafetyTests(WorldTestCase):
                 with self.assertRaises(WorldIdError):
                     self.service.restore(world_id, adapters=_adapters())
                 with self.assertRaises(WorldIdError):
-                    self.service.create(
-                        world_id, _cold_state(), adapters=_adapters()
-                    )
+                    self.service.create(world_id, _cold_state(), adapters=_adapters())
 
     def test_a_traversing_world_id_writes_nothing_outside_the_root(self):
         outside = self.root.parent / "outside"
@@ -617,7 +632,9 @@ class ArchivePathSafetyTests(WorldTestCase):
         linked.symlink_to(real_root, target_is_directory=True)
         store = FileWorldStore(linked)
         store.save(WorldArchive.capture("nightcord", _cold_state(), revision=1))
-        self.assertTrue((real_root / "nightcord" / FileWorldStore.ARCHIVE_NAME).exists())
+        self.assertTrue(
+            (real_root / "nightcord" / FileWorldStore.ARCHIVE_NAME).exists()
+        )
         self.assertEqual(store.load("nightcord").revision, 1)
 
     def test_an_archive_whose_envelope_id_disagrees_with_the_request_is_refused(self):
@@ -865,7 +882,9 @@ class CheckpointBoundaryTests(WorldTestCase):
             result = world.runtime.process_due(_due(world.runtime.scheduler))
 
         self.assertTrue(taken)
-        self.assertIsInstance(taken[0], (CheckpointError, AutonomyError, LifecycleError))
+        self.assertIsInstance(
+            taken[0], (CheckpointError, AutonomyError, LifecycleError)
+        )
         self.assertEqual(result.outcome.value, "failed_retryable")
         # 磁盘一动没动，而且里面没有那条被回滚掉的事件。
         self.assertEqual(self.archive_json()["revision"], before)
@@ -973,9 +992,7 @@ class CheckpointBoundaryTests(WorldTestCase):
     def test_a_failed_checkpoint_does_not_advance_the_revision(self):
         world = self.created()
         world.runtime.process_due(_due(world.runtime.scheduler))
-        with patch.object(
-            store_mod.os, "replace", side_effect=OSError("disk full")
-        ):
+        with patch.object(store_mod.os, "replace", side_effect=OSError("disk full")):
             with self.assertRaises(CheckpointError):
                 world.checkpoint()
         self.assertEqual(world.status()["revision"], 1)
@@ -1028,6 +1045,30 @@ class CheckpointBoundaryTests(WorldTestCase):
         self.assertFalse(status["clean"])
         self.assertFalse(status["durable"])
 
+    def test_restore_does_not_invent_durability_evidence(self):
+        world = self.created()
+        world.runtime.process_due(_due(world.runtime.scheduler))
+        with patch.object(
+            store_mod.os,
+            "fsync",
+            _dir_fsync(OSError(errno.EIO, "I/O error")),
+        ):
+            with self.assertRaises(CheckpointError):
+                world.checkpoint()
+        self.assertFalse(world.status()["durable"])
+        world.release("simulate-process-exit")
+
+        # 存档信封不携带文件系统目录同步证据。恢复后只能说未知，不能把上一
+        # 句柄明确记录的 False 悄悄升级成 True。
+        restored = self.service.restore("nightcord", adapters=_adapters())
+        self.addCleanup(restored.release)
+        self.assertIsNone(restored.status()["durable"])
+        self.assertIsNone(restored.status()["directory_synced"])
+        # 下一次本进程亲自完成的 checkpoint 才重新建立证据。
+        restored.checkpoint()
+        self.assertTrue(restored.status()["durable"])
+        self.assertTrue(restored.status()["directory_synced"])
+
     def test_a_checkpoint_captures_work_committed_before_it(self):
         world = self.created()
         world.runtime.process_due(_due(world.runtime.scheduler))
@@ -1035,9 +1076,7 @@ class CheckpointBoundaryTests(WorldTestCase):
         restored = self.store.load("nightcord").restore_state()
         self.assertEqual(restored.events.to_dict(), world.state.events.to_dict())
         self.assertEqual(restored.memories.to_dict(), world.state.memories.to_dict())
-        self.assertEqual(
-            restored.world_state.clock, world.state.world_state.clock
-        )
+        self.assertEqual(restored.world_state.clock, world.state.world_state.clock)
 
     def test_the_dirty_flag_tracks_authoritative_writes(self):
         world = self.created()
@@ -1081,9 +1120,13 @@ class CheckpointBoundaryTests(WorldTestCase):
         self.assertEqual(world.checkpoint()["revision"], 2)
 
     def test_a_policy_that_would_write_per_event_is_refused_at_construction(self):
-        for bad in ({"every_boundaries": 0}, {"every_boundaries": -1},
-                    {"every_boundaries": True}, {"min_interval_seconds": -1},
-                    {"min_interval_seconds": "快点"}):
+        for bad in (
+            {"every_boundaries": 0},
+            {"every_boundaries": -1},
+            {"every_boundaries": True},
+            {"min_interval_seconds": -1},
+            {"min_interval_seconds": "快点"},
+        ):
             with self.subTest(**bad):
                 with self.assertRaises(LifecycleError):
                     CheckpointPolicy(**bad)
@@ -1219,9 +1262,7 @@ class ShutdownOrderTests(WorldTestCase):
     def test_a_failed_final_checkpoint_keeps_ownership_and_stays_open(self):
         world = self.created()
         world.runtime.process_due(_due(world.runtime.scheduler))
-        with patch.object(
-            store_mod.os, "replace", side_effect=OSError("disk full")
-        ):
+        with patch.object(store_mod.os, "replace", side_effect=OSError("disk full")):
             with self.assertRaises(CheckpointError):
                 world.close()
         status = world.status()
@@ -1244,9 +1285,7 @@ class ShutdownOrderTests(WorldTestCase):
     def test_abandoning_after_a_failed_checkpoint_is_explicit_and_honest(self):
         world = self.created()
         world.runtime.process_due(_due(world.runtime.scheduler))
-        with patch.object(
-            store_mod.os, "replace", side_effect=OSError("disk full")
-        ):
+        with patch.object(store_mod.os, "replace", side_effect=OSError("disk full")):
             with self.assertRaises(CheckpointError):
                 world.close()
             status = world.close(force=True)
@@ -1327,10 +1366,10 @@ class RestoreTests(WorldTestCase):
         # 崩溃恢复的边界就在这里：最后一次成功 checkpoint 之后的处理会重来。
         world = self.created()
         due = _due(world.runtime.scheduler)
-        world.checkpoint()          # 到期已经落箱，但还没被处理
+        world.checkpoint()  # 到期已经落箱，但还没被处理
         world.runtime.process_due(due)
         self.assertTrue(world.state.activation_outbox.is_acknowledged(due.due_id))
-        world.release()             # 模拟崩溃：checkpoint 之后的工作没落盘
+        world.release()  # 模拟崩溃：checkpoint 之后的工作没落盘
 
         again = self.service.restore("nightcord", adapters=_adapters())
         self.addCleanup(again.close)
@@ -1577,11 +1616,11 @@ class CrashRecoveryTests(WorldTestCase):
         """
         world = self.created()
         due = _due(world.runtime.scheduler)
-        world.checkpoint(reason="before-the-work")   # 到期已落箱，还没处理
+        world.checkpoint(reason="before-the-work")  # 到期已落箱，还没处理
         result = world.runtime.process_due(due)
         self.assertEqual(result.outcome.value, "acted")
         self.assertEqual(len(world.state.events.by_type(EventType.MESSAGE_SENT)), 1)
-        world.release()                              # 模拟崩溃：之后没再存过
+        world.release()  # 模拟崩溃：之后没再存过
 
         again = self.service.restore("nightcord", adapters=_adapters())
         self.addCleanup(again.close)
@@ -1795,7 +1834,10 @@ class AdversarialRegressionTests(WorldTestCase):
         )
         self.assertEqual(stored["scheduler"]["queue"]["activations"], [])
         self.assertEqual(
-            [item["activation_id"] for item in stored["scheduler"]["outbox"]["records"]],
+            [
+                item["activation_id"]
+                for item in stored["scheduler"]["outbox"]["records"]
+            ],
             ["wake"],
         )
 
@@ -1845,14 +1887,15 @@ class AdversarialRegressionTests(WorldTestCase):
         stored = self.archive_json()["state"]
         self.assertEqual(stored["world_state"]["clock"], CLOCK.isoformat())
         self.assertEqual(
-            [item["activation_id"] for item in stored["scheduler"]["queue"]["activations"]],
+            [
+                item["activation_id"]
+                for item in stored["scheduler"]["queue"]["activations"]
+            ],
             ["wake"],
         )
         self.assertEqual(stored["scheduler"]["outbox"]["records"], [])
         # 而推进本身确实在快照之后完成了，一条都没丢。
-        self.assertEqual(
-            world.state.world_state.clock, CLOCK + timedelta(minutes=10)
-        )
+        self.assertEqual(world.state.world_state.clock, CLOCK + timedelta(minutes=10))
         self.assertEqual(len(world.state.activation_outbox.pending()), 1)
 
     def test_a_transaction_excludes_a_snapshot_from_before_its_first_mutation(self):
@@ -1955,7 +1998,9 @@ class AdversarialRegressionTests(WorldTestCase):
         # 事务让开之后，同一个世界照样存得下去。
         self.assertEqual(world.checkpoint()["revision"], before + 1)
 
-    def test_a_snapshot_from_inside_a_foreign_transaction_is_refused_not_deadlocked(self):
+    def test_a_snapshot_from_inside_a_foreign_transaction_is_refused_not_deadlocked(
+        self,
+    ):
         # 事务不是协调器开的（所以协调器那道 in_transaction 认不出它），但取
         # 快照的是**同一个线程** —— 可重入锁会放行，会话必须自己拦下来。
         world = self.created()
@@ -2014,7 +2059,10 @@ class AdversarialRegressionTests(WorldTestCase):
                 except BaseException as e:
                     outcome.append(e)
 
-        threads = [threading.Thread(target=offender), threading.Thread(target=checkpointer)]
+        threads = [
+            threading.Thread(target=offender),
+            threading.Thread(target=checkpointer),
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -2158,9 +2206,7 @@ class AdversarialRegressionTests(WorldTestCase):
         self.assertTrue(self.service.status("nightcord")["error"])
 
     def test_a_failed_first_save_leaves_neither_a_world_nor_a_lock(self):
-        with patch.object(
-            store_mod.os, "replace", side_effect=OSError("disk full")
-        ):
+        with patch.object(store_mod.os, "replace", side_effect=OSError("disk full")):
             with self.assertRaises(StorageError):
                 self.service.create("nightcord", _cold_state(), adapters=_adapters())
         self.assertEqual(owned_world_paths(), ())
@@ -2191,9 +2237,9 @@ class ResearchSessionIsUntouchedTests(unittest.TestCase):
     """/ws/run 不拿世界锁、不写存档根、也不 import 这一层。"""
 
     def test_session_runtime_does_not_import_the_persistence_layer(self):
-        source = (
-            REPO_ROOT / "pns" / "runtime" / "session_runtime.py"
-        ).read_text(encoding="utf-8")
+        source = (REPO_ROOT / "pns" / "runtime" / "session_runtime.py").read_text(
+            encoding="utf-8"
+        )
         tree = ast.parse(source)
         imported = set()
         for node in ast.walk(tree):
