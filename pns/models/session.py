@@ -7,6 +7,7 @@ from typing import Dict, Iterator, List, Mapping, Optional, Sequence
 from pns.models.activation import ActivationError
 from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
+from pns.models.agency import AgencyError, AgencyLog
 from pns.models.event_store import EventStore
 from pns.models.exposure import ExposureDecision, ExposureLog
 from pns.models.observation import Observation, ObservationLog
@@ -174,6 +175,10 @@ class SessionState:
     # 队列和到期记录丢了"——那种存档恢复出来的世界是残缺的。
     activations: ActivationQueue = field(default_factory=ActivationQueue)
     activation_outbox: ActivationOutbox = field(default_factory=ActivationOutbox)
+    # Agency 审计：每条到期资格被评估之后的结论，含"评估过但决定不动"。
+    # 跟排期状态同一种归属 —— 它归会话所有，引擎只是它上面的服务。它是审计
+    # 记录而不是世界真相：世界真相只有 events。
+    agency: AgencyLog = field(default_factory=AgencyLog)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -183,6 +188,9 @@ class SessionState:
     # 它是运行时服务，不是状态，因此不进 to_dict()——存档里存的是 activations
     # 和 activation_outbox。
     scheduler: Optional[object] = field(default=None, repr=False, compare=False)
+    # 同理，绑定在本会话上的 Agency 引擎实例。类型同样不写死：models 不许
+    # import runtime，而"一个会话只有一个引擎"必须由会话自己判定。
+    agency_engine: Optional[object] = field(default=None, repr=False, compare=False)
 
     def attach_world_state(self, world_state: WorldState) -> None:
         """绑定本会话唯一一份权威 WorldState（只允许一次）。
@@ -209,6 +217,20 @@ class SessionState:
             if not callable(getattr(scheduler, required, None)):
                 raise TypeError(f"调度器必须提供 {required}()")
         self.scheduler = scheduler
+
+    def attach_agency(self, engine) -> None:
+        """绑定本会话唯一一份 Agency 引擎（只允许一次）。
+
+        第二次绑定必须失败。两个引擎会对同一条到期资格给出两个互相看不见的
+        结论，而先落地的那个已经把到期记录确认掉了 —— 于是"这条到期是怎么
+        处理的"有两个都自称权威的答案。
+        """
+        if self.agency_engine is not None:
+            raise RuntimeError("SessionState 已经绑定过 Agency 引擎")
+        for required in ("propose", "commit", "evaluate"):
+            if not callable(getattr(engine, required, None)):
+                raise TypeError(f"Agency 引擎必须提供 {required}()")
+        self.agency_engine = engine
 
     def initialize_runtime(self, scene_trigger: str) -> None:
         """Initialize per-character runtime state exactly once."""
@@ -323,10 +345,10 @@ class SessionState:
         """把一次提交里的会话可变状态绑成一个整体。
 
         覆盖：世界状态、事件历史、观察、曝光判定、轮次、角色历史、待纠正，
-        以及调度器的排期队列与到期投递箱。块内任何一步抛异常，它们会一起回到
-        进入时的样子：不会出现"世界改了但事件没记下"、"事件记下了但轮次没
-        落地"、"时间走了但队列没动"、"队列摘了但到期记录没落箱"这些半提交
-        状态中的任何一种。
+        调度器的排期队列与到期投递箱，以及 Agency 审计日志。块内任何一步抛
+        异常，它们会一起回到进入时的样子：不会出现"世界改了但事件没记下"、
+        "事件记下了但轮次没落地"、"时间走了但队列没动"、"队列摘了但到期记录
+        没落箱"、"动作提交了但审计没写"这些半提交状态中的任何一种。
         """
         world = self.world_state
         world_snapshot = (
@@ -335,11 +357,14 @@ class SessionState:
         events_length = len(self.events)
         observations_length = len(self.observations)
         exposures_length = len(self.exposures)
+        agency_length = len(self.agency)
         turns_length = len(self.turns)
         history_lengths = {cid: len(items) for cid, items in self.histories.items()}
         corrections = dict(self.pending_corrections)
         # 引用和内容都要记：块内如果发生了存档恢复（restore_scheduler_archive
-        # 会整个换掉这两个容器），只回滚内容会留下换过之后的那一份。
+        # 和 restore_agency_archive 会整个换掉这几个容器），只回滚内容会留下
+        # 换过之后的那一份。
+        agency = self.agency
         activations = self.activations
         activations_snapshot = activations._snapshot()
         outbox = self.activation_outbox
@@ -352,6 +377,8 @@ class SessionState:
             self.events._rollback_to(events_length)
             self.observations._rollback_to(observations_length)
             self.exposures._rollback_to(exposures_length)
+            self.agency = agency
+            agency._rollback_to(agency_length)
             self.activations = activations
             activations._restore(activations_snapshot)
             self.activation_outbox = outbox
@@ -461,14 +488,68 @@ class SessionState:
         self.activations = activations
         self.activation_outbox = outbox
 
+    # ── Agency 存档 ─────────────────────────────────────────────────────
+    def agency_archive(self) -> Dict:
+        """Agency 审计状态的持久化形状：日志，以及它对应的那一刻时钟。
+
+        跟调度存档同一条规矩 —— 这是**唯一**一处定义这个形状的地方。
+        """
+        return {
+            "session_id": self.session_id,
+            "clock": (
+                self.world_state.clock.isoformat()
+                if self.world_state is not None
+                else None
+            ),
+            "log": self.agency.to_dict(),
+        }
+
+    def restore_agency_archive(self, payload) -> None:
+        """按存档就地恢复 Agency 日志。
+
+        跨部分的一致性在这里判，因为只有会话同时看得见日志、投递箱和事件
+        历史。四类不自洽一律拒绝：会话对不上、时钟对不上、记录引用了这个
+        会话里不存在的到期资格（或那条到期根本没被确认过）、已行动的记录
+        指向一条世界历史里没有的事件。
+
+        少了任何一条都能拼出一份"每一部分单独看都合法、合起来自相矛盾"的
+        存档：审计说某个角色在某一刻做了某件事，而世界历史里没有这件事。
+        """
+        if not isinstance(payload, Mapping):
+            raise SessionStateError("Agency 存档必须是字典")
+        if payload.get("session_id") != self.session_id:
+            raise SessionStateError(
+                f"Agency 存档属于会话 '{payload.get('session_id')}'，不能恢复进会话 "
+                f"'{self.session_id}'"
+            )
+
+        clock = _parse_clock(payload.get("clock"), "Agency 存档的 clock")
+        world_clock = self.world_state.clock if self.world_state is not None else None
+        if clock != world_clock:
+            raise SessionStateError(
+                f"Agency 存档的时钟 {clock} 与世界时钟 {world_clock} 不一致"
+            )
+
+        raw_log = payload.get("log")
+        if not isinstance(raw_log, Mapping):
+            # 少了就当空的，等于一份丢了内容的存档能安静地恢复成"什么都没评估过"。
+            raise SessionStateError("Agency 存档缺少 log")
+        try:
+            log = AgencyLog.from_dict(dict(raw_log))
+        except AgencyError as e:
+            raise SessionStateError(str(e)) from e
+
+        _validate_agency_against_session(self, log, clock)
+        self.agency = log
+
     @classmethod
     def from_dict(cls, payload: Dict) -> "SessionState":
         """从 to_dict() 的形状恢复一份权威会话状态。
 
-        这是会话存档的生产路径：世界、事件历史、观察、曝光判定、排期队列和
-        到期投递箱一起存、一起恢复、一起校验。刻意不允许缺件恢复 ——
-        少了 scheduler 段就直接失败，而不是"世界时钟还在、队列却没了"地
-        安静恢复成一份残缺的世界。
+        这是会话存档的生产路径：世界、事件历史、观察、曝光判定、排期队列、
+        到期投递箱和 Agency 审计一起存、一起恢复、一起校验。刻意不允许缺件
+        恢复 —— 少了 scheduler 或 agency 段就直接失败，而不是"世界时钟还在、
+        队列却没了"地安静恢复成一份残缺的世界。
 
         跨部分的一致性也在这里判：事件/观察/判定不能发生在世界时钟之后，
         排期必须严格在时钟之后，到期记录必须不晚于时钟。把不同时刻的世界、
@@ -477,7 +558,7 @@ class SessionState:
         """
         if not isinstance(payload, Mapping):
             raise SessionStateError("会话存档必须是字典")
-        for required in ("session_id", "scene", "characters", "scheduler"):
+        for required in ("session_id", "scene", "characters", "scheduler", "agency"):
             if required not in payload:
                 raise SessionStateError(f"会话存档缺少必填字段: {required}")
 
@@ -544,6 +625,8 @@ class SessionState:
         _validate_history_against_clock(state, clock)
 
         state.restore_scheduler_archive(payload["scheduler"])
+        # Agency 审计放在最后恢复：它的校验要同时看得见投递箱和事件历史。
+        state.restore_agency_archive(payload["agency"])
 
         created_at = payload.get("created_at")
         if created_at is not None:
@@ -571,6 +654,7 @@ class SessionState:
             "observations": self.observations.to_dict(),
             "exposures": self.exposures.to_dict(),
             "scheduler": self.scheduler_archive(),
+            "agency": self.agency_archive(),
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
@@ -640,3 +724,51 @@ def _validate_history_against_clock(state: "SessionState", clock) -> None:
             raise SessionStateError(
                 f"曝光判定 '{decision.event_id}' 晚于世界时钟 {clock.isoformat()}"
             )
+
+
+def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
+    """Agency 记录必须跟这个会话的时钟、投递箱和世界历史自洽。"""
+    if clock is None:
+        # 没有世界就没有模拟时间，也就不可能评估过任何到期资格。
+        if len(log):
+            raise SessionStateError("没有世界状态的会话不能持有 Agency 记录")
+        return
+    outbox = state.activation_outbox
+    for record in log.records():
+        if record.decided_at > clock:
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 的决定时间 "
+                f"{record.decided_at.isoformat()} 晚于世界时钟 {clock.isoformat()}"
+            )
+        if not outbox.has(record.due_id):
+            raise SessionStateError(
+                f"Agency 记录引用了投递箱里不存在的到期资格: {record.due_id}"
+            )
+        if not outbox.is_acknowledged(record.due_id):
+            # 有记录就说明交接完成过，而交接的最后一步就是确认。
+            raise SessionStateError(
+                f"到期资格 '{record.due_id}' 有 Agency 记录却没有被确认"
+            )
+        fired_at = outbox.get(record.due_id).fired_at
+        if record.decided_at < fired_at:
+            # 在这条资格到期之前就"决定"过它 —— 那不是一个更早的决定，
+            # 那是两段来自不同时刻的状态被拼在了一起。
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 的决定时间 "
+                f"{record.decided_at.isoformat()} 早于它的触发时间 "
+                f"{fired_at.isoformat()}"
+            )
+        if record.event_id is not None:
+            if not state.events.has(record.event_id):
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 指向了世界历史里不存在的事件: "
+                    f"{record.event_id}"
+                )
+            expected = record.proposal.derived_event_id(state.session_id)
+            if record.event_id != expected:
+                # 只查"这条事件存在"是不够的：把 event_id 改成世界历史里
+                # 随便另一条真实事件，审计就会说这个动作产出了一件它没做过的事。
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 指向的事件 "
+                    f"'{record.event_id}' 不是它的提案产出的（应为 '{expected}'）"
+                )

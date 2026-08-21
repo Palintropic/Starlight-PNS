@@ -9,6 +9,26 @@ from .activation import (
 )
 from .activation_outbox import ActivationOutbox, ActivationOutboxError
 from .activation_queue import ActivationQueue, ActivationQueueError
+from .action import (
+    ActionDefinition,
+    ActionError,
+    ActionId,
+    ActionProposal,
+    LegalAction,
+    Precondition,
+    TargetKind,
+    action_definition,
+    catalogue,
+    catalogue_ids,
+    new_proposal_id,
+)
+from .agency import (
+    AgencyBudget,
+    AgencyError,
+    AgencyLog,
+    AgencyOutcome,
+    AgencyRecord,
+)
 from .drift_score import DriftScore
 from .event import Event, EventError, EventScope, EventType, new_event_id
 from .event_store import EventStore, EventStoreError
@@ -36,6 +56,10 @@ __all__ = [
     'new_activation_id',
     'ActivationQueue', 'ActivationQueueError',
     'ActivationOutbox', 'ActivationOutboxError',
+    'ActionDefinition', 'ActionError', 'ActionId', 'ActionProposal',
+    'LegalAction', 'Precondition', 'TargetKind',
+    'action_definition', 'catalogue', 'catalogue_ids', 'new_proposal_id',
+    'AgencyBudget', 'AgencyError', 'AgencyLog', 'AgencyOutcome', 'AgencyRecord',
     'Event', 'EventError', 'EventScope', 'EventType', 'new_event_id',
     'EventStore', 'EventStoreError',
     'ExposureDecision', 'ExposureError', 'ExposureLog', 'ExposureReason',
