@@ -27,11 +27,14 @@ from pns.models.activation import (
     ScheduledActivation,
     new_activation_id,
 )
+from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.event import EventType
 from pns.models.event_store import EventStore
 from pns.models.exposure import ExposureLog
-from pns.models.session import SessionState
+from copy import deepcopy
+
+from pns.models.session import SessionState, SessionStateError, Turn
 from pns.models.world_state import Availability, WorldState
 from pns.runtime import scheduler as scheduler_mod
 from pns.runtime.scheduler import (
@@ -79,6 +82,16 @@ def _scheduler(state=None):
     return PersistentScheduler(state if state is not None else _session())
 
 
+def _reopen(state):
+    """走生产路径把会话存档恢复成一份新的权威状态 + 它的调度器。
+
+    这就是"进程中断之后重新起来"在测试里的样子：只经过 to_dict()/from_dict()，
+    不碰任何内部字段。
+    """
+    restored = SessionState.from_dict(state.to_dict())
+    return restored, PersistentScheduler(restored)
+
+
 def _fingerprint(scheduler):
     """调度器 + 会话的全部相关状态。回滚测试拿它做前后比对。"""
     state = scheduler.state
@@ -89,6 +102,7 @@ def _fingerprint(scheduler):
         "exposures": len(state.exposures),
         "turns": len(state.turns),
         "queue": scheduler.queue.to_dict(),
+        "outbox": scheduler.outbox.to_dict(),
     }
 
 
@@ -363,10 +377,11 @@ class SchedulingValidationTests(unittest.TestCase):
         with self.assertRaises(SchedulerError):
             PersistentScheduler(bare)
 
-    def test_a_prebuilt_queue_with_stale_items_is_rejected_at_construction(self):
-        queue = ActivationQueue([_activation("stale", minutes_ahead=-30)])
+    def test_a_state_carrying_stale_items_is_rejected_at_binding(self):
+        state = _session()
+        state.activations._append(_activation("stale", minutes_ahead=-30))
         with self.assertRaises(SchedulerError):
-            PersistentScheduler(_session(), queue=queue)
+            PersistentScheduler(state)
 
     def test_preview_is_read_only(self):
         self.scheduler.schedule(_activation("soon", minutes_ahead=10))
@@ -785,7 +800,7 @@ class AtomicTickTests(unittest.TestCase):
 
 
 class SerializationTests(unittest.TestCase):
-    """存档能原样恢复；损坏的存档必须响亮地失败。"""
+    """存档能原样恢复；损坏的存档必须响亮地失败，而且不留半个装进去的队列。"""
 
     def setUp(self):
         self.state = _session()
@@ -796,7 +811,14 @@ class SerializationTests(unittest.TestCase):
         self.archive = self.scheduler.to_dict()
 
     def _restore(self, archive):
-        return PersistentScheduler.restore(self.state, archive)
+        return self.scheduler.restore(archive)
+
+    def _assert_rejected(self, archive):
+        """拒绝一份存档时，活着的调度状态必须一个字节都没动。"""
+        before = self.scheduler.to_dict()
+        with self.assertRaises(SchedulerError):
+            self.scheduler.restore(archive)
+        self.assertEqual(self.scheduler.to_dict(), before)
 
     def _corrupt(self, mutate):
         import copy
@@ -805,12 +827,18 @@ class SerializationTests(unittest.TestCase):
         mutate(archive)
         return archive
 
+    def test_the_scheduler_archive_is_the_session_archive_section(self):
+        """同一份状态只有一种写法：调度存档就是会话存档里的那一段。"""
+        self.assertEqual(self.state.to_dict()["scheduler"], self.scheduler.to_dict())
+
     def test_round_trips_through_constructors_and_validation(self):
         restored = self._restore(self.archive)
+        # 恢复落回同一个权威实例，不是新造一个并列的调度器。
+        self.assertIs(restored, self.scheduler)
+        self.assertIs(self.state.scheduler, self.scheduler)
         self.assertEqual(restored.to_dict(), self.archive)
         self.assertEqual(
-            [a.activation_id for a in restored.pending()],
-            [a.activation_id for a in self.scheduler.pending()],
+            [a.activation_id for a in restored.pending()], ["zz", "aa", "daily"]
         )
         self.assertEqual(restored.queue.sequence_of("daily"), 2)
 
@@ -823,56 +851,77 @@ class SerializationTests(unittest.TestCase):
             [a.activation_id for a in restored.pending()], ["aa", "fresh", "daily"]
         )
 
-    def test_a_restored_scheduler_still_ticks_identically(self):
-        restored = self._restore(self.archive)
-        expected = self.scheduler.advance_by(30)
-        # 两个调度器绑在同一个会话上，先跑的那次已经改了世界；这里只比对
-        # 恢复出来的队列会算出同一批到期。
+    def test_a_session_restored_from_an_archive_ticks_identically(self):
+        """生产路径：会话存档 → SessionState.from_dict → 同样的到期判断。"""
+        restored_state = SessionState.from_dict(self.state.to_dict())
+        restored = PersistentScheduler(restored_state)
+        target = CLOCK + timedelta(minutes=30)
+
         self.assertEqual(
-            [record.activation_id for record in expected.due], ["zz", "aa"]
+            [a.activation_id for a in restored.preview_due(target)],
+            [a.activation_id for a in self.scheduler.preview_due(target)],
         )
-        self.assertEqual(
-            [a.activation_id for a in restored.preview_due(CLOCK + timedelta(minutes=30))],
-            ["zz", "aa"],
-        )
+        original = self.scheduler.advance_to(target)
+        copy_result = restored.advance_to(target)
+        self.assertEqual(copy_result.to_dict(), original.to_dict())
+        self.assertEqual(restored_state.to_dict()["scheduler"],
+                         self.state.to_dict()["scheduler"])
 
     def test_rejects_an_archive_from_another_session(self):
-        other = _session(session_id="s2")
+        other = PersistentScheduler(_session(session_id="s2"))
         with self.assertRaises(SchedulerError) as ctx:
-            PersistentScheduler.restore(other, self.archive)
+            other.restore(self.archive)
         self.assertIn("s2", str(ctx.exception))
 
     def test_rejects_a_clock_that_disagrees_with_the_world(self):
         self.state.world_state.advance_time(5)
+        before = self.scheduler.to_dict()
         with self.assertRaises(SchedulerError) as ctx:
             self._restore(self.archive)
         self.assertIn("不一致", str(ctx.exception))
+        self.assertEqual(self.scheduler.to_dict(), before)
 
     def test_rejects_a_missing_or_unparsable_clock(self):
         for value in (None, "", "昨天", 1755000000):
-            archive = self._corrupt(lambda a, v=value: a.__setitem__("clock", v))
-            with self.subTest(clock=value), self.assertRaises(SchedulerError):
-                self._restore(archive)
+            with self.subTest(clock=value):
+                self._assert_rejected(
+                    self._corrupt(lambda a, v=value: a.__setitem__("clock", v))
+                )
 
     def test_rejects_an_activation_that_is_not_in_the_future(self):
         """存档里出现早于持久化时钟的激活 = 一条永远不会被触发的僵尸排期。"""
         for offset in (-30, 0):
-            archive = self._corrupt(
-                lambda a, o=offset: a["queue"]["activations"][0].__setitem__(
-                    "due_at", (CLOCK + timedelta(minutes=o)).isoformat()
+            with self.subTest(offset=offset):
+                self._assert_rejected(
+                    self._corrupt(
+                        lambda a, o=offset: a["queue"]["activations"][0].__setitem__(
+                            "due_at", (CLOCK + timedelta(minutes=o)).isoformat()
+                        )
+                    )
                 )
-            )
-            with self.subTest(offset=offset), self.assertRaises(SchedulerError):
-                self._restore(archive)
+
+    def test_rejects_a_due_record_from_after_the_persisted_clock(self):
+        """到期记录发生在时钟之后 = 把两个不同时刻的状态拼在了一起。"""
+        self.scheduler.schedule(_activation("soon", minutes_ahead=5))
+        self.scheduler.advance_by(5)
+        archive = self.scheduler.to_dict()
+        archive["outbox"]["records"][0]["fired_at"] = (
+            self.scheduler.clock + timedelta(minutes=1)
+        ).isoformat()
+        archive["outbox"]["records"][0].pop("due_id")
+        with self.assertRaises(SchedulerError):
+            self.scheduler.restore(archive)
 
     def test_rejects_a_reordered_queue(self):
         def swap(archive):
             entries = archive["queue"]["activations"]
             entries[0], entries[1] = entries[1], entries[0]
 
+        before = self.scheduler.to_dict()
         with self.assertRaises(SchedulerError) as ctx:
             self._restore(self._corrupt(swap))
         self.assertIn("顺序", str(ctx.exception))
+        self.assertEqual(self.scheduler.to_dict(), before)
 
     def test_rejects_duplicate_ids_and_duplicate_sequences(self):
         def duplicate_id(archive):
@@ -882,49 +931,48 @@ class SerializationTests(unittest.TestCase):
             archive["queue"]["activations"][1]["sequence"] = 0
 
         for mutate in (duplicate_id, duplicate_sequence):
-            with self.subTest(mutate=mutate.__name__), self.assertRaises(SchedulerError):
-                self._restore(self._corrupt(mutate))
+            with self.subTest(mutate=mutate.__name__):
+                self._assert_rejected(self._corrupt(mutate))
 
     def test_rejects_corrupt_sequence_numbers(self):
         for value in (None, "0", -1, True, 1.5):
-            archive = self._corrupt(
-                lambda a, v=value: a["queue"]["activations"][0].__setitem__("sequence", v)
-            )
-            with self.subTest(sequence=value), self.assertRaises(SchedulerError):
-                self._restore(archive)
+            with self.subTest(sequence=value):
+                self._assert_rejected(
+                    self._corrupt(
+                        lambda a, v=value: a["queue"]["activations"][0].__setitem__(
+                            "sequence", v
+                        )
+                    )
+                )
 
     def test_rejects_a_missing_sequence(self):
-        archive = self._corrupt(
-            lambda a: a["queue"]["activations"][0].pop("sequence")
+        self._assert_rejected(
+            self._corrupt(lambda a: a["queue"]["activations"][0].pop("sequence"))
         )
-        with self.assertRaises(SchedulerError):
-            self._restore(archive)
 
     def test_rejects_a_next_sequence_that_would_collide(self):
-        archive = self._corrupt(
-            lambda a: a["queue"].__setitem__("next_sequence", 1)
+        self._assert_rejected(
+            self._corrupt(lambda a: a["queue"].__setitem__("next_sequence", 1))
         )
-        with self.assertRaises(SchedulerError):
-            self._restore(archive)
-        archive = self._corrupt(
-            lambda a: a["queue"].__setitem__("next_sequence", "3")
+        self._assert_rejected(
+            self._corrupt(lambda a: a["queue"].__setitem__("next_sequence", "3"))
         )
-        with self.assertRaises(SchedulerError):
-            self._restore(archive)
 
     def test_rejects_a_corrupt_activation_shape(self):
-        archive = self._corrupt(
-            lambda a: a["queue"]["activations"][0].__setitem__("kind", "character.dances")
+        self._assert_rejected(
+            self._corrupt(
+                lambda a: a["queue"]["activations"][0].__setitem__(
+                    "kind", "character.dances"
+                )
+            )
         )
-        with self.assertRaises(SchedulerError):
-            self._restore(archive)
 
     def test_rejects_archives_that_are_not_dictionaries(self):
         for bad in ("存档", None, ["a"]):
-            with self.subTest(archive=bad), self.assertRaises(SchedulerError):
-                self._restore(bad)
-        with self.assertRaises(SchedulerError):
-            self._restore({**self.archive, "queue": "不是队列"})
+            with self.subTest(archive=bad):
+                self._assert_rejected(bad)
+        self._assert_rejected({**self.archive, "queue": "不是队列"})
+        self._assert_rejected({**self.archive, "outbox": "不是投递箱"})
 
 
 class SessionIsolationTests(unittest.TestCase):
@@ -945,8 +993,10 @@ class SessionIsolationTests(unittest.TestCase):
     def test_a_queue_cannot_be_carried_from_one_session_into_another(self):
         first = PersistentScheduler(_session(session_id="s1"))
         first.schedule(_activation("private", minutes_ahead=10))
+        second = PersistentScheduler(_session(session_id="s2"))
         with self.assertRaises(SchedulerError):
-            PersistentScheduler.restore(_session(session_id="s2"), first.to_dict())
+            second.restore(first.to_dict())
+        self.assertEqual(len(second.queue), 0)
 
     def test_the_module_holds_no_process_level_scheduler(self):
         instances = [
@@ -1051,6 +1101,42 @@ class RoundRobinUnchangedTests(RuntimeSessionTestBase, unittest.IsolatedAsyncioT
         finally:
             first.close()
             second.close()
+
+    async def test_the_runtime_scheduler_is_the_session_scheduler(self):
+        runtime = self._create()
+        try:
+            self.assertIs(runtime.scheduler, runtime.state.scheduler)
+            self.assertIs(runtime.scheduler.queue, runtime.state.activations)
+            with self.assertRaises(SchedulerError):
+                PersistentScheduler(runtime.state)
+        finally:
+            runtime.close()
+
+    async def test_a_real_session_round_trips_through_its_archive(self):
+        """生产路径：跑完一局 + 推进时间 + 排期，整份存档存得下、恢复得回来。"""
+        runtime = self._create(max_turns=2)
+        with patch("pns.runtime.session_runtime.call_character_async", _reply), \
+             patch("pns.runtime.session_runtime.judge_async", _judge):
+            [m async for m in runtime.run()]
+
+        clock = runtime.world.clock
+        runtime.scheduler.schedule(
+            _activation("later", due_at=clock + timedelta(minutes=90), interval_minutes=60)
+        )
+        runtime.scheduler.schedule(_activation("soon", due_at=clock + timedelta(minutes=10)))
+        due_id = runtime.scheduler.advance_by(10).due[0].due_id
+
+        archive = runtime.state.to_dict()
+        restored = SessionState.from_dict(archive)
+        scheduler = PersistentScheduler(restored)
+
+        self.assertEqual(restored.to_dict(), archive)
+        self.assertEqual(len(restored.turns), 2)
+        self.assertEqual(len(restored.events), len(runtime.state.events))
+        self.assertEqual(len(restored.observations), len(runtime.state.observations))
+        self.assertEqual([r.due_id for r in scheduler.pending_due()], [due_id])
+        self.assertEqual([a.activation_id for a in scheduler.pending()], ["later"])
+        self.assertFalse(scheduler.queue.has("soon"))
 
     async def test_a_scheduler_tick_coexists_with_the_round_robin_history(self):
         """手动推进时间不会打断轮转，也不会给谁多写一行角色历史。"""
@@ -1163,22 +1249,21 @@ class AdversarialEdgeTests(unittest.TestCase):
         self.assertGreaterEqual(scheduler.clock, datetime(2026, 8, 22, 0, 10))
         self.assertEqual(result.due_ids, ("x",))
 
-    def test_restore_rejects_an_archive_that_lost_its_queue(self):
+    def test_restore_rejects_an_archive_that_lost_its_queue_or_outbox(self):
         scheduler = _scheduler()
-        archive = scheduler.to_dict()
-        archive.pop("queue")
-        with self.assertRaises(SchedulerError):
-            PersistentScheduler.restore(scheduler.state, archive)
+        for missing in ("queue", "outbox"):
+            archive = scheduler.to_dict()
+            archive.pop(missing)
+            with self.subTest(missing=missing), self.assertRaises(SchedulerError):
+                scheduler.restore(archive)
 
-    def test_two_schedulers_on_one_session_do_not_collide_on_event_ids(self):
+    def test_a_session_refuses_a_second_scheduler(self):
+        """两份队列推同一个时钟 = 两个互相看不见的"权威"排期。"""
         state = _session()
         first = PersistentScheduler(state)
-        second = PersistentScheduler(state)
-        first.advance_by(10)
-        second.advance_by(10)
-        ids = [event.event_id for event in state.events]
-        self.assertEqual(len(set(ids)), 2)
-        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=20))
+        with self.assertRaises(SchedulerError):
+            PersistentScheduler(state)
+        self.assertIs(state.scheduler, first)
 
     def test_works_on_a_session_state_without_generation_histories(self):
         """调度器只需要权威世界状态，不需要一个正在生成的会话。"""
@@ -1208,11 +1293,11 @@ class AdversarialEdgeTests(unittest.TestCase):
             ],
         }
         with self.assertRaises(SchedulerError):
-            PersistentScheduler.restore(scheduler.state, aware)
+            scheduler.restore(aware)
 
         shifted = {**archive, "clock": "2026-08-21T23:50:00+09:00"}
         with self.assertRaises(SchedulerError):
-            PersistentScheduler.restore(scheduler.state, shifted)
+            scheduler.restore(shifted)
 
     def test_the_queue_invariant_holds_across_a_long_run(self):
         """跑一串长短不一的推进，每一步之后队列都不能留下已经过期的激活。"""
@@ -1237,11 +1322,9 @@ class AdversarialEdgeTests(unittest.TestCase):
             fired.extend(result.due_ids)
             for activation in scheduler.pending():
                 self.assertGreater(activation.due_at, scheduler.clock)
-            # 每一步的存档都必须能原样恢复回来。
-            self.assertEqual(
-                PersistentScheduler.restore(state, scheduler.to_dict()).to_dict(),
-                scheduler.to_dict(),
-            )
+            # 每一步的会话存档都必须能原样恢复回来（走生产路径）。
+            archive = state.to_dict()
+            self.assertEqual(SessionState.from_dict(archive).to_dict(), archive)
 
         self.assertEqual(scheduler.clock, CLOCK + timedelta(minutes=total))
         self.assertEqual(
@@ -1256,3 +1339,330 @@ class AdversarialEdgeTests(unittest.TestCase):
         )
         self.assertEqual(fired.count("once"), 1)
         self.assertEqual(len(scheduler.queue), 2)
+
+
+class DurableDueTests(unittest.TestCase):
+    """到期资格必须是耐久的：下游没处理完，进程中断也不能把它弄丢。"""
+
+    def setUp(self):
+        self.state = _session()
+        self.scheduler = PersistentScheduler(self.state)
+
+    def test_a_due_record_outlives_the_call_that_produced_it(self):
+        """反例：只把到期记录塞进返回值的实现，恢复之后什么都不剩。"""
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        result = self.scheduler.advance_by(10)
+        record = result.due[0]
+
+        # 消费者还没处理，进程就没了 —— 从存档重新起来。
+        restored_state, restored = _reopen(self.state)
+
+        pending = restored.pending_due()
+        self.assertEqual([r.due_id for r in pending], [record.due_id])
+        self.assertEqual(pending[0].to_dict(), record.to_dict())
+        # 而且不会因为"恢复"就重新触发：一次性排期已经不在队列里了。
+        self.assertFalse(restored.queue.has("once"))
+        self.assertEqual(restored.advance_by(600).due_ids, ())
+        self.assertEqual(len(restored.pending_due()), 1)
+
+    def test_acknowledgement_is_explicit_and_idempotent(self):
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        due_id = self.scheduler.advance_by(10).due[0].due_id
+
+        self.assertTrue(self.scheduler.acknowledge(due_id))
+        self.assertFalse(self.scheduler.acknowledge(due_id))
+        self.assertFalse(self.scheduler.acknowledge(due_id))
+        self.assertEqual(self.scheduler.pending_due(), ())
+        # 确认过的记录不删除：它仍然是"这件事发生过"的证据。
+        self.assertTrue(self.scheduler.outbox.has(due_id))
+        self.assertTrue(self.scheduler.outbox.is_acknowledged(due_id))
+
+    def test_an_acknowledgement_is_not_lost_and_not_redelivered(self):
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        self.scheduler.schedule(_activation("other", minutes_ahead=10, character_id="ena"))
+        first, second = self.scheduler.advance_by(10).due
+        self.scheduler.acknowledge(first.due_id)
+
+        _, restored = _reopen(self.state)
+        self.assertEqual([r.due_id for r in restored.pending_due()], [second.due_id])
+        self.assertTrue(restored.outbox.is_acknowledged(first.due_id))
+        self.assertFalse(restored.acknowledge(first.due_id))
+
+    def test_acknowledging_something_that_never_happened_is_loud(self):
+        for bad in ("nope@2026-08-22T00:00:00", "", None, 7):
+            with self.subTest(due_id=bad), self.assertRaises(SchedulerError):
+                self.scheduler.acknowledge(bad)
+
+    def test_each_firing_of_a_recurring_activation_gets_its_own_record(self):
+        self.scheduler.schedule(_activation("hourly", minutes_ahead=10, interval_minutes=60))
+        first = self.scheduler.advance_by(10).due[0]
+        second = self.scheduler.advance_by(60).due[0]
+        self.assertNotEqual(first.due_id, second.due_id)
+        self.assertEqual(len(self.scheduler.outbox), 2)
+        self.assertEqual(
+            [r.due_id for r in self.scheduler.pending_due()],
+            [first.due_id, second.due_id],
+        )
+
+    def test_the_outbox_is_inside_the_tick_transaction(self):
+        """落箱失败 = 整次推进作废，不能留下"队列摘了、记录没落"的状态。"""
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        before = _fingerprint(self.scheduler)
+        with patch.object(
+            ActivationOutbox, "_append", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                self.scheduler.advance_by(10)
+        self.assertEqual(_fingerprint(self.scheduler), before)
+        self.assertEqual(self.scheduler.pending_due(), ())
+
+    def test_a_rolled_back_tick_leaves_no_due_record(self):
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        before = _fingerprint(self.scheduler)
+        with patch.object(EventStore, "_append", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.scheduler.advance_by(10)
+        self.assertEqual(_fingerprint(self.scheduler), before)
+        self.assertEqual(len(self.scheduler.outbox), 0)
+
+    def test_an_acknowledgement_inside_a_failed_commit_is_rolled_back(self):
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        due_id = self.scheduler.advance_by(10).due[0].due_id
+        with self.assertRaises(RuntimeError):
+            with self.state.atomic_commit():
+                self.scheduler.acknowledge(due_id)
+                raise RuntimeError("boom")
+        self.assertFalse(self.scheduler.outbox.is_acknowledged(due_id))
+        self.assertEqual([r.due_id for r in self.scheduler.pending_due()], [due_id])
+
+    def test_the_outbox_rejects_records_from_the_past(self):
+        """投递箱的顺序跟时钟一致；倒流意味着有人在拼接两个时刻的状态。"""
+        outbox = ActivationOutbox()
+        late = ActivationDue(
+            activation_id="a", kind=ActivationKind.CHARACTER_ACTIVATION,
+            due_at=CLOCK, fired_at=CLOCK + timedelta(minutes=10), sequence=0,
+        )
+        early = ActivationDue(
+            activation_id="b", kind=ActivationKind.CHARACTER_ACTIVATION,
+            due_at=CLOCK, fired_at=CLOCK + timedelta(minutes=5), sequence=1,
+        )
+        outbox._append(late)
+        with self.assertRaises(ActivationOutboxError):
+            outbox._append(early)
+        with self.assertRaises(ActivationOutboxError):
+            outbox._append(late)
+
+    def test_a_due_record_keeps_one_identity_across_serialization(self):
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        record = self.scheduler.advance_by(10).due[0]
+        payload = record.to_dict()
+        self.assertEqual(payload["due_id"], "once@2026-08-22T00:00:00")
+        self.assertEqual(ActivationDue.from_dict(payload), record)
+        # 身份被改过的存档不能安静地恢复成"另一条记录"。
+        with self.assertRaises(ActivationError):
+            ActivationDue.from_dict({**payload, "due_id": "someone_else@2026-01-01T00:00:00"})
+
+
+class SessionArchiveTests(unittest.TestCase):
+    """调度状态属于会话存档，而且各部分必须来自同一个时刻。"""
+
+    def setUp(self):
+        self.state = _session()
+        self.scheduler = PersistentScheduler(self.state)
+        self.scheduler.schedule(_activation("once", minutes_ahead=10))
+        self.scheduler.schedule(_activation("daily", minutes_ahead=90, interval_minutes=1440))
+        self.scheduler.advance_by(10)
+        self.archive = self.state.to_dict()
+
+    def test_the_session_archive_carries_the_queue_and_the_outbox(self):
+        """反例：只存 world clock 的存档，恢复出来就是一份没有排期的世界。"""
+        self.assertIn("scheduler", self.archive)
+        self.assertEqual(self.archive["scheduler"]["clock"], "2026-08-22T00:00:00")
+        self.assertEqual(
+            [a["activation_id"] for a in self.archive["scheduler"]["queue"]["activations"]],
+            ["daily"],
+        )
+        self.assertEqual(
+            [r["activation_id"] for r in self.archive["scheduler"]["outbox"]["records"]],
+            ["once"],
+        )
+
+    def test_the_archive_round_trips_through_the_production_path(self):
+        restored_state, restored = _reopen(self.state)
+        self.assertEqual(restored_state.to_dict(), self.archive)
+        self.assertEqual(restored.to_dict(), self.scheduler.to_dict())
+        self.assertEqual(len(restored_state.events), len(self.state.events))
+        self.assertEqual(restored.clock, self.scheduler.clock)
+
+    def test_an_archive_without_the_scheduler_section_is_rejected(self):
+        broken = deepcopy(self.archive)
+        broken.pop("scheduler")
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(broken)
+
+    def test_an_archive_that_lost_only_the_queue_is_rejected(self):
+        broken = deepcopy(self.archive)
+        broken["scheduler"].pop("queue")
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(broken)
+
+    def test_pieces_from_different_moments_cannot_be_stitched_together(self):
+        def older_world(archive):
+            archive["world_state"]["clock"] = "2026-08-21T23:00:00"
+
+        def scheduler_from_another_moment(archive):
+            archive["scheduler"]["clock"] = "2026-08-22T01:00:00"
+
+        def stale_queue_item(archive):
+            archive["scheduler"]["queue"]["activations"][0]["due_at"] = (
+                "2026-08-21T23:00:00"
+            )
+
+        def due_from_the_future(archive):
+            record = archive["scheduler"]["outbox"]["records"][0]
+            record.pop("due_id")
+            record["fired_at"] = "2026-08-23T00:00:00"
+
+        def event_after_the_clock(archive):
+            archive["events"]["events"][0]["occurred_at"] = "2026-08-23T00:00:00"
+
+        for mutate in (
+            older_world,
+            scheduler_from_another_moment,
+            stale_queue_item,
+            due_from_the_future,
+            event_after_the_clock,
+        ):
+            broken = deepcopy(self.archive)
+            mutate(broken)
+            with self.subTest(mutate=mutate.__name__):
+                with self.assertRaises((SessionStateError, ValueError)):
+                    SessionState.from_dict(broken)
+
+    def test_a_session_without_a_world_cannot_carry_schedule_state(self):
+        broken = deepcopy(self.archive)
+        broken["world_state"] = {}
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(broken)
+
+    def test_turn_and_history_state_survive_the_round_trip(self):
+        state = _session()
+        PersistentScheduler(state)
+        turn = Turn(
+            turn_number=1, character="mizuki", prompt="开场", response="喵",
+            timestamp="2026-08-21T23:50:00", char_name="Mizuki", score=2,
+        )
+        state.record_turn(turn)
+        archive = state.to_dict()
+        restored = SessionState.from_dict(archive)
+        self.assertEqual(restored.to_dict(), archive)
+        self.assertEqual(restored.turns[0], turn)
+
+    def test_a_corrupt_turn_sequence_is_rejected(self):
+        state = _session()
+        PersistentScheduler(state)
+        state.record_turn(
+            Turn(turn_number=1, character="mizuki", prompt="p", response="r",
+                 timestamp="t")
+        )
+        broken = state.to_dict()
+        broken["turns"][0]["turn"] = 5
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(broken)
+
+
+class SingleAuthoritativeSchedulerTests(unittest.TestCase):
+    """一个会话一份调度器，恢复也不会变出第二份。"""
+
+    def test_the_session_owns_the_scheduler_and_its_state(self):
+        state = _session()
+        scheduler = PersistentScheduler(state)
+        self.assertIs(state.scheduler, scheduler)
+        self.assertIs(scheduler.queue, state.activations)
+        self.assertIs(scheduler.outbox, state.activation_outbox)
+
+    def test_a_second_scheduler_is_refused(self):
+        state = _session()
+        PersistentScheduler(state)
+        with self.assertRaises(SchedulerError):
+            PersistentScheduler(state)
+
+    def test_restore_replaces_the_state_in_place(self):
+        state = _session()
+        scheduler = PersistentScheduler(state)
+        scheduler.schedule(_activation("a", minutes_ahead=30))
+        archive = scheduler.to_dict()
+        scheduler.cancel("a")
+        scheduler.schedule(_activation("b", minutes_ahead=45))
+
+        scheduler.restore(archive)
+
+        self.assertIs(state.scheduler, scheduler)
+        # 调度器读的始终是会话上那一份：恢复换掉容器之后也不会读到旧的。
+        self.assertIs(scheduler.queue, state.activations)
+        self.assertEqual([a.activation_id for a in scheduler.pending()], ["a"])
+
+    def test_a_restore_inside_a_failed_commit_is_undone(self):
+        """自查补的：事务块里发生存档恢复，回滚必须连"换过容器"一起撤销。"""
+        state = _session()
+        scheduler = PersistentScheduler(state)
+        scheduler.schedule(_activation("live", minutes_ahead=30))
+        archive = scheduler.to_dict()
+        scheduler.cancel("live")
+        scheduler.schedule(_activation("newer", minutes_ahead=45))
+        before = scheduler.to_dict()
+        queue_object = state.activations
+
+        with self.assertRaises(RuntimeError):
+            with state.atomic_commit():
+                scheduler.restore(archive)
+                raise RuntimeError("boom")
+
+        self.assertIs(state.activations, queue_object)
+        self.assertIs(scheduler.queue, queue_object)
+        self.assertEqual(scheduler.to_dict(), before)
+
+    def test_a_non_scheduler_cannot_be_attached(self):
+        state = _session()
+        with self.assertRaises(TypeError):
+            state.attach_scheduler(object())
+        self.assertIsNone(state.scheduler)
+
+
+class PackageExportTests(unittest.TestCase):
+    """调用方按名字从包里取，不该依赖内部文件路径。"""
+
+    def test_models_package_exports_the_activation_surface(self):
+        import pns.models as models
+
+        for name in (
+            "ScheduledActivation", "ActivationKind", "ActivationDue",
+            "ActivationQueue", "ActivationOutbox", "SessionState", "Turn",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, models.__all__)
+                self.assertTrue(hasattr(models, name))
+        self.assertIs(models.ScheduledActivation, ScheduledActivation)
+        self.assertIs(models.ActivationOutbox, ActivationOutbox)
+
+    def test_runtime_package_exports_the_runtime_surface(self):
+        import pns.runtime as runtime
+
+        for name in (
+            "SessionRuntime", "PersistentScheduler", "TickResult", "SchedulerError",
+            "commit_session_event", "evaluate_exposure", "ContentRegistry",
+            "ConfigBoundary",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, runtime.__all__)
+                self.assertTrue(hasattr(runtime, name))
+        self.assertIs(runtime.PersistentScheduler, PersistentScheduler)
+
+    def test_every_exported_name_resolves(self):
+        import pns.models as models
+        import pns.runtime as runtime
+
+        for package in (models, runtime):
+            missing = [n for n in package.__all__ if not hasattr(package, n)]
+            with self.subTest(package=package.__name__):
+                self.assertEqual(missing, [])

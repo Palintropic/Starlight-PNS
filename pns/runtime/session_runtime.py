@@ -90,14 +90,15 @@ class SessionRuntime:
         # self.world 始终就是 self.state.world_state 那一个对象。
         self.state.attach_world_state(world_state)
         self.state.initialize_runtime(scene["trigger"])
-        # 本会话私有的排期与时间推进服务。它是运行时权威状态的一部分：每个
-        # 会话一份，不共享、不来自配置，重载换不掉它。
+        # 本会话私有的排期与时间推进服务。构造时它就把自己绑到 SessionState 上，
+        # 之后 self.scheduler 读的就是那一份 —— 跟 world 一样，运行时不另存副本。
+        # 排期队列和到期投递箱归 SessionState 所有，所以会话存档天然带着它们。
         #
         # 研究会话的 round robin **不**调用它，这是刻意的：确定性轮转的可复现性
         # 依赖"一局里时间不动、轮次顺序只由角色列表决定"，而"到点了角色要不要
         # 真的行动"本来就是 P9 的判断，不是调度器的。调度器决定的是时间什么时候
         # 往前走、什么变得可以发生。
-        self.scheduler = PersistentScheduler(self.state)
+        PersistentScheduler(self.state)
 
     @property
     def session_id(self) -> str:
@@ -107,6 +108,11 @@ class SessionRuntime:
     def world(self) -> WorldState:
         """本会话唯一的权威 WorldState。"""
         return self.state.world_state
+
+    @property
+    def scheduler(self) -> PersistentScheduler:
+        """本会话唯一的权威调度器。"""
+        return self.state.scheduler
 
     @property
     def stop_reason(self) -> Optional[str]:

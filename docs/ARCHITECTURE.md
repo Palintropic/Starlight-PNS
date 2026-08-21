@@ -111,7 +111,7 @@ Starlight-PNS
 │   ├── Channel / ChannelRegistry
 │   ├── Event / EventStore
 │   ├── Exposure / Observation
-│   ├── ScheduledActivation / ActivationQueue
+│   ├── ScheduledActivation / ActivationQueue / ActivationOutbox
 │   └── DriftScore
 │
 ├── pns/runtime/
@@ -176,6 +176,7 @@ committed to `SessionState` and published over the WebSocket.
 - the session's single ordered committed event history
 - the session's per-character observation stream
 - the session's exposure decision log (system-side; allows and denies)
+- the session's activation queue and its due-activation outbox
 - metadata
 
 `SessionState.world_state` is a typed `WorldState`, attached exactly once by
@@ -525,6 +526,14 @@ minutes, and a frozen JSON payload. `ActivationKind` has exactly one member,
 scheduler knows what to emit when it comes due; placeholder kinds would make
 callers believe scheduling them does something.
 
+Ownership is the part that is easy to get wrong. The activation queue and the
+outbox belong to `SessionState`, not to the scheduler: the scheduler is a service
+over that state, and a session accepts exactly one. Binding a second scheduler to
+the same session is refused, because two queues driving one clock would give two
+mutually invisible answers to "has this one-shot fired yet?". Restoring an archive
+therefore restores the existing instance's containers in place rather than
+producing a second, parallel scheduler.
+
 `ActivationQueue` (`pns/models/activation_queue.py`) holds the items that have
 not fired yet, and its order is explicit rather than incidental:
 
@@ -555,13 +564,29 @@ verify the clock landed exactly on the target
 drain one-shots, reschedule recurring items, emit ActivationDue records
 ```
 
-The whole sequence is one transaction. The clock, the event store, the exposure
-log, the activation queue and the emitted due records either all survive or all
-roll back to the instant before the tick; a test patches each mutation step in
-turn to prove it. The scheduler never calls `WorldState.advance_time()` itself —
-that would be a clock change with no record in world history, and world history
-has to be able to explain why the clock reads what it reads. A test walks the
-module's AST to keep it that way.
+The whole sequence is one transaction, and the transaction is
+`SessionState.atomic_commit()` — the same one the dialogue commit path uses. It
+now covers the clock, the event store, observations, exposure decisions, turns,
+character histories, the activation queue and the due outbox: they all survive or
+all roll back to the instant before the tick, and a test patches each mutation
+step in turn to prove it. The scheduler never calls `WorldState.advance_time()`
+itself — that would be a clock change with no record in world history, and world
+history has to be able to explain why the clock reads what it reads. A test walks
+the module's AST to keep it that way.
+
+Due records are durable, not a return value. A one-shot activation is gone from
+the queue the moment it fires, so if its `ActivationDue` existed only in the
+`TickResult` handed back to the caller, a process that stopped before the
+consumer ran would lose that eligibility with nothing left to recover it from.
+Every due record is therefore appended, inside the same transaction, to the
+session's `ActivationOutbox` (`pns/models/activation_outbox.py`), where it stays
+readable until it is explicitly acknowledged. Identity is derived, not random —
+`due_id` is `"<activation_id>@<fired_at>"`, so the same record has the same id
+after a restore, which is what makes acknowledgement idempotent: the first
+`acknowledge()` returns `True`, later ones return `False`, and acknowledging an
+id the session never produced raises rather than being silently absorbed.
+Acknowledged records are marked, never deleted, so "already handled" stays a fact
+that can be checked instead of an absence that has to be assumed.
 
 A clock tick is scoped `public` with no location and no channel, so the exposure
 layer decides that nobody perceived it. Characters perceive events, not time.
@@ -581,11 +606,26 @@ Scheduler state is **runtime authoritative state**, not configuration. Each
 session owns one `PersistentScheduler` over its own `SessionState`; there is no
 process-level queue, `ContentRegistry` has no field that holds one and no method
 that writes one, and a reload — successful or failed — cannot alter a live queue
-or clock. A serialized scheduler names the session and the clock it was taken
-at, and restoring it into a different session, against a different clock, with a
-reordered queue, with duplicate ids or sequences, or with an activation that is
-not strictly in the future all fail loudly instead of restoring a queue that
-quietly disagrees with the world.
+or clock.
+
+Serialization has one boundary, not two. `SessionState.to_dict()` carries the
+queue and the outbox in a `scheduler` section, and `PersistentScheduler.to_dict()`
+returns exactly that section, so a session archive cannot save the world clock
+while quietly losing the schedule. `SessionState.from_dict()` rebuilds the whole
+authoritative state — world, events, observations, exposure decisions, turns,
+histories, queue and outbox — and refuses an archive whose parts come from
+different moments: an archive with no `scheduler` section, events or observations
+later than the world clock, an activation that is not strictly in the future, a
+due record fired after the clock, a scheduler section whose clock disagrees with
+the world, a reordered queue, duplicate ids or sequences. A failed restore
+installs nothing.
+
+"Persistent" here means exactly that much: the state has one archive shape that
+round-trips and is validated on the way back in, and a restored session resumes
+with its pending due records intact. Nothing in this phase writes that archive to
+disk or reloads it at process start — that lifecycle belongs to the persistent
+world stage, and until it exists the durability guarantee stops at the archive
+boundary.
 
 The deterministic research round robin is untouched. `SessionRuntime` owns a
 scheduler because scheduler state is per-session runtime state, but the turn loop
@@ -864,6 +904,7 @@ It currently considers:
 
 - simulated time
 - a per-session queue of scheduled activations, with recurrence
+- a durable outbox of due activations awaiting acknowledgement
 
 It may later also consider:
 

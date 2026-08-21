@@ -51,6 +51,16 @@ def _require_simulation_time(value, label: str) -> datetime:
     return value
 
 
+def _parse_simulation_time(value, label: str) -> datetime:
+    """存档里的时间字符串 → 模拟时间；解析不了就响亮失败。"""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            raise ActivationError(f"无法解析的 {label}: {value!r}") from None
+    return _require_simulation_time(value, label)
+
+
 def _require_id(value, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ActivationError(f"{label} 必须是非空字符串")
@@ -183,12 +193,7 @@ class ScheduledActivation:
         for required in ("activation_id", "kind", "due_at"):
             if required not in payload:
                 raise ActivationError(f"激活缺少必填字段: {required}")
-        due_at = payload["due_at"]
-        if isinstance(due_at, str):
-            try:
-                due_at = datetime.fromisoformat(due_at)
-            except ValueError:
-                raise ActivationError(f"无法解析的 due_at: {payload['due_at']!r}") from None
+        due_at = _parse_simulation_time(payload["due_at"], "due_at")
         return cls(
             activation_id=payload["activation_id"],
             kind=payload["kind"],
@@ -205,6 +210,11 @@ class ActivationDue:
 
     它是调度器唯一的产出形式。刻意**不含**任何"要做什么"的字段：没有台词、
     没有动作、没有目标。到期只是资格，选择留给 P9。
+
+    身份是 due_id = "<activation_id>@<fired_at>"，由两个字段推导而来，不是随机
+    生成的：同一份存档恢复出来的记录必须有同一个 ID，否则"这条到期我处理过了"
+    就没法幂等地判断。一条激活在一次推进里至多触发一次，而触发时刻严格递增，
+    所以这个组合在一个会话里唯一。
     """
 
     activation_id: str
@@ -273,10 +283,16 @@ class ActivationDue:
         )
 
     def __hash__(self) -> int:
-        return hash((self.activation_id, self.fired_at))
+        return hash(self.due_id)
+
+    @property
+    def due_id(self) -> str:
+        """到期记录的稳定身份，确认（ack）就是按它做幂等的。"""
+        return f"{self.activation_id}@{self.fired_at.isoformat()}"
 
     def to_dict(self) -> Dict:
         return {
+            "due_id": self.due_id,
             "activation_id": self.activation_id,
             "kind": self.kind.value,
             "due_at": self.due_at.isoformat(),
@@ -289,3 +305,35 @@ class ActivationDue:
             ),
             "payload": thaw_json_value(self.payload),
         }
+
+    @classmethod
+    def from_dict(cls, payload: Dict) -> "ActivationDue":
+        if not isinstance(payload, Mapping):
+            raise ActivationError("到期记录必须是字典")
+        for required in ("activation_id", "kind", "due_at", "fired_at", "sequence"):
+            if required not in payload:
+                raise ActivationError(f"到期记录缺少必填字段: {required}")
+        record = cls(
+            activation_id=payload["activation_id"],
+            kind=payload["kind"],
+            due_at=_parse_simulation_time(payload["due_at"], "due_at"),
+            fired_at=_parse_simulation_time(payload["fired_at"], "fired_at"),
+            sequence=payload["sequence"],
+            character_id=payload.get("character_id"),
+            missed_occurrences=payload.get("missed_occurrences", 0),
+            next_due_at=(
+                _parse_simulation_time(payload["next_due_at"], "next_due_at")
+                if payload.get("next_due_at") is not None
+                else None
+            ),
+            payload=payload.get("payload", {}),
+        )
+        stored_id = payload.get("due_id")
+        if stored_id is not None and stored_id != record.due_id:
+            # 存档里的身份跟字段推导出来的对不上 —— 要么 ID 被改过，要么时间被
+            # 改过。两种都意味着"这条我确认过了"的判断会落到错的记录上。
+            raise ActivationError(
+                f"到期记录的 due_id '{stored_id}' 与字段推导出的 "
+                f"'{record.due_id}' 不一致"
+            )
+        return record

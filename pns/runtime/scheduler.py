@@ -7,7 +7,7 @@
 # 角色生成层。所以这个模块不 import 任何生成/判分/Router 代码，产出的也只有
 # ActivationDue 这一种记录。
 #
-# 两条硬约束：
+# 三条硬约束：
 #
 #   1. 时间只能通过 world.time_advanced 事件推进。这里从不调用
 #      WorldState.advance_time() —— 那会是一次没有记录在世界历史里的状态变更，
@@ -15,6 +15,14 @@
 #   2. 一次推进是一个事务。时钟、事件历史、曝光判定、激活队列、产出的到期
 #      记录，要么全部成立，要么一起回到推进之前的样子。中途失败留下"时间走了
 #      但队列没动"或者"队列动了但事件没记下"都是不可接受的。
+#   3. 到期记录必须是耐久的。一条一次性激活到期时已经从队列里摘掉了，如果到期
+#      记录只活在本次调用的返回值里，下游还没处理进程就中断的话，这次到期就
+#      永远消失了。所以每条到期记录都在同一个事务里落进 SessionState 的
+#      activation_outbox，在被明确确认（acknowledge）之前一直可读。
+#
+# 权威归属：队列和投递箱归 **SessionState** 所有，调度器是它们之上的服务，
+# 一个会话只能绑一个。所以会话存档不可能存下时钟却丢掉排期，恢复也只会恢复
+# 同一个权威实例管理的那一份状态，不会凭空多出一份并行的排期。
 #
 # 会话调度（确定性 round robin）跟这里是两件事，不是一件事的两种写法：前者
 # 决定研究会话里谁下一个说话，后者决定世界时间什么时候往前走。P8 不让研究
@@ -30,9 +38,10 @@ from pns.models.activation import (
     ActivationKind,
     ScheduledActivation,
 )
+from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.event import Event, EventScope, EventType
-from pns.models.session import SessionState
+from pns.models.session import SessionState, SessionStateError
 from pns.models.world_state import WorldState
 from pns.runtime.event_commit import commit_session_event
 
@@ -77,19 +86,19 @@ class PersistentScheduler:
     已经存在的队列和时钟。
     """
 
-    def __init__(
-        self, state: SessionState, *, queue: Optional[ActivationQueue] = None
-    ) -> None:
+    def __init__(self, state: SessionState) -> None:
         if not isinstance(state, SessionState):
             raise SchedulerError("调度器必须绑定在一个 SessionState 上")
         if not isinstance(state.world_state, WorldState):
             raise SchedulerError("调度器绑定的会话还没有权威 WorldState")
-        if queue is not None and not isinstance(queue, ActivationQueue):
-            raise SchedulerError("queue 必须是 ActivationQueue")
         self._state = state
-        self._queue = queue if queue is not None else ActivationQueue()
-        for activation in self._queue.pending():
-            self._require_future(activation)
+        # 绑定只允许一次。第二个调度器会带来第二份队列，两份都在推同一个时钟，
+        # 于是"这条一次性激活触发过没有"会有两个互相看不见的答案。
+        try:
+            state.attach_scheduler(self)
+        except RuntimeError as e:
+            raise SchedulerError(str(e)) from e
+        self._validate_bound_state()
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -111,20 +120,47 @@ class PersistentScheduler:
 
     @property
     def queue(self) -> ActivationQueue:
-        return self._queue
+        """本会话的排期队列。权威副本在 SessionState 上，这里不另存引用 ——
+        存档恢复会就地换掉它，缓存一份就会读到被替换掉的旧队列。"""
+        return self._state.activations
+
+    @property
+    def outbox(self) -> ActivationOutbox:
+        """本会话的到期投递箱（已触发、等待消费的记录）。"""
+        return self._state.activation_outbox
 
     def pending(self) -> Tuple[ScheduledActivation, ...]:
-        return self._queue.pending()
+        return self.queue.pending()
+
+    def pending_due(self) -> Tuple[ActivationDue, ...]:
+        """还没被确认的到期记录，按触发顺序。恢复之后要接着处理的就是这些。"""
+        return self.outbox.pending()
+
+    def acknowledge(self, due_id: str) -> bool:
+        """确认一条到期记录已被消费。
+
+        幂等：第一次确认返回 True，之后再确认同一条返回 False，都不抛异常。
+        确认一条**不存在**的 due_id 会抛错 —— 那不是重复确认，而是消费方拿着
+        一条这个会话里没发生过的到期记录，静默吞掉只会让错误更晚才暴露。
+
+        确认改的是"这条处理过了"，不改时钟、不改队列，因此不需要走时间推进
+        那套事务；但它仍然在 atomic_commit() 的回滚范围内，所以放在一次提交
+        块里确认、提交失败时确认也会一并撤销。
+        """
+        try:
+            return self.outbox._acknowledge(due_id)
+        except ActivationOutboxError as e:
+            raise SchedulerError(str(e)) from e
 
     def next_due_at(self) -> Optional[datetime]:
-        activation = self._queue.next_due()
+        activation = self.queue.next_due()
         return activation.due_at if activation is not None else None
 
     def preview_due(self, target: datetime) -> Tuple[ScheduledActivation, ...]:
         """如果时钟推进到 target，哪些激活会到期。纯读取，不改任何状态。"""
         target = self._require_simulation_time(target, "target")
         return tuple(
-            activation for _, activation in self._queue.due_at_or_before(target)
+            activation for _, activation in self.queue.due_at_or_before(target)
         )
 
     # ── 排期 ────────────────────────────────────────────────────────────
@@ -139,10 +175,10 @@ class PersistentScheduler:
         self._require_future(activation)
         self._require_known_character(activation)
         try:
-            self._queue._check_can_append(activation)
+            self.queue._check_can_append(activation)
         except ActivationQueueError as e:
             raise SchedulerError(str(e)) from e
-        return self._queue._append(activation)
+        return self.queue._append(activation)
 
     def cancel(self, activation_id: str) -> bool:
         """取消一条还没触发的激活。
@@ -155,9 +191,9 @@ class PersistentScheduler:
         """
         if not isinstance(activation_id, str) or not activation_id:
             raise SchedulerError("activation_id 必须是非空字符串")
-        if not self._queue.has(activation_id):
+        if not self.queue.has(activation_id):
             return False
-        self._queue._remove(activation_id)
+        self.queue._remove(activation_id)
         return True
 
     # ── 推进时间 ────────────────────────────────────────────────────────
@@ -196,7 +232,7 @@ class PersistentScheduler:
 
     def advance_to_next_due(self) -> Optional[TickResult]:
         """推进到下一条激活到期的那一刻；队列为空就返回 None，不动时钟。"""
-        activation = self._queue.next_due()
+        activation = self.queue.next_due()
         if activation is None:
             return None
         delta = activation.due_at - self.clock
@@ -225,21 +261,18 @@ class PersistentScheduler:
         plan = self._plan_due(target)
         event = self._time_advanced_event(minutes, target, plan)
 
-        snapshot = self._queue._snapshot()
-        try:
-            with state.atomic_commit():
-                committed = commit_session_event(state, event)
-                if world.clock != target:
-                    # 事件的状态效果没把时钟落在预期的位置上：宁可整体作废，
-                    # 也不能让队列按一个跟世界不一致的时间去触发。
-                    raise SchedulerError(
-                        f"时间推进后的时钟 {world.clock.isoformat()} 与目标 "
-                        f"{target.isoformat()} 不一致"
-                    )
-                due = self._apply_due(plan, fired_at=target)
-        except BaseException:
-            self._queue._restore(snapshot)
-            raise
+        # 队列和投递箱都在 SessionState.atomic_commit() 的回滚范围内，所以这里
+        # 不需要（也不应该）另建一套快照：一次推进的全部后果由同一个事务兜底。
+        with state.atomic_commit():
+            committed = commit_session_event(state, event)
+            if world.clock != target:
+                # 事件的状态效果没把时钟落在预期的位置上：宁可整体作废，
+                # 也不能让队列按一个跟世界不一致的时间去触发。
+                raise SchedulerError(
+                    f"时间推进后的时钟 {world.clock.isoformat()} 与目标 "
+                    f"{target.isoformat()} 不一致"
+                )
+            due = self._apply_due(plan, fired_at=target)
 
         return TickResult(
             from_clock=from_clock,
@@ -259,7 +292,7 @@ class PersistentScheduler:
         plan: List[
             Tuple[int, ScheduledActivation, Optional[ScheduledActivation], int]
         ] = []
-        for sequence, activation in self._queue.due_at_or_before(target):
+        for sequence, activation in self.queue.due_at_or_before(target):
             if not activation.is_recurring:
                 plan.append((sequence, activation, None, 0))
                 continue
@@ -271,18 +304,21 @@ class PersistentScheduler:
         return tuple(plan)
 
     def _apply_due(self, plan, *, fired_at: datetime) -> Tuple[ActivationDue, ...]:
-        """把计划落到队列上，并产出到期记录。
+        """把计划落到队列上，产出到期记录，并把它们落进投递箱。
 
         一次性激活从队列里摘掉 —— 它至多触发一次，摘掉之后再怎么推进时间都
         不会重新出现。周期激活换成它的下一次触发（严格晚于本次触发时刻），
         因此同一次推进里不可能把同一条激活触发两遍。
+
+        摘掉队列和落进投递箱是同一步：先摘后落之间如果能被打断，那条到期资格
+        就会凭空消失，而这正是投递箱要解决的问题。两者都在调用方的事务里。
         """
         records: List[ActivationDue] = []
         for sequence, activation, following, missed in plan:
             if following is None:
-                self._queue._remove(activation.activation_id)
+                self.queue._remove(activation.activation_id)
             else:
-                self._queue._reschedule(following)
+                self.queue._reschedule(following)
             records.append(
                 ActivationDue(
                     activation_id=activation.activation_id,
@@ -296,6 +332,11 @@ class PersistentScheduler:
                     payload=activation.payload,
                 )
             )
+        for record in records:
+            try:
+                self.outbox._append(record)
+            except ActivationOutboxError as e:
+                raise SchedulerError(str(e)) from e
         return tuple(records)
 
     def _time_advanced_event(
@@ -342,6 +383,18 @@ class PersistentScheduler:
             )
         return value
 
+    def _validate_bound_state(self) -> None:
+        """绑定/恢复之后确认队列与投递箱跟当前时钟自洽。"""
+        for activation in self.queue.pending():
+            self._require_future(activation)
+        latest = self.outbox.latest()
+        if latest is not None and latest.fired_at > self.clock:
+            raise SchedulerError(
+                f"到期记录 '{latest.due_id}' 的触发时间 "
+                f"{latest.fired_at.isoformat()} 晚于当前模拟时钟 "
+                f"{self.clock.isoformat()}"
+            )
+
     def _require_future(self, activation: ScheduledActivation) -> None:
         """排期必须严格晚于当前时钟。
 
@@ -377,65 +430,28 @@ class PersistentScheduler:
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
-        """完整持久化形状：绑定的会话、当时的模拟时钟、整个队列。"""
-        return {
-            "session_id": self.session_id,
-            "clock": self.clock.isoformat(),
-            "queue": self._queue.to_dict(),
-        }
+        """调度状态的持久化形状。
 
-    @classmethod
-    def restore(cls, state: SessionState, payload: Mapping) -> "PersistentScheduler":
-        """从持久化形状恢复一个调度器，损坏的存档一律拒绝。
-
-        三道检查各自对应一种真实的错法：
-          - session_id 对不上 → 把甲会话的队列恢复进了乙会话（调度状态是
-            会话私有的运行时状态，不是可以搬来搬去的配置）；
-          - clock 对不上 → 队列和世界时钟来自两个不同的时刻，恢复出来的
-            "还没到期"是假的；
-          - 队列顺序/ID/sequence 损坏，或者有激活早于持久化的时钟 → 存档
-            本身已经不自洽。
+        形状由 SessionState.scheduler_archive() 定义，这里只是转发：调度存档
+        是会话存档的一部分（`session.to_dict()["scheduler"]` 就是这一份），
+        同一份状态不该有两种写法。
         """
-        if not isinstance(state, SessionState):
-            raise SchedulerError("调度器必须绑定在一个 SessionState 上")
-        if not isinstance(payload, Mapping):
-            raise SchedulerError("调度器存档必须是字典")
-        if not isinstance(state.world_state, WorldState):
-            raise SchedulerError("调度器绑定的会话还没有权威 WorldState")
+        return self._state.scheduler_archive()
 
-        session_id = payload.get("session_id")
-        if session_id != state.session_id:
-            raise SchedulerError(
-                f"调度器存档属于会话 '{session_id}'，不能恢复进会话 "
-                f"'{state.session_id}'"
-            )
+    def restore(self, payload: Mapping) -> "PersistentScheduler":
+        """按存档恢复本调度器管理的队列与投递箱，返回自己。
 
-        raw_clock = payload.get("clock")
-        if not isinstance(raw_clock, str):
-            raise SchedulerError("调度器存档缺少 clock")
+        刻意是实例方法而不是 classmethod：恢复必须落回**同一个**权威实例，
+        新建第二个调度器会让同一个会话出现两份互相看不见的排期。校验（会话
+        对不对得上、时钟对不对得上、排期是不是还在未来、到期记录是不是不晚于
+        时钟）由 SessionState 统一做，它是这份状态的所有者。
+        """
         try:
-            clock = datetime.fromisoformat(raw_clock)
-        except ValueError:
-            raise SchedulerError(f"无法解析的 clock: {raw_clock!r}") from None
-        if clock != state.world_state.clock:
-            raise SchedulerError(
-                f"调度器存档的时钟 {clock.isoformat()} 与世界时钟 "
-                f"{state.world_state.clock.isoformat()} 不一致"
-            )
-
-        raw_queue = payload.get("queue")
-        if not isinstance(raw_queue, Mapping):
-            # 少了队列就当成空队列，等于一份丢了内容的存档能安静地恢复成
-            # "什么都没排"。存档不完整必须是错误，不是默认值。
-            raise SchedulerError("调度器存档缺少 queue")
-        try:
-            queue = ActivationQueue.from_dict(dict(raw_queue))
-        except (ActivationQueueError, ActivationError) as e:
+            self._state.restore_scheduler_archive(payload)
+        except SessionStateError as e:
             raise SchedulerError(str(e)) from e
-
-        # __init__ 会逐条校验"严格晚于时钟"，恢复出一个已经过期的队列会在
-        # 这里失败，而不是等到下一次推进才暴露。
-        return cls(state, queue=queue)
+        self._validate_bound_state()
+        return self
 
     # ── 调试投影 ────────────────────────────────────────────────────────
     def debug_projection(self) -> Dict:
@@ -447,7 +463,7 @@ class PersistentScheduler:
         return {
             "session_id": self.session_id,
             "clock": clock.isoformat(),
-            "pending": len(self._queue),
+            "pending": len(self.queue),
             "next_due_at": (
                 self.next_due_at().isoformat()
                 if self.next_due_at() is not None
@@ -456,6 +472,9 @@ class PersistentScheduler:
             "time_advanced_events": len(
                 self._state.events.by_type(EventType.WORLD_TIME_ADVANCED)
             ),
+            "due_total": len(self.outbox),
+            "due_pending": len(self.outbox.pending()),
+            "pending_due_ids": [record.due_id for record in self.outbox.pending()],
             "queue": [
                 {
                     "sequence": sequence,
@@ -466,7 +485,7 @@ class PersistentScheduler:
                     "due_in_minutes": (activation.due_at - clock) // _MINUTE,
                     "interval_minutes": activation.interval_minutes,
                 }
-                for sequence, activation in self._queue.entries()
+                for sequence, activation in self.queue.entries()
             ],
         }
 
@@ -474,6 +493,7 @@ class PersistentScheduler:
 __all__ = [
     "ActivationDue",
     "ActivationKind",
+    "ActivationOutbox",
     "ActivationQueue",
     "PersistentScheduler",
     "ScheduledActivation",
