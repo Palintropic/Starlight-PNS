@@ -1,5 +1,14 @@
 # pns/models/__init__.py
-from .session import SessionState
+from .session import SessionState, SessionStateError, Turn
+from .activation import (
+    ActivationDue,
+    ActivationError,
+    ActivationKind,
+    ScheduledActivation,
+    new_activation_id,
+)
+from .activation_outbox import ActivationOutbox, ActivationOutboxError
+from .activation_queue import ActivationQueue, ActivationQueueError
 from .drift_score import DriftScore
 from .event import Event, EventError, EventScope, EventType, new_event_id
 from .event_store import EventStore, EventStoreError
@@ -21,7 +30,12 @@ from .location import (
 from .world_state import Availability, WorldState, WorldStateError
 
 __all__ = [
-    'SessionState', 'DriftScore', 'WorldState', 'WorldStateError', 'Availability',
+    'SessionState', 'SessionStateError', 'Turn',
+    'DriftScore', 'WorldState', 'WorldStateError', 'Availability',
+    'ScheduledActivation', 'ActivationKind', 'ActivationDue', 'ActivationError',
+    'new_activation_id',
+    'ActivationQueue', 'ActivationQueueError',
+    'ActivationOutbox', 'ActivationOutboxError',
     'Event', 'EventError', 'EventScope', 'EventType', 'new_event_id',
     'EventStore', 'EventStoreError',
     'ExposureDecision', 'ExposureError', 'ExposureLog', 'ExposureReason',
