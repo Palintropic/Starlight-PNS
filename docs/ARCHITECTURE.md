@@ -1219,6 +1219,117 @@ own.
 
 ---
 
+### Persistent world lifecycle boundary
+
+`pns/runtime/persistence/` gives one autonomous world a complete process
+lifecycle:
+
+```text
+create or restore
+  → acquire exclusive ownership
+  → bind runtime services from caller-supplied cold adapters
+  → run / checkpoint at safe boundaries
+  → stop and let in-flight work settle
+  → write one complete atomic archive
+  → release ownership
+  → restore the same authoritative world after restart
+```
+
+What it persists is the authoritative `SessionState`: world state, event history,
+observations, exposure decisions, the activation queue and outbox, the agency
+audit log and subjective memory. What it never persists is anything alive —
+service instances, model clients, API keys, locks, callables. That is enforced
+structurally, not by convention: capture walks the payload and refuses any value
+that is not plain JSON data, because `metadata` is a free-form dict and anyone
+can drop a client into it.
+
+**The durability contract is small enough to state exactly.** A save writes a
+temporary file in the destination directory, flushes it, `fsync`s it, atomically
+`os.replace`s the target and then syncs the directory. At every instant the disk
+holds either the previous complete archive or the new complete archive — a
+half-written file is always still a temporary file, and a temporary file is never
+named `world.json`. A failed save leaves the previous archive untouched and
+reports whether temporary material remains that a human has to clear. Crash
+recovery reads the last successfully replaced archive and ignores — but reports —
+incomplete temporaries.
+
+**The recovery boundary is the last successful checkpoint. Nothing more.** There
+is no WAL, no event-sourced replay and no zero-loss crash guarantee, and the
+implementation does not pretend otherwise. Work committed after the last
+checkpoint is lost on a crash. What survives that loss is *correctness*, not
+*work*: an activation that fell due before the checkpoint but was never
+acknowledged is simply still pending when the world comes back, so it is
+processed again — and processed **once**, because the outbox handoff is one-shot.
+Re-running is not double-committing.
+
+**Ownership is two gates, and it needs both.** In-process, a registry keyed by the
+resolved lock path refuses to open the same world twice — keyed by path rather
+than by a bare `world_id`, so two stores pointing at the same archive root, or a
+root reached through a symlink, are still the same world. Across processes, an
+exclusive `fcntl.flock` decides, and the decision is the kernel's: the lock dies
+with the process holding it. That is why stale-owner recovery needs no pid
+heuristics and can never steal from a live owner. A pid comparison would be wrong
+in both directions — a reused pid reads as "alive" and locks the world out
+forever, and a process exiting mid-check reads as "dead" and produces two owners.
+A crashed owner leaves its record behind, so the next owner knows it took over a
+crashed world and reports `recovered_from`; a clean release rewrites that record,
+so there is nothing to report.
+
+**Checkpoints observe one coherent state.** A checkpoint takes the coordinator's
+gate — the same one `start`, `stop` and commit admission share — and then asks the
+session itself whether any transaction is open. Both questions are necessary, and
+adversarial review is what proved it: the gate covers commits the coordinator
+starts, but the scheduler's time advance and the event commit layer open
+`SessionState.atomic_commit()` directly. Snapshotting inside such a transaction
+produced an archive in which the clock had advanced, a one-shot activation had
+been taken off the queue, and its due record had not yet reached the outbox —
+that activation was gone for good, and the archive passed every validation. The
+snapshot is taken inside the boundary; serialization and the write happen outside
+it, so one `fsync` never blocks a shutdown.
+
+**Shutdown order is fixed**: stop admission, wait for the running transaction to
+settle, checkpoint the final state, mark the handle closed, release ownership. A
+failed final checkpoint does not claim a clean close and does not release
+ownership — releasing would announce that what is on disk is the latest state.
+Abandoning such a world is possible but explicit (`close(force=True)`), and the
+status it returns says `clean: false` and names the revision that is actually
+recoverable.
+
+Writes also verify ownership first. A lock lives on an inode, so deleting the
+lock file out from under a live owner lets the next process acquire the world
+while the first still believes it is the only writer — confirmed by attack, two
+processes writing the same archive. The check cannot prevent that deletion, but it
+turns "two writers silently overwriting each other" into "the second write fails
+loudly".
+
+Paths are confined to one configured archive root by two independent checks:
+`world_id` must be lowercase ASCII with no separators, no traversal and no
+leading or trailing punctuation (uppercase and non-NFC names are refused rather
+than normalized, because case-insensitive and Unicode-normalizing filesystems
+would fold two different ids into one directory and quietly break the one-owner
+rule), and the resolved directory must still sit directly under the resolved
+root, which is what catches a symlinked world directory.
+
+The service surface is deliberately minimal and Python-level: list, create,
+restore, checkpoint, close, status — including ownership, revision, last
+successful save, dirty state, residue and recovery error. No HTTP routes and no
+UI: those belong to `WEB-1`, and this phase exists to settle how a world lives,
+saves and is owned before deciding what it looks like.
+
+**The research path is untouched.** `/ws/run` acquires no world lock, writes
+nothing under the archive root, and nothing in `pns/` imports this package (an AST
+test enforces both). Persistence is opt-in by explicit call. Importing the package
+performs no I/O, creates no directories, takes no locks and initializes no reload
+boundary.
+
+What this phase deliberately does not contain: no database, cloud storage or
+multi-host failover, no WAL or replay, no ST-1 publishing, no WEB-1 dashboard, no
+concrete 25ji content, and no background checkpoint writer — automatic
+checkpoints, when enabled, are synchronous, coalesced and taken only at completed
+authoritative boundaries.
+
+---
+
 ## 4. Architectural Principle
 
 The primary rule is:

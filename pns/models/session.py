@@ -1,3 +1,4 @@
+import threading
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -212,6 +213,29 @@ class SessionState:
     # 判分 → 提交 → 曝光 → 记忆这条链，但不拥有其中任何一份状态：那些仍然
     # 归各自的服务和这个会话所有。
     autonomy: Optional[object] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # 提交事务的记账。刻意**不**做成 dataclass 字段：它不是会话状态的一部分，
+        # 不进存档、不参与相等性比较，也不该出现在 repr 里。
+        self._commit_lock = threading.Lock()
+        self._commit_depth = 0
+
+    @property
+    def in_transaction(self) -> bool:
+        """此刻有没有**任何**线程正处在一次 atomic_commit() 的中途。
+
+        它只有一个用途，但那个用途很硬：**在事务中途取的存档快照是一份半截
+        世界**。比如一次时间推进的中途 —— 时钟已经推了、一次性激活已经从队列
+        里摘掉了、到期记录还没落进投递箱 —— 这一刻存下去的存档能通过全部校验，
+        看起来完好无损，而那条激活从此凭空消失，没有任何地方会报告它。
+
+        它回答的是"有没有人在事务里"，不是"是不是我"：一次提交可能由协调器
+        发起（那条路上还额外持着协调器的闸门），也可能由调度器、事件提交层或
+        任何别的调用方直接发起。快照必须被**所有**这些挡住，而不只是走闸门的
+        那一条。
+        """
+        with self._commit_lock:
+            return self._commit_depth > 0
 
     def attach_world_state(self, world_state: WorldState) -> None:
         """绑定本会话唯一一份权威 WorldState（只允许一次）。
@@ -430,6 +454,8 @@ class SessionState:
         activations_snapshot = activations._snapshot()
         outbox = self.activation_outbox
         outbox_snapshot = outbox._snapshot()
+        with self._commit_lock:
+            self._commit_depth += 1
         try:
             yield self
         except BaseException:
@@ -455,6 +481,9 @@ class SessionState:
             self.pending_corrections.clear()
             self.pending_corrections.update(corrections)
             raise
+        finally:
+            with self._commit_lock:
+                self._commit_depth -= 1
 
     def advance_character(self) -> None:
         self.current_character_index = (
