@@ -31,18 +31,22 @@ from unittest.mock import patch
 from pns.models.event import Event, EventScope, EventType
 from pns.models.exposure import ExposureReason
 from pns.models.memory import (
-    GIST_CHARS,
+    FRAGMENT_CHARS,
     MEMORY_ARCHIVE_VERSION,
+    MIN_FRAGMENT,
     MemoryClass,
     MemoryError,
     MemoryMismatch,
     MemoryRecord,
     MemoryStore,
     derive_memory_id,
+    derived_salience,
+    eligible_classes,
     memory_content,
-    memory_gist,
+    memory_fragment,
     verify_memory_against_observation,
 )
+from pns.models import memory as memory_mod
 from pns.models.observation import Observation
 from pns.models.session import SessionState, SessionStateError
 from pns.models.world_state import WorldState
@@ -102,9 +106,9 @@ def _session(world=None, session_id="s1"):
     return state
 
 
-def _rig(budget=None, aliases=None, world=None):
+def _rig(budget=None, world=None):
     state = _session(world)
-    return state, MemoryEncoder(state, budget=budget, aliases=aliases)
+    return state, MemoryEncoder(state, budget=budget)
 
 
 def _message(state, text, *, actor="ena", event_id="e1"):
@@ -255,7 +259,7 @@ class MemoryClassBehaviorTests(unittest.TestCase):
 
     def test_every_class_has_an_encoding_rule(self):
         self.assertEqual(
-            {memory_class for memory_class, _ in encoding_mod._RULES},
+            {memory_class for memory_class, _ in memory_mod._RULES},
             set(MemoryClass),
         )
 
@@ -264,9 +268,9 @@ class MemoryClassBehaviorTests(unittest.TestCase):
 
     def test_every_class_is_actually_produced_by_the_rules(self):
         """不是"表里有"，是**真的能长出来**：六类各给一个局面。"""
-        state, encoder = _rig(aliases={"mizuki": ("瑞希",)})
+        state, encoder = _rig()
         encoder.commit_and_encode(
-            _message(state, "瑞希，我答应了明天把和声写完。", event_id="e1")
+            _message(state, "mizuki，我答应了明天把和声写完。", event_id="e1")
         )
         state.world_state.advance_time(1)
         encoder.commit_and_encode(_move(state, "ena", "mizuki_home_room", "e2"))
@@ -359,23 +363,41 @@ class EncodingIsNotRecallTests(unittest.TestCase):
     def test_the_exact_line_is_not_copied_into_memory(self):
         blob = json.dumps(self.state.memories.to_dict(), ensure_ascii=False)
         self.assertNotIn(self.long_text, blob)
-        for record in self.state.memories.records():
-            summary = record.content.get("summary", "")
-            self.assertLessEqual(len(summary), GIST_CHARS + 1)
         # 精确原文仍然留在世界历史里供审计 —— 那是另一种数据产品。
         self.assertEqual(self.state.events.get("e1").payload["text"], self.long_text)
 
-    def test_the_gist_collapses_whitespace_and_marks_truncation(self):
-        self.assertEqual(memory_gist("  一   二  "), "一 二")
-        self.assertTrue(memory_gist("啊" * 300).endswith("…"))
+    def test_a_short_line_is_not_copied_either(self):
+        """短台词同样不整段进记忆 —— 上限之内不等于可以照抄。"""
+        for text in ("熬夜写歌。", "今天的天气不错。", "我在。", "好啊，明天见。"):
+            with self.subTest(text):
+                state, encoder = _rig()
+                encoder.commit_and_encode(_message(state, text))
+                self.assertTrue(state.memories.records())
+                blob = json.dumps(state.memories.to_dict(), ensure_ascii=False)
+                self.assertNotIn(text, blob)
+                block = prompt_block(MemoryRecall(state).recall_for("mizuki"))
+                self.assertNotIn(text, block)
+
+    def test_the_fragment_is_bounded_by_length_and_by_ratio(self):
+        self.assertEqual(memory_fragment("  一   二  "), "")  # 太短，一个字都不留
+        for text in ("啊" * 300, "啊" * 30, "啊" * 8, "啊" * 7, "啊"):
+            with self.subTest(len(text)):
+                fragment = memory_fragment(text)
+                if not fragment:
+                    continue
+                body = fragment[:-1]  # 去掉截断标记
+                self.assertLessEqual(len(body), FRAGMENT_CHARS)
+                self.assertLessEqual(len(body), len(text) // 2)
+                self.assertGreaterEqual(len(body), MIN_FRAGMENT)
+                self.assertNotIn(text, fragment)
 
 
 # ── AC5 召回是角色作用域、确定性、有预算 ────────────────────────────────
 class RecallTests(unittest.TestCase):
     def setUp(self):
-        self.state, self.encoder = _rig(aliases={"mizuki": ("瑞希",)})
+        self.state, self.encoder = _rig()
         self.encoder.commit_and_encode(
-            _message(self.state, "瑞希，我答应了明天把和声写完。", event_id="e1")
+            _message(self.state, "mizuki，我答应了明天把和声写完。", event_id="e1")
         )
         self.state.world_state.advance_time(5)
         self.encoder.commit_and_encode(
@@ -401,11 +423,19 @@ class RecallTests(unittest.TestCase):
         谁先被想起来只由线索决定。
         """
         state, encoder = _rig()
-        encoder.commit_and_encode(_message(state, "今天的天气不错。", event_id="w1"))
-        encoder.commit_and_encode(_message(state, "和声部分再改一版。", event_id="w2"))
+        encoder.commit_and_encode(
+            _message(state, "今天的天气真好，晒得人想睡觉。", event_id="w1")
+        )
+        encoder.commit_and_encode(
+            _message(state, "和声部分再改一版，明天给你听。", event_id="w2")
+        )
         service = MemoryRecall(state)
+        # 两条线索都落在各自记忆保留下来的那段片段里 —— 否则这条测试会靠
+        # ID 兜底"通过"，而不是靠线索。
         first = service.recall_for("mizuki", cues=["和声"])
         second = service.recall_for("mizuki", cues=["天气"])
+        self.assertGreater(first.memories[0].score, first.memories[1].score)
+        self.assertGreater(second.memories[0].score, second.memories[1].score)
         self.assertEqual(first.memories[0].record.source_event_id, "w2")
         self.assertEqual(second.memories[0].record.source_event_id, "w1")
         # 想起的顺序变了，存下来的东西一个字节都没变。
@@ -460,9 +490,9 @@ class RecallTests(unittest.TestCase):
 # ── AC7 持久化与衰减 ────────────────────────────────────────────────────
 class PersistenceAndDecayTests(unittest.TestCase):
     def setUp(self):
-        self.state, self.encoder = _rig(aliases={"mizuki": ("瑞希",)})
+        self.state, self.encoder = _rig()
         self.encoder.commit_and_encode(
-            _message(self.state, "瑞希，我答应了明天把和声写完。")
+            _message(self.state, "mizuki，我答应了明天把和声写完。")
         )
         self.records = {
             record.memory_class: record
@@ -636,30 +666,42 @@ class EligibilityTests(unittest.TestCase):
         )
 
     def test_being_addressed_by_name_promotes_the_memory(self):
-        state, encoder = _rig(aliases={"mizuki": ("瑞希",)})
-        encoder.commit_and_encode(_message(state, "瑞希，这段你怎么看？"))
+        state, encoder = _rig()
+        encoder.commit_and_encode(_message(state, "mizuki，这段你怎么看？"))
         classes = {r.memory_class for r in state.memories.for_owner("mizuki")}
         self.assertIn(MemoryClass.RELATIONAL, classes)
         self.assertIn(MemoryClass.EPISODIC, classes)
 
-    def test_aliases_never_leak_into_stored_content(self):
-        """别名只影响触发与显著度，不进内容 —— 于是存档恢复能原样重推。"""
-        state, encoder = _rig(aliases={"mizuki": ("瑞希",)})
-        encoder.commit_and_encode(_message(state, "瑞希，这段你怎么看？"))
-        for record in state.memories.for_owner("mizuki"):
-            observation = state.observations.find("mizuki", record.source_event_id)
+    def test_every_stored_field_can_be_re_derived_from_the_observation(self):
+        """资格、内容、显著度三样都只依赖观察本身 —— 所以恢复时能重算。
+
+        任何一样依赖了只有编码那一刻才知道的输入（比如一张外部别名表），
+        它就变成"存档说了算"，伪造也就无从判起。
+        """
+        state, encoder = _rig()
+        encoder.commit_and_encode(_message(state, "mizuki，这段你怎么看？"))
+        for record in state.memories.records():
+            observation = state.observations.find(
+                record.owner_id, record.source_event_id
+            )
+            self.assertIn(record.memory_class, eligible_classes(observation))
+            self.assertEqual(record.salience, derived_salience(observation))
             self.assertEqual(
                 json.loads(json.dumps(record.to_dict()["content"])),
                 memory_content(record.memory_class, observation),
             )
 
+    def test_the_encoder_takes_no_input_that_restore_cannot_see(self):
+        """静态可证：编码器构造签名里没有会影响资格判断的外部输入。"""
+        import inspect
+
+        parameters = set(inspect.signature(MemoryEncoder.__init__).parameters)
+        self.assertEqual(parameters, {"self", "state", "budget", "name"})
+
     def test_the_per_observation_cap_drops_the_least_durable_first(self):
-        state, encoder = _rig(
-            budget=MemoryBudget(max_records_per_observation=1),
-            aliases={"mizuki": ("瑞希",)},
-        )
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_observation=1))
         _, decisions = encoder.commit_and_encode(
-            _message(state, "瑞希，我答应了明天把和声写完。")
+            _message(state, "mizuki，我答应了明天把和声写完。")
         )
         kept = {r.memory_class for r in state.memories.for_owner("mizuki")}
         self.assertEqual(kept, {MemoryClass.COMMITMENT})
@@ -750,9 +792,9 @@ class AtomicityTests(unittest.TestCase):
 # ── AC10 / AC12 存档与权威边界 ──────────────────────────────────────────
 class ArchiveTests(unittest.TestCase):
     def setUp(self):
-        self.state, self.encoder = _rig(aliases={"mizuki": ("瑞希",)})
+        self.state, self.encoder = _rig()
         self.encoder.commit_and_encode(
-            _message(self.state, "瑞希，我答应了明天把和声写完。")
+            _message(self.state, "mizuki，我答应了明天把和声写完。")
         )
         self.archive = self.state.to_dict()
 
@@ -765,11 +807,28 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(self.archive["memory"], self.state.memory_archive())
         self.assertEqual(self.archive["memory"]["version"], MEMORY_ARCHIVE_VERSION)
 
-    def test_a_research_shaped_archive_without_the_memory_section_is_rejected(self):
+    def test_an_archive_without_the_memory_section_is_refused_with_a_way_out(self):
+        """P10 之前的存档：明确拒绝，而不是静默恢复成一个失忆的角色。
+
+        兼容策略是显式的 —— 错误信息里直接给出要补的那一段形状，升级由人做
+        一次决定，不由恢复路径替他决定。
+        """
         broken = deepcopy(self.archive)
         broken.pop("memory")
-        with self.assertRaises(SessionStateError):
+        with self.assertRaises(SessionStateError) as caught:
             SessionState.from_dict(broken)
+        message = str(caught.exception)
+        self.assertIn("memory", message)
+        self.assertIn(str(MEMORY_ARCHIVE_VERSION), message)
+        # 按说明补上空的那一段，就能恢复（只是什么都没记住）。
+        broken["memory"] = {
+            "session_id": broken["session_id"],
+            "version": MEMORY_ARCHIVE_VERSION,
+            "clock": broken["world_state"]["clock"],
+            "store": {"records": []},
+        }
+        restored = SessionState.from_dict(broken)
+        self.assertEqual(len(restored.memories), 0)
 
     def test_an_archive_that_lost_only_the_store_is_rejected(self):
         broken = deepcopy(self.archive)
@@ -867,12 +926,150 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(state.observations.to_dict(), observations_before)
 
 
+# ── 独立审查发现的伪造路径 ──────────────────────────────────────────────
+class ForgedMemoryTests(unittest.TestCase):
+    """存档里把类别改掉、再按新类别重算 ID 和内容 —— 这是独立审查里真的过关过的改法。
+
+    只核对内容是不够的：`memory_content()` 对任何一条台词观察都推得出一个
+    合法的 commitment 内容，所以一句路人的闲话可以被改写成一条永不衰减、
+    召回预算也挤不掉的"承诺"，而每个字段单独看都合法、ID 也对得上。
+    资格必须一起重判。
+    """
+
+    def setUp(self):
+        self.state, self.encoder = _rig()
+        self.encoder.commit_and_encode(_message(self.state, "今天的天气不错。"))
+        # 前提：这句话没点名任何人，对 mizuki 只该留下一条会过期的短时痕迹。
+        self.assertEqual(
+            {r.memory_class for r in self.state.memories.for_owner("mizuki")},
+            {MemoryClass.WORKING},
+        )
+        self.archive = self.state.to_dict()
+
+    def _promote(self, memory_class):
+        """把 mizuki 那条痕迹改成另一个类别，ID 与内容全部按新类别重算。"""
+        archive = deepcopy(self.archive)
+        record = next(
+            r
+            for r in archive["memory"]["store"]["records"]
+            if r["owner_id"] == "mizuki"
+        )
+        observation = self.state.observations.find("mizuki", record["source_event_id"])
+        record["memory_class"] = memory_class.value
+        record["content"] = memory_content(memory_class, observation)
+        record["memory_id"] = derive_memory_id(
+            "mizuki", record["source_event_id"], memory_class
+        )
+        return archive, record
+
+    def test_a_plain_line_cannot_be_promoted_to_a_commitment(self):
+        archive, _ = self._promote(MemoryClass.COMMITMENT)
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(archive)
+        self.assertIn("资格", str(caught.exception))
+
+    def test_the_same_forgery_fails_for_every_durable_class(self):
+        for memory_class in (
+            MemoryClass.COMMITMENT,
+            MemoryClass.IDENTITY,
+            MemoryClass.RELATIONAL,
+            MemoryClass.EPISODIC,
+        ):
+            with self.subTest(memory_class.value):
+                archive, _ = self._promote(memory_class)
+                with self.assertRaises(SessionStateError):
+                    SessionState.from_dict(archive)
+
+    def test_content_verification_alone_would_have_accepted_the_forgery(self):
+        """证明这道闸确实是新加的那一道，而不是旧检查的另一种说法。"""
+        archive, record = self._promote(MemoryClass.COMMITMENT)
+        observation = self.state.observations.find("mizuki", record["source_event_id"])
+        # 内容与"承诺该长什么样"完全一致，ID 也与字段自洽 —— 旧检查全过。
+        self.assertEqual(
+            record["content"], memory_content(MemoryClass.COMMITMENT, observation)
+        )
+        self.assertEqual(
+            record["memory_id"],
+            derive_memory_id("mizuki", record["source_event_id"], MemoryClass.COMMITMENT),
+        )
+        # 但这条观察根本没资格长出承诺。
+        self.assertNotIn(MemoryClass.COMMITMENT, eligible_classes(observation))
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(archive)
+
+    def _mizuki_record(self, archive):
+        return next(
+            r
+            for r in archive["memory"]["store"]["records"]
+            if r["owner_id"] == "mizuki"
+        )
+
+    def test_the_forgery_cannot_be_pushed_down_into_the_observation(self):
+        """把伪造往下挪一层：改存档里那条观察的台词，让伪造的类别"有资格"。
+
+        这样一来记忆与观察之间完全自洽 —— 只核对这一段就会放行。来源链必须
+        一路核到事件为止。
+        """
+        archive, record = self._promote(MemoryClass.COMMITMENT)
+        promised = "我答应了明天把和声写完。"
+        entry = next(
+            e
+            for e in archive["observations"]["observations"]
+            if e["observer_id"] == "mizuki"
+        )
+        entry["perceived"]["text"] = promised
+        # 让伪造的记忆内容与被改过的那条观察也完全对得上。
+        rewritten = Observation.from_dict(entry)
+        record["content"] = memory_content(MemoryClass.COMMITMENT, rewritten)
+        self.assertIn(MemoryClass.COMMITMENT, eligible_classes(rewritten))
+
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(archive)
+        self.assertIn("台词", str(caught.exception))
+
+    def test_a_rewritten_actor_or_participant_list_is_rejected(self):
+        for field, value in (
+            ("actor_id", "kanade"),
+            ("type", "dialogue.spoken"),
+        ):
+            with self.subTest(field):
+                archive = deepcopy(self.archive)
+                for entry in archive["observations"]["observations"]:
+                    if entry["observer_id"] == "mizuki":
+                        entry["perceived"][field] = value
+                with self.assertRaises(SessionStateError):
+                    SessionState.from_dict(archive)
+
+    def test_a_forged_salience_is_rejected(self):
+        """显著度也不能靠存档拔高 —— 否则一条痕迹能压过所有真正重要的记忆。"""
+        archive = deepcopy(self.archive)
+        self._mizuki_record(archive)["salience"] = 100
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(archive)
+
+    def test_a_forged_perception_channel_is_rejected(self):
+        """把"我旁听到的"改写成"我自己说的"也不行。"""
+        archive = deepcopy(self.archive)
+        self._mizuki_record(archive)["provenance"]["reason"] = "self_action"
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(archive)
+
+    def test_a_class_that_was_genuinely_eligible_still_restores(self):
+        """闸门不能宽到放行伪造，也不能紧到把真记忆判成损坏。"""
+        state, encoder = _rig()
+        encoder.commit_and_encode(_message(state, "mizuki，我答应了明天把和声写完。"))
+        classes = {r.memory_class for r in state.memories.for_owner("mizuki")}
+        self.assertIn(MemoryClass.COMMITMENT, classes)
+        archive = state.to_dict()
+        self.assertEqual(SessionState.from_dict(deepcopy(archive)).to_dict(), archive)
+
+
 # ── AC11 提示投影 ───────────────────────────────────────────────────────
 class PromptProjectionTests(unittest.TestCase):
     def setUp(self):
-        self.state, self.encoder = _rig(aliases={"mizuki": ("瑞希",)})
+        self.state, self.encoder = _rig()
         self.encoder.commit_and_encode(
-            _message(self.state, "瑞希，我答应了明天把和声写完。")
+            _message(self.state, "mizuki，我答应了明天把和声写完。")
         )
         self.state.world_state.advance_time(2)
         self.encoder.commit_and_encode(_private(self.state, event_id="secret"))
@@ -912,6 +1109,18 @@ class PromptProjectionTests(unittest.TestCase):
     def test_the_same_line_is_not_repeated_once_per_class(self):
         lines = recalled_lines(self.result)
         self.assertEqual(len(lines), len(set(lines)))
+        bodies = [line.split("：", 1)[-1] for line in lines]
+        self.assertEqual(len(bodies), len(set(bodies)))
+
+    def test_the_owners_own_action_reads_as_first_person_on_one_line(self):
+        """同一件事不该在自己的提示词里出现两次，一次"我"一次"我的 ID"。"""
+        state, encoder = _rig()
+        encoder.commit_and_encode(_move(state, "mizuki", "city_streets", "m1"))
+        lines = recalled_lines(MemoryRecall(state).recall_for("mizuki"))
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertNotIn("mizuki ", line)
+            self.assertIn("我", line)
         bodies = [line.split("：", 1)[-1] for line in lines]
         self.assertEqual(len(bodies), len(set(bodies)))
 

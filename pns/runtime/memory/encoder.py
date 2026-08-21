@@ -20,7 +20,7 @@
 # 归属跟调度器、Agency 一样：存储归 SessionState 所有，编码器是它上面的服务，
 # 一个会话只能绑一个。存档里的 memory 段就是那份存储。
 from datetime import datetime
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from pns.models.event import Event
 from pns.models.memory import (
@@ -35,7 +35,6 @@ from pns.models.world_state import WorldState
 from pns.runtime.event_commit import commit_session_event
 from pns.runtime.memory.encoding import (
     EncodingDecision,
-    EncodingError,
     EncodingOutcome,
     MemoryBudget,
     draft_memories,
@@ -63,8 +62,7 @@ class MemoryEncoder:
         self,
         state: SessionState,
         budget: Optional[MemoryBudget] = None,
-        aliases: Optional[Mapping[str, Sequence[str]]] = None,
-        name: str = "declared-rules-v1",
+        name: str = "declared-rules-v2",
     ) -> None:
         if not isinstance(state, SessionState):
             raise MemoryEncoderError("记忆编码器必须绑定在一个 SessionState 上")
@@ -75,19 +73,11 @@ class MemoryEncoder:
         if not isinstance(budget, MemoryBudget):
             raise MemoryEncoderError("budget 必须是 MemoryBudget")
 
-        # 别名表只影响"这句话是不是冲着我说的"这个判断，不进记忆内容。
-        # 构造时拷成不可变的形状：调用方之后改自己那份改不动编码器。
-        frozen_aliases: Dict[str, Tuple[str, ...]] = {}
-        for owner, names in dict(aliases or {}).items():
-            if not isinstance(owner, str) or not owner:
-                raise MemoryEncoderError("别名表的键必须是非空角色 ID")
-            if isinstance(names, (str, bytes)):
-                raise MemoryEncoderError(f"角色 '{owner}' 的别名必须是字符串序列")
-            frozen_aliases[owner] = tuple(str(name) for name in names)
-
+        # 这里刻意**没有**任何影响资格判断的外部输入（比如一张角色别名表）：
+        # 只有编码那一刻才知道的信号，存档恢复时重算不出来，于是那一类记忆的
+        # 资格就变成"存档说了算"。资格规则的输入必须全部来自观察本身。
         self._state = state
         self._budget = budget
-        self._aliases = frozen_aliases
         self._name = name
         try:
             state.attach_memory(self)
@@ -125,9 +115,6 @@ class MemoryEncoder:
     @property
     def name(self) -> str:
         return self._name
-
-    def aliases_for(self, owner_id: str) -> Tuple[str, ...]:
-        return self._aliases.get(owner_id, ())
 
     # ── 编码（事务） ────────────────────────────────────────────────────
     def encode(
@@ -175,7 +162,7 @@ class MemoryEncoder:
     ) -> Tuple[EncodingDecision, ...]:
         owner = observation.observer_id
         observation_id = observation.observation_id
-        drafts = draft_memories(observation, self.aliases_for(owner))
+        drafts = draft_memories(observation)
         if not drafts:
             # 显式的"不记"：白名单外的观察类型（比如时钟前进这种系统心跳），
             # 或者一条规则都没触发。

@@ -860,16 +860,36 @@ observed event types: dialogue, messages, channel presence and movement encode;
 anything unregistered encodes nothing and says so with a reason code. A clock
 tick never even reaches this layer — exposure produces no observation for it.
 
-Eligibility is deterministic and computed from the observation alone. An
-overheard line leaves only a short-term trace; being addressed, acting yourself,
-or uttering a declared commitment marker raises salience past the episodic
-threshold and adds the durable classes. The commitment detector is a **declared
-marker table**, not semantic understanding: it is deliberately shallow so that it
-is deterministic and testable, and the cost — rephrasing evades it, quoting
-someone trips it — is written down rather than implied. Owner aliases (used only
-to decide "was this said to me") influence which rules fire and the salience
-scalar; they deliberately **do not enter stored content**, so an archive can be
-re-derived without knowing which alias table was in force.
+Eligibility, content and salience are all computed from the observation alone,
+and all three are declared **in the model layer** next to the record type, not in
+the encoder. That placement is the point: restore has to re-decide eligibility,
+restore lives in `SessionState`, and models may not import runtime. One
+declaration, used by construction and by verification, so verification cannot
+drift looser than construction.
+
+Every rule input therefore has to be recoverable from the observation. An earlier
+draft let the encoder hold an owner-alias table so that "was this said to me"
+could recognise display names; that was removed, because a signal only the
+encoding moment knows cannot be recomputed at restore, which silently makes that
+class's eligibility *whatever the archive says*. Addressing is currently
+recognised by character id in the observed text or by explicit participant
+naming; for display names to count, they must first become a verifiable part of
+the observation rather than a table in the encoder's hand.
+
+An overheard line leaves only a short-term trace; being addressed, acting
+yourself, or uttering a declared commitment marker raises salience past the
+episodic threshold and adds the durable classes. The commitment detector is a
+**declared marker table**, not semantic understanding: it is deliberately shallow
+so that it is deterministic and testable, and the cost — rephrasing evades it,
+quoting someone trips it — is written down rather than implied.
+
+Stored text is never a transcript, and that holds for short lines too. A memory
+keeps a structural description of what was said (its scale) plus at most a
+bounded distinctive fragment: `memory_fragment()` caps the fragment at
+`FRAGMENT_CHARS`, *and* at half the original, *and* drops it entirely below
+`MIN_FRAGMENT`, so no utterance of any length can be reconstructed from memory.
+"Fits under the cap" is not a licence to copy — the exact text lives in world
+history for auditing, which is a different data product (§18).
 
 Identity is derived, never random: `owner@event#class`, with the source
 observation identified as `observer@event`. Re-encoding the same observation
@@ -914,14 +934,22 @@ the same reason it binds one scheduler and one agency engine.
 
 The archive section is versioned. `session.to_dict()["memory"]` carries
 `version`, the clock it belongs to, and the store; `MEMORY_ARCHIVE_VERSION` is
-currently `1`. Restore refuses an unknown version outright rather than trusting
+currently `2`. Restore refuses an unknown version outright rather than trusting
 records that may have been derived under different rules — **the derivation rules
-are part of the storage format**, so changing `memory_content()`, the gist rule,
-or the content shape requires bumping the version and writing a migration note
-here. Archives written before this phase have no `memory` section and are refused;
-migrating one means adding `{"session_id": …, "version": 1, "clock": …, "store":
-{"records": []}}`, which is exactly what a session that never encoded anything
-produces.
+are part of the storage format**, so changing `memory_content()`, the fragment
+rule, the eligibility rules or the salience formula requires bumping the version
+and writing a migration note here.
+
+- **1 → 2**: fragments replaced verbatim short summaries, and restore began
+  re-deciding eligibility and salience. Version 1 existed only on this unmerged
+  branch and was never released, so it is refused rather than upgraded in place.
+- **Archives predating this phase** have no `memory` section at all. The policy is
+  deliberate refusal, not a silent default: restoring them as "remembered nothing"
+  makes a session that lost its memory indistinguishable from one that never
+  encoded any. The error names the stanza to add — `{"session_id": …, "version":
+  2, "clock": …, "store": {"records": []}}` — which is exactly what a session that
+  never encoded anything produces, so upgrading is a decision a person makes once
+  rather than one the restore path makes on their behalf.
 
 Restore validates against the rest of the session, not just against itself. A
 record may not be encoded after the world clock or before its own observation,
@@ -930,20 +958,40 @@ session actually produced for that owner, and must appear in non-decreasing
 encoded order. As with the agency log, matching ids is not enough: ids are
 *derived from* the fields, so keeping them correct while rewriting what was
 remembered produces an archive where memory says one thing, the observation says
-another, and both agree on the identifier. Restore therefore checks **content**,
-through `verify_memory_against_observation()`, which rebuilds the expected content
-with `memory_content()` — the same function that constructed it — and compares.
-There is one definition of what a memory looks like, so verification cannot drift
-looser than construction. `salience` is excluded from that comparison and only
-range-checked: it is a scalar the encoding policy assigned, not an assertion about
-the world (the same treatment the `policy` string gets in the agency log).
+another, and both agree on the identifier. Restore therefore checks, through
+`verify_memory_against_observation()`, four things — and leaving out any one of
+them admits a forgery that looks legal field by field:
+
+1. identity and timing (whose memory, which event, when it was perceived);
+2. **class eligibility**, recomputed with `eligible_classes()`. Content alone is
+   not enough: `memory_content()` will happily produce a valid-looking
+   `commitment` body for *any* utterance, so relabelling an overheard remark and
+   recomputing its id and content yields a never-decaying, budget-proof "promise"
+   whose every field checks out. Independent review found exactly that;
+3. **content**, rebuilt with `memory_content()` — the same function that
+   constructed it;
+4. **salience**, recomputed with `derived_salience()`. It is derived, not
+   assigned, so forcing it to 100 to dominate recall is caught too. Only the
+   `encoder` name in provenance stays unverified, the way `policy` does in the
+   agency log; the perception channel it records is checked against the
+   observation.
+
+Because eligibility is derived from the observation, the source chain has to be
+verified one step further down as well. Rewriting the *observation's* line in an
+archive would make a forged class genuinely eligible and leave memory and
+observation perfectly consistent with each other, so restore also checks the
+fields the rules read — type, actor, text, participant list — against the
+committed event they were projected from. What remains outside any in-session
+check is an archive whose event history was rewritten wholesale and made
+self-consistent throughout; that needs provenance stronger than validation, and
+is recorded here rather than implied.
 
 Memory is a **separate runtime path**. `pns/runtime/session_runtime.py` does not
 import it — an AST test enforces that — and the deterministic round robin, its
 turn order and its standing clock are unchanged; a research session's archive
 simply carries an empty memory section. Encoding means constructing a
 `MemoryEncoder` explicitly. Memory schema and algorithms are **cold update**:
-`ContentRegistry` has no field holding a store, budget or alias table and no
+`ContentRegistry` has no field holding a store, budget or threshold and no
 method that writes one, so a reload — successful or failed — cannot alter a live
 memory. Editable thresholds or prompt templates could become reloadable content
 later; the record schema, the derivation rules and the archive validation cannot,

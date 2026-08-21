@@ -676,6 +676,19 @@ class SessionState:
             "memory",
         ):
             if required not in payload:
+                if required == "memory":
+                    # P10 之前的存档没有这一段。兼容策略是**明确拒绝**，不是
+                    # 静默当成"什么都没记住"：后者会让一份真的丢了记忆的存档
+                    # 安静地恢复成一个失忆的角色，而这跟"这个角色本来就没记过
+                    # 任何东西"看起来一模一样。跟 scheduler / agency 两段同一
+                    # 条规矩。升级方式是显式补一段空的（见下面的形状），这件事
+                    # 必须由人做一次决定，而不是由恢复路径替他决定。
+                    raise SessionStateError(
+                        "会话存档缺少 memory 段（P10 之前的存档会这样）。"
+                        '升级方式：补上 {"session_id": <本会话>, "version": '
+                        f'{MEMORY_ARCHIVE_VERSION}, "clock": <世界时钟>, '
+                        '"store": {"records": []}}'
+                    )
                 raise SessionStateError(f"会话存档缺少必填字段: {required}")
 
         characters = payload["characters"]
@@ -941,7 +954,46 @@ def _validate_memories_against_session(
         # （谁说的、说了什么、事实取值），就能拼出一份"记忆说 A、观察说 B"
         # 而两边 ID 又对得上的存档。所以核对的是内容，走的是当初构造它的
         # 那段声明（pns/models/memory.py 的 memory_content）。
+        # 资格是从观察推导出来的，所以只核对"记忆 ↔ 观察"还不够：把伪造往下
+        # 挪一层 —— 改掉存档里那条观察的台词，让伪造的类别真的变得"有资格"，
+        # 记忆与观察就又自洽了。来源链必须一路核到事件为止。
+        #
+        # 这里只核对资格规则真正读到的那几样（类型、行动者、台词、被点名的
+        # 参与者），而且它们在曝光投影里是原样复制过去的，所以可以精确比对。
+        _validate_observation_against_event(
+            observation, state.events.get(record.source_event_id)
+        )
         try:
             verify_memory_against_observation(record, observation)
         except MemoryMismatch as e:
             raise SessionStateError(str(e)) from e
+
+
+def _validate_observation_against_event(observation, event) -> None:
+    """一条观察里"记忆据以判定资格"的那几个字段，必须与它投影的那条事件一致。
+
+    这不是完整的观察校验（那属于曝光层），而是记忆这条来源链上必需的一段：
+    没有它，把存档里那条观察的台词改成一句带承诺标记的话，就能让一条伪造的
+    承诺重新变得"有资格"，而记忆与观察之间又完全自洽。
+    """
+    perceived = observation.perceived
+    if perceived.get("type") != event.type.value:
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的类型 "
+            f"{perceived.get('type')!r} 与事件的 '{event.type.value}' 不一致"
+        )
+    if perceived.get("actor_id") != event.actor_id:
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的行动者 "
+            f"{perceived.get('actor_id')!r} 与事件的 {event.actor_id!r} 不一致"
+        )
+    if "text" in perceived and perceived.get("text") != event.payload.get("text"):
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的台词与事件里的原文不一致"
+        )
+    if "participants" in perceived and tuple(
+        perceived.get("participants") or ()
+    ) != event.participants:
+        raise SessionStateError(
+            f"观察 '{observation.observation_id}' 记的参与者名单与事件的不一致"
+        )

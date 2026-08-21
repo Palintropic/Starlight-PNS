@@ -43,9 +43,11 @@ def _age_phrase(minutes: int) -> str:
     return f"{minutes // 1440} 天前"
 
 
-def _fact_body(content: Mapping) -> str:
+def _fact_body(content: Mapping, owner_id: str) -> str:
     """世界事实渲染成一句人话。fact 的身份形状由 memory_content 声明。"""
     about = content.get("about") or "某人"
+    if about == owner_id:
+        about = "我"
     fact = content.get("fact") or ""
     value = content.get("value")
     if fact.startswith("location:"):
@@ -61,19 +63,29 @@ def _fact_body(content: Mapping) -> str:
 
 
 def _body(record: MemoryRecord) -> str:
-    """一条记忆在提示词里的正文。只读内容里被显式点名的那几个键。"""
+    """一条记忆在提示词里的正文。只读内容里被显式点名的那几个键。
+
+    摘要本身不带行动者（谁做的在 about / by 里），在这里拼回去。这样同一条
+    观察在不同类别下的正文完全一致，渲染时能合并成一行。
+    """
     content = record.content
-    memory_class = record.memory_class
-    if memory_class is MemoryClass.SEMANTIC:
-        return _fact_body(content)
+    if record.memory_class is MemoryClass.SEMANTIC:
+        return _fact_body(content, record.owner_id)
     summary = content.get("summary") or ""
-    if memory_class is MemoryClass.COMMITMENT:
-        who = "我" if content.get("self") else (content.get("by") or "对方")
-        return f"{who}：{summary}"
-    if memory_class is MemoryClass.RELATIONAL:
-        about = content.get("about") or "对方"
-        return f"和 {about} 之间：{summary}"
-    return summary
+    if not summary:
+        return ""
+    actor = content.get("about") or content.get("by")
+    mine = (
+        bool(content.get("self"))
+        or content.get("source") == "self_commitment"
+        or actor == record.owner_id
+    )
+    if mine:
+        # 自己的事就说"我"。这里要看行动者是不是记忆的主人，而不是只看内容里
+        # 那个 self 标记：短时痕迹不带这个标记，只看标记会让同一条经历渲染成
+        # 两行（"我说了…"和"ena说了…"），而它们本来是同一件事。
+        return f"我{summary}"
+    return f"{actor or '某人'} {summary}"
 
 
 def recalled_lines(result: RecallResult) -> Tuple[str, ...]:

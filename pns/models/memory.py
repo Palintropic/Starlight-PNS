@@ -27,12 +27,23 @@ from pns.models.observation import Observation
 
 # 记忆存档的格式版本。形状或派生规则一旦变化就必须进位，并在
 # docs/ARCHITECTURE.md 的迁移说明里写清楚旧存档怎么处理 —— 恢复时会核对
-# 记忆内容是不是能从观察重新推导出来，所以推导规则本身就是存档格式的一部分。
-MEMORY_ARCHIVE_VERSION = 1
+# 记忆内容、类别资格和显著度是不是都能从观察重新推导出来，所以推导规则本身
+# 就是存档格式的一部分。
+#
+#   1 → 2  摘要不再原样保留短台词（改为"结构描述 + 有上限的片段"），并且
+#          恢复时要重判类别资格与显著度。版本 1 只在本分支存在过、从未发布，
+#          没有需要迁移的真实存档，所以它直接被拒绝而不是就地升级。
+MEMORY_ARCHIVE_VERSION = 2
 
-# 摘要的硬上限。它是**模型层常量**而不是预算字段：存档恢复时要用同一条规则
-# 重新推导摘要来核对内容，两处用不同的上限就会把一份好存档判成损坏的。
-GIST_CHARS = 80
+# 字面片段的硬上限。它们是**模型层常量**而不是预算字段：存档恢复时要用同一
+# 条规则重新推导内容来核对，两处用不同的上限就会把一份好存档判成损坏的。
+#
+# 三条一起保证"记忆里绝不会出现一句完整台词"：片段最多这么长、最多占原文
+# 一半、短到取不出有意义片段时干脆一个字都不留。世界历史里有精确原文供审计，
+# 记忆保留的是要点和少量有特征的措辞（架构文档 §18）。
+FRAGMENT_CHARS = 24
+FRAGMENT_RATIO = 2  # 最多取原文的 1/2
+MIN_FRAGMENT = 4
 
 
 # 这个名字**刻意**遮蔽了内建的 MemoryError（内存耗尽），跟 EventError /
@@ -116,18 +127,37 @@ _CLASS_BEHAVIOR: Dict[MemoryClass, ClassBehavior] = {
 _UTTERANCE_TYPES = ("dialogue.spoken", "message.sent")
 
 
-def memory_gist(text) -> str:
-    """台词的语义摘要。
-
-    **不是**逐字抄写：空白折叠，超过 GIST_CHARS 就截断。世界历史保留精确原文
-    供审计（架构文档 §18），角色记忆保留的是要点和少量有特征的措辞。
-    """
+def collapse(text) -> str:
+    """折叠空白，拿到一段可以稳定推导的文本。"""
     if not isinstance(text, str):
         return ""
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= GIST_CHARS:
-        return collapsed
-    return collapsed[:GIST_CHARS] + "…"
+    return " ".join(text.split())
+
+
+def memory_fragment(text) -> str:
+    """台词里留下来的那一小段有特征的措辞；短到取不出来就返回空串。
+
+    **绝不是**逐字抄写，而且对短台词同样不是：能留下的长度既受 FRAGMENT_CHARS
+    限制，也不能超过原文的一半，于是任何长度的台词都不可能被完整存进记忆。
+    低于 MIN_FRAGMENT 时一个字都不留 —— 一句"好啊"截成"好"没有意义，不如
+    只记"说了一句话"。
+    """
+    collapsed = collapse(text)
+    allowed = min(FRAGMENT_CHARS, len(collapsed) // FRAGMENT_RATIO)
+    if allowed < MIN_FRAGMENT:
+        return ""
+    return collapsed[:allowed] + "…"
+
+
+def _said_phrase(text) -> str:
+    """"说了什么"的结构化描述：规模 + 可选的片段，绝不含完整原文。"""
+    collapsed = collapse(text)
+    if not collapsed:
+        return "说了句什么"
+    length = len(collapsed)
+    scale = "一句话" if length <= 20 else ("一段话" if length <= 80 else "很长一段")
+    fragment = memory_fragment(collapsed)
+    return f"说了{scale}：「{fragment}」" if fragment else f"说了{scale}"
 
 
 def _where(perceived: Mapping) -> Dict:
@@ -141,21 +171,25 @@ def _where(perceived: Mapping) -> Dict:
 
 
 def describe_observation(observation: Observation) -> str:
-    """一条观察在记忆里的一句话摘要。确定性，不调用任何模型。"""
+    """一条观察在记忆里的摘要。确定性，不调用任何模型。
+
+    刻意**不带行动者**：谁做的已经在内容的 about / by 字段里了，摘要只说
+    "做了什么"。提示投影再把两者拼起来，于是同一条观察在不同类别下的正文
+    完全一致，渲染时能合并成一行。
+    """
     perceived = observation.perceived
     kind = perceived.get("type")
-    actor = perceived.get("actor_id") or "某人"
-    if kind in _UTTERANCE_TYPES:
-        return memory_gist(perceived.get("text"))
     channel = perceived.get("channel_id")
     location = perceived.get("location_id")
+    if kind in _UTTERANCE_TYPES:
+        return _said_phrase(perceived.get("text"))
     if kind == "presence.joined_channel":
-        return f"{actor} 进入了频道 {channel}" if channel else f"{actor} 上线了"
+        return f"进入了频道 {channel}" if channel else "上线了"
     if kind == "presence.left_channel":
-        return f"{actor} 离开了频道 {channel}" if channel else f"{actor} 下线了"
+        return f"离开了频道 {channel}" if channel else "下线了"
     if kind == "character.location_changed":
-        return f"{actor} 去了 {location}" if location else f"{actor} 换了地方"
-    return f"{actor} 那边发生了点什么"
+        return f"去了 {location}" if location else "换了地方"
+    return "那边有点动静"
 
 
 def world_fact(observation: Observation) -> Optional[Tuple[str, str]]:
@@ -236,6 +270,179 @@ def memory_content(memory_class, observation: Observation) -> Dict:
             "source": "self_commitment" if is_self else "addressed_by_other",
         }
     raise MemoryError(f"未实现的记忆类别: {memory_class!r}")
+
+
+# ── 资格：这条观察该长出哪几类记忆 ──────────────────────────────────────
+#
+# 跟 memory_content() 一样，这里是**唯一**一处定义资格的地方：编码器照它产出
+# 记忆，存档恢复照它重判。两处共用一份声明，验证就不可能比构造更松。
+#
+# 因此每一条规则的输入都必须能从观察本身推导出来。这不是洁癖：任何一个只有
+# 编码那一刻才知道的信号（比如一张外部别名表），恢复时都重算不出来，于是那一
+# 类记忆的资格就变成"存档说了算"—— 一句路人的闲话可以被改写成一条永不衰减、
+# 预算也挤不掉的承诺，而每个字段单独看都合法。
+#
+# 代价写在这里：认不认得出"这句话是冲我说的"，目前只看角色 ID 和被点名的
+# 参与者名单，不认显示名。显示名要参与判断，就得先让它成为观察里可验证的
+# 一部分，而不是编码器手里的一张表。
+COMMITMENT_MARKERS = (
+    "约定",
+    "答应",
+    "保证",
+    "一定会",
+    "说好了",
+    "約束",
+    "必ず",
+    "promise",
+    "i will",
+    "i'll",
+)
+
+# 情节记忆的门槛。低于它的观察只留短时痕迹 —— 听见路人说了句话，两小时后
+# 想不起来是正常的。
+EPISODIC_THRESHOLD = 20
+
+# 能长出记忆的观察类型。跟曝光投影的 payload 白名单同一条规矩：没登记的类型
+# 什么都不记。world.time_advanced 刻意不在里面 —— 时钟前进是系统心跳，不是
+# 角色经验（而且曝光那一层根本不会为它生成观察）。
+ENCODABLE_TYPES = (
+    "dialogue.spoken",
+    "message.sent",
+    "presence.joined_channel",
+    "presence.left_channel",
+    "character.location_changed",
+)
+
+
+@dataclass(frozen=True)
+class EncodingSignals:
+    """从一条观察里读出来的编码信号。全部只依赖这条观察本身。"""
+
+    actor_id: Optional[str]
+    is_self: bool
+    is_utterance: bool
+    addressed: bool
+    has_commitment: bool
+    encodable: bool
+
+
+def _mentions(text, owner_id: str) -> bool:
+    collapsed = collapse(text).lower()
+    return bool(collapsed and owner_id and owner_id.lower() in collapsed)
+
+
+def read_signals(observation: Observation) -> EncodingSignals:
+    """把一条观察读成编码信号。只看这条观察，不接受任何外部输入。"""
+    if not isinstance(observation, Observation):
+        raise MemoryError("只能从 Observation 读取编码信号")
+    perceived = observation.perceived
+    kind = perceived.get("type")
+    actor = perceived.get("actor_id")
+    owner = observation.observer_id
+    text = perceived.get("text")
+    participants = tuple(perceived.get("participants") or ())
+    is_utterance = kind in _UTTERANCE_TYPES
+    addressed = bool(
+        actor
+        and actor != owner
+        and (_mentions(text, owner) or owner in participants)
+    )
+    has_commitment = bool(
+        is_utterance
+        and isinstance(text, str)
+        and any(marker in text.lower() for marker in COMMITMENT_MARKERS)
+    )
+    return EncodingSignals(
+        actor_id=actor,
+        is_self=observation.reason is ExposureReason.SELF_ACTION,
+        is_utterance=is_utterance,
+        addressed=addressed,
+        has_commitment=has_commitment,
+        encodable=kind in ENCODABLE_TYPES,
+    )
+
+
+def derived_salience(observation: Observation) -> int:
+    """这条观察的显著度：0..100 的整数。
+
+    用整数是为了排序完全确定；从观察推导（而不是让编码器随便给一个数）是为了
+    恢复时能重算 —— 否则把显著度改成 100 就能让一条无关的痕迹压过所有记忆。
+    """
+    signals = read_signals(observation)
+    score = 0
+    if signals.is_self:
+        score += 40
+    if signals.addressed:
+        score += 30
+    if signals.has_commitment:
+        score += 20
+    score += 10 if signals.is_utterance else 5
+    return max(0, min(100, score))
+
+
+def _wants_commitment(observation, s: EncodingSignals) -> bool:
+    return bool(s.is_utterance and s.has_commitment and s.actor_id)
+
+
+def _wants_identity(observation, s: EncodingSignals) -> bool:
+    # 两种身份相关的经验：我自己说出口的承诺，以及别人冲着我说的话。
+    if s.is_self and s.has_commitment:
+        return True
+    return bool(s.addressed and s.actor_id)
+
+
+def _wants_relational(observation, s: EncodingSignals) -> bool:
+    # 关系记忆问的是"这个人对我做了什么"，所以只在互动确实指向我时才产生；
+    # 旁听到的一句话不会自动变成一条关系记忆。
+    return bool(s.addressed and s.actor_id and s.actor_id != observation.observer_id)
+
+
+def _wants_semantic(observation, s: EncodingSignals) -> bool:
+    return world_fact(observation) is not None
+
+
+def _wants_episodic(observation, s: EncodingSignals) -> bool:
+    return derived_salience(observation) >= EPISODIC_THRESHOLD
+
+
+def _wants_working(observation, s: EncodingSignals) -> bool:
+    return True  # 白名单内的观察都留一条会过期的短时痕迹
+
+
+# 顺序就是持久度顺序：一条观察长出的记忆超过预算时，从后往前丢。丢掉一条
+# 短时痕迹的代价，比丢掉一条承诺小得多。
+_RULES = (
+    (MemoryClass.COMMITMENT, _wants_commitment),
+    (MemoryClass.IDENTITY, _wants_identity),
+    (MemoryClass.RELATIONAL, _wants_relational),
+    (MemoryClass.SEMANTIC, _wants_semantic),
+    (MemoryClass.EPISODIC, _wants_episodic),
+    (MemoryClass.WORKING, _wants_working),
+)
+
+# 每个类别都必须有一条规则 —— 没有规则的类别是个空标签。用显式 raise 而不是
+# assert：assert 在 -O 下会被剥掉，而这条是结构约束，不是调试断言。
+if {memory_class for memory_class, _ in _RULES} != set(MemoryClass):
+    raise MemoryError("每一个记忆类别都必须有一条编码规则")
+
+
+def eligible_classes(observation: Observation) -> Tuple[MemoryClass, ...]:
+    """这条观察够资格长出哪几类记忆，按持久度从高到低。纯函数。"""
+    signals = read_signals(observation)
+    if not signals.encodable:
+        return ()
+    eligible = []
+    for memory_class, wants in _RULES:
+        if not wants(observation, signals):
+            continue
+        try:
+            memory_content(memory_class, observation)
+        except MemoryError:
+            # 规则说要，内容却推导不出来。这是"不记"，不是崩溃 —— 但它不该
+            # 悄悄发生，所以两边的条件是对齐的，走到这里说明有一边被改松了。
+            continue
+        eligible.append(memory_class)
+    return tuple(eligible)
 
 
 def derive_memory_id(owner_id: str, source_event_id: str, memory_class) -> str:
@@ -413,8 +620,18 @@ def verify_memory_against_observation(
     而两边 ID 又对得上的存档。所以这里核对的是**内容**，走的是当初构造它的
     那段声明（memory_content），不是另写一套更松的规则。
 
-    salience 不在核对范围内：它是编码策略给的一个标量，不是关于世界的断言
-    （范围由 MemoryRecord 自己校验）。这跟 P9 里 policy 字符串的处理一致。
+    核对四件事，缺一件就有一种伪造能过关：
+
+      1. 身份与时间对得上（谁的记忆、哪条事件、什么时候感知的）。
+      2. **类别资格**：这条观察够不够格长出这一类记忆。少了这一条，把一句
+         路人闲话的类别改成 commitment、再按新类别重算 ID 和内容，就能拼出
+         一条永不衰减、预算也挤不掉的"承诺"，而每个字段单独看都合法。
+      3. 内容与观察一致（谁说的、说了什么、事实取值）。
+      4. **显著度**：它由观察推导，不是策略随便给的标量。少了这一条，把它
+         改成 100 就能让一条无关的痕迹压过所有真正重要的记忆。
+
+    provenance 里只核对可推导的那一项（感知通道）；encoder 名字是策略字符串，
+    不是关于世界的断言，跟 P9 里 policy 的处理一致。
     """
     if not isinstance(observation, Observation):
         raise MemoryMismatch("核对记忆需要一条 Observation")
@@ -433,6 +650,26 @@ def verify_memory_against_observation(
             f"记忆 '{record.memory_id}' 记的观察时间 "
             f"{record.observed_at.isoformat()} 与源观察的 "
             f"{observation.observed_at.isoformat()} 不一致"
+        )
+    eligible = eligible_classes(observation)
+    if record.memory_class not in eligible:
+        raise MemoryMismatch(
+            f"记忆 '{record.memory_id}' 声称的类别 "
+            f"'{record.memory_class.value}' 在这条观察上没有资格产生；"
+            f"这条观察只够格长出 "
+            f"{[c.value for c in eligible] if eligible else '（什么都不长）'}"
+        )
+    expected_salience = derived_salience(observation)
+    if record.salience != expected_salience:
+        raise MemoryMismatch(
+            f"记忆 '{record.memory_id}' 的显著度 {record.salience} 与从源观察"
+            f"推导出的 {expected_salience} 不一致"
+        )
+    reason = record.provenance.get("reason")
+    if reason != observation.reason.value:
+        raise MemoryMismatch(
+            f"记忆 '{record.memory_id}' 记的感知通道 {reason!r} 与源观察的 "
+            f"'{observation.reason.value}' 不一致"
         )
     try:
         expected = memory_content(record.memory_class, observation)
@@ -565,18 +802,27 @@ class MemoryStore:
 
 
 __all__ = [
-    "ClassBehavior",
-    "GIST_CHARS",
+    "COMMITMENT_MARKERS",
+    "ENCODABLE_TYPES",
+    "EPISODIC_THRESHOLD",
+    "FRAGMENT_CHARS",
     "MEMORY_ARCHIVE_VERSION",
+    "MIN_FRAGMENT",
+    "ClassBehavior",
+    "EncodingSignals",
     "MemoryClass",
     "MemoryError",
     "MemoryMismatch",
     "MemoryRecord",
     "MemoryStore",
+    "collapse",
     "derive_memory_id",
+    "derived_salience",
     "describe_observation",
+    "eligible_classes",
     "memory_content",
-    "memory_gist",
+    "memory_fragment",
+    "read_signals",
     "verify_memory_against_observation",
     "world_fact",
 ]

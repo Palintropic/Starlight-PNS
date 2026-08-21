@@ -21,7 +21,7 @@
 # 衰减在这一层实现，而且**只在这一层**：过期的短时记忆原样躺在存储里，只是
 # 不再进入召回。编码与召回分开的意思就是这个 —— 存下来的东西不会因为问法
 # 变了而被改写。
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
