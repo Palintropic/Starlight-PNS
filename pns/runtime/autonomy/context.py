@@ -21,15 +21,86 @@
 # 不是"现在没有"，是"以后也不许有"。
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from pns.models.action import ActionId, LegalAction
-from pns.models.activation import ActivationDue
 from pns.models.observation import Observation
 
 
 class GenerationContextError(ValueError):
-    """无法为这个角色构造生成上下文（观察串了台、动作对不上等）。"""
+    """无法为这个角色构造生成上下文（观察串了台、动作对不上、提示越界等）。"""
+
+
+# 到期资格的 payload 里，**唯一**一个角色看得见的键。默认全部不可见：排期
+# payload 是调度侧与内容侧的簿记（这条排期为什么存在、它属于哪套作息、下游
+# 该怎么处理），把它整份交给模型，等于让内容作者写给系统看的话变成角色的
+# 内心独白。想让某句话进模型，就显式放进 cue —— 白名单，一个键，可以一眼
+# 审查完。
+CHARACTER_VISIBLE_PAYLOAD_KEYS = ("cue",)
+
+# 那句提示的长度上限。它是人写的内容，不是模型输出，但它同样会原样进提示词，
+# 所以同样要有上限。超了**拒绝**而不是截断：一句被砍掉一半的提示会让角色
+# 按半个指令行动，而那比响亮失败难查得多。
+MAX_CUE_CHARS = 200
+
+
+@dataclass(frozen=True)
+class ActivationCue:
+    """一条到期资格在**角色眼里**的样子。
+
+    角色不知道自己有一张排期表。所以这里没有 due_id、没有 activation_id、
+    没有队列登记号、没有"跨过了几次"、没有"下一次什么时候"——那些是调度器
+    的簿记，跟"这一刻我想说什么"没有任何关系，而且每一样都是以后被顺手写进
+    提示词的东西。
+
+    留下的只有三样：这是哪一类激活（系统闭集，不是内容）、发生在哪一刻、
+    以及内容作者**显式声明**为角色可见的那一句提示。
+    """
+
+    kind: str
+    at: datetime
+    cue: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not self.kind:
+            raise GenerationContextError("kind 必须是非空字符串")
+        if not isinstance(self.at, datetime):
+            raise GenerationContextError("at 必须是 datetime（模拟时钟时间）")
+        if self.cue is not None and not isinstance(self.cue, str):
+            raise GenerationContextError("cue 必须是字符串或 None")
+
+    @classmethod
+    def from_due(cls, due) -> "ActivationCue":
+        """把一条到期记录收窄成角色看得见的那一点点。
+
+        这是**唯一**一处把 ActivationDue 变成角色可见数据的地方，所以"排期
+        payload 默认不可见"这件事有且只有一个执行点。新增一个可见键，必须
+        改这里的白名单 —— 而不是在别处多传一个字段。
+        """
+        payload = getattr(due, "payload", None)
+        cue = None
+        if isinstance(payload, Mapping):
+            raw = payload.get("cue")
+            if raw is not None:
+                if not isinstance(raw, str):
+                    raise GenerationContextError(
+                        f"排期提示 cue 必须是字符串，收到 {type(raw).__name__}"
+                    )
+                cue = raw.strip() or None
+                if cue is not None and len(cue) > MAX_CUE_CHARS:
+                    raise GenerationContextError(
+                        f"排期提示 cue 超过 {MAX_CUE_CHARS} 字（收到 {len(cue)}），"
+                        "不接受截断"
+                    )
+        kind = getattr(due, "kind", None)
+        return cls(
+            kind=getattr(kind, "value", kind),
+            at=getattr(due, "fired_at", None),
+            cue=cue,
+        )
+
+    def to_dict(self) -> Dict:
+        return {"kind": self.kind, "at": self.at.isoformat(), "cue": self.cue}
 
 
 @dataclass(frozen=True)
@@ -41,7 +112,10 @@ class GenerationContext:
     """
 
     character_id: str
-    activation: ActivationDue
+    # 到期资格的**角色可见投影**，不是那条到期记录本身。给全的话，生成器一句
+    # `context.activation.payload` 就能读到整份排期簿记 —— 只把 to_dict()
+    # 删干净是挡不住的，因为对象还在手上。
+    activation: ActivationCue
     # 生成依据的那一刻模拟时钟。判分与提交都会拿它对一次。
     now: datetime
     # 要为哪一个动作写这句话。生成层不挑动作 —— 挑动作是 Agency 的事，
@@ -67,8 +141,11 @@ class GenerationContext:
         set_ = object.__setattr__
         if not isinstance(self.character_id, str) or not self.character_id:
             raise GenerationContextError("character_id 必须是非空字符串")
-        if not isinstance(self.activation, ActivationDue):
-            raise GenerationContextError("activation 必须是一条 ActivationDue")
+        if not isinstance(self.activation, ActivationCue):
+            raise GenerationContextError(
+                "activation 必须是一条 ActivationCue（角色可见投影），"
+                "不能是完整的 ActivationDue"
+            )
         if not isinstance(self.now, datetime):
             raise GenerationContextError("now 必须是 datetime（模拟时钟时间）")
         try:
@@ -173,7 +250,8 @@ def build_generation_context(
         raise GenerationContextError("agency_context 必须带上 character_id")
     return GenerationContext(
         character_id=character_id,
-        activation=agency_context.activation,
+        # 收窄就是这一行：整条到期记录在这里变成角色看得见的那一点点。
+        activation=ActivationCue.from_due(agency_context.activation),
         now=agency_context.observed_at,
         action_id=choice.action_id,
         target_id=choice.target_id,
@@ -191,6 +269,9 @@ def build_generation_context(
 
 
 __all__ = [
+    "CHARACTER_VISIBLE_PAYLOAD_KEYS",
+    "MAX_CUE_CHARS",
+    "ActivationCue",
     "GenerationContext",
     "GenerationContextError",
     "build_generation_context",

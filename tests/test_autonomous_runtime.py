@@ -12,6 +12,8 @@
 #   6. 每条到期都有耐久且可查的终局，或者仍然显式待处理。
 #   7. 一个会话只能绑一个协调器。
 #   8. 研究会话的 /ws/run round robin 一点没变。
+#   9. 排期 payload 默认不进模型输入：角色不知道自己有一张排期表。
+#  10. 停机与提交许可是线性化的：慢调用不持锁，stop() 返回之后没有提交能落地。
 #
 # 运行: python -m unittest tests.test_autonomous_runtime -v
 import ast
@@ -19,6 +21,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -43,7 +46,12 @@ from pns.runtime.agency.policy import AbstainPolicy
 from pns.runtime.autonomy import context as context_mod
 from pns.runtime.autonomy import coordinator as coordinator_mod
 from pns.runtime.autonomy.audit import AuditError, RouterAuditor, ScriptedAuditor
-from pns.runtime.autonomy.context import GenerationContext
+from pns.runtime.autonomy.context import (
+    MAX_CUE_CHARS,
+    ActivationCue,
+    GenerationContext,
+    GenerationContextError,
+)
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.autonomy.generation import (
     MAX_LINE_CHARS,
@@ -122,13 +130,16 @@ def _rig(
     return state, scheduler, runtime
 
 
-def _due(scheduler, activation_id="wake", *, character_id="mizuki", minutes=10):
+def _due(
+    scheduler, activation_id="wake", *, character_id="mizuki", minutes=10, payload=None
+):
     scheduler.schedule(
         ScheduledActivation(
             activation_id=activation_id,
             kind=ActivationKind.CHARACTER_ACTIVATION,
             due_at=scheduler.clock + timedelta(minutes=minutes),
             character_id=character_id,
+            payload=payload or {},
         )
     )
     return scheduler.advance_by(minutes).due[0]
@@ -548,6 +559,95 @@ class GenerationScopeTests(unittest.TestCase):
         )
 
 
+class ActivationPayloadIsNotCharacterVisibleTests(unittest.TestCase):
+    """排期 payload 是调度侧与内容侧的簿记，默认一个字都不进模型输入。
+
+    只把 to_dict() 删干净是挡不住的：生成器手上还有那个对象，一句
+    `context.activation.payload` 就全读到了。所以交给生成层的必须是一个
+    **投影类型**，而不是那条到期记录本身。
+    """
+
+    SECRET = "调度内部标记-不该被角色看见"
+
+    def _capture(self, payload):
+        captured = []
+        state, scheduler, runtime = _rig(
+            lines={"mizuki": lambda context: (captured.append(context), "在的哦")[1]}
+        )
+        runtime.process_due(_due(scheduler, payload=payload))
+        self.assertTrue(captured, "生成器应当被调用过")
+        return captured[-1]
+
+    def test_the_context_carries_a_projection_not_the_due_record(self):
+        context = self._capture({"secret": self.SECRET})
+        self.assertIsInstance(context.activation, ActivationCue)
+        self.assertNotIsInstance(context.activation, ActivationDue)
+        # 对象上根本没有 payload 这个属性可读。
+        self.assertIsNone(getattr(context.activation, "payload", None))
+
+    def test_the_scheduler_payload_reaches_the_generator_nowhere(self):
+        context = self._capture({"secret": self.SECRET, "route": "morning_routine"})
+        # 三条通道一起堵：JSON 投影、dataclass 的 repr、以及对象属性遍历。
+        self.assertNotIn(self.SECRET, json.dumps(context.to_dict(), ensure_ascii=False))
+        self.assertNotIn(self.SECRET, repr(context))
+        self.assertNotIn("morning_routine", repr(context))
+        for name in dir(context.activation):
+            if name.startswith("__"):
+                continue
+            self.assertNotIn(
+                self.SECRET, repr(getattr(context.activation, name, None)), name
+            )
+
+    def test_the_scheduler_bookkeeping_is_not_visible_either(self):
+        # 角色不知道自己有一张排期表：没有 due_id、没有队列登记号、
+        # 没有"跨过了几次"、没有"下一次什么时候"。
+        context = self._capture({"secret": self.SECRET})
+        projection = context.activation.to_dict()
+        self.assertEqual(sorted(projection), ["at", "cue", "kind"])
+        blob = json.dumps(context.to_dict(), ensure_ascii=False)
+        for leaked in ("due_id", "activation_id", "sequence", "missed_occurrences",
+                       "next_due_at", "due_at"):
+            self.assertNotIn(leaked, blob)
+
+    def test_only_an_explicitly_declared_cue_comes_through(self):
+        context = self._capture({"secret": self.SECRET, "cue": "该起床了"})
+        self.assertEqual(context.activation.cue, "该起床了")
+        blob = json.dumps(context.to_dict(), ensure_ascii=False)
+        self.assertIn("该起床了", blob)
+        self.assertNotIn(self.SECRET, blob)
+
+    def test_no_cue_means_no_cue(self):
+        self.assertIsNone(self._capture({"secret": self.SECRET}).activation.cue)
+        self.assertIsNone(self._capture({"cue": "   "}).activation.cue)
+
+    def test_a_malformed_cue_fails_loudly_instead_of_being_truncated(self):
+        for payload in ({"cue": 7}, {"cue": "长" * (MAX_CUE_CHARS + 1)}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(GenerationContextError):
+                    ActivationCue.from_due(
+                        ActivationDue(
+                            activation_id="wake",
+                            kind=ActivationKind.CHARACTER_ACTIVATION,
+                            due_at=CLOCK, fired_at=CLOCK, sequence=0,
+                            character_id="mizuki", payload=payload,
+                        )
+                    )
+
+    def test_a_context_built_with_a_raw_due_record_is_refused(self):
+        # 把整条到期记录塞回去也不行 —— 类型本身就是那道闸。
+        with self.assertRaises(GenerationContextError):
+            GenerationContext(
+                character_id="mizuki",
+                activation=ActivationDue(
+                    activation_id="wake",
+                    kind=ActivationKind.CHARACTER_ACTIVATION,
+                    due_at=CLOCK, fired_at=CLOCK, sequence=0, character_id="mizuki",
+                ),
+                now=CLOCK,
+                action_id=ActionId.SPEAK_HERE,
+            )
+
+
 class ContextModuleBoundaryTests(unittest.TestCase):
     """静态保证：生成上下文构造器读不到全知数据。"""
 
@@ -586,9 +686,8 @@ class UntrustedOutputTests(unittest.TestCase):
     def setUp(self):
         self.context = GenerationContext(
             character_id="mizuki",
-            activation=ActivationDue(
-                activation_id="wake", kind=ActivationKind.CHARACTER_ACTIVATION,
-                due_at=CLOCK, fired_at=CLOCK, sequence=0, character_id="mizuki",
+            activation=ActivationCue(
+                kind=ActivationKind.CHARACTER_ACTIVATION.value, at=CLOCK
             ),
             now=CLOCK,
             action_id=ActionId.SEND_CHANNEL_MESSAGE,
@@ -1151,6 +1250,354 @@ class StopBoundaryTests(unittest.TestCase):
 
 
 # ── AC1/AC10 服务 API ───────────────────────────────────────────────────
+class StopCommitLinearizationTests(unittest.TestCase):
+    """停机与提交许可之间不能有窗口。
+
+    确定性做法：用 Event 当 barrier 把工作线程精确停在某一个点上，再从主线程
+    调 stop()，然后看 stop() 是**立刻返回**还是**被挡住**。两者恰好区分了
+    "停机发生在事务之前"和"事务已经开始"。
+
+    每个 wait 都带超时，所以哪怕不变量坏掉，测试是失败而不是挂死。
+    """
+
+    TIMEOUT = 5
+
+    def _run_in_thread(self, target):
+        box = {}
+
+        def run():
+            try:
+                box["result"] = target()
+            except BaseException as e:  # 线程里的异常要带回主线程
+                box["error"] = e
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread, box
+
+    def _join(self, thread, box, what):
+        thread.join(self.TIMEOUT)
+        self.assertFalse(thread.is_alive(), f"{what} 没能在超时前结束")
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
+    def test_a_slow_generation_holds_no_lock_and_stop_wins(self):
+        # 工作线程停在**生成**里（闸门之外）。stop() 必须立刻返回 ——
+        # 一个卡住的模型调用不该让停机也跟着卡住。
+        entered = threading.Event()
+        release = threading.Event()
+
+        def parked(context):
+            entered.set()
+            release.wait(self.TIMEOUT)
+            return "这句话来晚了"
+
+        state, scheduler, runtime = _rig(lines={"mizuki": parked})
+        due = _due(scheduler)
+        worker, worker_box = self._run_in_thread(lambda: runtime.process_due(due))
+        self.assertTrue(entered.wait(self.TIMEOUT), "生成器没被调用")
+
+        stopper, stopper_box = self._run_in_thread(lambda: runtime.stop("配置重载"))
+        self._join(stopper, stopper_box, "慢生成期间的 stop()")
+
+        release.set()
+        result = self._join(worker, worker_box, "工作线程")
+        self.assertIs(result.outcome, ActivationOutcome.STOPPED)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertEqual(len(state.agency), 0)
+        self.assertIn(due, state.activation_outbox.pending())
+
+    def test_a_slow_audit_holds_no_lock_and_stop_wins(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Parked(ScriptedAuditor):
+            def audit(inner, request):
+                entered.set()
+                release.wait(self.TIMEOUT)
+                return super().audit(request)
+
+        state, scheduler, runtime = _rig(auditor=Parked())
+        due = _due(scheduler)
+        worker, worker_box = self._run_in_thread(lambda: runtime.process_due(due))
+        self.assertTrue(entered.wait(self.TIMEOUT), "判分器没被调用")
+
+        stopper, stopper_box = self._run_in_thread(lambda: runtime.stop("配置重载"))
+        self._join(stopper, stopper_box, "慢判分期间的 stop()")
+
+        release.set()
+        result = self._join(worker, worker_box, "工作线程")
+        self.assertIs(result.outcome, ActivationOutcome.STOPPED)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertIn(due, state.activation_outbox.pending())
+
+    def test_a_stop_landing_in_the_window_before_the_transaction_wins(self):
+        # 这条盯的就是那个被复核出来的窗口：最后一次裸检查已经过了，事务还
+        # 没开始。把工作线程精确停在这里，再停机 —— 提案必须提交不了。
+        entered = threading.Event()
+        release = threading.Event()
+        state, scheduler, runtime = _rig()
+        due = _due(scheduler)
+        commit = runtime._commit
+
+        def parked(*args, **kwargs):
+            entered.set()
+            release.wait(self.TIMEOUT)
+            return commit(*args, **kwargs)
+
+        runtime._commit = parked
+        worker, worker_box = self._run_in_thread(lambda: runtime.process_due(due))
+        self.assertTrue(entered.wait(self.TIMEOUT), "没走到提交那一步")
+
+        stopper, stopper_box = self._run_in_thread(lambda: runtime.stop("窗口里停机"))
+        # 事务还没开始，所以 stop() 不该被挡住。
+        self._join(stopper, stopper_box, "窗口里的 stop()")
+
+        release.set()
+        result = self._join(worker, worker_box, "工作线程")
+        self.assertIs(result.outcome, ActivationOutcome.STOPPED)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertEqual(len(state.agency), 0)
+        self.assertEqual(len(state.memories), 0)
+        self.assertIn(due, state.activation_outbox.pending())
+
+    def test_a_transaction_already_under_way_makes_stop_wait_for_it(self):
+        # 反过来那一半：事务已经开始，stop() 必须等它跑完再返回 —— 撕开
+        # 一个进行中的提交会留下半条事件。
+        entered = threading.Event()
+        release = threading.Event()
+        state, scheduler, runtime = _rig()
+        due = _due(scheduler)
+        record_observations = state.record_observations
+
+        def parked(decisions, observations):
+            entered.set()
+            release.wait(self.TIMEOUT)
+            return record_observations(decisions, observations)
+
+        state.record_observations = parked
+        worker, worker_box = self._run_in_thread(lambda: runtime.process_due(due))
+        self.assertTrue(entered.wait(self.TIMEOUT), "没走进事务")
+
+        stopper, stopper_box = self._run_in_thread(lambda: runtime.stop("事务里停机"))
+        stopper.join(0.3)
+        self.assertTrue(
+            stopper.is_alive(), "事务还在跑，stop() 却先返回了 —— 没有线性化"
+        )
+        self.assertTrue(runtime.running, "事务跑完之前不该已经变成停止状态")
+
+        release.set()
+        result = self._join(worker, worker_box, "工作线程")
+        self._join(stopper, stopper_box, "事务结束后的 stop()")
+
+        self.assertIs(result.outcome, ActivationOutcome.ACTED)
+        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
+        self.assertTrue(state.activation_outbox.is_acknowledged(due.due_id))
+        self.assertFalse(runtime.running)
+
+    def test_stop_from_inside_the_transaction_does_not_deadlock(self):
+        # 同一个线程在事务里回头调 stop()。可重入锁必须放行，否则那次提交
+        # 会把自己锁死在半截 —— 正是这把锁本来要防的事。
+        state, scheduler, runtime = _rig()
+        due = _due(scheduler)
+        record_observations = state.record_observations
+
+        def stopping(decisions, observations):
+            runtime.stop("事务中途")
+            return record_observations(decisions, observations)
+
+        state.record_observations = stopping
+        worker, box = self._run_in_thread(lambda: runtime.process_due(due))
+        result = self._join(worker, box, "事务里自调 stop 的线程")
+        self.assertIs(result.outcome, ActivationOutcome.ACTED)
+        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
+        self.assertFalse(runtime.running)
+
+    def test_stopping_between_the_tick_and_the_processing_loses_nothing(self):
+        # 时钟推进是调度器自己的事务，已经落地了；停机发生在它之后、处理
+        # 之前 —— 那几条到期资格必须原样躺在投递箱里，不能凭空消失。
+        state, scheduler, runtime = _rig()
+        for index in range(3):
+            scheduler.schedule(
+                ScheduledActivation(
+                    activation_id=f"a{index}",
+                    kind=ActivationKind.CHARACTER_ACTIVATION,
+                    due_at=scheduler.clock + timedelta(minutes=5),
+                    character_id="mizuki",
+                )
+            )
+        tick_report = runtime._tick_report
+
+        def stopping(tick):
+            runtime.stop("推进后立刻停")
+            return tick_report(tick)
+
+        runtime._tick_report = stopping
+        report = runtime.advance(5)
+        self.assertEqual(report["results"], [])
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+        self.assertEqual(len(state.activation_outbox.pending()), 3)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertEqual(len(state.agency), 0)
+
+    def test_a_crashed_transaction_does_not_wedge_the_gate(self):
+        # 事务里抛异常之后闸门必须已经释放，否则下一条到期会永远卡住。
+        state, scheduler, runtime = _rig()
+        first = _due(scheduler, "x1", minutes=2)
+        state.events._append = lambda event: (_ for _ in ()).throw(RuntimeError("炸"))
+        self.assertIs(
+            runtime.process_due(first).outcome, ActivationOutcome.FAILED_RETRYABLE
+        )
+        del state.events._append
+
+        second = _due(scheduler, "x2", minutes=2)
+        worker, box = self._run_in_thread(lambda: runtime.process_due(second))
+        result = self._join(worker, box, "闸门崩溃之后的下一条")
+        self.assertIs(result.outcome, ActivationOutcome.ACTED)
+
+    def test_advancing_the_clock_races_stop_without_tearing(self):
+        state, scheduler, runtime = _rig()
+        runtime.stop("先停了")
+        clock = state.world_state.clock
+        with self.assertRaises(AutonomyError):
+            runtime.advance(10)
+        self.assertEqual(state.world_state.clock, clock)
+        self.assertEqual(len(state.events), 0)
+
+
+class ConcurrentProcessingTests(unittest.TestCase):
+    """并发 process_due：不许重复提交，也不许白跑两次生成。"""
+
+    TIMEOUT = 5
+
+    def test_the_same_due_cannot_be_processed_twice_at_once(self):
+        entered = threading.Event()
+        release = threading.Event()
+        generations = []
+
+        def parked(context):
+            generations.append(context.character_id)
+            entered.set()
+            release.wait(self.TIMEOUT)
+            return "在的哦"
+
+        state, scheduler, runtime = _rig(lines={"mizuki": parked})
+        due = _due(scheduler)
+        box = {}
+
+        def first():
+            box["first"] = runtime.process_due(due)
+
+        worker = threading.Thread(target=first, daemon=True)
+        worker.start()
+        self.assertTrue(entered.wait(self.TIMEOUT), "第一个线程没走到生成")
+
+        with self.assertRaises(AutonomyError):
+            runtime.process_due(due)
+
+        release.set()
+        worker.join(self.TIMEOUT)
+        self.assertFalse(worker.is_alive())
+        self.assertIs(box["first"].outcome, ActivationOutcome.ACTED)
+        # 生成只跑了一次，事件只有一条。
+        self.assertEqual(generations, ["mizuki"])
+        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
+        self.assertEqual(len(state.agency), 1)
+
+    def test_a_due_can_be_processed_again_after_the_first_pass_finishes(self):
+        # 在途登记是**并发**保护，不是永久占用：处理完就摘掉，之后再处理
+        # 同一条会撞上交接那道闸（一次性），而不是撞上这把锁。
+        state, scheduler, runtime = _rig()
+        due = _due(scheduler)
+        runtime.process_due(due)
+        with self.assertRaises(AgencyEngineError):
+            runtime.process_due(due)
+
+    def test_different_dues_commit_concurrently_without_corruption(self):
+        state, scheduler, runtime = _rig()
+        first = _due(scheduler, "a0", character_id="mizuki", minutes=5)
+        second = _due(scheduler, "a1", character_id="ena", minutes=5)
+        results = {}
+        ready = threading.Barrier(2, timeout=self.TIMEOUT)
+
+        def run(due, key):
+            ready.wait()
+            results[key] = runtime.process_due(due)
+
+        threads = [
+            threading.Thread(target=run, args=(first, "first"), daemon=True),
+            threading.Thread(target=run, args=(second, "second"), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(self.TIMEOUT)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual(len(results), 2)
+        for result in results.values():
+            self.assertIs(result.outcome, ActivationOutcome.ACTED)
+        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 2)
+        self.assertEqual(len(state.agency), 2)
+        self.assertEqual(state.activation_outbox.pending(), ())
+        # 世界历史仍然自洽：事件 ID 全局唯一（含两条时钟推进），序号连续，
+        # 没有被并发写坏。
+        events = state.events.events()
+        self.assertEqual(len(set(e.event_id for e in events)), len(events))
+        self.assertEqual(
+            [state.events.sequence_of(e.event_id) for e in events],
+            list(range(len(events))),
+        )
+
+    def test_process_pending_skips_an_in_flight_due_instead_of_breaking(self):
+        # 点名处理某一条要响亮拒绝；成批驱动则应该跳过 —— 那条没有丢，
+        # 正有人在处理它，而这一轮只报告"这次真的处理了哪些"。
+        entered = threading.Event()
+        release = threading.Event()
+
+        def parked(context):
+            entered.set()
+            release.wait(self.TIMEOUT)
+            return "在的哦"
+
+        state, scheduler, runtime = _rig(lines={"mizuki": parked, "ena": "……嗯"})
+        _due(scheduler, "a0", character_id="mizuki", minutes=2)
+        worker = threading.Thread(
+            target=lambda: runtime.process_pending(), daemon=True
+        )
+        worker.start()
+        self.assertTrue(entered.wait(self.TIMEOUT), "第一个线程没走到生成")
+
+        # 这一轮什么都没处理，但也没有抛错。
+        self.assertEqual(runtime.process_pending(), ())
+        self.assertEqual(runtime.status()["in_flight_due_ids"], ["a0@2026-08-21T23:52:00"])
+
+        release.set()
+        worker.join(self.TIMEOUT)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
+        self.assertEqual(state.activation_outbox.pending(), ())
+        self.assertEqual(runtime.status()["in_flight_due_ids"], [])
+
+    def test_a_failed_due_stays_processable_after_the_in_flight_slot_clears(self):
+        calls = {"n": 0}
+
+        def flaky(context):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise GenerationError("暂时不可用", retryable=True)
+            return "在的哦"
+
+        state, scheduler, runtime = _rig(lines={"mizuki": flaky})
+        due = _due(scheduler)
+        self.assertIs(
+            runtime.process_due(due).outcome, ActivationOutcome.FAILED_RETRYABLE
+        )
+        self.assertIs(runtime.process_due(due).outcome, ActivationOutcome.ACTED)
+        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
+
+
 class ServiceApiTests(unittest.TestCase):
     def test_status_reports_the_shape_web1_needs(self):
         state, scheduler, runtime = _rig()

@@ -19,6 +19,9 @@ from pns.runtime.autonomy.audit import (
     ScriptedAuditor,
 )
 from pns.runtime.autonomy.context import (
+    CHARACTER_VISIBLE_PAYLOAD_KEYS,
+    MAX_CUE_CHARS,
+    ActivationCue,
     GenerationContext,
     GenerationContextError,
     build_generation_context,
@@ -42,8 +45,11 @@ from pns.runtime.autonomy.outcome import (
 )
 
 __all__ = [
+    "CHARACTER_VISIBLE_PAYLOAD_KEYS",
     "DEFAULT_THRESHOLD",
+    "MAX_CUE_CHARS",
     "MAX_LINE_CHARS",
+    "ActivationCue",
     "ActivationOutcome",
     "ActivationResult",
     "AuditError",

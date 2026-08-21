@@ -20,17 +20,21 @@
 #   3. **一次处理是一个事务。** Agency 提交（事件 + 曝光 + 观察 + 审计 +
 #      交接确认）与记忆编码落在**同一个** atomic_commit() 里。中途任何一步
 #      失败，世界回到处理之前的样子，到期记录仍然待处理，可以重来。
-#   4. **停机在安全边界上生效。** 慢调用（生成、判分）之后各检查一次：已经
-#      被要求停止的话就放手，不提交。于是"停了之后模型才回来"这件事永远
-#      变不成一次提交。放手不消耗重试预算 —— 停机不是失败。
+#   4. **停机与提交许可是线性化的。** 光在慢调用之后"再查一次 _running"是不够
+#      的：查完到真正进事务之间还有一段窗口，另一个线程在那一瞬间停机，这条
+#      已经判过分的提案照样会提交。所以"许可"本身是一次加锁判断 —— 提交在
+#      持锁期间完成，stop() 也要拿同一把锁。慢调用（生成、判分）**绝不持锁**，
+#      于是停机不会被一个卡住的模型调用挡住。放手不消耗重试预算 —— 停机不是
+#      失败。
 #   5. **每条到期都有交代。** 要么留下一条耐久的终局记录（Agency 日志里有它、
 #      投递箱里它被确认了），要么明确地仍然待处理。没有第三种状态，也没有
 #      "无限期悬着"——重试预算用完就写终局失败记录。
 #
 # 研究会话的 /ws/run 确定性 round robin 跟这里没有任何关系：那条路上时钟不动，
 # 什么都不会到期，而且 session_runtime.py 不 import 这个包（有 AST 测试盯着）。
+import threading
 from datetime import datetime
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Set, Tuple
 
 from pns.models.activation import ActivationDue
 from pns.models.agency import AgencyBudget, AgencyOutcome
@@ -121,9 +125,22 @@ class AutonomousRuntime:
         )
         self._recall = MemoryRecall(state, recall_budget)
 
+        # 提交许可闸门。它保护三样东西，而且只保护这三样：运行标志的翻转、
+        # "这次写入准不准"的判断、以及那次写入本身。慢调用一律在闸门之外 ——
+        # 一个卡住的模型调用不该让 stop() 也跟着卡住。
+        #
+        # 用可重入锁而不是普通锁：提交事务里的代码有可能回头调用 stop()。
+        # 同一个线程再进来必须放行，否则那次提交会把自己锁死在半截 ——
+        # 而那正是这把锁本来要防的事。
+        self._gate = threading.RLock()
         self._started = False
         self._running = False
         self._stop_reason: Optional[str] = None
+        # 正在处理中的到期资格。同一条被两个线程同时处理不会重复提交（交接
+        # 是一次性的，提案身份也是推导出来的），但会白跑两次生成和两次判分，
+        # 而且第二个线程会在提交那一刻拿到一个含义不明的交接错误。响亮拒绝
+        # 比两次模型调用便宜得多。
+        self._in_flight: Set[str] = set()
         # 每条到期资格已经失败过几次。刻意只活在进程里：跨进程重启的持久化
         # 是 P12 的事。丢掉它的后果是重试预算重新开始数，而不是重复提交 ——
         # 重复提交由推导出来的提案身份和交接的一次性挡着。
@@ -212,14 +229,18 @@ class AutonomousRuntime:
         这几个安全边界上：新的到期不再开始处理；已经在跑的慢调用回来之后
         发现已经停了，就放手不提交。
 
-        一次已经进了 atomic_commit() 的提交不会被打断 —— 那会撕开 P5 的
-        提交边界，留下半条事件。协调器宁可让那一次提交跑完。
+        一次已经进了 atomic_commit() 的提交不会被打断 —— 那会撕开 P5 的提交
+        边界，留下半条事件。协调器宁可让那一次提交跑完，于是 stop() 会在闸门
+        上**等它跑完再返回**。这正是"线性化"的可观察含义：stop() 返回之后，
+        不可能再有任何一次提交落地；stop() 返回之前落地的那一次，是在它之前
+        就已经开始的。
         """
         if not isinstance(reason, str) or not reason:
             raise AutonomyError("stop 的理由必须是非空字符串")
-        self._running = False
-        if self._stop_reason is None:
-            self._stop_reason = reason
+        with self._gate:
+            self._running = False
+            if self._stop_reason is None:
+                self._stop_reason = reason
         return self.status()
 
     # ── 处理一条到期资格 ────────────────────────────────────────────────
@@ -232,19 +253,38 @@ class AutonomousRuntime:
         """
         if not isinstance(due, ActivationDue):
             raise AutonomyError("只能处理 ActivationDue")
-        if not self._running:
-            # 还没启动，或者已经停了。什么都不碰 —— 到期记录仍然待处理。
-            return self._record(
-                self._stopped_result(due, attempt=self._attempts.get(due.due_id, 0))
-            )
+        with self._gate:
+            if not self._running:
+                # 还没启动，或者已经停了。什么都不碰 —— 到期记录仍然待处理。
+                return self._record(
+                    self._stopped_result(
+                        due, attempt=self._attempts.get(due.due_id, 0)
+                    )
+                )
+            if due.due_id in self._in_flight:
+                raise AutonomyError(
+                    f"到期记录 '{due.due_id}' 正在被处理，不能同时处理第二次"
+                )
+            self._in_flight.add(due.due_id)
+            attempt = self._attempts.get(due.due_id, 0) + 1
+        try:
+            return self._process(due, attempt)
+        finally:
+            with self._gate:
+                self._in_flight.discard(due.due_id)
 
-        attempt = self._attempts.get(due.due_id, 0) + 1
+    def _process(self, due: ActivationDue, attempt: int) -> ActivationResult:
+        """一条到期资格的实际处理。慢调用都在这里，而且都在闸门之外。"""
 
         # ── 提案（含生成，纯的） ───────────────────────────────────────
         plan = self._agency.propose(due)
         if not self._running:
             # 生成期间被要求停止。模型回来晚了，这句话就不算数 —— 不提交、
             # 不确认、不消耗重试预算。
+            #
+            # 这次检查是**省事**，不是保证：它让一条注定提交不了的提案不必再
+            # 白跑一趟判分。真正挡住提交的是闸门里那次加锁判断（见 _commit），
+            # 因为"查完"到"进事务"之间永远有一段窗口。
             return self._record(self._stopped_result(due, attempt=attempt - 1))
 
         retryable = self._retryable_policy_failure(plan)
@@ -285,7 +325,7 @@ class AutonomousRuntime:
                     )
                 )
             if not self._running:
-                # 判分回来晚了。同上：不提交、不确认。
+                # 判分回来晚了。同上：省事，不是保证 —— 兜底在闸门里。
                 return self._record(self._stopped_result(due, attempt=attempt - 1))
             plan = plan.with_audit(audit)
 
@@ -296,12 +336,24 @@ class AutonomousRuntime:
 
         停机之后剩下的那些原样留在待处理 —— 处理它们的是恢复之后的下一个
         协调器，不是这一个。
+
+        已经被别的线程拿在手上的那条会被**跳过**，不会让这一轮抛错中断：
+        它没有丢，正有人在处理它，而这一轮的返回值只报告"这次调用真的处理
+        了哪些"。点名处理某一条（process_due）则仍然响亮拒绝 —— 调用方要的
+        就是那一条，静默跳过会让它以为处理过了。
         """
         results = []
         for due in self._agency.pending_due():
-            if not self._running:
-                break
-            results.append(self.process_due(due))
+            with self._gate:
+                if not self._running:
+                    break
+                if due.due_id in self._in_flight:
+                    continue
+            try:
+                results.append(self.process_due(due))
+            except AutonomyError:
+                # 检查与进入之间被别的线程抢走了。跳过，不中断这一轮。
+                continue
         return tuple(results)
 
     # ── 推进模拟时钟 ────────────────────────────────────────────────────
@@ -311,16 +363,18 @@ class AutonomousRuntime:
         时间推进本身是调度器的事务（时钟 + 世界历史 + 队列 + 投递箱同生
         共死），这里不重复它，也不绕过它。
         """
-        self._require_running("推进模拟时钟")
-        tick = self._scheduler.advance_by(minutes)
+        with self._gate:
+            self._require_running("推进模拟时钟")
+            tick = self._scheduler.advance_by(minutes)
         return self._tick_report(tick)
 
     def advance_to_next_due(self) -> Optional[Dict]:
         """推进到下一条排期到期的那一刻；队列为空就返回 None，不动时钟。"""
-        self._require_running("推进模拟时钟")
-        tick = self._scheduler.advance_to_next_due()
-        if tick is None:
-            return None
+        with self._gate:
+            self._require_running("推进模拟时钟")
+            tick = self._scheduler.advance_to_next_due()
+            if tick is None:
+                return None
         return self._tick_report(tick)
 
     def _tick_report(self, tick) -> Dict:
@@ -411,7 +465,27 @@ class AutonomousRuntime:
         确认）。记忆编码套在**同一个**外层事务里，所以"事件提交了但记忆没写
         成"这种半截世界不存在：编码失败，事件、观察、曝光判定、审计记录、
         交接确认一起回滚，到期记录仍然待处理。
+
+        许可判断（"现在还准写吗"）和写入本身在**同一次持锁**里完成。分成两步
+        的话，两者之间的那一瞬间就是一个停机竞态：stop() 已经返回，而一条在它
+        之前就查过 _running 的提案照样落了地。
         """
+        with self._gate:
+            if not self._running:
+                # 闸门关了。这是提交路径上**唯一**权威的那次判断 —— 前面几处
+                # 检查都只是提前放手，省掉白跑的慢调用。
+                return self._stopped_result(due, attempt=attempt - 1)
+            return self._commit_admitted(due, plan, attempt, as_failure=as_failure)
+
+    def _commit_admitted(
+        self,
+        due: ActivationDue,
+        plan: ProposalPlan,
+        attempt: int,
+        *,
+        as_failure: bool = False,
+    ) -> ActivationResult:
+        """已经拿到许可、并且正持着闸门的那次写入。"""
         state = self._state
         try:
             with state.atomic_commit():
@@ -433,7 +507,8 @@ class AutonomousRuntime:
             # 处理。这一档天然可重试 —— 但仍然受预算约束。
             return self._commit_failure(due, plan, attempt, e)
 
-        self._attempts.pop(due.due_id, None)
+        with self._gate:
+            self._attempts.pop(due.due_id, None)
         return ActivationResult(
             due_id=due.due_id,
             character_id=record.character_id,
@@ -472,7 +547,8 @@ class AutonomousRuntime:
         except AgencyEngineError:
             raise
         except BaseException as second:
-            self._attempts[due.due_id] = attempt
+            with self._gate:
+                self._attempts[due.due_id] = attempt
             return ActivationResult(
                 due_id=due.due_id,
                 character_id=plan.character_id,
@@ -486,7 +562,8 @@ class AutonomousRuntime:
                     "still_pending": True,
                 },
             )
-        self._attempts.pop(due.due_id, None)
+        with self._gate:
+            self._attempts.pop(due.due_id, None)
         return ActivationResult(
             due_id=due.due_id,
             character_id=record.character_id,
@@ -501,7 +578,8 @@ class AutonomousRuntime:
         self, due: ActivationDue, character_id: str, attempt: int, error: str
     ) -> ActivationResult:
         """一次可重试的失败：什么都没提交，到期记录仍然待处理。"""
-        self._attempts[due.due_id] = attempt
+        with self._gate:
+            self._attempts[due.due_id] = attempt
         return ActivationResult(
             due_id=due.due_id,
             character_id=character_id or due.character_id or "",
@@ -530,7 +608,8 @@ class AutonomousRuntime:
         )
 
     def _record(self, result: ActivationResult) -> ActivationResult:
-        self._results.append(result)
+        with self._gate:
+            self._results.append(result)
         return result
 
     # ── 服务 API（给 WEB-1 用的最小面） ─────────────────────────────────
@@ -556,16 +635,24 @@ class AutonomousRuntime:
             "events": len(state.events),
             "memories": len(state.memories),
             "retry": self._retry.to_dict(),
-            "outcomes": {
-                outcome.value: sum(
-                    1 for result in self._results if result.outcome is outcome
-                )
-                for outcome in ActivationOutcome
-            },
+            "in_flight_due_ids": self._in_flight_ids(),
+            "outcomes": self._outcome_counts(),
             "agency_outcomes": {
                 outcome.value: len(log.for_outcome(outcome))
                 for outcome in AgencyOutcome
             },
+        }
+
+    def _in_flight_ids(self) -> List[str]:
+        with self._gate:
+            return sorted(self._in_flight)
+
+    def _outcome_counts(self) -> Dict:
+        with self._gate:
+            results = list(self._results)
+        return {
+            outcome.value: sum(1 for result in results if result.outcome is outcome)
+            for outcome in ActivationOutcome
         }
 
     def positions(self) -> Dict:
@@ -592,7 +679,9 @@ class AutonomousRuntime:
         真正要接着处理的东西（还没被确认的到期记录）一条不少。
         """
         limit = self._require_limit(limit)
-        return [result.to_dict() for result in self._results[-limit:]]
+        with self._gate:
+            recent = self._results[-limit:]
+        return [result.to_dict() for result in recent]
 
     def recent_events(self, limit: int = _RECENT) -> List[Dict]:
         """世界历史里最近几条事件的投影（含系统侧 provenance）。

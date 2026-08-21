@@ -1086,7 +1086,16 @@ and it is recorded here rather than implied.
 `GenerationContext` is built by transcription only, from an already-narrowed
 `AgencyContext` plus that character's own recall; it takes no `SessionState`, so
 there is no path to another character's memory, to the exposure log, or to
-omniscient event payloads. AST tests keep `.events`, `.exposures`, `.memories`,
+omniscient event payloads. The due activation reaches it as `ActivationCue` —
+kind, when, and an explicitly declared `cue` string — never as the `ActivationDue`
+record. Independent review found the earlier version handing over the whole
+record, which put arbitrary scheduler `payload` into model input; sanitising
+`to_dict()` would not have fixed it, because the generator still held the object
+and could read `context.activation.payload`. A character does not know it has a
+schedule row, so due ids, queue sequence numbers, missed-occurrence counts and
+next-due times are gone as well, and the payload whitelist is one key wide:
+content authors put character-visible text under `cue`, and a malformed or
+over-long cue fails loudly instead of being truncated. AST tests keep `.events`, `.exposures`, `.memories`,
 `.agency` and the name `SessionState` out of the module. Its `to_dict()` is a
 whitelist, not `Observation.to_dict()`: review found the raw projection carried
 the exposure reason code. That code is never a denial — a denial produces no
@@ -1126,17 +1135,39 @@ as still pending rather than dropping it. Retry counts live in the process, not
 the archive — cross-restart persistence is P12 — and losing them restarts the
 budget, not the commit, which is fenced separately.
 
-**Stop takes effect at documented boundaries.** `stop()` is idempotent and keeps
-the *first* reason, since later ones are its consequences. No new activation
-starts after it; the runtime refuses to advance the clock; and the two slow calls
-are followed by a re-check, so a generation or a judgement that returns after the
-stop is abandoned without committing or acknowledging, and without spending
-retry budget — abandonment is not failure. A transaction already under way runs
-to completion: tearing it open would leave half an event, which is worse than
-stopping one activation late. A runtime that was stopped can never be started,
-including one stopped before it ever ran — the test is whether a stop was ever
-requested, not whether it is currently running, because the weaker test yields a
-runtime that is simultaneously running and stopped.
+**Stop and commit admission are linearized.** `stop()` is idempotent and keeps
+the *first* reason, since later ones are its consequences. Re-checking a running
+flag after each slow call is not enough, and review found the gap: between that
+check and entering the transaction there is a window in which a stop can land and
+an already-judged proposal still commits. So admission is itself a locked
+decision — the check and the write happen under one hold of the same lock that
+`stop()` takes. The observable guarantee is the one worth stating: **after
+`stop()` returns, no further commit can land; a commit that landed before it
+returned had already begun.** The checks after generation and judging remain, but
+only as an optimisation that skips a doomed round trip; the authoritative refusal
+is the locked one.
+
+Slow calls hold nothing. Generation and judging run outside the lock, so a hung
+model call cannot block a shutdown — a deterministic test parks a worker inside
+the generator and asserts `stop()` still returns promptly. The mirror case is
+tested too: park a worker *inside* the transaction and `stop()` blocks until it
+finishes, because tearing an in-flight commit open would leave half an event,
+which is worse than stopping one activation late. The lock is reentrant, so code
+that calls `stop()` from within a transaction does not deadlock itself.
+
+The same lock also registers in-flight activations, so one due cannot be
+processed twice concurrently — that would not double-commit (handoff is
+single-use and ids are derived) but it would run generation and judging twice and
+hand the loser a confusing handoff error. Naming a due explicitly through
+`process_due()` is refused loudly; the batch driver `process_pending()` skips it
+instead, because there the due is not lost, someone else is holding it. A clock
+tick is authoritative too and takes the same lock; a stop landing between the tick
+and the processing leaves every due sitting in the outbox, advanced clock and all.
+
+A runtime that was stopped can never be started, including one stopped before it
+ever ran — the test is whether a stop was ever requested, not whether it is
+currently running, because the weaker test yields a runtime that is simultaneously
+running and stopped.
 
 **The research path is untouched.** `session_runtime.py` does not import this
 package (an AST test enforces it), and the stronger statement also holds: a
