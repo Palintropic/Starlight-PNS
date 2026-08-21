@@ -24,12 +24,13 @@
 #
 # 归属跟调度器一样：审计日志归 SessionState 所有，引擎是它上面的服务，一个
 # 会话只能绑一个。存档里的 agency 段就是那份日志。
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Dict, Mapping, Optional, Tuple
 
 from pns.models.action import ActionProposal
 from pns.models.activation import ActivationDue
+from pns.models.authored import GenerationAudit
 from pns.models.agency import (
     AgencyBudget,
     AgencyError,
@@ -81,10 +82,50 @@ class ProposalPlan:
     proposal: Optional[ActionProposal] = None
     detail: Mapping = field(default_factory=dict)
     rationale: str = ""
+    # 这条提案里那句话的 Router 判分凭据。propose() 永远交回 None ——
+    # 判分发生在提案之后，而提案是纯的。附上它的只能是那条走完了
+    # 生成 → 判分 的编排路径（P11 的协调器）。
+    audit: Optional[GenerationAudit] = None
 
     @property
     def would_act(self) -> bool:
         return self.verdict.acted
+
+    @property
+    def requires_audit(self) -> bool:
+        """这个计划要落地的话，必须带一份被接受的判分凭据吗。
+
+        从动作声明推导，不另存一个布尔字段：两处说法迟早会不一致，而不一致
+        的那一次就是一句没判过分的台词进了世界历史。
+        """
+        return (
+            self.proposal is not None
+            and self.proposal.definition.requires_authored_text
+        )
+
+    def with_audit(self, audit: Optional[GenerationAudit]) -> "ProposalPlan":
+        """带上判分凭据，返回**新的**计划。原计划一个字节都不变。
+
+        刻意不是就地赋值：计划是不可变值对象，一个能被改写的计划意味着
+        "我判的是哪一句"可以在判分之后被换掉。
+        """
+        return replace(self, audit=audit)
+
+    def refused(self, verdict: AgencyOutcome, **detail) -> "ProposalPlan":
+        """把这个计划变成一条被拒的计划，理由并进 detail。
+
+        提案对象留着不动：commit() 只会给 acted 记录写提案，被拒记录的细节
+        全在 detail 里（见 AgencyRecord 的字段一致性约束）。
+        """
+        merged = dict(self.detail)
+        merged.update(detail)
+        return replace(self, verdict=AgencyOutcome(verdict), detail=merged)
+
+    def annotated(self, **detail) -> "ProposalPlan":
+        """只往 detail 里补几条说明，不改结论。"""
+        merged = dict(self.detail)
+        merged.update(detail)
+        return replace(self, detail=merged)
 
     def to_dict(self) -> Dict:
         return {
@@ -98,6 +139,8 @@ class ProposalPlan:
             ),
             "detail": dict(self.detail),
             "rationale": self.rationale,
+            "requires_audit": self.requires_audit,
+            "audit": self.audit.to_dict() if self.audit is not None else None,
         }
 
 
@@ -243,7 +286,13 @@ class AgencyEngine:
         except AgencyPolicyError as e:
             return plan(
                 AgencyOutcome.REJECTED_POLICY_ERROR,
-                detail={"reason": "policy_error", "error": str(e)},
+                detail={
+                    "reason": "policy_error",
+                    "error": str(e),
+                    # 策略自述这次失败是不是暂时的。它只是记录，不是权限：
+                    # 真要不要重试由上层的重试预算决定。
+                    "retryable": bool(getattr(e, "retryable", False)),
+                },
             )
         except Exception as e:  # 策略实现的 bug 不该炸穿整个运行时
             return plan(
@@ -307,14 +356,10 @@ class AgencyEngine:
                 "reason": "duplicate_proposal_id",
                 "proposal_id": proposal.proposal_id,
             }
-        if proposal.definition.requires_authored_text:
-            # 台词属于角色生成层，而生成 → Router 判分 → 审计落盘那条链在
-            # Agency 这一侧还没接上。**无条件**拒绝：没有开关，也没有"调用方
-            # 自行承担"——那不是边界。
-            return {
-                "reason": "authored_text_not_committable",
-                "action_id": proposal.action_id.value,
-            }
+        # 台词在提案期**不**被拒 —— 判分要判的就是这一句，而这一句得先被
+        # 提出来。它在提交期被拦：没有一份被接受、且绑定到这一句的凭据，
+        # commit() 一律拒绝（见 _commit_refusal）。于是 evaluate()（提案+提交
+        # 一步到位、中间没有判分步骤）对台词的结论和 P9 完全一样。
         if not context.has_legal(proposal.action_id, proposal.target_id):
             return {
                 "reason": "illegal_action",
@@ -357,6 +402,16 @@ class AgencyEngine:
             if refusal is not None:
                 verdict, detail = refusal
 
+        if isinstance(plan.audit, GenerationAudit):
+            # 凭据进审计细节，而且是**唯一**一份可以在存档里重新读出来的副本：
+            # 存档校验按它重建事件的 provenance，两边对不上就是有人动过其中
+            # 一边。被拒的记录也留着它 —— "判过但没通过"和"根本没判过"必须
+            # 能分开。
+            # 只记真正的凭据。不是凭据的东西已经在 _refuse_audit 里被判成
+            # audit_not_bound 了，这里再对它调用 to_dict() 只会把一次干净的
+            # 拒绝炸成一个异常。
+            detail.setdefault("audit", plan.audit.to_dict())
+
         if plan.rationale:
             # 策略自己给的说法进审计。它是系统侧记录，不是世界真相，也永远
             # 不会进任何角色的观察 —— 但"为什么没动"如果连策略的说法都不留，
@@ -375,6 +430,7 @@ class AgencyEngine:
                     due,
                     plan.proposal,
                     policy=plan.policy,
+                    audit=plan.audit,
                 )
                 commit_session_event(state, event)
                 event_id = event.event_id
@@ -451,14 +507,9 @@ class AgencyEngine:
                 "clock": self.clock.isoformat(),
             }
         proposal = plan.proposal
-        if proposal.definition.requires_authored_text:
-            # 提交期也拦一次：手工拼出来的 ACTED 计划根本没经过 propose()，
-            # 只在那边设闸等于没设。这是拒绝，不是超预算 —— 再多预算也不会
-            # 让它变得可提交。事件构造那一层还有第三道结构性的拒绝。
-            return AgencyOutcome.REJECTED_ILLEGAL, {
-                "reason": "authored_text_not_committable",
-                "action_id": proposal.action_id.value,
-            }
+        refusal = self._refuse_audit(plan, proposal)
+        if refusal is not None:
+            return refusal
         if proposal.proposal_id in self._state.agency.proposal_ids():
             # 另一条计划抢先用掉了这个提案身份。事件 ID 由提案 ID 推导，
             # 硬走下去会撞上世界历史的重复 ID，整笔回滚，到期记录卡住 ——
@@ -476,6 +527,57 @@ class AgencyEngine:
                 "action_id": proposal.action_id.value,
                 "target_id": proposal.target_id,
                 "failed": [precondition.value for precondition in failed],
+            }
+        return None
+
+    def _refuse_audit(self, plan: ProposalPlan, proposal: ActionProposal):
+        """台词的通行证检查。这是 P11 唯一一处放行台词的判断。
+
+        四种拒法各拦一种真实的绕法：
+
+          没有凭据        手工拼出来的 ACTED 计划、或者 evaluate() 这种中间
+                          没有判分步骤的直路。理由码沿用 P9 的
+                          `authored_text_not_committable` —— 结论一个字没变。
+          凭据对不上      判的是别的句子、别的角色、别的提案。"换一句话再用
+                          同一份审计"就是从这里进来的。
+          凭据没通过      分数超阈值，或者判分器自己标了需要人工复核。
+          凭据过期了      判分发生在别的模拟时刻。一句话像不像本人，依赖它
+                          被说出来的那个当下；用一份旧判分给现在的世界背书，
+                          跟拿一个旧决定去改变现在的世界是同一种错。
+
+        反过来也拦：不需要台词的动作带着凭据来 —— 那是拿一句判过分的台词
+        给一个跟台词无关的动作背书。事件构造那一层还有第三道结构性的拒绝。
+        """
+        audit = plan.audit
+        if not proposal.definition.requires_authored_text:
+            if audit is not None:
+                return AgencyOutcome.REJECTED_ILLEGAL, {
+                    "reason": "audit_without_authored_text",
+                    "action_id": proposal.action_id.value,
+                }
+            return None
+        if audit is None:
+            return AgencyOutcome.REJECTED_ILLEGAL, {
+                "reason": "authored_text_not_committable",
+                "action_id": proposal.action_id.value,
+            }
+        if not isinstance(audit, GenerationAudit) or not audit.binds(proposal):
+            return AgencyOutcome.REJECTED_ILLEGAL, {
+                "reason": "audit_not_bound",
+                "action_id": proposal.action_id.value,
+                "proposal_id": proposal.proposal_id,
+            }
+        if not audit.accepted:
+            return AgencyOutcome.REJECTED_ILLEGAL, {
+                "reason": "router_rejected",
+                "action_id": proposal.action_id.value,
+                **audit.refusal(),
+            }
+        if audit.audited_at != self.clock:
+            return AgencyOutcome.REJECTED_STALE, {
+                "reason": "audit_stale",
+                "audited_at": audit.audited_at.isoformat(),
+                "clock": self.clock.isoformat(),
             }
         return None
 

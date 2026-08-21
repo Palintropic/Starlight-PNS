@@ -9,6 +9,7 @@ from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog
+from pns.models.authored import AuthoredTextError, GenerationAudit
 from pns.models.event_store import EventStore
 from pns.models.exposure import ExposureDecision, ExposureLog
 from pns.models.memory import (
@@ -207,6 +208,10 @@ class SessionState:
     # 同理，绑定在本会话上的记忆编码器实例。两个编码器各自带着自己的预算和
     # 别名表往同一份存储里写，"这条观察记过没有"就有两个都自称权威的答案。
     memory_encoder: Optional[object] = field(default=None, repr=False, compare=False)
+    # 同理，绑定在本会话上的自主运行时协调器。它编排调度 → Agency → 生成 →
+    # 判分 → 提交 → 曝光 → 记忆这条链，但不拥有其中任何一份状态：那些仍然
+    # 归各自的服务和这个会话所有。
+    autonomy: Optional[object] = field(default=None, repr=False, compare=False)
 
     def attach_world_state(self, world_state: WorldState) -> None:
         """绑定本会话唯一一份权威 WorldState（只允许一次）。
@@ -260,6 +265,21 @@ class SessionState:
         if not callable(getattr(encoder, "encode", None)):
             raise TypeError("记忆编码器必须提供 encode()")
         self.memory_encoder = encoder
+
+    def attach_autonomy(self, coordinator) -> None:
+        """绑定本会话唯一一份自主运行时协调器（只允许一次）。
+
+        第二次绑定必须失败。两个协调器会各自从同一个投递箱里取到期资格、
+        各自跑生成与判分、各自往同一份世界历史里提交，于是"这条到期是怎么
+        处理的""现在到底在不在跑"都有两个都自称权威的答案 —— 跟绑第二个
+        调度器 / 引擎 / 编码器是同一种错。
+        """
+        if self.autonomy is not None:
+            raise RuntimeError("SessionState 已经绑定过自主运行时协调器")
+        for required in ("start", "stop", "status", "process_due"):
+            if not callable(getattr(coordinator, required, None)):
+                raise TypeError(f"自主运行时协调器必须提供 {required}()")
+        self.autonomy = coordinator
 
     def initialize_runtime(self, scene_trigger: str) -> None:
         """Initialize per-character runtime state exactly once."""
@@ -908,6 +928,19 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
         # 拼出一份"审计说做了 A、世界历史说发生了 B"而两边 ID 又对得上的存档。
         # 所以这里核对的是**事件的实际内容**，走的是当初构造它的那段声明
         # （pns/models/action.py），不是另写一套更松的规则，也不重放状态效果。
+        # 需要台词的动作还多一层：那条事件是靠一份 Router 判分凭据才被接受的，
+        # 凭据的唯一存档副本就在这条记录的 detail 里。按它重建 provenance，
+        # 两边对不上说明有人动过其中一边 —— 比如把分数改软、或者干脆删掉凭据
+        # 却留着那句台词。
+        audit = None
+        raw_audit = record.detail.get("audit")
+        if raw_audit is not None:
+            try:
+                audit = GenerationAudit.from_dict(raw_audit)
+            except AuthoredTextError as e:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 里的判分凭据不合法: {e}"
+                ) from e
         try:
             verify_agency_event(
                 state.events.get(record.event_id),
@@ -916,6 +949,7 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
                 record.proposal,
                 occurred_at=record.decided_at,
                 policy=record.policy,
+                audit=audit,
             )
         except ActionEventMismatch as e:
             raise SessionStateError(str(e)) from e

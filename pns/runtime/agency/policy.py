@@ -26,7 +26,17 @@ class AgencyPolicyError(ValueError):
 
     引擎捕获它并记成一条 REJECTED_POLICY_ERROR，不让它冒泡穿过提交事务：
     一个策略实现出问题，不应该变成整个运行时的异常。
+
+    `retryable` 是策略对这次失败的**自述**：模型暂时不可用跟提示词模板写错
+    是两件事，前者再试一次就好，后者试一百次也一样。它只是一条被记进审计
+    细节的声明，不是权限 —— 重试要不要真的发生、发生几次，由上层的重试预算
+    决定（见 pns/runtime/autonomy/outcome.py）。默认是 False：说不清楚的
+    失败按"别再试了"处理，免得一个永远失败的策略把一条到期资格卡死在待处理。
     """
+
+    def __init__(self, *args, retryable: bool = False):
+        super().__init__(*args)
+        self.retryable = bool(retryable)
 
 
 @dataclass(frozen=True)

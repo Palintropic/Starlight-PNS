@@ -1,0 +1,636 @@
+# pns/runtime/autonomy/coordinator.py — 自主运行时的编排
+#
+#     调度到期 → 角色作用域的 Agency 提案 → （需要台词就）生成
+#              → Router 判分与生成审计 → 校验后的事件提交
+#              → 曝光 / 观察 → 主观记忆编码 → 到期资格的终局
+#
+# 这是 P4–P10 各层之间**唯一**的编排者，而且它刻意只做编排：调度、Agency、
+# 事件提交、曝光、记忆仍然是各自独立的服务，各自守着自己的权威和事务边界。
+# 协调器不拥有它们中任何一份状态 —— 它一条到期资格都存不下来，存的地方是
+# SessionState。
+#
+# 五条硬约束：
+#
+#   1. **一个会话一个协调器。** 两个协调器会从同一个投递箱里各自取走到期
+#      资格、各自跑生成与判分、各自往同一份世界历史里提交。绑定只允许一次。
+#   2. **台词只有一条路。** 提案里的台词必须先拿到一份被接受、且绑定到这一句
+#      的 GenerationAudit，才可能进世界历史。这道闸在
+#      `pns/models/action.py` 的构造函数里，不是在这里 —— 协调器绕不过它，
+#      别的调用方也绕不过。
+#   3. **一次处理是一个事务。** Agency 提交（事件 + 曝光 + 观察 + 审计 +
+#      交接确认）与记忆编码落在**同一个** atomic_commit() 里。中途任何一步
+#      失败，世界回到处理之前的样子，到期记录仍然待处理，可以重来。
+#   4. **停机在安全边界上生效。** 慢调用（生成、判分）之后各检查一次：已经
+#      被要求停止的话就放手，不提交。于是"停了之后模型才回来"这件事永远
+#      变不成一次提交。放手不消耗重试预算 —— 停机不是失败。
+#   5. **每条到期都有交代。** 要么留下一条耐久的终局记录（Agency 日志里有它、
+#      投递箱里它被确认了），要么明确地仍然待处理。没有第三种状态，也没有
+#      "无限期悬着"——重试预算用完就写终局失败记录。
+#
+# 研究会话的 /ws/run 确定性 round robin 跟这里没有任何关系：那条路上时钟不动，
+# 什么都不会到期，而且 session_runtime.py 不 import 这个包（有 AST 测试盯着）。
+from datetime import datetime
+from typing import Dict, List, Mapping, Optional, Tuple
+
+from pns.models.activation import ActivationDue
+from pns.models.agency import AgencyBudget, AgencyOutcome
+from pns.models.authored import GenerationAudit
+from pns.models.session import SessionState
+from pns.models.world_state import WorldState
+from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
+from pns.runtime.autonomy.audit import AuditError, AuditRequest
+from pns.runtime.autonomy.outcome import (
+    ActivationOutcome,
+    ActivationResult,
+    RetryPolicy,
+    outcome_for,
+)
+from pns.runtime.memory.encoder import MemoryEncoder
+from pns.runtime.memory.recall import MemoryRecall
+from pns.runtime.scheduler import PersistentScheduler
+
+# 状态投影里默认回看多少条。
+_RECENT = 20
+
+
+class AutonomyError(ValueError):
+    """这次调用根本不该发生（绑了第二个协调器、停机后还要推时钟等）。
+
+    它跟 ActivationOutcome 里的失败码是两类东西：失败码是"处理过，结论是
+    没成"，会留下可查的结果；AutonomyError 是"这次调用的前提就不成立"。
+    """
+
+
+class AutonomousRuntime:
+    """一个会话里唯一一份自主运行时协调器。
+
+    编排逻辑属于 **cold update**：它是运行时逻辑，不是内容配置。没有任何
+    构造它的路径读磁盘配置，ContentRegistry 也没有任何字段能碰到它 ——
+    P7 的重载换掉的是配置快照，动不了一个已经在跑的世界。
+    """
+
+    def __init__(
+        self,
+        state: SessionState,
+        *,
+        policy=None,
+        auditor=None,
+        budget: Optional[AgencyBudget] = None,
+        retry: Optional[RetryPolicy] = None,
+        recall_budget=None,
+        name: str = "autonomy",
+    ) -> None:
+        if not isinstance(state, SessionState):
+            raise AutonomyError("自主运行时必须绑定在一个 SessionState 上")
+        if not isinstance(state.world_state, WorldState):
+            raise AutonomyError("自主运行时绑定的会话还没有权威 WorldState")
+        if auditor is None or not callable(getattr(auditor, "audit", None)):
+            raise AutonomyError("自主运行时需要一个提供 audit() 的判分器")
+
+        self._state = state
+        self._auditor = auditor
+        self._name = name
+        self._retry = retry if retry is not None else RetryPolicy()
+        if not isinstance(self._retry, RetryPolicy):
+            raise AutonomyError("retry 必须是 RetryPolicy")
+
+        # 已经绑在这个会话上的服务原样复用；没有的才建。协调器不是它们的
+        # 拥有者，只是它们的编排者 —— 所以它绝不会造出第二份权威。
+        if state.scheduler is not None:
+            if not isinstance(state.scheduler, PersistentScheduler):
+                raise AutonomyError("会话上绑着的调度器不是 PersistentScheduler")
+            self._scheduler = state.scheduler
+        else:
+            self._scheduler = PersistentScheduler(state)
+
+        if state.agency_engine is not None:
+            if policy is not None:
+                # 引擎已经绑了策略，再交一个进来会得到两份互相看不见的"谁在
+                # 替这些角色做决定"。响亮失败，不静默取其一。
+                raise AutonomyError(
+                    "这个会话已经绑定过 Agency 引擎，不能再指定策略"
+                )
+            self._agency = state.agency_engine
+        else:
+            self._agency = AgencyEngine(state, policy=policy, budget=budget)
+
+        self._memory = (
+            state.memory_encoder
+            if state.memory_encoder is not None
+            else MemoryEncoder(state)
+        )
+        self._recall = MemoryRecall(state, recall_budget)
+
+        self._started = False
+        self._running = False
+        self._stop_reason: Optional[str] = None
+        # 每条到期资格已经失败过几次。刻意只活在进程里：跨进程重启的持久化
+        # 是 P12 的事。丢掉它的后果是重试预算重新开始数，而不是重复提交 ——
+        # 重复提交由推导出来的提案身份和交接的一次性挡着。
+        self._attempts: Dict[str, int] = {}
+        self._results: List[ActivationResult] = []
+
+        try:
+            state.attach_autonomy(self)
+        except (RuntimeError, TypeError) as e:
+            raise AutonomyError(str(e)) from e
+
+    # ── 读 ──────────────────────────────────────────────────────────────
+    @property
+    def state(self) -> SessionState:
+        return self._state
+
+    @property
+    def session_id(self) -> str:
+        return self._state.session_id
+
+    @property
+    def world(self) -> WorldState:
+        return self._state.world_state
+
+    @property
+    def clock(self) -> datetime:
+        """当前模拟时间。权威值始终在 WorldState 上，这里不另存一份。"""
+        return self._state.world_state.clock
+
+    @property
+    def scheduler(self) -> PersistentScheduler:
+        return self._scheduler
+
+    @property
+    def agency(self) -> AgencyEngine:
+        return self._agency
+
+    @property
+    def memory(self) -> MemoryEncoder:
+        return self._memory
+
+    @property
+    def recall(self) -> MemoryRecall:
+        return self._recall
+
+    @property
+    def auditor(self):
+        return self._auditor
+
+    @property
+    def retry(self) -> RetryPolicy:
+        return self._retry
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    @property
+    def stop_reason(self) -> Optional[str]:
+        return self._stop_reason
+
+    # ── 启停 ────────────────────────────────────────────────────────────
+    def start(self) -> Dict:
+        """开始接受到期资格。只能调用一次。
+
+        停过之后不能再启动，**哪怕它根本没启动过**：一个"停了又开"的运行时，
+        会让"停机期间发生了什么"这个问题没有单一答案。判据是"有没有被要求
+        停止过"，不是"现在跑没跑"——只看后者的话，先 stop 再 start 会得到一个
+        既有停机理由、又自称在跑的运行时。要接着跑，就从存档恢复出一个新的
+        协调器。
+        """
+        if self._started:
+            raise AutonomyError("自主运行时已经启动过了")
+        if self._stop_reason is not None:
+            raise AutonomyError(
+                f"自主运行时已经被要求停止（{self._stop_reason}），不能启动"
+            )
+        self._started = True
+        self._running = True
+        return self.status()
+
+    def stop(self, reason: str = "stopped") -> Dict:
+        """请求停止。幂等，而且**保留第一个理由**。
+
+        第一个理由才是真正的原因，后来的都是它的后果。停止立即生效在下面
+        这几个安全边界上：新的到期不再开始处理；已经在跑的慢调用回来之后
+        发现已经停了，就放手不提交。
+
+        一次已经进了 atomic_commit() 的提交不会被打断 —— 那会撕开 P5 的
+        提交边界，留下半条事件。协调器宁可让那一次提交跑完。
+        """
+        if not isinstance(reason, str) or not reason:
+            raise AutonomyError("stop 的理由必须是非空字符串")
+        self._running = False
+        if self._stop_reason is None:
+            self._stop_reason = reason
+        return self.status()
+
+    # ── 处理一条到期资格 ────────────────────────────────────────────────
+    def process_due(self, due: ActivationDue) -> ActivationResult:
+        """把一条到期资格走完整条链，产出一个结局。
+
+        顺序是刻意的：先在不改任何状态的前提下把提案、生成、判分全做完，
+        再一次性进事务。于是慢调用全部发生在事务之外，而事务里只有确定性的
+        校验与写入。
+        """
+        if not isinstance(due, ActivationDue):
+            raise AutonomyError("只能处理 ActivationDue")
+        if not self._running:
+            # 还没启动，或者已经停了。什么都不碰 —— 到期记录仍然待处理。
+            return self._record(
+                self._stopped_result(due, attempt=self._attempts.get(due.due_id, 0))
+            )
+
+        attempt = self._attempts.get(due.due_id, 0) + 1
+
+        # ── 提案（含生成，纯的） ───────────────────────────────────────
+        plan = self._agency.propose(due)
+        if not self._running:
+            # 生成期间被要求停止。模型回来晚了，这句话就不算数 —— 不提交、
+            # 不确认、不消耗重试预算。
+            return self._record(self._stopped_result(due, attempt=attempt - 1))
+
+        retryable = self._retryable_policy_failure(plan)
+        if retryable is not None and not self._retry.exhausted(attempt):
+            return self._record(
+                self._retry_result(due, plan.character_id, attempt, retryable)
+            )
+        exhausted = retryable is not None
+        if exhausted:
+            plan = plan.annotated(retry_budget_exhausted=True, attempts=attempt)
+
+        # ── 判分（纯的） ───────────────────────────────────────────────
+        if plan.verdict.acted and plan.requires_audit:
+            try:
+                audit = self._auditor.audit(self._audit_request(plan))
+            except AuditError as e:
+                return self._record(
+                    self._audit_failure(due, plan, attempt, e.retryable, str(e))
+                )
+            except Exception as e:  # 判分器实现自己的 bug
+                return self._record(
+                    self._audit_failure(
+                        due, plan, attempt, False, f"{type(e).__name__}: {e}"
+                    )
+                )
+            if not isinstance(audit, GenerationAudit):
+                # 判分器交回来的不是一份凭据。这不是"判成了不接受"，也不是
+                # 一次可以重试的故障 —— 一个返回错类型的判分器不会自己好起来。
+                # 不在这里拦的话，它会一路走到审计细节那一行才炸成一个
+                # AttributeError，被当成"提交事务被打断"白烧掉重试预算。
+                return self._record(
+                    self._audit_failure(
+                        due,
+                        plan,
+                        attempt,
+                        False,
+                        f"判分器返回了 {type(audit).__name__}，不是 GenerationAudit",
+                    )
+                )
+            if not self._running:
+                # 判分回来晚了。同上：不提交、不确认。
+                return self._record(self._stopped_result(due, attempt=attempt - 1))
+            plan = plan.with_audit(audit)
+
+        return self._record(self._commit(due, plan, attempt, as_failure=exhausted))
+
+    def process_pending(self) -> Tuple[ActivationResult, ...]:
+        """把投递箱里还没评估的到期资格按触发顺序处理掉。
+
+        停机之后剩下的那些原样留在待处理 —— 处理它们的是恢复之后的下一个
+        协调器，不是这一个。
+        """
+        results = []
+        for due in self._agency.pending_due():
+            if not self._running:
+                break
+            results.append(self.process_due(due))
+        return tuple(results)
+
+    # ── 推进模拟时钟 ────────────────────────────────────────────────────
+    def advance(self, minutes: int) -> Dict:
+        """把模拟时间往前推，并处理这段时间里到期的一切。
+
+        时间推进本身是调度器的事务（时钟 + 世界历史 + 队列 + 投递箱同生
+        共死），这里不重复它，也不绕过它。
+        """
+        self._require_running("推进模拟时钟")
+        tick = self._scheduler.advance_by(minutes)
+        return self._tick_report(tick)
+
+    def advance_to_next_due(self) -> Optional[Dict]:
+        """推进到下一条排期到期的那一刻；队列为空就返回 None，不动时钟。"""
+        self._require_running("推进模拟时钟")
+        tick = self._scheduler.advance_to_next_due()
+        if tick is None:
+            return None
+        return self._tick_report(tick)
+
+    def _tick_report(self, tick) -> Dict:
+        results = self.process_pending()
+        return {
+            "from_clock": tick.from_clock.isoformat(),
+            "to_clock": tick.to_clock.isoformat(),
+            "minutes": tick.minutes,
+            "due_ids": list(tick.due_ids),
+            "results": [result.to_dict() for result in results],
+        }
+
+    def _require_running(self, what: str) -> None:
+        if not self._running:
+            raise AutonomyError(
+                f"自主运行时{'还没启动' if not self._started else '已经停止'}，"
+                f"不能{what}"
+            )
+
+    # ── 各步骤的结局构造 ────────────────────────────────────────────────
+    def _audit_request(self, plan: ProposalPlan) -> AuditRequest:
+        proposal = plan.proposal
+        return AuditRequest(
+            character_id=proposal.character_id,
+            proposal_id=proposal.proposal_id,
+            payload=proposal.event_payload(),
+            action_id=proposal.action_id,
+            target_id=proposal.target_id,
+            now=plan.proposed_at,
+        )
+
+    @staticmethod
+    def _retryable_policy_failure(plan: ProposalPlan) -> Optional[str]:
+        """这次提案是不是一次"值得再来一次"的失败；不是就返回 None。
+
+        判断只看引擎写进审计细节的那两个字段，不看异常类型 —— 异常早就被
+        引擎吞掉并变成了一条结论，而结论才是会被记进存档的东西。
+        """
+        if plan.verdict is not AgencyOutcome.REJECTED_POLICY_ERROR:
+            return None
+        if not plan.detail.get("retryable"):
+            return None
+        return str(plan.detail.get("error", "policy error"))
+
+    def _audit_failure(
+        self,
+        due: ActivationDue,
+        plan: ProposalPlan,
+        attempt: int,
+        retryable: bool,
+        error: str,
+    ) -> ActivationResult:
+        """判分没能给出结果。**绝不**退化成"那就当它通过吧"。"""
+        if retryable and not self._retry.exhausted(attempt):
+            return self._retry_result(due, plan.character_id, attempt, error)
+        refused = plan.refused(
+            AgencyOutcome.REJECTED_POLICY_ERROR,
+            reason="audit_unavailable",
+            error=error,
+            retryable=bool(retryable),
+            **(
+                {"retry_budget_exhausted": True, "attempts": attempt}
+                if retryable
+                else {}
+            ),
+        )
+        # 判分没发生过，所以这不是"被拒"——什么都没被判。结局是失败，
+        # 而耐久记录说明了是哪一种失败。
+        return self._commit(due, refused, attempt, as_failure=True)
+
+    def _commit(
+        self,
+        due: ActivationDue,
+        plan: ProposalPlan,
+        attempt: int,
+        *,
+        as_failure: bool = False,
+    ) -> ActivationResult:
+        """一次处理的全部权威写入，落在一个事务里。
+
+        `as_failure` 把结局码从"评估过，结论是不行"改成"这次处理失败了，
+        而且没救了"。两者的**耐久记录是同一条** REJECTED_POLICY_ERROR ——
+        Agency 那套结论词汇里没有"重试用完了"这一档，也不该有：那是编排层
+        的概念，不是"这个角色选择了什么"的概念。区分留在结局码里，理由留在
+        detail 里（retry_budget_exhausted / audit_unavailable）。
+
+        Agency 的提交本身已经是一个事务（事件 + 曝光 + 观察 + 审计 + 交接
+        确认）。记忆编码套在**同一个**外层事务里，所以"事件提交了但记忆没写
+        成"这种半截世界不存在：编码失败，事件、观察、曝光判定、审计记录、
+        交接确认一起回滚，到期记录仍然待处理。
+        """
+        state = self._state
+        try:
+            with state.atomic_commit():
+                record = self._agency.commit(plan)
+                encoded = 0
+                if record.outcome.acted and record.event_id is not None:
+                    decisions = self._memory.encode(
+                        state.observations.for_event(record.event_id)
+                    )
+                    encoded = sum(
+                        1 for decision in decisions if decision.outcome.encoded
+                    )
+        except AgencyEngineError:
+            # 交接的前提就不成立（这条到期不是本会话的、已经处理过了）。
+            # 那不是一次可以重试的失败，也不该被吞掉。
+            raise
+        except BaseException as e:
+            # 提交事务被打断。世界已经回到处理之前的样子，到期记录仍然待
+            # 处理。这一档天然可重试 —— 但仍然受预算约束。
+            return self._commit_failure(due, plan, attempt, e)
+
+        self._attempts.pop(due.due_id, None)
+        return ActivationResult(
+            due_id=due.due_id,
+            character_id=record.character_id,
+            outcome=(
+                ActivationOutcome.FAILED_TERMINAL
+                if as_failure
+                else outcome_for(record.outcome)
+            ),
+            attempt=attempt,
+            at=record.decided_at,
+            agency_outcome=record.outcome,
+            event_id=record.event_id,
+            memories=encoded,
+            detail={"policy": record.policy, **_plain(record.detail)},
+        )
+
+    def _commit_failure(
+        self, due: ActivationDue, plan: ProposalPlan, attempt: int, error: BaseException
+    ) -> ActivationResult:
+        message = f"{type(error).__name__}: {error}"
+        if not self._retry.exhausted(attempt):
+            return self._retry_result(due, plan.character_id, attempt, message)
+        # 预算用完了，而且失败的正是提交路径本身。再试一次**最小**的那条：
+        # 一条不产出事件、不碰记忆的终局失败记录。它成了，这条到期就有了
+        # 耐久的交代；它也没成，那就如实报告"卡住了"，绝不静默丢弃。
+        minimal = plan.refused(
+            AgencyOutcome.REJECTED_POLICY_ERROR,
+            reason="commit_failed",
+            error=message,
+            retry_budget_exhausted=True,
+            attempts=attempt,
+        )
+        try:
+            with self._state.atomic_commit():
+                record = self._agency.commit(minimal)
+        except AgencyEngineError:
+            raise
+        except BaseException as second:
+            self._attempts[due.due_id] = attempt
+            return ActivationResult(
+                due_id=due.due_id,
+                character_id=plan.character_id,
+                outcome=ActivationOutcome.FAILED_TERMINAL,
+                attempt=attempt,
+                at=self.clock,
+                detail={
+                    "reason": "stuck",
+                    "error": message,
+                    "recording_error": f"{type(second).__name__}: {second}",
+                    "still_pending": True,
+                },
+            )
+        self._attempts.pop(due.due_id, None)
+        return ActivationResult(
+            due_id=due.due_id,
+            character_id=record.character_id,
+            outcome=ActivationOutcome.FAILED_TERMINAL,
+            attempt=attempt,
+            at=record.decided_at,
+            agency_outcome=record.outcome,
+            detail={"policy": record.policy, **_plain(record.detail)},
+        )
+
+    def _retry_result(
+        self, due: ActivationDue, character_id: str, attempt: int, error: str
+    ) -> ActivationResult:
+        """一次可重试的失败：什么都没提交，到期记录仍然待处理。"""
+        self._attempts[due.due_id] = attempt
+        return ActivationResult(
+            due_id=due.due_id,
+            character_id=character_id or due.character_id or "",
+            outcome=ActivationOutcome.FAILED_RETRYABLE,
+            attempt=attempt,
+            at=self.clock,
+            detail={
+                "error": error,
+                "attempts": attempt,
+                "max_attempts": self._retry.max_attempts,
+                "still_pending": True,
+            },
+        )
+
+    def _stopped_result(self, due: ActivationDue, *, attempt: int) -> ActivationResult:
+        return ActivationResult(
+            due_id=due.due_id,
+            character_id=due.character_id or "",
+            outcome=ActivationOutcome.STOPPED,
+            attempt=max(attempt, 0),
+            at=self.clock,
+            detail={
+                "reason": self._stop_reason or "not_started",
+                "still_pending": True,
+            },
+        )
+
+    def _record(self, result: ActivationResult) -> ActivationResult:
+        self._results.append(result)
+        return result
+
+    # ── 服务 API（给 WEB-1 用的最小面） ─────────────────────────────────
+    def status(self) -> Dict:
+        """运行时此刻的样子。每次返回全新的结构。"""
+        state = self._state
+        log = state.agency
+        return {
+            "session_id": self.session_id,
+            "name": self._name,
+            "started": self._started,
+            "running": self._running,
+            "stop_reason": self._stop_reason,
+            "clock": self.clock.isoformat(),
+            "scheduled": len(state.activations),
+            "next_due_at": (
+                self._scheduler.next_due_at().isoformat()
+                if self._scheduler.next_due_at() is not None
+                else None
+            ),
+            "pending_due_ids": [due.due_id for due in self._agency.pending_due()],
+            "committed_actions": log.committed_actions(),
+            "events": len(state.events),
+            "memories": len(state.memories),
+            "retry": self._retry.to_dict(),
+            "outcomes": {
+                outcome.value: sum(
+                    1 for result in self._results if result.outcome is outcome
+                )
+                for outcome in ActivationOutcome
+            },
+            "agency_outcomes": {
+                outcome.value: len(log.for_outcome(outcome))
+                for outcome in AgencyOutcome
+            },
+        }
+
+    def positions(self) -> Dict:
+        """每个角色此刻在哪、挂着哪些频道、什么状态。
+
+        每次重新从权威世界状态投影，交出去的是新的可变结构 —— 调用方改它
+        影响不到世界（有测试盯着这一条）。
+        """
+        world = self.world
+        return {
+            character_id: {
+                "location_id": world.location_of(character_id),
+                "channels": list(world.channels_for(character_id)),
+                "availability": world.availability_of(character_id).value,
+            }
+            for character_id in world.known_characters()
+        }
+
+    def recent_outcomes(self, limit: int = _RECENT) -> List[Dict]:
+        """最近几条处理结果。
+
+        它是**报告**，不是权威存储：权威的那份在 Agency 日志和投递箱里，
+        而且跟着会话存档走。这个列表活在进程里，重启就没了 —— 但重启之后
+        真正要接着处理的东西（还没被确认的到期记录）一条不少。
+        """
+        limit = self._require_limit(limit)
+        return [result.to_dict() for result in self._results[-limit:]]
+
+    def recent_events(self, limit: int = _RECENT) -> List[Dict]:
+        """世界历史里最近几条事件的投影（含系统侧 provenance）。
+
+        这是**系统视角**的调试通道，跟角色上下文是两回事：它读的是全知的
+        事件历史，所以任何渲染角色提示词的路径都不许读它。
+        """
+        limit = self._require_limit(limit)
+        store = self._state.events
+        return [
+            {"sequence": store.sequence_of(event.event_id), **event.to_dict()}
+            for event in store.events()[-limit:]
+        ]
+
+    @staticmethod
+    def _require_limit(limit) -> int:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise AutonomyError(f"limit 必须是整数，收到 {limit!r}")
+        if limit <= 0:
+            raise AutonomyError(f"limit 必须大于 0，收到 {limit}")
+        return limit
+
+    def debug_projection(self) -> Dict:
+        """只读的编排状态投影（JSON 安全），供测试和调试 UI 读。"""
+        return {
+            **self.status(),
+            "positions": self.positions(),
+            "recent_outcomes": self.recent_outcomes(),
+        }
+
+
+def _plain(value):
+    """把只读视图复制成普通可变结构 —— 交出去的东西不能是内部引用。"""
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+__all__ = ["AutonomousRuntime", "AutonomyError"]
