@@ -1,3 +1,4 @@
+import threading
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -26,6 +27,23 @@ from pns.models.world_state import WorldState
 
 class SessionStateError(ValueError):
     """会话存档不自洽（各部分来自不同时刻、引用对不上、形状损坏等）。"""
+
+
+class TransactionBoundaryError(RuntimeError):
+    """拿不到这份状态的独占边界，因此现在取不到一致快照。
+
+    它跟 SessionStateError 是两回事：那个说"这份数据本身有问题"，这个说
+    "这一刻不能看"。两种原因：本线程正处在自己的事务里（看到的必然是半截），
+    或者别人的事务占了太久（等超时了）。
+    """
+
+
+# 快照等一次事务让路的上限。事务里只有确定性的内存工作 —— 慢调用（生成、
+# 判分）按设计都在事务之外 —— 所以正常情况下这个上限碰都碰不到。它防的是
+# 另一件事：某条路径违反了锁顺序（拿着这份状态的边界，回头去拿别人的锁），
+# 那本该是一次死锁，而这里把它变成一次**响亮的、能定位的失败**：等不到就
+# 放手，把边界还给对方，让系统自己解开。
+DEFAULT_SNAPSHOT_TIMEOUT = 30.0
 
 
 @dataclass
@@ -212,6 +230,80 @@ class SessionState:
     # 判分 → 提交 → 曝光 → 记忆这条链，但不拥有其中任何一份状态：那些仍然
     # 归各自的服务和这个会话所有。
     autonomy: Optional[object] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # 这份状态的**独占边界**。一次事务和一次快照互斥，而且互斥由这一把锁
+        # 线性化 —— 不是靠"先查一下有没有人在事务里"。查是**一个时刻的观察**，
+        # 观察完到动手之间那一段窗口，别人照样可以开事务，于是快照和提交重叠，
+        # 存下去的就是一份半截世界。
+        #
+        # 用可重入锁：一次提交里会嵌套另一次提交（协调器的外层事务里套着
+        # Agency 的提交），同一个线程再进来必须放行。
+        #
+        # 刻意**不**做成 dataclass 字段：它不是会话状态的一部分，不进存档、
+        # 不参与相等性比较，也不该出现在 repr 里。
+        self._commit_gate = threading.RLock()
+        # 记账：谁在事务里、嵌了几层。只在持着边界时改。可重入锁会放行同一个
+        # 线程，所以"我自己是不是正在事务里"必须另外记 —— 否则事务内部取快照
+        # 会畅通无阻地拿到一份半截世界。
+        self._commit_thread: Optional[int] = None
+        self._commit_depth = 0
+
+    @property
+    def in_transaction(self) -> bool:
+        """此刻有没有**任何**线程正处在一次 atomic_commit() 的中途。
+
+        这是一次**瞬时读取**，只用来回答状态面上"现在忙不忙"，**不是**取快照
+        的判据：读完的下一纳秒别人就可以开事务。真正的判据是
+        snapshot_boundary()，它拿的是同一把锁。
+        """
+        return self._commit_depth > 0
+
+    @property
+    def transaction_is_mine(self) -> bool:
+        """本线程是不是正处在自己开的事务里面。"""
+        return self._commit_depth > 0 and self._commit_thread == threading.get_ident()
+
+    @contextmanager
+    def snapshot_boundary(
+        self, timeout: Optional[float] = None
+    ) -> Iterator["SessionState"]:
+        """独占这份状态，直到块结束。块内不可能有任何事务在跑。
+
+        它跟 atomic_commit() 抢的是**同一把锁**，所以这两件事真正互斥：块内
+        取的 to_dict() 不可能跟一次提交重叠，也不可能撞上一次刚要开始的提交。
+        只查一次 `in_transaction` 是不够的 —— 查完到动手之间那段窗口正是这条
+        边界要消灭的东西。
+
+        事务**内部**调用一律拒绝。可重入锁会放行同一个线程，而那一刻的世界是
+        半截的（时钟推了、激活出队了、到期记录还没落箱），放行等于允许存下一份
+        不存在过的世界。
+
+        等不到就抛 TransactionBoundaryError，绝不无限期挂着：见
+        DEFAULT_SNAPSHOT_TIMEOUT 的说明。
+
+        锁顺序（全局唯一一条，写在这里也写在协调器里）：
+        **协调器闸门 → 这条边界**。反过来拿会死锁。所以任何在事务内部回头去
+        拿协调器闸门的代码，必须是那个已经持着闸门的线程自己（P11 的"事务内部
+        stop()"就是这一种，它拿的是自己手上那把可重入锁）。
+        """
+        if self.transaction_is_mine:
+            raise TransactionBoundaryError(
+                "不能在自己的提交事务内部取快照：那一刻的世界是半截的"
+                "（比如事件已经写了、记忆还没落地）"
+            )
+        wait = DEFAULT_SNAPSHOT_TIMEOUT if timeout is None else timeout
+        if isinstance(wait, bool) or not isinstance(wait, (int, float)) or wait < 0:
+            raise TransactionBoundaryError(f"快照等待上限必须是非负数字，收到 {wait!r}")
+        if not self._commit_gate.acquire(timeout=wait):
+            raise TransactionBoundaryError(
+                f"等了 {wait} 秒也没能独占会话 '{self.session_id}' —— 有一次提交"
+                "一直占着它。这一刻取不到一致快照，什么都没写。"
+            )
+        try:
+            yield self
+        finally:
+            self._commit_gate.release()
 
     def attach_world_state(self, world_state: WorldState) -> None:
         """绑定本会话唯一一份权威 WorldState（只允许一次）。
@@ -408,7 +500,28 @@ class SessionState:
         没记下"、"事件记下了但轮次没落地"、"时间走了但队列没动"、"队列摘了但
         到期记录没落箱"、"动作提交了但审计没写"、"记忆写了一半而观察没留下"
         这些半提交状态中的任何一种。
+
+        整段持有这份状态的独占边界（见 snapshot_boundary）：从记账那一刻起，
+        直到回滚做完为止。所以两件事同时成立 ——
+
+        * 一次快照绝不会跟一次提交重叠，**也不会跟一次刚要开始的提交重叠**：
+          边界是在建立回滚快照**之前**拿的，不是之后。晚一步的话，"已经决定
+          要提交、快照正在建"这段时间里状态看起来还是空闲的。
+        * 两个线程不可能同时在同一份状态上开事务。以前它们会各自建一份回滚
+          快照、再互相覆盖对方的回滚 —— 那不是竞态，是两份都不成立的事务。
         """
+        with self._commit_gate:
+            self._commit_depth += 1
+            self._commit_thread = threading.get_ident()
+            try:
+                yield from self._atomic_commit_locked()
+            finally:
+                self._commit_depth -= 1
+                if self._commit_depth == 0:
+                    self._commit_thread = None
+
+    def _atomic_commit_locked(self) -> Iterator["SessionState"]:
+        """atomic_commit() 的本体。调用方已经持着这份状态的独占边界。"""
         world = self.world_state
         world_snapshot = (
             world.snapshot_mutable_state() if world is not None else None

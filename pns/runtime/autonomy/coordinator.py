@@ -233,6 +233,56 @@ class AutonomousRuntime:
     def stop_reason(self) -> Optional[str]:
         return self._stop_reason
 
+    @property
+    def in_transaction(self) -> bool:
+        """**本线程**此刻是不是正处在一次提交事务里面。
+
+        它刻意不拿闸门：拿了就永远问不出来（问的人会被那次提交挡住），而这
+        个问题的用处正是"我现在能不能做一件需要闸门的事"。不拿锁也是安全的 ——
+        只有本线程自己会把这两个字段写成"我"，所以答案对本线程永远是准的；
+        别的线程正在事务里时，这里得到 False，随后那次加锁会如实等它结束。
+
+        持久化层用它判断"能不能在这里取快照"：事务内部取快照会拿到一份事件
+        写了、记忆还没落地的半截世界，而闸门是可重入的，不会替它挡住。
+        """
+        return bool(self._committing_depth) and self._committing_thread == (
+            threading.get_ident()
+        )
+
+    @contextmanager
+    def lifecycle_boundary(self, timeout: Optional[float] = None):
+        """把一次生命周期操作串到跟 start / stop / 提交**同一条**边界上。
+
+        它拿**两把**锁，顺序固定，而且两把都必须拿：
+
+          1. **协调器闸门。** 持有期间没有任何提交能被准入，也没有 start/stop
+             能翻转运行标志。
+          2. **会话自己的独占边界**（SessionState.snapshot_boundary）。闸门只
+             管得住协调器发起的提交；调度器的时间推进和事件提交层会直接开
+             atomic_commit()，闸门看不见它们。而且这里必须是**互斥**，不能是
+             "查一下有没有人在事务里"——查完到 to_dict() 之间那段窗口里，一次
+             时间推进照样能开起来并跟快照重叠。
+
+        锁顺序是全局唯一一条：**闸门 → 会话边界**。反过来拿会死锁。事务内部
+        回头拿闸门只有一种合法情形（P11 的"事务内部 stop()"），那时闸门本来就
+        在自己手上，拿的是同一把可重入锁。
+
+        块内只许放确定性的纯内存工作（取快照），绝不放 I/O 或模型调用：两把锁
+        都攥着，一次 fsync 会把停机一起堵住。
+
+        事务**内部**进来一律拒绝（两层各拒一次，消息不同好定位）：两把锁都是
+        可重入的，会放行同一个线程，而那一刻的世界是半截的 —— 放行等于允许存下
+        一份不存在过的世界。
+        """
+        with self._gate:
+            if self.in_transaction:
+                raise AutonomyError(
+                    "不能在一次提交事务内部进入生命周期边界：那一刻的世界是"
+                    "半截的（事件已经写了、记忆还没落地）"
+                )
+            with self._state.snapshot_boundary(timeout):
+                yield self
+
     # ── 启停 ────────────────────────────────────────────────────────────
     def start(self) -> Dict:
         """开始接受到期资格。只能调用一次。

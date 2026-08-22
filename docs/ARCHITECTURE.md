@@ -1219,6 +1219,158 @@ own.
 
 ---
 
+### Persistent world lifecycle boundary
+
+`pns/runtime/persistence/` gives one autonomous world a complete process
+lifecycle:
+
+```text
+create or restore
+  → acquire exclusive ownership
+  → bind runtime services from caller-supplied cold adapters
+  → run / checkpoint at safe boundaries
+  → stop and let in-flight work settle
+  → write one complete atomic archive
+  → release ownership
+  → restore the same authoritative world after restart
+```
+
+What it persists is the authoritative `SessionState`: world state, event history,
+observations, exposure decisions, the activation queue and outbox, the agency
+audit log and subjective memory. What it never persists is anything alive —
+service instances, model clients, API keys, locks, callables. That is enforced
+structurally, not by convention: capture walks the payload and refuses any value
+that is not plain JSON data, because `metadata` is a free-form dict and anyone
+can drop a client into it.
+
+**The durability contract is small enough to state exactly.** A save writes a
+temporary file in the destination directory, flushes it, `fsync`s it, atomically
+`os.replace`s the target and then syncs the directory. At every instant the disk
+holds either the previous complete archive or the new complete archive — a
+half-written file is always still a temporary file, and a temporary file is never
+named `world.json`. A failed save leaves the previous archive untouched and
+reports whether temporary material remains that a human has to clear. Crash
+recovery reads the last successfully replaced archive and ignores — but reports —
+incomplete temporaries.
+
+**Visible and durable are two different claims, so they get two different
+answers.** `os.replace` makes the new archive visible; the directory `fsync`
+makes that rename survive a power loss. When the directory sync genuinely fails
+— `EIO`, `ENOSPC` — the save does not return success: it raises
+`ArchiveNotDurable`, which says exactly what happened, namely that this revision
+*is* on disk and readable but may not come back after a power loss. That is a
+different shape from every other storage failure, so the lifecycle books it
+differently: the revision advances, because the disk really does hold that
+revision and reusing the number would let two different contents share it, while
+`durable: false` and the error stay in the status and the close refuses to call
+itself clean. That evidence belongs to the live filesystem operation, not to the
+archive payload: after a later restore, `durable` and `directory_synced` are
+`null` (unknown) until this process completes another checkpoint. Merely being
+able to read an archive must not silently upgrade a previously unproven save to
+durable. A platform or filesystem that simply has no directory `fsync`
+(Windows cannot even open a directory handle; some filesystems answer `EINVAL`)
+is the other case entirely — nothing failed, the capability is absent — so the
+save succeeds and says `directory_sync_supported: false`. The errno list that
+separates the two is a whitelist: an unrecognized errno counts as a real failure,
+because on durability the safe direction to guess wrong is toward reporting a
+problem. Permission errors such as `EACCES` and `EPERM` are real failures, not
+evidence that the platform lacks the capability.
+
+**The recovery boundary is the last successful checkpoint. Nothing more.** There
+is no WAL, no event-sourced replay and no zero-loss crash guarantee, and the
+implementation does not pretend otherwise. Work committed after the last
+checkpoint is lost on a crash. What survives that loss is *correctness*, not
+*work*: an activation that fell due before the checkpoint but was never
+acknowledged is simply still pending when the world comes back, so it is
+processed again — and processed **once**, because the outbox handoff is one-shot.
+Re-running is not double-committing.
+
+**Ownership is two gates, and it needs both.** In-process, a registry keyed by the
+resolved lock path refuses to open the same world twice — keyed by path rather
+than by a bare `world_id`, so two stores pointing at the same archive root, or a
+root reached through a symlink, are still the same world. Across processes, an
+exclusive `fcntl.flock` decides, and the decision is the kernel's: the lock dies
+with the process holding it. That is why stale-owner recovery needs no pid
+heuristics and can never steal from a live owner. A pid comparison would be wrong
+in both directions — a reused pid reads as "alive" and locks the world out
+forever, and a process exiting mid-check reads as "dead" and produces two owners.
+A crashed owner leaves its record behind, so the next owner knows it took over a
+crashed world and reports `recovered_from`; a clean release rewrites that record,
+so there is nothing to report.
+
+**Checkpoints observe one coherent state, and the exclusion is real.** A
+checkpoint takes two locks in one fixed order: the coordinator's gate — the same
+one `start`, `stop` and commit admission share — and then the session's own
+exclusive boundary, which is the very lock `SessionState.atomic_commit()` holds
+for the whole of a transaction. Both are necessary. The gate only covers commits
+the coordinator starts, while the scheduler's time advance and the event commit
+layer open `atomic_commit()` directly; snapshotting inside such a transaction
+produced an archive in which the clock had advanced, a one-shot activation had
+been taken off the queue, and its due record had not yet reached the outbox —
+that activation was gone for good, and the archive passed every validation.
+
+Asking *whether* a transaction is open is not enough, which is the second thing
+review established. A question is answered at an instant; between the answer and
+the first byte of `to_dict()` a time advance can start and run alongside the
+snapshot, and the archive is torn exactly as before — only now in the other
+direction, with the snapshot first. So the two operations share one lock and
+serialize: a checkpoint waits for a running transaction to finish rather than
+refusing, and a transaction cannot start while a snapshot is in flight. The lock
+is taken before `atomic_commit()` builds its rollback snapshots, not after, so
+there is no window in which a commit is already underway and the state still
+looks idle. Nesting still works (a commit inside a commit) and a snapshot from
+inside one's own transaction is refused rather than admitted by re-entrancy.
+
+The order — gate, then session boundary — is the one global rule, and it is
+enforced by a bounded wait rather than by hope: a path that violates it would
+otherwise hang forever, so the snapshot gives the boundary a deadline, and on
+expiry it fails loudly, releases the gate and lets the system unwind. The
+snapshot itself is taken inside the boundary; serialization and the write happen
+outside it, so one `fsync` never blocks a shutdown.
+
+**Shutdown order is fixed**: stop admission, wait for the running transaction to
+settle, checkpoint the final state, mark the handle closed, release ownership. A
+failed final checkpoint does not claim a clean close and does not release
+ownership — releasing would announce that what is on disk is the latest state.
+Abandoning such a world is possible but explicit (`close(force=True)`), and the
+status it returns says `clean: false` and names the revision that is actually
+recoverable.
+
+Writes also verify ownership first. A lock lives on an inode, so deleting the
+lock file out from under a live owner lets the next process acquire the world
+while the first still believes it is the only writer — confirmed by attack, two
+processes writing the same archive. The check cannot prevent that deletion, but it
+turns "two writers silently overwriting each other" into "the second write fails
+loudly".
+
+Paths are confined to one configured archive root by two independent checks:
+`world_id` must be lowercase ASCII with no separators, no traversal and no
+leading or trailing punctuation (uppercase and non-NFC names are refused rather
+than normalized, because case-insensitive and Unicode-normalizing filesystems
+would fold two different ids into one directory and quietly break the one-owner
+rule), and the resolved directory must still sit directly under the resolved
+root, which is what catches a symlinked world directory.
+
+The service surface is deliberately minimal and Python-level: list, create,
+restore, checkpoint, close, status — including ownership, revision, last
+successful save, dirty state, residue and recovery error. No HTTP routes and no
+UI: those belong to `WEB-1`, and this phase exists to settle how a world lives,
+saves and is owned before deciding what it looks like.
+
+**The research path is untouched.** `/ws/run` acquires no world lock, writes
+nothing under the archive root, and nothing in `pns/` imports this package (an AST
+test enforces both). Persistence is opt-in by explicit call. Importing the package
+performs no I/O, creates no directories, takes no locks and initializes no reload
+boundary.
+
+What this phase deliberately does not contain: no database, cloud storage or
+multi-host failover, no WAL or replay, no ST-1 publishing, no WEB-1 dashboard, no
+concrete 25ji content, and no background checkpoint writer — automatic
+checkpoints, when enabled, are synchronous, coalesced and taken only at completed
+authoritative boundaries.
+
+---
+
 ## 4. Architectural Principle
 
 The primary rule is:
