@@ -10,8 +10,11 @@
 //   1. **过期的动作要拿到冲突，而不是被本地拦下。** 另一个标签页把世界关了
 //      之后，这里的"存一次"按钮可能还亮着 —— 点下去会拿到 409，然后刷新。
 //      本地拦截会让 UI 看起来对、实际上在按一份过期的假设做决定。
-//   2. **慢响应不许覆盖新结果。** 一次列表请求可能比它之后发出的操作还晚
-//      回来。序号一比就丢掉，否则后台会闪回旧状态。
+//   2. **慢的列表响应不许覆盖新的，但它也不许株连操作结果。** 这两件事各有
+//      各的时序，必须分开管：列表回答"某一刻的世界长什么样"，会过期；操作
+//      结果回答"操作者刚才按下的那一下得到了什么答复"，不会过期。共用一个
+//      序号的话，先回来的那次操作触发的刷新会把后回来的那次操作的成功/失败
+//      直接吞掉 —— 一次 close 失败就这么从屏幕上消失了。
 //   3. **关闭要确认。** 它会停掉一个正在跑的世界。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -69,7 +72,11 @@ export default function PersistentWorlds() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, Action | undefined>>({});
-  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  // 每个世界一条自己的反馈，外加建世界表单那一条。用一张表而不是一个格子：
+  // 同时对两个世界动手时，先回来的那条结果不该被后回来的挤掉 —— 它们回答的
+  // 是两个不同的问题。
+  const [rowFeedback, setRowFeedback] = useState<Record<string, Feedback>>({});
+  const [createFeedback, setCreateFeedback] = useState<Feedback | null>(null);
 
   const [scenes, setScenes] = useState<SceneOption[]>([]);
   const [characterPool, setCharacterPool] = useState<string[]>([]);
@@ -77,11 +84,20 @@ export default function PersistentWorlds() {
   const [newScene, setNewScene] = useState('');
   const [newCharacters, setNewCharacters] = useState<string[]>([]);
 
-  // 每次拉取/操作领一个序号。回来的时候序号已经不是最新的，就说明期间发生过
-  // 更新的事，这份结果直接丢掉。
-  const sequence = useRef(0);
+  // 列表请求的顺序票。**只**管列表：拿回来的票不是最新的，就说明这份列表
+  // 描述的是一个已经过时的时刻，丢掉。
+  //
+  // 操作结果**不**参与这个比较，这一条是要害。操作结果不是"某一刻的世界长
+  // 什么样"，而是"操作者刚才按下的那一下得到了什么答复"——它没有过期一说。
+  // 早先把两者共用一个序号，会导致：A 先回来 → A 的 finally 触发刷新 → 序号
+  // 前进 → B 回来时发现票过期，于是把自己那条成功/失败**丢掉**。一次
+  // checkpoint 或 close 的失败就这么从操作反馈区消失了。
+  const listSequence = useRef(0);
   // 已卸载之后不再 setState。
   const alive = useRef(true);
+  // 在飞的操作。用 ref 而不是只看 state：重复提交保护要在**事件发生的那一刻**
+  // 成立，而 state 要等重渲染才更新。
+  const inFlight = useRef<Set<string>>(new Set());
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -89,16 +105,20 @@ export default function PersistentWorlds() {
     };
   }, []);
 
+  /** 让所有在飞的列表请求作废。操作开始时也要叫一次：它们带回来的数据
+   *  描述的是这次操作**之前**的世界。 */
+  const invalidateList = () => ++listSequence.current;
+
   const refresh = useCallback(() => {
-    const ticket = ++sequence.current;
+    const ticket = invalidateList();
     fetchPersistentWorlds()
       .then((data) => {
-        if (!alive.current || ticket !== sequence.current) return;
+        if (!alive.current || ticket !== listSequence.current) return;
         setWorlds(data.worlds);
         setLoadError(null);
       })
       .catch((e: unknown) => {
-        if (!alive.current || ticket !== sequence.current) return;
+        if (!alive.current || ticket !== listSequence.current) return;
         setLoadError(describe(e, '加载持久世界列表失败'));
       });
   }, []);
@@ -128,6 +148,20 @@ export default function PersistentWorlds() {
       .catch(() => undefined);
   }, [refresh]);
 
+  /** 把一条反馈放进它该去的格子：建世界那条留在表单里，其余的挂在对应的行上。 */
+  const report = (key: string, worldId: string, note: Feedback | null) => {
+    if (key === CREATE_KEY) {
+      setCreateFeedback(note);
+      return;
+    }
+    setRowFeedback((current) => {
+      const next = { ...current };
+      if (note === null) delete next[worldId];
+      else next[worldId] = note;
+      return next;
+    });
+  };
+
   const run = (
     key: string,
     action: Action,
@@ -137,21 +171,30 @@ export default function PersistentWorlds() {
     onOk?: () => void,
   ) => {
     // 重复提交保护：同一个按钮在飞的时候，第二次点击什么都不做。
-    if (pending[key]) return;
+    if (inFlight.current.has(key)) return;
+    inFlight.current.add(key);
     setPending((current) => ({ ...current, [key]: action }));
-    setFeedback(null);
-    const ticket = ++sequence.current;
+    // 只清掉这一格的旧反馈。别的世界那条是别的问题的答案，跟这次无关。
+    report(key, worldId, null);
+    // 这次操作会改变世界，所以在飞的列表请求全部作废 —— 它们描述的是操作
+    // 之前的样子。注意这里**不**给自己领票：操作结果不参与列表的新旧比较。
+    invalidateList();
     call()
       .then((status) => {
-        if (!alive.current || ticket !== sequence.current) return;
-        setFeedback({ worldId, kind: 'ok', message: okText(status) });
+        if (!alive.current) return;
+        report(key, worldId, { worldId, kind: 'ok', message: okText(status) });
         onOk?.();
       })
       .catch((e: unknown) => {
-        if (!alive.current || ticket !== sequence.current) return;
-        setFeedback({ worldId, kind: 'error', message: describe(e, '操作失败') });
+        if (!alive.current) return;
+        report(key, worldId, {
+          worldId,
+          kind: 'error',
+          message: describe(e, '操作失败'),
+        });
       })
       .finally(() => {
+        inFlight.current.delete(key);
         if (!alive.current) return;
         setPending((current) => {
           const next = { ...current };
@@ -219,9 +262,6 @@ export default function PersistentWorlds() {
     );
 
   const creating = pending[CREATE_KEY] !== undefined;
-  const listed = new Set((worlds ?? []).map((world) => world.world_id));
-  // 失败的创建没有对应的行，它的反馈就留在表单里。
-  const formFeedback = feedback && !listed.has(feedback.worldId) ? feedback : null;
 
   return (
     <div className="worlds">
@@ -292,8 +332,10 @@ export default function PersistentWorlds() {
             world_id 只允许小写字母、数字和 . _ -，而且创建不会覆盖已经存在的存档。
           </span>
         </div>
-        {formFeedback ? (
-          <div className={`worlds-feedback ${formFeedback.kind}`}>{formFeedback.message}</div>
+        {createFeedback ? (
+          <div className={`worlds-feedback ${createFeedback.kind}`}>
+            {createFeedback.message}
+          </div>
         ) : null}
       </form>
 
@@ -306,7 +348,7 @@ export default function PersistentWorlds() {
           {worlds.map((world) => {
             const state = summarize(world);
             const isOpen = expanded === world.world_id;
-            const note = feedback && feedback.worldId === world.world_id ? feedback : null;
+            const note = rowFeedback[world.world_id] ?? null;
             const busy = (action: Action) => pending[`${world.world_id}:${action}`] !== undefined;
             return (
               <li key={world.world_id} className="worlds-item">
