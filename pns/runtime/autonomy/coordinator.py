@@ -453,7 +453,9 @@ class AutonomousRuntime:
 
         return self._record(self._commit(due, plan, attempt, as_failure=exhausted))
 
-    def process_pending(self) -> Tuple[ActivationResult, ...]:
+    def process_pending(
+        self, max_results: Optional[int] = None
+    ) -> Tuple[ActivationResult, ...]:
         """把投递箱里还没评估的到期资格按触发顺序处理掉。
 
         停机之后剩下的那些原样留在待处理 —— 处理它们的是恢复之后的下一个
@@ -461,11 +463,21 @@ class AutonomousRuntime:
 
         已经被别的线程拿在手上的那条会被**跳过**，不会让这一轮抛错中断：
         它没有丢，正有人在处理它，而这一轮的返回值只报告"这次调用真的处理
-        了哪些"。点名处理某一条（process_due）则仍然响亮拒绝 —— 调用方要的
-        就是那一条，静默跳过会让它以为处理过了。
+        了哪些"。`max_results` 只限制本次真正处理的条数，剩余记录继续待办。
+        点名处理某一条（process_due）则仍然响亮拒绝 —— 调用方要的就是那一
+        条，静默跳过会让它以为处理过了。
         """
+        if max_results is not None:
+            if (
+                isinstance(max_results, bool)
+                or not isinstance(max_results, int)
+                or max_results < 0
+            ):
+                raise AutonomyError("max_results 必须是非负整数或 None")
         results = []
         for due in self._agency.pending_due():
+            if max_results is not None and len(results) >= max_results:
+                break
             with self._gate:
                 if not self._running:
                     break
@@ -479,7 +491,7 @@ class AutonomousRuntime:
         return tuple(results)
 
     # ── 推进模拟时钟 ────────────────────────────────────────────────────
-    def advance(self, minutes: int) -> Dict:
+    def advance(self, minutes: int, *, max_results: Optional[int] = None) -> Dict:
         """把模拟时间往前推，并处理这段时间里到期的一切。
 
         时间推进本身是调度器的事务（时钟 + 世界历史 + 队列 + 投递箱同生
@@ -488,7 +500,11 @@ class AutonomousRuntime:
         with self._gate:
             self._require_running("推进模拟时钟")
             tick = self._scheduler.advance_by(minutes)
-        return self._tick_report(tick)
+        # 保留既有的 `_tick_report(tick)` 调用形状：生命周期并发测试会替换这条
+        # 内部缝来精确停在“推进后、处理前”。只有驱动真的交了额度时才扩展参数。
+        if max_results is None:
+            return self._tick_report(tick)
+        return self._tick_report(tick, max_results=max_results)
 
     def advance_to_next_due(self) -> Optional[Dict]:
         """推进到下一条排期到期的那一刻；队列为空就返回 None，不动时钟。"""
@@ -499,8 +515,8 @@ class AutonomousRuntime:
                 return None
         return self._tick_report(tick)
 
-    def _tick_report(self, tick) -> Dict:
-        results = self.process_pending()
+    def _tick_report(self, tick, *, max_results: Optional[int] = None) -> Dict:
+        results = self.process_pending(max_results=max_results)
         return {
             "from_clock": tick.from_clock.isoformat(),
             "to_clock": tick.to_clock.isoformat(),

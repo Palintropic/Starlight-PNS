@@ -362,12 +362,11 @@ class WorldDriver:
             self._finish("runtime_stopped")
             return False
 
-        # 两道花费边界，在**一轮开始之前**判 —— 判完再进 tick 的话，这一轮
-        # 已经在花钱了。它们都不打断已经开始的那一轮：撕开一次处理会留下
-        # 半截事务，比多花一轮严重得多。所以实际用量至多超出最后一轮那几条，
-        # 这一点写在 status 里（used 会大于 limit），不假装没发生。
+        # 两道花费边界，在**一轮开始之前**判，并把这一轮能处理的条数一起交给
+        # 协调器。已经开始处理的单条不会被撕开；超出额度的其余待办留在 outbox。
         with self._lock:
-            if self._processed >= self._config.max_activations_per_run:
+            run_remaining = self._config.max_activations_per_run - self._processed
+            if run_remaining <= 0:
                 self._finish_locked(EXIT_RUN_BUDGET)
                 return False
         actions = self._world_actions()
@@ -375,10 +374,23 @@ class WorldDriver:
             self._finish(EXIT_WORLD_CAP)
             return False
 
+        # 一轮只能交出两道额度里更小的那一份。超过的到期记录原样留在 outbox，
+        # 等下一次显式 Start；不能把整批交给 Agency 再让后半批变成
+        # rejected_budget，因为那会把“响亮停机”退回静默拒绝。
+        allowance = run_remaining
+        if actions["remaining"] is not None:
+            allowance = min(allowance, actions["remaining"])
+
         try:
-            report = runtime.advance(self._config.tick_minutes)
+            report = runtime.advance(
+                self._config.tick_minutes, max_results=allowance
+            )
         except BaseException as e:  # noqa: BLE001 - 记下来，绝不让 worker 静默死掉
             return self._record_failure(e)
+
+        # 模型调用与权威提交已经发生，额度就在这里消费。后面的 checkpoint 是
+        # 另一条边界；磁盘失败不能把已经花掉的调用从本轮账本里抹掉。
+        self._record_processed(report)
 
         checkpointed = None
         try:
@@ -399,10 +411,6 @@ class WorldDriver:
             outcomes[key] = outcomes.get(key, 0) + 1
         with self._lock:
             self._ticks += 1
-            # 每一条被处理的到期资格都花过钱（至多一次生成 + 一次判分），
-            # 所以计的是"处理了几条"，不是"成了几条"——只算成功的话，一个
-            # 每次都被判分拒掉的世界就能无限花下去。
-            self._processed += len(results)
             self._consecutive_failures = 0
             self._last_error = None
             self._last_tick_at = datetime.now().isoformat(timespec="seconds")
@@ -417,6 +425,12 @@ class WorldDriver:
                     checkpointed.get("revision") if checkpointed else None
                 ),
             }
+
+    def _record_processed(self, report: Dict) -> None:
+        """记下已经发生的模型工作；它不依赖随后 checkpoint 是否成功。"""
+        results = report.get("results") or []
+        with self._lock:
+            self._processed += len(results)
 
     def _record_failure(self, error: BaseException) -> bool:
         """记一次失败的 tick，并回答"这个 worker 还该不该继续"。"""

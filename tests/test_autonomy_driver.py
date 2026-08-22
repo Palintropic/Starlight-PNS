@@ -640,6 +640,25 @@ class RunBudgetTests(DriverTestCase):
         self.assertGreaterEqual(driver.start()["run_budget"]["used"], used)
         self.assertGreaterEqual(driver.status()["run_budget"]["used"], used)
 
+    def test_checkpoint_failures_do_not_refund_model_work(self):
+        """落盘是另一条边界：失败不能抹掉已经发生的生成与判分。"""
+        world = self.open_world()
+        driver = self.driver(world)
+        with patch.object(
+            world,
+            "checkpoint_if_due",
+            side_effect=RuntimeError("simulated disk failure"),
+        ):
+            driver.start()
+            wait_for(
+                lambda: driver.status()["exit_reason"] == EXIT_RUN_BUDGET,
+                what="落盘持续失败时本轮额度仍然耗尽",
+            )
+        status = driver.status()
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(status["run_budget"]["used"], 2)
+        self.assertGreater(status["failures"], 0)
+
     def test_neither_a_restore_nor_a_restart_refills_the_same_round(self):
         """跑完一轮之后关掉再恢复：没有人在推，也没有一句新的台词。
 
@@ -755,6 +774,31 @@ class WorldActionCapTests(DriverTestCase):
         finally:
             roomy.drivers.stop_all("test", 5.0)
             roomy.service.release_all()
+
+
+class CollidingWorldActionCapTests(DriverTestCase):
+    """同一 tick 的整批到期也不能越过世界剩余额度。"""
+
+    # 开局两名角色分别在 +5/+10 分钟到期；一次推进 10 分钟会让两条同时待办。
+    driver_config = DriverConfig(
+        tick_minutes=10, interval_seconds=0.01, stop_timeout_seconds=1.0
+    )
+    world_action_cap = 1
+
+    def test_only_the_remaining_allowance_reaches_agency(self):
+        world = self.open_world()
+        driver = self.driver(world)
+        driver.start()
+        wait_for(
+            lambda: driver.status()["exit_reason"] == EXIT_WORLD_CAP,
+            what="一条动作填满世界上限",
+        )
+        self.assertEqual(world.state.agency.committed_actions(), 1)
+        self.assertEqual(
+            world.state.agency.for_outcome(AgencyOutcome.REJECTED_BUDGET), ()
+        )
+        # 没拿到额度的另一条仍在投递箱里，而不是被静默拒绝并确认掉。
+        self.assertEqual(len(world.state.activation_outbox.pending()), 1)
 
 
 # ── AC8 驱动状态不进存档，import 不起线程 ───────────────────────────────
