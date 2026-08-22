@@ -57,6 +57,11 @@ config.secret.py
 
 .claude/session-notes.md
 
+# ─── 持久世界存档 / 所有权锁（本地运行时数据）──────────────
+# 存档根默认在 data/worlds/，可用 PNS_WORLD_ROOT 改到别处。
+# 它装的是一个跑着的世界的权威状态和一把进程锁，不是源码。
+data/worlds/
+
 # ─── 开工/规划文档（给 CC 用，不进仓库）────────────────────
 /kickoff/
 /research/

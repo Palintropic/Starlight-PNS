@@ -2252,11 +2252,21 @@ class ResearchSessionIsUntouchedTests(unittest.TestCase):
             imported,
         )
 
+    # 唯一允许 import 持久化层的地方：WEB-1 的应用组装边界和它的 HTTP 路由。
+    # 它们的**全部**职责就是把这一层接出去，所以这条依赖是显式的产品决定，
+    # 不是顺手加的。允许清单是精确的 —— 多一个少一个都要在这里被看见。
+    PERSISTENCE_IMPORTERS = (
+        "pns/interfaces/composition.py",
+        "pns/interfaces/persistent_worlds.py",
+    )
+
     def test_nothing_in_pns_imports_the_persistence_layer(self):
         """持久化是**明确要**才有的东西。
 
         任何 pns 模块顺手 import 它，都会让"这条路会不会去拿世界锁、会不会
-        写存档根"变成一个要靠读代码才能回答的问题。
+        写存档根"变成一个要靠读代码才能回答的问题。允许清单之外一个都不许，
+        清单本身也必须每一项都真的还在 —— 否则它会随着重命名慢慢变成一张
+        谁也不看的白名单。
         """
         offenders = []
         for path in sorted((REPO_ROOT / "pns").rglob("*.py")):
@@ -2270,8 +2280,27 @@ class ResearchSessionIsUntouchedTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     names = [node.module]
                 if any("persistence" in name for name in names):
-                    offenders.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(offenders, [])
+                    offenders.append(path.relative_to(REPO_ROOT).as_posix())
+        self.assertEqual(sorted(set(offenders)), sorted(self.PERSISTENCE_IMPORTERS))
+
+    def test_the_research_and_domain_layers_stay_out_of_the_allow_list(self):
+        """允许清单只覆盖接口层的那两个文件，别的一律不许溜进来。
+
+        尤其是 /ws/run 那条路：`pns/interfaces/simulate.py` 和
+        `pns/runtime/session_runtime.py` 进了清单，就等于研究会话可以去拿
+        世界锁了。
+        """
+        for banned in (
+            "pns/interfaces/simulate.py",
+            "pns/interfaces/app.py",
+            "pns/interfaces/review.py",
+            "pns/interfaces/world.py",
+            "pns/interfaces/config.py",
+            "pns/runtime/session_runtime.py",
+        ):
+            self.assertNotIn(banned, self.PERSISTENCE_IMPORTERS)
+        for allowed in self.PERSISTENCE_IMPORTERS:
+            self.assertTrue((REPO_ROOT / allowed).is_file(), allowed)
 
     def test_a_research_session_state_owns_no_world(self):
         state = SessionState("s", "gate", ["mizuki", "ena"])
