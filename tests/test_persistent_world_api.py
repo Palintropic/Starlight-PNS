@@ -198,11 +198,13 @@ class OperatorLoopTests(WorldApiTestCase):
         status = self.client.get("/api/persistent-worlds/nightcord").json()
         self.assertTrue(status["owned"])
         self.assertEqual(status["owner"]["pid"], os.getpid())
+        # MVP-1 的产品默认：每个已完成的权威边界问一次，最快一分钟落一次盘。
+        # WEB-1 时这里是"手动 + 干净关闭"，因为那时没有任何驱动方会来问。
         self.assertEqual(
             status["policy"],
             {
-                "every_boundaries": None,
-                "min_interval_seconds": 0.0,
+                "every_boundaries": 1,
+                "min_interval_seconds": 60.0,
                 "on_close": True,
             },
         )
@@ -887,16 +889,24 @@ class AdapterTests(WorldApiTestCase):
         # 而且它没把这个 ID 用掉：修好之后照样能建。
         self.assertEqual(self.create().status_code, 201)
 
-    def test_the_default_policy_is_abstain_and_the_auditor_is_the_real_one(self):
-        """WEB-1 不塞占位策略：没有生成层的世界诚实地什么都不做。"""
+    def test_the_product_policy_is_the_real_authored_line_policy(self):
+        """MVP-1 起，产品路径上的策略是真的 —— 而且绝不退回 AbstainPolicy。
+
+        WEB-1 时这里断言的是"没有生成层就诚实地什么都不做"。现在生成层有了，
+        所以那条断言反过来：一个建出来的世界必须带着真实的
+        `AuthoredLinePolicy` + 真实生成器 + 真实判分器。悄悄退回 abstain 会
+        让操作台上的 Start 按钮宣布一件它做不到的事。
+        """
         adapters = self.plane.build_adapters(self.registry)
-        self.assertIsNone(adapters.policy_factory)
+        self.assertIsNotNone(adapters.policy_factory)
         self.assertEqual(adapters.auditor.name, "router")
+        self.assertIsNone(adapters.seed, "恢复用的适配器不该带播种器")
         world = self.plane.service.opened("nightcord")
         self.assertIsNone(world)
         self.open_world()
         engine = self.plane.service.opened("nightcord").state.agency_engine
-        self.assertEqual(engine.policy.name, "abstain")
+        self.assertEqual(engine.policy.name, "authored_line")
+        self.assertEqual(engine.policy.generator.name, "prompted")
 
 
 # ── AC8 存储失败 ─────────────────────────────────────────────────────────
@@ -1149,9 +1159,14 @@ class ExistingSurfaceTests(WorldApiTestCase):
             "/api/persistent-worlds/{world_id}/close",
         ):
             self.assertIn(expected, paths)
-        # 新前缀只多了这六条，一条不多。
+        for expected in (
+            "/api/persistent-worlds/{world_id}/autonomy/start",
+            "/api/persistent-worlds/{world_id}/autonomy/stop",
+        ):
+            self.assertIn(expected, paths)
+        # 这个前缀下只有这七条，一条不多。
         self.assertEqual(
-            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 5
+            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 7
         )
 
 
@@ -1191,20 +1206,26 @@ class StatusVocabularyTests(WorldApiTestCase):
     而不是在生产里变成一个没人看得见的空白。
     """
 
+    # `autonomy` 是组装层加的一格，**不属于** P12 的词汇：P12 不知道这台
+    # 服务器在不在推这个世界。所以它在这些比较里被显式减掉，而不是让比较
+    # 松成"包含"——松掉的话，P12 以后新加的字段又会安静地掉在地上。
+    COMPOSITION_ONLY = {"autonomy"}
+
     def test_the_response_model_matches_the_p12_status_vocabulary(self):
         self.open_world()
         live = set(self.plane.service.opened("nightcord").status())
-        self.assertEqual(set(WorldStatusModel.model_fields), live)
+        self.assertNotIn("autonomy", live, "驱动状态不该混进 P12 的状态词汇")
+        self.assertEqual(set(WorldStatusModel.model_fields) - self.COMPOSITION_ONLY, live)
 
         self.plane.close("nightcord")
-        cold = set(self.plane.status("nightcord"))
-        self.assertEqual(set(WorldStatusModel.model_fields), cold)
+        cold = set(self.plane.status("nightcord")) - self.COMPOSITION_ONLY
+        self.assertEqual(set(WorldStatusModel.model_fields) - self.COMPOSITION_ONLY, cold)
 
     def test_the_json_body_carries_the_same_keys_as_the_lifecycle_status(self):
         self.open_world()
         live = self.plane.service.opened("nightcord").status()
         body = self.client.get("/api/persistent-worlds/nightcord").json()
-        self.assertEqual(set(body), set(live))
+        self.assertEqual(set(body) - self.COMPOSITION_ONLY, set(live))
 
 
 class CreateDurabilityTests(WorldApiTestCase):

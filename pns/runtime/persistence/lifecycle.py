@@ -104,6 +104,14 @@ class RuntimeAdapters:
     memory_budget: Optional[object] = None
     retry: Optional[object] = None
     recall_budget: Optional[object] = None
+    # 只在**创建**新世界时交进来的初始排期播种器。它在第一份存档写下去之前
+    # 跑，所以它排下去的东西是这个世界与生俱来的一部分。
+    #
+    # 恢复路径**拿不到**它，而且这是一道真闸不是一句约定：restore() 见到带
+    # 播种器的适配器会响亮失败（见下面）。理由是机制性的 —— 存档里已经带着
+    # 这个世界自己的队列，恢复时再播一遍，这些角色就会每个周期被叫醒两次、
+    # 花两份 API 额度，而"多了一条排期"在状态面上跟正常世界长得一模一样。
+    seed: Optional[Callable[[SessionState], None]] = None
     name: str = "autonomy"
 
     def __post_init__(self) -> None:
@@ -111,6 +119,8 @@ class RuntimeAdapters:
             raise LifecycleError("运行时适配器必须包含一个提供 audit() 的判分器")
         if self.policy_factory is not None and not callable(self.policy_factory):
             raise LifecycleError("policy_factory 必须是可调用对象")
+        if self.seed is not None and not callable(self.seed):
+            raise LifecycleError("seed 必须是可调用对象")
 
     def bind(self, state: SessionState) -> AutonomousRuntime:
         """把服务显式绑到这份**已经恢复好**的状态上。
@@ -122,6 +132,10 @@ class RuntimeAdapters:
             raise LifecycleError("只能把服务绑在 SessionState 上")
         if state.scheduler is None:
             PersistentScheduler(state)
+        if self.seed is not None:
+            # 新世界的初始排期。它在第一份存档之前落进队列，所以要么这个世界
+            # 带着排期诞生，要么它根本没诞生 —— 没有第三种结果。
+            self.seed(state)
         policy = self.policy_factory(state) if self.policy_factory is not None else None
         if state.agency_engine is None:
             AgencyEngine(state, policy=policy, budget=self.budget)
@@ -689,6 +703,14 @@ class WorldLifecycleService:
         """
         name = validate_world_id(world_id)
         adapters = self._require_adapters(adapters)
+        if adapters.seed is not None:
+            # 恢复路径不许带播种器。存档里已经有这个世界自己的队列了，再播
+            # 一遍就是给每个角色排两条排期。这道闸放在**拿所有权之前**：
+            # 一次配错的恢复不该先把世界锁住再失败。
+            raise LifecycleError(
+                f"恢复世界 '{name}' 时不能带初始排期播种器 —— 存档里已经有"
+                "它自己的排期队列，再播一遍会让每个角色被重复激活"
+            )
         policy = self._require_policy(checkpoint_policy)
 
         self._refuse_if_open(name)

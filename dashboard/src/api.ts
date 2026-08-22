@@ -217,6 +217,75 @@ export interface WorldCheckpointPolicy {
   on_close: boolean;
 }
 
+/** 驱动的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。 */
+export interface WorldDriverCadence {
+  tick_minutes: number;
+  interval_seconds: number;
+  stop_timeout_seconds: number;
+  max_activations_per_run: number;
+}
+
+/** **这一轮** Start 的额度。用完了驱动自己停下，再按一次 Start 就重置。 */
+export interface WorldRunBudget {
+  limit: number;
+  used: number;
+  remaining: number;
+}
+
+/** 这个世界**一生**的动作用量与上限。
+ *
+ * 用量从耐久的 Agency 日志推导，所以重启和恢复都换不来新的额度。`cap` 为
+ * null 表示读不出上限（不知道），不表示没有上限。
+ */
+export interface WorldActionUsage {
+  committed: number | null;
+  cap: number | null;
+  remaining: number | null;
+}
+
+/** 上一次 tick 的样子。失败的那次只有 `failed`。 */
+export interface WorldDriverTick {
+  failed: boolean;
+  from_clock: string | null;
+  to_clock: string | null;
+  minutes: number | null;
+  due: number | null;
+  processed: number | null;
+  outcomes: Record<string, number>;
+  checkpoint_revision: number | null;
+}
+
+/** 自主驱动此刻的样子（MVP-1）。
+ *
+ * 它跟 P12 的 `running` 是两件事：`running` 说的是"这个世界的运行时还接不接受
+ * 写入"，`state` 说的是"服务器此刻在不在推它"。running=true 而 state='stopped'
+ * 就是"开着但没人推"——新建和恢复之后的默认状态，因为自动模型调用是 opt-in。
+ *
+ * `state === 'stopping'` 的意思很具体：**还没停干净**，当前那一轮仍然可能落地
+ * 一次提交。UI 不许把它显示成"已停止"。
+ */
+export interface WorldDriverStatus {
+  world_id: string;
+  state: string;
+  running: boolean;
+  stopping: boolean;
+  stopped: boolean;
+  stop_reason: string | null;
+  exit_reason: string | null;
+  ticks: number;
+  failures: number;
+  consecutive_failures: number;
+  last_error: string | null;
+  last_tick_at: string | null;
+  last_tick: WorldDriverTick | null;
+  next_due_at: string | null;
+  cadence: WorldDriverCadence;
+  /** 按 Start 重置的那道边界。 */
+  run_budget: WorldRunBudget;
+  /** 跟着世界一辈子的那道边界。 */
+  world_actions: WorldActionUsage;
+}
+
 export interface PersistentWorldStatus {
   world_id: string;
   session_id: string | null;
@@ -243,6 +312,8 @@ export interface PersistentWorldStatus {
   archive_path: string | null;
   boundaries_since_checkpoint: number | null;
   policy: WorldCheckpointPolicy | null;
+  /** `null` = 这台服务器从来没为这个世界起过驱动；跟"起过、现在停着"不是一回事。 */
+  autonomy: WorldDriverStatus | null;
 }
 
 const worldPath = (worldId: string) =>
@@ -273,3 +344,11 @@ export const checkpointPersistentWorld = (worldId: string): Promise<PersistentWo
 
 export const closePersistentWorld = (worldId: string): Promise<PersistentWorldStatus> =>
   fetch(`${worldPath(worldId)}/close`, { method: 'POST' }).then((res) => json(res));
+
+/** 开始自动推这个世界。**唯一**会让服务器自己花 API 额度的入口。 */
+export const startWorldAutonomy = (worldId: string): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/autonomy/start`, { method: 'POST' }).then((res) => json(res));
+
+/** 请驱动暂停。可重启，不关闭世界。 */
+export const stopWorldAutonomy = (worldId: string): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/autonomy/stop`, { method: 'POST' }).then((res) => json(res));

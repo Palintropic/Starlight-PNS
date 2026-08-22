@@ -6,6 +6,8 @@
 #     POST /api/persistent-worlds/{world_id}/restore
 #     POST /api/persistent-worlds/{world_id}/checkpoint
 #     POST /api/persistent-worlds/{world_id}/close
+#     POST /api/persistent-worlds/{world_id}/autonomy/start
+#     POST /api/persistent-worlds/{world_id}/autonomy/stop
 #
 # 这一层只做三件事：把请求翻译成一次生命周期调用、把 P12 的状态词汇原样交出去、
 # 把失败翻译成一个稳定的类别 + 一句安全的话。它**不**判断一个世界能不能被
@@ -35,6 +37,7 @@ from pydantic import BaseModel, Field
 from pns.runtime.agency.policy import AgencyPolicyError
 from pns.runtime.autonomy.audit import AuditError
 from pns.runtime.autonomy.coordinator import AutonomyError
+from pns.runtime.autonomy.driver import DriverBusy, DriverError
 from pns.runtime.persistence import (
     ArchiveCorrupt,
     ArchiveError,
@@ -77,6 +80,86 @@ class CheckpointPolicyModel(BaseModel):
     on_close: bool = True
 
 
+class DriverCadenceModel(BaseModel):
+    """驱动的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。"""
+
+    tick_minutes: int
+    interval_seconds: float
+    stop_timeout_seconds: float
+    max_activations_per_run: int
+
+
+class RunBudgetModel(BaseModel):
+    """**这一轮** Start 的额度。用完了 worker 自己停下，再按一次 Start 重置。
+
+    它活在进程里，所以它跟"这个世界一生做过多少"是两件事 —— 后者是
+    `world_actions`，跨重启、跨恢复都成立。
+    """
+
+    limit: int
+    used: int
+    remaining: int
+
+
+class WorldActionsModel(BaseModel):
+    """这个世界**一生**的动作用量与上限。
+
+    用量从耐久的 Agency 日志推导，所以重启和恢复都换不来新的额度。`cap`
+    为 null 表示读不出上限（不知道），不表示没有上限 —— 硬闸始终在引擎里。
+    """
+
+    committed: Optional[int] = None
+    cap: Optional[int] = None
+    remaining: Optional[int] = None
+
+
+class DriverTickModel(BaseModel):
+    """上一次 tick 的样子。失败的那次只有 `failed`。"""
+
+    failed: bool = False
+    from_clock: Optional[str] = None
+    to_clock: Optional[str] = None
+    minutes: Optional[int] = None
+    due: Optional[int] = None
+    processed: Optional[int] = None
+    outcomes: Dict[str, int] = Field(default_factory=dict)
+    checkpoint_revision: Optional[int] = None
+
+
+class DriverStatusModel(BaseModel):
+    """自主驱动此刻的样子。
+
+    它跟 P12 的 `running` 是**两件事**，而且这个区分必须保住：`running` 说的
+    是"这个世界的运行时还接不接受写入"，`state` 说的是"这台服务器此刻在不在
+    推它"。一个 running=True 而 state=stopped 的世界就是"开着但没人推"——
+    那正是新建和恢复之后的默认状态，因为自动模型调用是 opt-in 的。
+    """
+
+    world_id: str
+    # running / stopping / stopped。stopping 的意思很具体：**还没停干净**，
+    # 当前那次 tick 可能仍会落地一次提交。
+    state: str
+    running: bool
+    stopping: bool
+    stopped: bool
+    stop_reason: Optional[str] = None
+    # worker 自己收摊的原因（世界关了、运行时终局停机了）。
+    exit_reason: Optional[str] = None
+    ticks: int = 0
+    failures: int = 0
+    consecutive_failures: int = 0
+    last_error: Optional[str] = None
+    last_tick_at: Optional[str] = None
+    last_tick: Optional[DriverTickModel] = None
+    # 下一条排期到期的**模拟**时刻。
+    next_due_at: Optional[str] = None
+    cadence: DriverCadenceModel
+    # 两道花费边界，分开报，因为它们是两件不同的事：一道按 Start 重置，
+    # 一道跟着这个世界一辈子。
+    run_budget: RunBudgetModel
+    world_actions: WorldActionsModel
+
+
 class WorldStatusModel(BaseModel):
     """一个世界此刻的样子。字段含义与 P12 `PersistentWorld.status()` 一致。
 
@@ -114,6 +197,9 @@ class WorldStatusModel(BaseModel):
     archive_path: Optional[str] = None
     boundaries_since_checkpoint: Optional[int] = None
     policy: Optional[CheckpointPolicyModel] = None
+    # 本进程有没有在推这个世界。`null` 的意思是**从来没为它起过驱动**，
+    # 跟"起过、现在停着"不是一回事 —— 后者还带着上一次 tick 的错误。
+    autonomy: Optional[DriverStatusModel] = None
 
 
 class WorldListModel(BaseModel):
@@ -173,6 +259,12 @@ def _translate(
         return _error(400, "invalid_content", e)
     if isinstance(e, AdaptersUnavailable):
         return _error(503, "adapters_unavailable", e)
+    if isinstance(e, DriverBusy):
+        # 上一个 worker 还没走干净。这不是"已经在跑"（那是幂等成功），
+        # 是说不清 —— 所以它必须是一次失败，让操作者再等一下重试。
+        return _error(409, "autonomy_busy", e)
+    if isinstance(e, DriverError):
+        return _error(409, "autonomy_refused", e)
     if isinstance(e, WorldAlreadyOwned):
         return _error(409, "world_already_open", e)
     if isinstance(e, OwnershipUnsupported):
@@ -211,7 +303,12 @@ def _translate(
             try:
                 if op == "create" and plane.store.exists(world_id):
                     return _error(409, "archive_already_exists", e)
-                if op in ("checkpoint", "close") and (
+                if op in (
+                    "checkpoint",
+                    "close",
+                    "autonomy_start",
+                    "autonomy_stop",
+                ) and (
                     plane.service.opened(world_id) is None
                 ):
                     return _error(409, "world_not_open", e)
@@ -308,6 +405,41 @@ def checkpoint_persistent_world(
     """
     with _translated(plane, "checkpoint", world_id):
         return _status(plane.checkpoint(world_id))
+
+
+@router.post("/{world_id}/autonomy/start", response_model=WorldStatusModel)
+def start_world_autonomy(
+    world_id: str, plane: WorldControlPlane = Depends(get_control_plane)
+):
+    """开始自动推这个世界的时间。
+
+    这是**唯一**一个会让服务器自己开始花 API 额度的入口，所以它是显式的：
+    建世界、恢复世界、重启进程都不会替操作者按下它。
+
+    幂等：已经在跑的驱动再启动一次，返回同一份状态，不会出现第二个 worker。
+    上一次停机还没停干净时是 409 `autonomy_busy` —— 那一档说不清，而说不清
+    不能报成成功。
+    """
+    with _translated(plane, "autonomy_start", world_id):
+        return _status(plane.start_autonomy(world_id))
+
+
+@router.post("/{world_id}/autonomy/stop", response_model=WorldStatusModel)
+def stop_world_autonomy(
+    world_id: str, plane: WorldControlPlane = Depends(get_control_plane)
+):
+    """请驱动暂停，并有界地等当前这一次 tick 落定。
+
+    它是**可重启的暂停**，不是关闭：世界仍然开着、仍然属于本进程，P11 的
+    运行时也仍然接受写入（`running` 不变）。稍后可以再 Start。
+
+    返回的 `autonomy.state` 有两种可能，而且区分是要害：`stopped` 表示当前
+    tick 已经整个结束、之后不会再有；`stopping` 表示等超时了 —— 那次 tick
+    还在跑（多半卡在一次模型调用上），它仍然可能落地一次提交。这时**不**谎称
+    已经停了。
+    """
+    with _translated(plane, "autonomy_stop", world_id):
+        return _status(plane.stop_autonomy(world_id))
 
 
 @router.post("/{world_id}/close", response_model=WorldStatusModel)

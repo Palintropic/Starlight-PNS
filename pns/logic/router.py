@@ -326,11 +326,18 @@ def judge(
             "evaluator_model": model,
             "evaluator_provider": evaluator_provider,
         }
-    except Exception as e:
-        print(f"[Router] ❌ 调用失败: {e}")
+    except Exception:
+        # 这个客户端**收到过 API Key**，所以从它出来的异常是不可信数据：
+        # 消息里可能带着 key（"provider rejected sk-…" 是真实形状），类型名
+        # 同样可能就是那把 key（`type(api_key, (RuntimeError,), {})` 是合法
+        # Python）。所以这里既不打印原文，也不把它放进返回值 —— 返回值会被
+        # 写进 drift_scores.jsonl 和归档。判分失败本身仍然如实报告：
+        # drift_type=error + needs_human_review=True + dimensions_complete=False，
+        # 自主路径上那份组合就是"不接受"（见 pns/runtime/autonomy/audit.py）。
+        print("[Router] ❌ 判分调用失败（异常原文不外传：它可能带着凭据）")
         return {
             "character": character, "drift_score": 0, "confidence": 0.0,
-            "drift_type": "error", "reason": str(e), "is_ooc": False,
+            "drift_type": "error", "reason": "判分调用失败", "is_ooc": False,
             "needs_human_review": True, "correction": None,
             "dimensions": _normalize_dimensions(None)[0],
             "dimensions_complete": False,

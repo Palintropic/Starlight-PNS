@@ -13,6 +13,17 @@ from pns.world.characters import registry as character_registry
 import pns.logic.router as router_mod
 
 
+class GenerationTruncated(ValueError):
+    """模型在说完之前撞到了 max_tokens。
+
+    它单独成一类，是因为后果跟"调用失败"完全不同：调用失败什么都没拿到，
+    而这一档**拿到了半句话**——而且那半句话看起来跟一句完整的话一模一样。
+    把它当成一句台词提交，就是让角色说了一句它没说完的话，然后这句话变成
+    世界真相、被别人观察到、被记进记忆。所以这里响亮失败，不截断也不将就
+    （跟 parse_line() 拒绝超长输出是同一条规矩）。
+    """
+
+
 def _strip_prefix(text: str, char_name: str) -> str:
     prefix = char_name + "："
     while text.startswith(prefix):
@@ -20,19 +31,25 @@ def _strip_prefix(text: str, char_name: str) -> str:
     return text
 
 
-async def call_character_async(
+def call_character(
     client, character: str, history: list, context, model: str,
     max_tokens: int, temperature: float, correction: str = None,
     *, registry=None,
 ) -> str:
-    """调用角色模型。
+    """调用角色模型（同步）。
 
-    context 是权威的 WorldState（新路径）或遗留 scene dict（兼容路径）；
-    两种都只被渲染成提示词文本，不反向影响世界状态。
+    context 是权威的 WorldState（新路径）、角色作用域的世界投影（自主路径），
+    或遗留 scene dict（兼容路径）；三种都只被渲染成提示词文本，不反向影响
+    世界状态。
 
     registry 是本次会话锁定的 ContentRegistry 快照：提示词文本和 provider 设定
     都从它取，所以会话跑到一半有人重载配置，这一路调用不会串到新配置上去。
     传 None 走遗留路径（直接读磁盘上的角色包），只给还没迁移的调用方用。
+
+    这是**唯一**一处按 provider 分支调用生成模型的地方：研究会话走
+    call_character_async()，自主路径由 pns/interfaces/composition.py 接给
+    pns/runtime/autonomy/prompt.py 的生成适配器 —— 两条路进来的都是这个函数。
+    多写一份分支就会出现"一条路修好了、另一条还在用旧写法"。
     """
     use_compat = "flash-lite" in model.lower()
     if registry is not None:
@@ -50,29 +67,50 @@ async def call_character_async(
     if correction:
         system += f"\n\n【注意】{correction}"
 
-    loop = asyncio.get_event_loop()
-
     api_format = registry.models.api_format if registry is not None else router_mod.API_FORMAT
 
-    def _call():
-        if api_format == "openai":
-            oai_history = [{"role": "system", "content": system}] + history
-            response = client.chat.completions.create(
-                model=model, max_tokens=max_tokens, temperature=temperature,
-                messages=oai_history,
+    if api_format == "openai":
+        oai_history = [{"role": "system", "content": system}] + history
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens, temperature=temperature,
+            messages=oai_history,
+        )
+        choice = response.choices[0]
+        content = choice.message.content
+        if not content:
+            raise ValueError(f"API返回空内容，finish_reason: {choice.finish_reason}")
+        if getattr(choice, "finish_reason", None) == "length":
+            raise GenerationTruncated(
+                f"模型在 max_tokens={max_tokens} 处被截断，这一句没说完"
             )
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError(f"API返回空内容，finish_reason: {response.choices[0].finish_reason}")
-            return _strip_prefix(content.strip(), char_name)
-        else:
-            response = client.messages.create(
-                model=model, max_tokens=max_tokens, temperature=temperature,
-                system=system, messages=history,
+        return _strip_prefix(content.strip(), char_name)
+    else:
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens, temperature=temperature,
+            system=system, messages=history,
+        )
+        text = _strip_prefix(router_mod.extract_anthropic_text(response), char_name)
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise GenerationTruncated(
+                f"模型在 max_tokens={max_tokens} 处被截断，这一句没说完"
             )
-            return _strip_prefix(router_mod.extract_anthropic_text(response), char_name)
+        return text
 
-    return await loop.run_in_executor(None, _call)
+
+async def call_character_async(
+    client, character: str, history: list, context, model: str,
+    max_tokens: int, temperature: float, correction: str = None,
+    *, registry=None,
+) -> str:
+    """call_character() 的异步包装：模型调用挪到线程池，事件循环不被阻塞。"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: call_character(
+            client, character, history, context, model,
+            max_tokens, temperature, correction, registry=registry,
+        ),
+    )
 
 
 async def judge_async(
