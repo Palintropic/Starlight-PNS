@@ -3,11 +3,12 @@ import ReviewDashboard from './ReviewDashboard';
 import WorldEditor from './world/WorldEditor';
 import SetupWizard from './SetupWizard';
 import ConfigReload from './ConfigReload';
+import PersistentWorlds from './PersistentWorlds';
 import Simulate from './Simulate';
 import { fetchConfig, type ConfigStatus } from './api';
 import './App.css';
 
-type Tab = 'simulate' | 'review' | 'world';
+type Tab = 'simulate' | 'review' | 'world' | 'worlds';
 
 function App() {
   const [tab, setTab] = useState<Tab>('simulate');
@@ -54,10 +55,21 @@ function App() {
         <button className={`tab-btn ${tab === 'world' ? 'active' : ''}`} onClick={() => setTab('world')}>
           World Editor
         </button>
+        <button className={`tab-btn ${tab === 'worlds' ? 'active' : ''}`} onClick={() => setTab('worlds')}>
+          持久世界
+        </button>
         <ConfigReload />
       </nav>
       <div className="shell-body">
-        {tab === 'simulate' ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : <WorldEditor />}
+        {tab === 'simulate' ? (
+          <Simulate />
+        ) : tab === 'review' ? (
+          <ReviewDashboard />
+        ) : tab === 'world' ? (
+          <WorldEditor />
+        ) : (
+          <PersistentWorlds />
+        )}
       </div>
     </div>
   );

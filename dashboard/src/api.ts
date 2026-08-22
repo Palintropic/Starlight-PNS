@@ -1,10 +1,54 @@
 import type { Decision, DecisionMap, DecisionValue, Turn } from './types';
 import type { FactsResponse, ScenesMap } from './world/types';
 
+/** 一次失败的请求。`category` 是后端给的稳定类别，UI 可以据此决定说什么。 */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly category: string | null;
+
+  constructor(message: string, status: number, category: string | null) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.category = category;
+  }
+}
+
+/** 从 FastAPI 的 `detail` 里取一句能给人看的话。
+ *
+ * detail 有三种形状，三种都要认：旧路由给字符串；持久世界路由给
+ * `{category, message}`；请求体校验失败给一个数组。认不出来就退回状态行，
+ * 绝不把 `[object Object]` 摆到后台上。
+ */
+function describe(detail: unknown): { message: string | null; category: string | null } {
+  if (typeof detail === 'string' && detail) return { message: detail, category: null };
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) =>
+        item && typeof item === 'object' && typeof (item as { msg?: unknown }).msg === 'string'
+          ? (item as { msg: string }).msg
+          : null,
+      )
+      .filter((part): part is string => part !== null);
+    return { message: parts.length ? parts.join('；') : null, category: 'invalid_request' };
+  }
+  if (detail && typeof detail === 'object') {
+    const record = detail as { message?: unknown; category?: unknown };
+    return {
+      message: typeof record.message === 'string' ? record.message : null,
+      category: typeof record.category === 'string' ? record.category : null,
+    };
+  }
+  return { message: null, category: null };
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
+    // 服务器出错时正文不一定是 JSON（代理的 502、断掉的连接、静态兜底页）。
+    // 解析失败就用状态行，别让一次 SyntaxError 盖住真正的错误。
     const body = await res.json().catch(() => null);
-    throw new Error((body && body.detail) || `${res.status} ${res.statusText}`);
+    const { message, category } = describe(body && (body as { detail?: unknown }).detail);
+    throw new ApiError(message || `${res.status} ${res.statusText}`, res.status, category);
   }
   return res.json() as Promise<T>;
 }
@@ -151,3 +195,81 @@ export const fetchReloadStatus = (): Promise<ReloadStatus> =>
 
 export const reloadConfig = (): Promise<ReloadResult> =>
   fetch('/api/config/reload', { method: 'POST' }).then((res) => json(res));
+
+// ─── 持久世界（WEB-1）──────────────────────────────────────────────────
+//
+// 字段名与后端 P12 的状态词汇一一对应，一个都不为了 UI 好看而改名。
+// `null` 与 `false` 不是一回事：本进程没开着的世界，它的 running / dirty /
+// clean 是**不知道**（null），不是"否"。
+
+export interface WorldOwner {
+  world_id: string;
+  pid: number;
+  host: string;
+  acquired_at: string;
+  renewed_at: string;
+  state: string;
+}
+
+export interface WorldCheckpointPolicy {
+  every_boundaries: number | null;
+  min_interval_seconds: number;
+  on_close: boolean;
+}
+
+export interface PersistentWorldStatus {
+  world_id: string;
+  session_id: string | null;
+  revision: number | null;
+  durable_revision: number | null;
+  dirty: boolean | null;
+  closed: boolean | null;
+  clean: boolean | null;
+  /** 本进程此刻持有这个世界。它不回答"别的进程是不是拥有它"。 */
+  owned: boolean;
+  owner: WorldOwner | null;
+  /** 上一个拥有者**崩掉**时留下的记录；干净释放过的世界这里是 null。 */
+  recovered_from: WorldOwner | null;
+  last_saved_at: string | null;
+  last_checkpoint_reason: string | null;
+  durable: boolean | null;
+  directory_synced: boolean | null;
+  last_error: string | null;
+  error: string | null;
+  residue: string[];
+  running: boolean | null;
+  stop_reason: string | null;
+  clock: string | null;
+  archive_path: string | null;
+  boundaries_since_checkpoint: number | null;
+  policy: WorldCheckpointPolicy | null;
+}
+
+const worldPath = (worldId: string) =>
+  `/api/persistent-worlds/${encodeURIComponent(worldId)}`;
+
+export const fetchPersistentWorlds = (): Promise<{ worlds: PersistentWorldStatus[] }> =>
+  fetch('/api/persistent-worlds').then((res) => json(res));
+
+export const fetchPersistentWorld = (worldId: string): Promise<PersistentWorldStatus> =>
+  fetch(worldPath(worldId)).then((res) => json(res));
+
+export const createPersistentWorld = (
+  worldId: string,
+  scene: string,
+  characters: string[],
+): Promise<PersistentWorldStatus> =>
+  fetch('/api/persistent-worlds', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ world_id: worldId, scene, characters }),
+  }).then((res) => json(res));
+
+export const restorePersistentWorld = (worldId: string): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/restore`, { method: 'POST' }).then((res) => json(res));
+
+export const checkpointPersistentWorld = (worldId: string): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/checkpoint`, { method: 'POST' }).then((res) => json(res));
+
+export const closePersistentWorld = (worldId: string): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/close`, { method: 'POST' }).then((res) => json(res));
