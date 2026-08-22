@@ -218,8 +218,18 @@ class WorldControlPlane:
         try:
             client = self._client_factory(api_key, settings=models)
         except Exception as e:
+            # 这个工厂**收到过 API Key**，所以它抛出来的话里可能原样带着那把
+            # key —— "provider rejected sk-…" 是真实会发生的形状。而这句话会
+            # 一路走到 503 的响应正文里，那就等于把凭据发给了浏览器。
+            #
+            # 所以对外只留异常的**类型名**：它足够让人知道是网络、配置还是
+            # 依赖缺失，而类型名不可能装得下一把 key。原始异常留在 __cause__
+            # 里，谁在服务器侧调试谁自己去看，不经过这条边界。
+            #
+            # 同理，这里也刻意不打日志：把原文打出去只是换个地方泄漏。
             raise AdaptersUnavailable(
-                f"判分模型客户端建不起来: {type(e).__name__}: {e}"
+                f"判分模型客户端建不起来（{type(e).__name__}）；"
+                "请检查服务器侧的 provider 与凭据配置"
             ) from e
 
         def judge(request: AuditRequest) -> object:

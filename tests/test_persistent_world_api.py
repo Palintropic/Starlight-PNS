@@ -61,6 +61,9 @@ from pns.runtime.reload import BOUNDARY  # noqa: E402
 
 SCENE = "nightcord"
 CHARACTERS = ["mizuki", "ena"]
+# 一把只在测试里存在、形状独一无二的"凭据"。任何一条响应里出现它，都说明
+# 服务器侧的 API Key 从某条路径漏到了浏览器。
+CANARY = "CANARY-SECRET-6f3a9c2e-DO-NOT-LEAK"
 
 
 class _FakeModelClient:
@@ -130,6 +133,14 @@ class WorldApiTestCase(unittest.TestCase):
 
     def category(self, response):
         return self.detail(response)["category"]
+
+    def assert_no_canary(self, response):
+        """整条响应里都不许出现那把 canary —— 正文、响应头、状态行都算。"""
+        self.assertNotIn(CANARY, response.text)
+        self.assertNotIn(CANARY, response.reason_phrase or "")
+        for name, value in response.headers.items():
+            self.assertNotIn(CANARY, name)
+            self.assertNotIn(CANARY, value)
 
     def archive(self, world_id="nightcord"):
         return json.loads((self.root / world_id / "world.json").read_text("utf-8"))
@@ -690,6 +701,104 @@ class AdapterTests(WorldApiTestCase):
         self.assertEqual(self.category(response), "adapters_unavailable")
         self.assertFalse(self.root.exists())
         self.assertEqual(owned_world_paths(), ())
+
+    def test_a_client_factory_failure_never_reflects_the_api_key_back(self):
+        """客户端工厂**收到过** API Key，所以它抛出来的话可能原样带着那把 key。
+
+        `provider rejected sk-…` 是真实会发生的形状。这条边界只允许异常的
+        **类型名**出去 —— 类型名装不下一把 key，而原文一旦进了 503 的正文，
+        就等于把服务器侧凭据发给了浏览器。
+        """
+
+        def explode(api_key, **kwargs):
+            raise RuntimeError(f"provider rejected {api_key}")
+
+        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+            plane = WorldControlPlane(root=self.root, client_factory=explode)
+            response = TestClient(create_app(plane)).post(
+                "/api/persistent-worlds",
+                json={
+                    "world_id": "nightcord",
+                    "scene": SCENE,
+                    "characters": CHARACTERS,
+                },
+            )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.category(response), "adapters_unavailable")
+        self.assert_no_canary(response)
+        # 类型名要留着：它足够让人分辨是网络、配置还是依赖缺失。
+        self.assertIn("RuntimeError", self.detail(response)["message"])
+        # 而且这一档在拿所有权之前就断掉了。
+        self.assertFalse(self.root.exists())
+        self.assertEqual(owned_world_paths(), ())
+
+    def test_the_original_client_failure_stays_available_for_server_side_diagnosis(
+        self,
+    ):
+        """对外不说，不等于把它扔掉：原始异常留在 __cause__ 里。"""
+
+        def explode(api_key, **kwargs):
+            raise RuntimeError(f"provider rejected {api_key}")
+
+        plane = WorldControlPlane(root=self.root, client_factory=explode)
+        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+            with self.assertRaises(AdaptersUnavailable) as caught:
+                plane.build_adapters(BOUNDARY.active())
+
+        self.assertNotIn(CANARY, str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+        self.assertIn(CANARY, str(caught.exception.__cause__))
+
+    def test_no_failure_path_on_this_prefix_reflects_the_api_key(self):
+        """相邻失败路径的一次清扫。
+
+        Finding 1 修的是客户端工厂那一处，但"凭据会不会从某条错误路径漏出去"
+        不该靠每次读代码来回答。这里把这条前缀上能触发的失败挨个走一遍，断言
+        canary 一次都不出现 —— 以后谁在任何一档里插进 `{e}`，这里就会红。
+        """
+
+        def explode(api_key, **kwargs):
+            raise RuntimeError(f"provider rejected {api_key}")
+
+        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+            # 先用一个正常的工厂建出一个真实世界，再逐个撞失败路径。
+            client = self.client
+            self.open_world()
+            probes = [
+                ("重复创建", lambda: self.create()),
+                ("非法 ID", lambda: self.create(world_id="../etc")),
+                ("未知场景", lambda: self.create(world_id="other", scene="nope")),
+                (
+                    "未知角色",
+                    lambda: self.create(world_id="other", characters=["nope"]),
+                ),
+                (
+                    "恢复不存在的世界",
+                    lambda: client.post("/api/persistent-worlds/ghost/restore"),
+                ),
+                ("查不存在的世界", lambda: client.get("/api/persistent-worlds/ghost")),
+                ("列表", lambda: client.get("/api/persistent-worlds")),
+                ("状态", lambda: client.get("/api/persistent-worlds/nightcord")),
+            ]
+            for label, probe in probes:
+                with self.subTest(path=label):
+                    self.assert_no_canary(probe())
+
+            # 适配器造不出来的两条：缺凭据，以及工厂自己炸了。
+            broken = TestClient(
+                create_app(WorldControlPlane(root=self.root, client_factory=explode))
+            )
+            self.assert_no_canary(
+                broken.post(
+                    "/api/persistent-worlds",
+                    json={
+                        "world_id": "other",
+                        "scene": SCENE,
+                        "characters": CHARACTERS,
+                    },
+                )
+            )
 
     def test_a_binding_failure_after_ownership_releases_the_world_again(self):
         with patch(
