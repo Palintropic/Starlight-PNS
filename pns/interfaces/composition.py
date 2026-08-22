@@ -46,6 +46,7 @@ from uuid import uuid4
 
 import pns.logic.router as router_mod
 from pns.logic.simulation import GenerationTruncated, call_character
+from pns.models.agency import AgencyBudget, AgencyError
 from pns.models.session import SessionState
 from pns.runtime.autonomy.audit import AuditRequest, RouterAuditor
 from pns.runtime.autonomy.driver import DriverConfig, DriverError, DriverRegistry
@@ -86,11 +87,17 @@ FIRST_DELAY_ENV = "PNS_AUTONOMY_FIRST_DELAY_MINUTES"
 STAGGER_ENV = "PNS_AUTONOMY_STAGGER_MINUTES"
 MAX_TOKENS_ENV = "PNS_AUTONOMY_MAX_TOKENS"
 TEMPERATURE_ENV = "PNS_AUTONOMY_TEMPERATURE"
+ACTIVATIONS_PER_RUN_ENV = "PNS_AUTONOMY_ACTIVATIONS_PER_RUN"
+WORLD_ACTION_CAP_ENV = "PNS_AUTONOMY_WORLD_ACTION_CAP"
 
 # 一次生成能配到的 token 上限（配置的上界，不是默认值；默认 1024）。
 # 撞到这个上限**不会**变成一句被砍掉一半的台词：那种情况在
 # pns/logic/simulation.py 里响亮失败，再由这一层翻译成一次可重试的生成失败。
 MAX_GENERATION_TOKENS = 8192
+
+# 一个世界**一生**能提交多少个动作的上界（配置的上界，不是默认值）。
+# 它跟单次 Start 的额度是两件事，见 AutonomySettings.world_action_cap。
+MAX_WORLD_ACTION_CAP = 10_000_000
 
 
 class CompositionError(RuntimeError):
@@ -144,6 +151,20 @@ class AutonomySettings:
     cadence: ActivationCadence
     max_tokens: int = 1024
     temperature: float = 0.85
+    # 这个世界**一生**能提交多少个动作（P9 的 `AgencyBudget`，计数从耐久的
+    # Agency 日志推导，所以跨重启、跨恢复都成立）。
+    #
+    # P9 的默认值是 128，那个数字是给**研究会话**定的 —— 一局几十轮，128
+    # 是个宽松的安全网。持久世界的"一个会话"就是这个世界的一辈子，于是按
+    # 默认双角色节拍跑一个半小时就会撞上它，而且撞上之后每一条激活都被静静
+    # 判成 rejected_budget，恢复存档也救不回来（计数就在存档里）。那不是
+    # 安全网，那是定时哑火。
+    #
+    # 所以这里给的是一个**世界一生**尺度的数字，而"一次 Start 花多少"由
+    # `driver.max_activations_per_run` 单独管、并且按 Start 重置。这个数字
+    # 到顶时驱动会响亮停机并说明怎么解开（调高它，然后重新打开这个世界），
+    # 不会让世界在没人看得出原因的情况下永远失声。
+    world_action_cap: int = 100_000
     # 进程收尾时最多等每个驱动多少秒。比 driver.stop_timeout_seconds 短：
     # 停机不该被一次慢模型调用无限期拖住，而真正挡住"晚到的提交"的是 P11
     # 的终局 stop()，不是这次等待。
@@ -174,6 +195,21 @@ class AutonomySettings:
             raise CompositionError("shutdown_timeout_seconds 必须是数字")
         if not 0 < float(self.shutdown_timeout_seconds) <= 60:
             raise CompositionError("shutdown_timeout_seconds 必须落在 (0, 60]")
+        if isinstance(self.world_action_cap, bool) or not isinstance(
+            self.world_action_cap, int
+        ):
+            raise CompositionError(
+                f"world_action_cap 必须是整数，收到 {self.world_action_cap!r}"
+            )
+        if not 1 <= self.world_action_cap <= MAX_WORLD_ACTION_CAP:
+            raise CompositionError(
+                f"world_action_cap 必须落在 1–{MAX_WORLD_ACTION_CAP}，"
+                f"收到 {self.world_action_cap}"
+            )
+        try:
+            self.agency_budget()
+        except AgencyError as e:
+            raise CompositionError(f"世界一生的动作上限不合法：{e}") from e
 
     @classmethod
     def from_env(cls) -> "AutonomySettings":
@@ -183,6 +219,9 @@ class AutonomySettings:
                 tick_minutes=_env_number(TICK_MINUTES_ENV, 5, int),
                 interval_seconds=_env_number(INTERVAL_SECONDS_ENV, 30.0, float),
                 stop_timeout_seconds=_env_number(STOP_TIMEOUT_ENV, 10.0, float),
+                max_activations_per_run=_env_number(
+                    ACTIVATIONS_PER_RUN_ENV, 200, int
+                ),
             )
             cadence = ActivationCadence(
                 interval_minutes=_env_number(ACTIVATION_INTERVAL_ENV, 15, int),
@@ -196,7 +235,17 @@ class AutonomySettings:
             cadence=cadence,
             max_tokens=_env_number(MAX_TOKENS_ENV, 1024, int),
             temperature=_env_number(TEMPERATURE_ENV, 0.85, float),
+            world_action_cap=_env_number(WORLD_ACTION_CAP_ENV, 100_000, int),
         )
+
+    def agency_budget(self) -> AgencyBudget:
+        """这个世界的 P9 预算。**每次新造一份** —— 它是冷配置，不共享实例。
+
+        除了那条一生的动作上限，其余项一律沿用 P9 自己的默认：它们是每次
+        判断的形状预算（一次激活最多几条提案、枚举多少合法动作、喂多少条
+        观察），跟世界活多久没关系。
+        """
+        return AgencyBudget(max_committed_actions_per_session=self.world_action_cap)
 
     def to_dict(self) -> Dict:
         return {
@@ -204,6 +253,7 @@ class AutonomySettings:
             "activation": self.cadence.to_dict(),
             "max_tokens": self.max_tokens,
             "temperature": float(self.temperature),
+            "world_action_cap": self.world_action_cap,
         }
 
 
@@ -475,6 +525,9 @@ class WorldControlPlane:
                 generator_provider=models.provider,
             ),
             policy_factory=policy_factory,
+            # 世界一生的动作上限。P9 的默认 128 是给研究会话定的，用在一个
+            # 持久世界上等于给它设了个定时哑火（见 AutonomySettings）。
+            budget=self._autonomy.agency_budget(),
             seed=seed,
         )
 
@@ -653,16 +706,19 @@ class WorldControlPlane:
 
 
 __all__ = [
+    "ACTIVATIONS_PER_RUN_ENV",
     "ACTIVATION_INTERVAL_ENV",
     "DEFAULT_WORLD_ROOT",
     "FIRST_DELAY_ENV",
     "INTERVAL_SECONDS_ENV",
     "MAX_GENERATION_TOKENS",
     "MAX_TOKENS_ENV",
+    "MAX_WORLD_ACTION_CAP",
     "STAGGER_ENV",
     "STOP_TIMEOUT_ENV",
     "TEMPERATURE_ENV",
     "TICK_MINUTES_ENV",
+    "WORLD_ACTION_CAP_ENV",
     "WORLD_ROOT_ENV",
     "AdaptersUnavailable",
     "AutonomySettings",

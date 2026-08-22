@@ -217,11 +217,30 @@ export interface WorldCheckpointPolicy {
   on_close: boolean;
 }
 
-/** 驱动的节拍。服务器侧配置，浏览器只能读。 */
+/** 驱动的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。 */
 export interface WorldDriverCadence {
   tick_minutes: number;
   interval_seconds: number;
   stop_timeout_seconds: number;
+  max_activations_per_run: number;
+}
+
+/** **这一轮** Start 的额度。用完了驱动自己停下，再按一次 Start 就重置。 */
+export interface WorldRunBudget {
+  limit: number;
+  used: number;
+  remaining: number;
+}
+
+/** 这个世界**一生**的动作用量与上限。
+ *
+ * 用量从耐久的 Agency 日志推导，所以重启和恢复都换不来新的额度。`cap` 为
+ * null 表示读不出上限（不知道），不表示没有上限。
+ */
+export interface WorldActionUsage {
+  committed: number | null;
+  cap: number | null;
+  remaining: number | null;
 }
 
 /** 上一次 tick 的样子。失败的那次只有 `failed`。 */
@@ -261,6 +280,10 @@ export interface WorldDriverStatus {
   last_tick: WorldDriverTick | null;
   next_due_at: string | null;
   cadence: WorldDriverCadence;
+  /** 按 Start 重置的那道边界。 */
+  run_budget: WorldRunBudget;
+  /** 跟着世界一辈子的那道边界。 */
+  world_actions: WorldActionUsage;
 }
 
 export interface PersistentWorldStatus {

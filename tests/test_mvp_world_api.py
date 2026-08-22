@@ -61,6 +61,7 @@ class WorldApiTestCase(unittest.TestCase):
     # 默认用产品策略（每个边界问一次，最快一分钟落一次盘）。要盯自动
     # checkpoint 本身的用例把最短间隔调掉 —— 不然它得等一分钟。
     checkpoint_policy = None
+    world_action_cap = 100_000
 
     def setUp(self):
         self.registry = BOUNDARY.active()
@@ -77,6 +78,7 @@ class WorldApiTestCase(unittest.TestCase):
                 driver=TEST_DRIVER,
                 cadence=ActivationCadence(),
                 shutdown_timeout_seconds=1.0,
+                world_action_cap=self.world_action_cap,
             ),
         )
         self.app = create_app(self.plane)
@@ -317,6 +319,49 @@ class StartStopContractTests(WorldApiTestCase):
         )
         if results["close"].status_code == 200:
             self.assertFalse(self.status()["owned"])
+
+
+# ── 花费边界在操作台上看得见 ────────────────────────────────────────────
+class SpendBoundaryTests(WorldApiTestCase):
+    def test_the_status_reports_both_boundaries_separately(self):
+        self.create()
+        driver = self.start().json()["autonomy"]
+        # 一道按 Start 重置……
+        self.assertEqual(
+            driver["run_budget"]["limit"], TEST_DRIVER.max_activations_per_run
+        )
+        # ……一道跟着这个世界一辈子。
+        self.assertEqual(driver["world_actions"]["cap"], self.world_action_cap)
+        # 两个用量都不断言具体数字：worker 已经在跑了，读到几都对。要断言的
+        # 是它们**只往上走**，而且是两笔各自独立的账。
+        self.assertGreaterEqual(driver["run_budget"]["used"], 0)
+        self.assertGreaterEqual(driver["world_actions"]["committed"], 0)
+        wait_for(lambda: self.spoken() >= 1, what="至少说上一句")
+        self.stop()
+        after = self.status()["autonomy"]
+        self.assertGreater(after["run_budget"]["used"], 0)
+        self.assertGreater(after["world_actions"]["committed"], 0)
+
+
+class CappedWorldTests(WorldApiTestCase):
+    world_action_cap = 1
+
+    def test_starting_a_world_at_its_lifetime_cap_is_a_conflict_that_explains_itself(
+        self,
+    ):
+        self.create()
+        self.start()
+        wait_for(
+            lambda: self.status()["autonomy"]["exit_reason"] == "world_action_cap",
+            what="到达世界动作上限",
+        )
+        refused = self.start()
+        self.assertEqual(refused.status_code, 409, refused.text)
+        detail = self.detail(refused)
+        self.assertEqual(detail["category"], "autonomy_refused")
+        self.assertIn("一生的动作上限", detail["message"])
+        # 而且世界仍然是开着的、干净的 —— 到顶不是一次失败，是一条边界。
+        self.assertTrue(self.status()["owned"])
 
 
 # ── AC6 恢复：不重复播种，也不自己接着跑 ────────────────────────────────

@@ -76,6 +76,13 @@ function describeDriver(driver: WorldDriverStatus | null): { label: string; tone
   if (driver === null) return { label: '未启动', tone: 'dim' };
   if (driver.state === 'running') return { label: '自动推进中', tone: 'ok' };
   if (driver.state === 'stopping') return { label: '正在停止…', tone: 'warn' };
+  // 两种"花完了"必须分开说：一种再按一次 Start 就好，另一种按多少次都没用。
+  if (driver.exit_reason === 'run_budget_exhausted') {
+    return { label: '本轮额度用完', tone: 'warn' };
+  }
+  if (driver.exit_reason === 'world_action_cap') {
+    return { label: '已达世界动作上限', tone: 'ooc' };
+  }
   if (driver.last_error) return { label: '已停（上次 tick 失败）', tone: 'ooc' };
   return { label: '已停', tone: 'dim' };
 }
@@ -574,6 +581,30 @@ export default function PersistentWorlds() {
                           ? '—'
                           : `每 ${driver.cadence.interval_seconds} 秒推 ` +
                             `${driver.cadence.tick_minutes} 模拟分钟`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>本轮额度</dt>
+                      <dd>
+                        {driver === null
+                          ? '—'
+                          : `${driver.run_budget.used} / ${driver.run_budget.limit} 条激活` +
+                            (driver.exit_reason === 'run_budget_exhausted'
+                              ? '（已用完；再按一次「开始自动推进」就是新的一轮）'
+                              : '')}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>世界一生的动作</dt>
+                      <dd>
+                        {driver === null
+                          ? '—'
+                          : `${driver.world_actions.committed ?? '—'} / ` +
+                            `${driver.world_actions.cap ?? '未知'}` +
+                            (driver.exit_reason === 'world_action_cap'
+                              ? '（已到顶；这个数字跨重启和恢复都成立，'
+                                + '要接着跑得先调高服务器侧的上限，再重新打开这个世界）'
+                              : '')}
                       </dd>
                     </div>
                     <div>

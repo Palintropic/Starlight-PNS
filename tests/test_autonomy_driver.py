@@ -14,6 +14,10 @@
 #   5. 驱动状态里不出现 provider 那侧的任何东西 —— 连异常类型名都不行。
 #   6. 关闭是终局的：驱动先停、然后 P12 的 close 接管，所有权照常归还。
 #   7. 驱动是进程内操作状态，一个字节都不进存档；import 它不起线程。
+#   8. 花费有两道边界，而且它们是两件不同的事：单次 Start 的额度按 Start
+#      重置（用完了自己停下，再按一次就是新的一轮），世界一生的动作上限跨
+#      重启和恢复都成立（偷不走），而且到顶时是**响亮停机**，不是让引擎从此
+#      把每一条激活都静静判掉。
 #
 # 运行: python -m unittest tests.test_autonomy_driver -v
 import json
@@ -36,9 +40,12 @@ from pns.interfaces.composition import (  # noqa: E402
     AutonomySettings,
     WorldControlPlane,
 )
+from pns.models.agency import AgencyOutcome  # noqa: E402
 from pns.models.event import EventType  # noqa: E402
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError  # noqa: E402
 from pns.runtime.autonomy.driver import (  # noqa: E402
+    EXIT_RUN_BUDGET,
+    EXIT_WORLD_CAP,
     OPAQUE_ERROR,
     DriverBusy,
     DriverConfig,
@@ -119,6 +126,10 @@ class DriverTestCase(unittest.TestCase):
     # 默认用产品策略。要盯 checkpoint 本身的用例把最短间隔调掉。
     checkpoint_policy = None
 
+    # 覆盖它就能换一份驱动节拍/额度。
+    driver_config = TEST_DRIVER
+    world_action_cap = 100_000
+
     def setUp(self):
         self.registry = BOUNDARY.active()
         self._tmp = tempfile.TemporaryDirectory()
@@ -131,9 +142,10 @@ class DriverTestCase(unittest.TestCase):
             client_factory=lambda *a, **k: self.provider,
             checkpoint_policy=self.checkpoint_policy,
             autonomy=AutonomySettings(
-                driver=TEST_DRIVER,
+                driver=self.driver_config,
                 cadence=ActivationCadence(),
                 shutdown_timeout_seconds=1.0,
+                world_action_cap=self.world_action_cap,
             ),
         )
         self.before = set(autonomy_threads())
@@ -561,6 +573,188 @@ class BlockedCheckpointTests(DriverTestCase):
         wait_for(
             lambda: not (set(autonomy_threads()) - self.before), what="worker 退出"
         )
+
+
+# ── 花费边界 ────────────────────────────────────────────────────────────
+class RunBudgetTests(DriverTestCase):
+    """单次 Start 的额度：明确、可重置，而且刷不出来。"""
+
+    driver_config = DriverConfig(
+        tick_minutes=5,
+        interval_seconds=0.01,
+        stop_timeout_seconds=1.0,
+        max_activations_per_run=2,
+    )
+
+    def spoken(self, world):
+        return len(world.state.events.by_type(EventType.MESSAGE_SENT))
+
+    def test_a_run_stops_itself_when_its_budget_is_gone(self):
+        world = self.open_world()
+        driver = self.driver(world)
+        driver.start()
+        wait_for(
+            lambda: driver.status()["exit_reason"] == EXIT_RUN_BUDGET,
+            what="这一轮的额度用完、worker 自己收摊",
+        )
+        status = driver.status()
+        self.assertEqual(status["state"], "stopped")
+        self.assertGreaterEqual(status["run_budget"]["used"], 2)
+        self.assertEqual(status["run_budget"]["remaining"], 0)
+        # 用完了不是失败：没有错误，只是这一轮跑到头了。
+        self.assertIsNone(status["last_error"])
+        self.assertEqual(status["failures"], 0)
+
+        # 而且它真的不再推了：时间和事件都停在那儿。
+        clock = world.state.world_state.clock
+        spoken = self.spoken(world)
+        time.sleep(0.2)
+        self.assertEqual(world.state.world_state.clock, clock)
+        self.assertEqual(self.spoken(world), spoken)
+
+    def test_a_new_start_is_a_new_round_and_the_world_speaks_again(self):
+        world = self.open_world()
+        driver = self.driver(world)
+        driver.start()
+        wait_for(
+            lambda: driver.status()["exit_reason"] == EXIT_RUN_BUDGET,
+            what="第一轮额度用完",
+        )
+        spoken = self.spoken(world)
+        self.assertGreater(spoken, 0)
+
+        # 显式的新一轮：额度重新装满，世界接着说。
+        again = driver.start()
+        self.assertEqual(again["state"], "running")
+        self.assertEqual(again["run_budget"]["used"], 0)
+        self.assertIsNone(again["exit_reason"])
+        wait_for(lambda: self.spoken(world) > spoken, what="新一轮里又说上话")
+
+    def test_pressing_start_again_while_running_does_not_refill_the_round(self):
+        """幂等的 start 不许当成新一轮 —— 那等于按住 Start 就能无限花下去。"""
+        world = self.open_world()
+        driver = self.driver(world)
+        driver.start()
+        wait_for(lambda: driver.status()["run_budget"]["used"] > 0, what="花掉一条")
+        used = driver.status()["run_budget"]["used"]
+        self.assertGreaterEqual(driver.start()["run_budget"]["used"], used)
+        self.assertGreaterEqual(driver.status()["run_budget"]["used"], used)
+
+    def test_neither_a_restore_nor_a_restart_refills_the_same_round(self):
+        """跑完一轮之后关掉再恢复：没有人在推，也没有一句新的台词。
+
+        新的一轮必须由操作者显式按下 —— 这才是"可重置"和"偷刷"的区别。
+        """
+        world = self.open_world()
+        driver = self.driver(world)
+        driver.start()
+        wait_for(
+            lambda: driver.status()["exit_reason"] == EXIT_RUN_BUDGET,
+            what="这一轮额度用完",
+        )
+        spoken = self.spoken(world)
+        committed = world.state.agency.committed_actions()
+        self.plane.close("nightcord")
+
+        self.plane.restore("nightcord")
+        back = self.plane.service.opened("nightcord")
+        # 恢复本身不起驱动，所以时间不动、也不会多出一句话。
+        self.assertIsNone(self.plane.status("nightcord")["autonomy"])
+        time.sleep(0.2)
+        self.assertEqual(self.spoken(back), spoken)
+        # 世界一生的用量跟着存档回来了，一次恢复换不来新的额度。
+        self.assertEqual(back.state.agency.committed_actions(), committed)
+
+        # 显式 Start 之后才是新的一轮。
+        self.plane.start_autonomy("nightcord")
+        wait_for(lambda: self.spoken(back) > spoken, what="新一轮里又说上话")
+
+
+class WorldActionCapTests(DriverTestCase):
+    """世界一生的动作上限：到顶时响亮停机，不是从此静静判掉每一条激活。"""
+
+    driver_config = DriverConfig(
+        tick_minutes=5, interval_seconds=0.01, stop_timeout_seconds=1.0
+    )
+    world_action_cap = 2
+
+    def test_reaching_the_cap_stops_the_driver_loudly(self):
+        world = self.open_world()
+        driver = self.driver(world)
+        driver.start()
+        wait_for(
+            lambda: driver.status()["exit_reason"] == EXIT_WORLD_CAP,
+            what="到达世界动作上限、worker 自己收摊",
+        )
+        status = driver.status()
+        self.assertEqual(status["state"], "stopped")
+        self.assertEqual(status["world_actions"]["cap"], 2)
+        self.assertEqual(status["world_actions"]["committed"], 2)
+        self.assertEqual(status["world_actions"]["remaining"], 0)
+        # 关键：它是在引擎开始静默拒绝**之前**停的。
+        self.assertEqual(
+            world.state.agency.for_outcome(AgencyOutcome.REJECTED_BUDGET), ()
+        )
+
+    def test_start_is_refused_while_the_cap_is_reached(self):
+        world = self.open_world()
+        driver = self.driver(world)
+        driver.start()
+        wait_for(
+            lambda: driver.status()["exit_reason"] == EXIT_WORLD_CAP, what="到达上限"
+        )
+        with self.assertRaises(DriverError) as caught:
+            driver.start()
+        # 报错要说清楚怎么解开：这不是"再按一次就好"的那一档。
+        self.assertIn("一生的动作上限", str(caught.exception))
+        self.assertIn("重新打开", str(caught.exception))
+
+    def test_a_restore_does_not_hand_back_a_fresh_lifetime_allowance(self):
+        world = self.open_world()
+        self.driver(world).start()
+        wait_for(
+            lambda: self.driver(world).status()["exit_reason"] == EXIT_WORLD_CAP,
+            what="到达上限",
+        )
+        self.plane.close("nightcord")
+        self.plane.restore("nightcord")
+        back = self.plane.service.opened("nightcord")
+        self.assertEqual(back.state.agency.committed_actions(), 2)
+        with self.assertRaises(DriverError):
+            self.plane.start_autonomy("nightcord")
+
+    def test_raising_the_cap_and_reopening_lets_the_world_speak_again(self):
+        """上限不是死刑：调高它、重新打开这个世界，角色就能接着说。"""
+        world = self.open_world()
+        self.driver(world).start()
+        wait_for(
+            lambda: self.driver(world).status()["exit_reason"] == EXIT_WORLD_CAP,
+            what="到达上限",
+        )
+        spoken = len(world.state.events.by_type(EventType.MESSAGE_SENT))
+        self.plane.close("nightcord")
+
+        roomy = WorldControlPlane(
+            root=self.root,
+            client_factory=lambda *a, **k: self.provider,
+            autonomy=AutonomySettings(
+                driver=self.driver_config,
+                cadence=ActivationCadence(),
+                shutdown_timeout_seconds=1.0,
+                world_action_cap=50,
+            ),
+        )
+        try:
+            roomy.restore("nightcord")
+            back = roomy.service.opened("nightcord")
+            roomy.start_autonomy("nightcord")
+            wait_for(
+                lambda: len(back.state.events.by_type(EventType.MESSAGE_SENT)) > spoken,
+                what="调高上限之后又说上话",
+            )
+        finally:
+            roomy.drivers.stop_all("test", 5.0)
+            roomy.service.release_all()
 
 
 # ── AC8 驱动状态不进存档，import 不起线程 ───────────────────────────────

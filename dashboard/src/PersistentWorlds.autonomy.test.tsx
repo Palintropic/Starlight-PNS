@@ -56,7 +56,14 @@ const driver = (
     checkpoint_revision: 4,
   },
   next_due_at: '2026-08-23T02:20:00',
-  cadence: { tick_minutes: 5, interval_seconds: 30, stop_timeout_seconds: 10 },
+  cadence: {
+    tick_minutes: 5,
+    interval_seconds: 30,
+    stop_timeout_seconds: 10,
+    max_activations_per_run: 200,
+  },
+  run_budget: { limit: 200, used: 3, remaining: 197 },
+  world_actions: { committed: 3, cap: 100000, remaining: 99997 },
   ...overrides,
 });
 

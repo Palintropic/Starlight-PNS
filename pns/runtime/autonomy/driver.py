@@ -31,6 +31,17 @@
 #   6. **驱动状态里不出现 provider 那侧的任何东西，日志里也不出现。** 未预期
 #      类型的异常只留一句固定的话。理由跟 composition.py 里那段一样：异常的
 #      类型名装得下一把 API Key，而日志跟 API 响应一样是外面看得见的地方。
+#   7. **花费有两道边界，而且它们是两件不同的事。**
+#      *单次 Start 的额度*（`max_activations_per_run`）是操作边界：它活在
+#      进程里、只由一次显式 Start 重新装满，用完了 worker 自己停下并说清楚
+#      原因。它回答"我按一下 Start，最多花多少"。
+#      *世界一生的动作上限*（P9 的 `AgencyBudget`，从耐久 Agency 日志推导）
+#      是累计边界：它跨重启、跨恢复都成立，也**必须**如此，否则重启一次就能
+#      把上限再用一遍。驱动在每一轮之前拿同一个数字对一次，到了就**响亮
+#      停机**——而不是让引擎从此把每一条激活都静静判成 rejected_budget，
+#      让一个世界在没人看得出为什么的情况下永远失声。
+#      两道边界共用**一个**权威数字：世界那道直接从引擎的预算上读，驱动这边
+#      不另存一份，免得两个数字各说各话。
 #
 # 这个模块不 import 持久化层（那会跟 lifecycle → coordinator 的方向撞成一个
 # 循环），它只鸭子类型地用世界句柄的四样东西：`world_id`、`runtime`、
@@ -54,6 +65,12 @@ OPAQUE_ERROR = "驱动 tick 遇到未预期类型的错误"
 MAX_TICK_MINUTES = 24 * 60
 MAX_INTERVAL_SECONDS = 3600.0
 MAX_STOP_TIMEOUT_SECONDS = 300.0
+MAX_ACTIVATIONS_PER_RUN = 100_000
+
+# worker 自己收摊的两种"花完了"。它们是**固定的码**，会进状态投影，所以
+# 前端可以据此说人话，而不用去匹配一句会改的中文。
+EXIT_RUN_BUDGET = "run_budget_exhausted"
+EXIT_WORLD_CAP = "world_action_cap"
 
 
 class DriverError(RuntimeError):
@@ -78,6 +95,14 @@ class DriverConfig:
     interval_seconds: float = 30.0
     # 一次 stop 最多等当前 tick 落定多少**真实**秒。等不到就如实报 stopping。
     stop_timeout_seconds: float = 10.0
+    # **单次 Start** 最多处理多少条到期资格。一条至多一次生成 + 一次判分，
+    # 所以它就是这一轮 API 调用次数的上限。
+    #
+    # 它刻意只活在进程里，而且只由一次显式 Start 重新装满：这样"我按一下
+    # Start 会花多少"有一个操作者说得出口的答案，而"这个世界一生做过多少"
+    # 由 P9 那个从耐久日志推导的上限单独管（见模块头第 7 条）。用完了不是
+    # 失败，是这一轮跑到头了。
+    max_activations_per_run: int = 200
 
     def __post_init__(self) -> None:
         if isinstance(self.tick_minutes, bool) or not isinstance(
@@ -87,6 +112,17 @@ class DriverConfig:
         if not 1 <= self.tick_minutes <= MAX_TICK_MINUTES:
             raise DriverError(
                 f"tick_minutes 必须落在 1–{MAX_TICK_MINUTES}，收到 {self.tick_minutes}"
+            )
+        if isinstance(self.max_activations_per_run, bool) or not isinstance(
+            self.max_activations_per_run, int
+        ):
+            raise DriverError(
+                f"max_activations_per_run 必须是整数，收到 {self.max_activations_per_run!r}"
+            )
+        if not 1 <= self.max_activations_per_run <= MAX_ACTIVATIONS_PER_RUN:
+            raise DriverError(
+                f"max_activations_per_run 必须落在 1–{MAX_ACTIVATIONS_PER_RUN}，"
+                f"收到 {self.max_activations_per_run}"
             )
         for name, high in (
             ("interval_seconds", MAX_INTERVAL_SECONDS),
@@ -103,6 +139,7 @@ class DriverConfig:
             "tick_minutes": self.tick_minutes,
             "interval_seconds": float(self.interval_seconds),
             "stop_timeout_seconds": float(self.stop_timeout_seconds),
+            "max_activations_per_run": self.max_activations_per_run,
         }
 
 
@@ -161,6 +198,10 @@ class WorldDriver:
         self._ticks = 0
         self._failures = 0
         self._consecutive_failures = 0
+        # **这一轮**已经处理掉多少条到期资格。只有一次显式 start() 会把它归零
+        # ——幂等的第二次 start（已经在跑）走的是提前返回那条路，碰不到它，
+        # 所以反复按 Start 刷不出额度来。
+        self._processed = 0
         self._last_error: Optional[str] = None
         self._last_tick_at: Optional[str] = None
         self._last_tick: Optional[Dict] = None
@@ -205,6 +246,19 @@ class WorldDriver:
                 )
             if getattr(self._world, "closed", False):
                 raise DriverError(f"世界 '{self.world_id}' 已经关闭，不能再驱动它")
+            actions = self._world_actions_locked()
+            if actions["remaining"] is not None and actions["remaining"] <= 0:
+                # 世界一生的动作上限已经到了。这一档**不是**"这一轮花完了"：
+                # 它跨重启、跨恢复都成立（计数从耐久 Agency 日志推导），所以
+                # 再按多少次 Start 都不会变。响亮拒绝，并且说清楚怎么解开 ——
+                # 让它变成引擎里一条条静默的 rejected_budget，才是真正的
+                # "世界莫名其妙不说话了"。
+                raise DriverError(
+                    f"世界 '{self.world_id}' 已经用掉一生的动作上限"
+                    f"（{actions['committed']}/{actions['cap']}）。这个数字跨"
+                    "重启和恢复都成立；要接着跑，先调高服务器侧的上限，再重新"
+                    "打开这个世界"
+                )
             runtime = self._world.runtime
             if not runtime.running:
                 # P11 的终局停机已经发生。再起一个 worker 只会每 N 秒失败
@@ -218,6 +272,8 @@ class WorldDriver:
             self._stop_reason = None
             self._exit_reason = None
             self._alive = True
+            # 新的一轮：额度在这里、而且**只在这里**重新装满。
+            self._processed = 0
             self._spawn_locked(self._stop_event)
             return self._status_locked()
 
@@ -306,6 +362,19 @@ class WorldDriver:
             self._finish("runtime_stopped")
             return False
 
+        # 两道花费边界，在**一轮开始之前**判 —— 判完再进 tick 的话，这一轮
+        # 已经在花钱了。它们都不打断已经开始的那一轮：撕开一次处理会留下
+        # 半截事务，比多花一轮严重得多。所以实际用量至多超出最后一轮那几条，
+        # 这一点写在 status 里（used 会大于 limit），不假装没发生。
+        with self._lock:
+            if self._processed >= self._config.max_activations_per_run:
+                self._finish_locked(EXIT_RUN_BUDGET)
+                return False
+        actions = self._world_actions()
+        if actions["remaining"] is not None and actions["remaining"] <= 0:
+            self._finish(EXIT_WORLD_CAP)
+            return False
+
         try:
             report = runtime.advance(self._config.tick_minutes)
         except BaseException as e:  # noqa: BLE001 - 记下来，绝不让 worker 静默死掉
@@ -330,6 +399,10 @@ class WorldDriver:
             outcomes[key] = outcomes.get(key, 0) + 1
         with self._lock:
             self._ticks += 1
+            # 每一条被处理的到期资格都花过钱（至多一次生成 + 一次判分），
+            # 所以计的是"处理了几条"，不是"成了几条"——只算成功的话，一个
+            # 每次都被判分拒掉的世界就能无限花下去。
+            self._processed += len(results)
             self._consecutive_failures = 0
             self._last_error = None
             self._last_tick_at = datetime.now().isoformat(timespec="seconds")
@@ -366,10 +439,49 @@ class WorldDriver:
 
     def _finish(self, reason: str) -> None:
         with self._lock:
-            if self._exit_reason is None:
-                self._exit_reason = reason
+            self._finish_locked(reason)
+
+    def _finish_locked(self, reason: str) -> None:
+        """记下 worker 自己收摊的原因。调用方持着锁。第一个原因才算数。"""
+        if self._exit_reason is None:
+            self._exit_reason = reason
 
     # ── 内部 ────────────────────────────────────────────────────────────
+    def _world_actions(self) -> Dict:
+        with self._lock:
+            return self._world_actions_locked()
+
+    def _world_actions_locked(self) -> Dict:
+        """这个世界一生用掉多少动作、上限是多少。
+
+        两个数都从**权威那一侧**读，驱动不另存一份：用量来自耐久的 Agency
+        日志（所以跨重启、跨恢复都成立），上限来自引擎自己的预算（所以驱动
+        这道闸和引擎那道闸永远是同一个数字，不会各说各话）。
+
+        读不出来就返回 None 而不是猜一个数：说不清的时候不该拦住操作者，
+        真正的硬闸仍然在引擎里。
+        """
+        runtime = getattr(self._world, "runtime", None)
+        committed = None
+        cap = None
+        try:
+            committed = runtime.state.agency.committed_actions()
+            cap = runtime.agency.budget.max_committed_actions_per_session
+        except Exception:  # pragma: no cover - 读不到就当不知道
+            pass
+        remaining = None
+        if isinstance(committed, int) and isinstance(cap, int):
+            remaining = max(0, cap - committed)
+        return {"committed": committed, "cap": cap, "remaining": remaining}
+
+    def _run_budget_locked(self) -> Dict:
+        limit = self._config.max_activations_per_run
+        return {
+            "limit": limit,
+            "used": self._processed,
+            "remaining": max(0, limit - self._processed),
+        }
+
     def _reap_locked(self) -> None:
         """线程已经真的结束了就把它收掉。调用方持着锁。
 
@@ -415,6 +527,9 @@ class WorldDriver:
             "last_tick": dict(self._last_tick) if self._last_tick else None,
             "next_due_at": next_due,
             "cadence": self._config.to_dict(),
+            # 两道花费边界，分开报：一道按 Start 重置，一道跟着世界一辈子。
+            "run_budget": self._run_budget_locked(),
+            "world_actions": self._world_actions_locked(),
         }
 
 
@@ -484,6 +599,9 @@ class DriverRegistry:
 
 __all__ = [
     "CHECKPOINT_REASON",
+    "EXIT_RUN_BUDGET",
+    "EXIT_WORLD_CAP",
+    "MAX_ACTIVATIONS_PER_RUN",
     "MAX_ERROR_CHARS",
     "OPAQUE_ERROR",
     "DriverBusy",

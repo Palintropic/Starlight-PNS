@@ -81,11 +81,36 @@ class CheckpointPolicyModel(BaseModel):
 
 
 class DriverCadenceModel(BaseModel):
-    """驱动的节拍。服务器侧配置，浏览器只能读。"""
+    """驱动的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。"""
 
     tick_minutes: int
     interval_seconds: float
     stop_timeout_seconds: float
+    max_activations_per_run: int
+
+
+class RunBudgetModel(BaseModel):
+    """**这一轮** Start 的额度。用完了 worker 自己停下，再按一次 Start 重置。
+
+    它活在进程里，所以它跟"这个世界一生做过多少"是两件事 —— 后者是
+    `world_actions`，跨重启、跨恢复都成立。
+    """
+
+    limit: int
+    used: int
+    remaining: int
+
+
+class WorldActionsModel(BaseModel):
+    """这个世界**一生**的动作用量与上限。
+
+    用量从耐久的 Agency 日志推导，所以重启和恢复都换不来新的额度。`cap`
+    为 null 表示读不出上限（不知道），不表示没有上限 —— 硬闸始终在引擎里。
+    """
+
+    committed: Optional[int] = None
+    cap: Optional[int] = None
+    remaining: Optional[int] = None
 
 
 class DriverTickModel(BaseModel):
@@ -129,6 +154,10 @@ class DriverStatusModel(BaseModel):
     # 下一条排期到期的**模拟**时刻。
     next_due_at: Optional[str] = None
     cadence: DriverCadenceModel
+    # 两道花费边界，分开报，因为它们是两件不同的事：一道按 Start 重置，
+    # 一道跟着这个世界一辈子。
+    run_budget: RunBudgetModel
+    world_actions: WorldActionsModel
 
 
 class WorldStatusModel(BaseModel):

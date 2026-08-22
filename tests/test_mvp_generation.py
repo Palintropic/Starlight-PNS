@@ -30,9 +30,11 @@ for _path in (str(REPO_ROOT), str(REPO_ROOT / "scripts")):
 
 from pns.interfaces.composition import (  # noqa: E402
     AdaptersUnavailable,
+    AutonomySettings,
     ContentUnavailable,
     WorldControlPlane,
 )
+from pns.runtime.autonomy.driver import DriverConfig  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
 from pns.models.activation import ActivationKind  # noqa: E402
 from pns.models.agency import AgencyOutcome  # noqa: E402
@@ -166,6 +168,8 @@ class MvpTestCase(unittest.TestCase):
     line = "今天也在这里哦"
     drift = 0.0
     needs_review = False
+    # None = 用服务器默认（环境变量）那一份。要压节律或压预算的用例覆盖它。
+    autonomy = None
 
     def setUp(self):
         self.registry = BOUNDARY.active()
@@ -180,7 +184,9 @@ class MvpTestCase(unittest.TestCase):
         self._env.start()
         self.provider = self.make_provider()
         self.plane = WorldControlPlane(
-            root=self.root, client_factory=lambda *a, **k: self.provider
+            root=self.root,
+            client_factory=lambda *a, **k: self.provider,
+            autonomy=self.autonomy,
         )
 
     def make_provider(self):
@@ -269,7 +275,9 @@ class ProductionPathTests(MvpTestCase):
         """
         self.provider = FakeProvider(line="我其实一直想说的是", truncated=True)
         self.plane = WorldControlPlane(
-            root=self.root, client_factory=lambda *a, **k: self.provider
+            root=self.root,
+            client_factory=lambda *a, **k: self.provider,
+            autonomy=self.autonomy,
         )
         world = self.create()
         self.advance(world, 5)
@@ -286,7 +294,9 @@ class ProductionPathTests(MvpTestCase):
         """模型吐一整份上下文回来，不会被当成一句台词写进世界。"""
         self.provider = FakeProvider(line="x" * 5000)
         self.plane = WorldControlPlane(
-            root=self.root, client_factory=lambda *a, **k: self.provider
+            root=self.root,
+            client_factory=lambda *a, **k: self.provider,
+            autonomy=self.autonomy,
         )
         world = self.create()
         report = self.advance(world, 5)
@@ -437,7 +447,9 @@ class ProviderLeakTests(MvpTestCase):
         hostile.api_key = CANARY
         self.provider = FakeProvider(generate_error=hostile)
         self.plane = WorldControlPlane(
-            root=self.root, client_factory=lambda *a, **k: self.provider
+            root=self.root,
+            client_factory=lambda *a, **k: self.provider,
+            autonomy=self.autonomy,
         )
         world = self.create()
         # 生成失败是可重试的，所以要把重试预算跑完，才会留下那条耐久的终局
@@ -655,6 +667,107 @@ class SeedingTests(MvpTestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(SeedingError):
                     ActivationCadence(**bad)
+
+
+# ── 花费边界：一次 Start 的额度 vs 世界一生的动作上限 ────────────────────
+class WorldLifetimeBudgetTests(MvpTestCase):
+    """P9 的 128 是给**研究会话**定的，不是给一个世界的一辈子定的。
+
+    按默认双角色节拍，一个持久世界一个半小时就会撞上它，然后每一条激活都被
+    静静判成 rejected_budget —— 而且恢复存档也救不回来，因为计数就在存档里。
+    那不是安全网，是定时哑火。这一组盯的就是它不再存在。
+    """
+
+    # 把节律压密，好在一个用例里真的跑过 128 那条旧边界。
+    autonomy = AutonomySettings(
+        driver=DriverConfig(interval_seconds=0.01, stop_timeout_seconds=1.0),
+        cadence=ActivationCadence(
+            interval_minutes=1, first_delay_minutes=1, stagger_minutes=1
+        ),
+    )
+
+    def push_until(self, world, done, ticks=200, what="条件"):
+        """推时间直到条件成立，**推的次数有上限**。
+
+        上限是刻意的：这一组用例的回归形态就是"世界不再说话了"，而一个用
+        `while` 死等的测试碰到它会挂住而不是变红。挂住的测试等于没有测试。
+        """
+        for _ in range(ticks):
+            if done():
+                return
+            self.advance(world, 5)
+        self.fail(f"推了 {ticks} 轮还等不到{what} —— 这个世界失声了")
+
+    def test_a_world_keeps_speaking_past_the_old_session_cap(self):
+        world = self.create()
+        state = world.state
+        # 一路推到远远越过旧的 128 边界。
+        self.push_until(
+            world,
+            lambda: state.agency.committed_actions() > 140,
+            what="累计提交超过旧的 128 边界",
+        )
+
+        committed = state.agency.committed_actions()
+        self.assertGreater(committed, 128)
+        self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), committed)
+        # 一条 rejected_budget 都不该有：旧默认下第 129 条起全是它。
+        self.assertEqual(state.agency.for_outcome(AgencyOutcome.REJECTED_BUDGET), ())
+
+        # 而且它此刻仍然说得出下一句 —— 这才是"没失声"。
+        before = committed
+        self.push_until(
+            world,
+            lambda: state.agency.committed_actions() > before,
+            ticks=20,
+            what="越过边界之后的下一句台词",
+        )
+
+    def test_the_lifetime_cap_still_exists_and_survives_a_restore(self):
+        """上限没有被删掉，只是换成了世界尺度的数字 —— 而且偷不走。"""
+        engine = self.create().state.agency_engine
+        self.assertEqual(
+            engine.budget.max_committed_actions_per_session,
+            self.plane.autonomy.world_action_cap,
+        )
+        world = self.plane.service.opened("nightcord")
+        self.advance(world, 5)
+        committed = world.state.agency.committed_actions()
+        self.assertGreater(committed, 0)
+
+        self.plane.close("nightcord")
+        self.plane.restore("nightcord")
+        restored = self.plane.service.opened("nightcord")
+        # 计数从耐久日志推导，所以一次恢复换不来新的额度。
+        self.assertEqual(restored.state.agency.committed_actions(), committed)
+
+    def test_the_configured_cap_is_what_the_engine_enforces(self):
+        plane = WorldControlPlane(
+            root=self.root / "capped",
+            client_factory=lambda *a, **k: self.provider,
+            autonomy=AutonomySettings(
+                driver=DriverConfig(interval_seconds=0.01, stop_timeout_seconds=1.0),
+                cadence=ActivationCadence(
+                    interval_minutes=1, first_delay_minutes=1, stagger_minutes=1
+                ),
+                world_action_cap=3,
+            ),
+        )
+        try:
+            plane.create(
+                world_id="tiny", scene_id=SCENE, character_ids=list(CHARACTERS)
+            )
+            world = plane.service.opened("tiny")
+            for _ in range(6):
+                world.runtime.advance(5)
+            # 引擎那道硬闸仍然在，而且认的就是配置里那个数。
+            self.assertEqual(world.state.agency.committed_actions(), 3)
+            self.assertNotEqual(
+                world.state.agency.for_outcome(AgencyOutcome.REJECTED_BUDGET), ()
+            )
+        finally:
+            plane.drivers.stop_all("test", 5.0)
+            plane.service.release_all()
 
 
 def _context(character_id, *, observations=(), recalled=(), cue=None):
