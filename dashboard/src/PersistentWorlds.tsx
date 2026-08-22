@@ -16,6 +16,11 @@
 //      序号的话，先回来的那次操作触发的刷新会把后回来的那次操作的成功/失败
 //      直接吞掉 —— 一次 close 失败就这么从屏幕上消失了。
 //   3. **关闭要确认。** 它会停掉一个正在跑的世界。
+//   4. **自动推进是显式开关，而且它跟"世界开着"是两件事。**（MVP-1）
+//      `running` 是 P12 的"运行时还接不接受写入"，`autonomy.state` 是"服务器
+//      此刻在不在推它"。开始自动推进 = 服务器开始自己花 API 额度，所以它只
+//      能由操作者按下，而且 `stopping` 绝不显示成"已停止"——那一轮还可能落地
+//      一次提交。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -26,11 +31,14 @@ import {
   fetchReloadStatus,
   fetchWorldScenes,
   restorePersistentWorld,
+  startWorldAutonomy,
+  stopWorldAutonomy,
   type PersistentWorldStatus,
+  type WorldDriverStatus,
 } from './api';
 import './worlds.css';
 
-type Action = 'create' | 'restore' | 'checkpoint' | 'close';
+type Action = 'create' | 'restore' | 'checkpoint' | 'close' | 'autonomy-start' | 'autonomy-stop';
 
 interface Feedback {
   worldId: string;
@@ -59,6 +67,17 @@ function summarize(world: PersistentWorldStatus): { label: string; tone: string 
   if (world.error) return { label: '存档读不出来', tone: 'ooc' };
   if (world.revision === null) return { label: '没有存档', tone: 'dim' };
   return { label: '已归档', tone: 'dim' };
+}
+
+/** 驱动那一格给人看的一句话。只由服务器字段推出来。 */
+function describeDriver(driver: WorldDriverStatus | null): { label: string; tone: string } {
+  // `null` = 从来没起过驱动。它跟"起过、现在停着"要分开说：后者还带着上一次
+  // tick 的结果，操作者要看得见。
+  if (driver === null) return { label: '未启动', tone: 'dim' };
+  if (driver.state === 'running') return { label: '自动推进中', tone: 'ok' };
+  if (driver.state === 'stopping') return { label: '正在停止…', tone: 'warn' };
+  if (driver.last_error) return { label: '已停（上次 tick 失败）', tone: 'ooc' };
+  return { label: '已停', tone: 'dim' };
 }
 
 const clockText = (iso: string | null): string =>
@@ -239,12 +258,40 @@ export default function PersistentWorlds() {
       (status) => `已存下第 ${status.revision} 版`,
     );
 
+  const onStartAutonomy = (worldId: string) =>
+    run(
+      `${worldId}:autonomy-start`,
+      'autonomy-start',
+      worldId,
+      () => startWorldAutonomy(worldId),
+      (status) => {
+        const cadence = status.autonomy?.cadence;
+        return cadence
+          ? `已开始自动推进：每 ${cadence.interval_seconds} 秒推 ${cadence.tick_minutes} 模拟分钟`
+          : '已开始自动推进';
+      },
+    );
+
+  const onStopAutonomy = (worldId: string) =>
+    run(
+      `${worldId}:autonomy-stop`,
+      'autonomy-stop',
+      worldId,
+      () => stopWorldAutonomy(worldId),
+      (status) =>
+        // `stopping` 绝不显示成"已停止"：那一轮还在跑（多半卡在一次模型调用
+        // 上），它仍然可能落地一次提交。说成停了就是一句会被事实拆穿的话。
+        status.autonomy?.state === 'stopping'
+          ? '停止请求已发出，但当前这一轮还没结束——它仍然可能落地一次提交'
+          : '已停止自动推进（世界仍然开着，可以再启动）',
+    );
+
   const onClose = (worldId: string) => {
     // 关闭会停掉一个正在跑的世界，所以先确认。
     const confirmed = window.confirm(
       `关闭世界「${worldId}」？\n\n` +
-        '会先停止接受新的行动、等在跑的事务落定、写下最后一份存档，然后归还所有权。' +
-        '存不下去时不会假装关干净了，世界会继续开着。',
+        '会先请自动推进停下、停止接受新的行动、等在跑的事务落定、写下最后一份存档，' +
+        '然后归还所有权。存不下去时不会假装关干净了，世界会继续开着。',
     );
     if (!confirmed) return;
     run(
@@ -350,6 +397,11 @@ export default function PersistentWorlds() {
             const isOpen = expanded === world.world_id;
             const note = rowFeedback[world.world_id] ?? null;
             const busy = (action: Action) => pending[`${world.world_id}:${action}`] !== undefined;
+            const driver = world.autonomy;
+            const driverState = describeDriver(driver);
+            // 「在推」= running 或者 stopping。stopping 也算，因为那时该给的
+            // 按钮仍然是"停止"——再按一次 Start 只会拿到 409。
+            const driving = driver !== null && !driver.stopped;
             return (
               <li key={world.world_id} className="worlds-item">
                 <div className="worlds-item-head">
@@ -362,6 +414,11 @@ export default function PersistentWorlds() {
                     {world.world_id}
                   </button>
                   <span className={`worlds-badge ${state.tone}`}>{state.label}</span>
+                  {world.owned ? (
+                    <span className={`worlds-badge ${driverState.tone}`}>
+                      {driverState.label}
+                    </span>
+                  ) : null}
                   <span className="worlds-meta">
                     第 {world.revision ?? '—'} 版
                     {world.dirty === true ? ' · 有未存的改动' : ''}
@@ -371,6 +428,23 @@ export default function PersistentWorlds() {
                   <span className="worlds-actions">
                     {world.owned ? (
                       <>
+                        {driving ? (
+                          <button
+                            className="btn btn-reject"
+                            disabled={busy('autonomy-stop')}
+                            onClick={() => onStopAutonomy(world.world_id)}
+                          >
+                            {busy('autonomy-stop') ? '停止中…' : '停止自动推进'}
+                          </button>
+                        ) : (
+                          <button
+                            className="btn btn-approve"
+                            disabled={busy('autonomy-start')}
+                            onClick={() => onStartAutonomy(world.world_id)}
+                          >
+                            {busy('autonomy-start') ? '启动中…' : '开始自动推进'}
+                          </button>
+                        )}
                         <button
                           className="btn btn-approve"
                           disabled={busy('checkpoint')}
@@ -480,6 +554,51 @@ export default function PersistentWorlds() {
                               : '')
                           : '—'}
                       </dd>
+                    </div>
+                    <div>
+                      <dt>自动推进</dt>
+                      <dd>
+                        {driver === null
+                          ? '未启动（这台服务器还没为它起过驱动）'
+                          : `${driverState.label}` +
+                            `　已跑 ${driver.ticks} 轮` +
+                            (driver.failures ? `，失败 ${driver.failures} 次` : '') +
+                            (driver.stop_reason ? `　停止理由：${driver.stop_reason}` : '') +
+                            (driver.exit_reason ? `　自行收摊：${driver.exit_reason}` : '')}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>推进节拍</dt>
+                      <dd>
+                        {driver === null
+                          ? '—'
+                          : `每 ${driver.cadence.interval_seconds} 秒推 ` +
+                            `${driver.cadence.tick_minutes} 模拟分钟`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>下一条排期到期</dt>
+                      <dd>{driver === null ? '—' : (driver.next_due_at ?? '队列是空的')}</dd>
+                    </div>
+                    <div>
+                      <dt>上一轮</dt>
+                      <dd>
+                        {driver === null || driver.last_tick === null
+                          ? '还没跑过'
+                          : driver.last_tick.failed
+                            ? `失败（${driver.last_tick_at ?? '—'}）`
+                            : `${driver.last_tick.from_clock ?? '—'} → ` +
+                              `${driver.last_tick.to_clock ?? '—'}，` +
+                              `到期 ${driver.last_tick.due ?? 0} 条，` +
+                              `处理 ${driver.last_tick.processed ?? 0} 条` +
+                              (driver.last_tick.checkpoint_revision !== null
+                                ? `，存下第 ${driver.last_tick.checkpoint_revision} 版`
+                                : '')}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>上次 tick 错误</dt>
+                      <dd>{driver?.last_error ?? '无'}</dd>
                     </div>
                     <div>
                       <dt>上次操作错误</dt>

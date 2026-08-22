@@ -56,7 +56,8 @@ const world = (
   clock: '2026-08-22T02:00:00',
   archive_path: `/tmp/worlds/${world_id}/world.json`,
   boundaries_since_checkpoint: 0,
-  policy: { every_boundaries: null, min_interval_seconds: 0, on_close: true },
+  policy: { every_boundaries: 1, min_interval_seconds: 60, on_close: true },
+  autonomy: null,
   ...overrides,
 });
 
