@@ -727,11 +727,78 @@ class AdapterTests(WorldApiTestCase):
         self.assertEqual(response.status_code, 503, response.text)
         self.assertEqual(self.category(response), "adapters_unavailable")
         self.assert_no_canary(response)
-        # 类型名要留着：它足够让人分辨是网络、配置还是依赖缺失。
-        self.assertIn("RuntimeError", self.detail(response)["message"])
+        self.assertEqual(
+            self.detail(response)["message"],
+            "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置",
+        )
         # 而且这一档在拿所有权之前就断掉了。
         self.assertFalse(self.root.exists())
         self.assertEqual(owned_world_paths(), ())
+
+    def test_an_exception_type_name_is_untrusted_data_too(self):
+        """连**类型名**都不能过边界。
+
+        Python 不校验类名，所以工厂可以现造一个名字就是那把 key 的异常类：
+
+            raise type(api_key, (RuntimeError,), {})("rejected")
+
+        于是 `type(e).__name__` 就是凭据本身。这就是为什么对外那句话必须是
+        完全固定的 —— 只要还有任何一处从异常派生的数据能出去，这条边界就还
+        是漏的。
+        """
+
+        def explode(api_key, **kwargs):
+            raise type(api_key, (RuntimeError,), {})("rejected")
+
+        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+            plane = WorldControlPlane(root=self.root, client_factory=explode)
+            response = TestClient(create_app(plane)).post(
+                "/api/persistent-worlds",
+                json={
+                    "world_id": "nightcord",
+                    "scene": SCENE,
+                    "characters": CHARACTERS,
+                },
+            )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.category(response), "adapters_unavailable")
+        self.assert_no_canary(response)
+        self.assertFalse(self.root.exists())
+        self.assertEqual(owned_world_paths(), ())
+
+    def test_the_visible_message_is_fixed_whatever_the_factory_raises(self):
+        """无论工厂怎么炸，对外那句话逐字相同 —— 没有任何一处随异常变化。"""
+        shapes = {
+            "消息带 key": lambda k: RuntimeError(f"rejected {k}"),
+            "类型名是 key": lambda k: type(k, (RuntimeError,), {})("rejected"),
+            "参数里带 key": lambda k: ValueError(k, "rejected"),
+            "自定义 __str__": lambda k: type(
+                "Weird", (RuntimeError,), {"__str__": lambda self: k}
+            )(),
+        }
+        messages = set()
+        for label, make in shapes.items():
+            with self.subTest(shape=label):
+
+                def explode(api_key, _make=make, **kwargs):
+                    raise _make(api_key)
+
+                with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+                    plane = WorldControlPlane(root=self.root, client_factory=explode)
+                    response = TestClient(create_app(plane)).post(
+                        "/api/persistent-worlds",
+                        json={
+                            "world_id": "nightcord",
+                            "scene": SCENE,
+                            "characters": CHARACTERS,
+                        },
+                    )
+                self.assertEqual(response.status_code, 503, response.text)
+                self.assert_no_canary(response)
+                messages.add(self.detail(response)["message"])
+
+        self.assertEqual(len(messages), 1, messages)
 
     def test_the_original_client_failure_stays_available_for_server_side_diagnosis(
         self,
@@ -785,20 +852,26 @@ class AdapterTests(WorldApiTestCase):
                 with self.subTest(path=label):
                     self.assert_no_canary(probe())
 
-            # 适配器造不出来的两条：缺凭据，以及工厂自己炸了。
-            broken = TestClient(
-                create_app(WorldControlPlane(root=self.root, client_factory=explode))
-            )
-            self.assert_no_canary(
-                broken.post(
-                    "/api/persistent-worlds",
-                    json={
-                        "world_id": "other",
-                        "scene": SCENE,
-                        "characters": CHARACTERS,
-                    },
+            # 适配器造不出来的两种：消息带 key，以及**类型名**就是 key。
+            def explode_by_type(api_key, **kwargs):
+                raise type(api_key, (RuntimeError,), {})("rejected")
+
+            for factory in (explode, explode_by_type):
+                broken = TestClient(
+                    create_app(
+                        WorldControlPlane(root=self.root, client_factory=factory)
+                    )
                 )
-            )
+                self.assert_no_canary(
+                    broken.post(
+                        "/api/persistent-worlds",
+                        json={
+                            "world_id": "other",
+                            "scene": SCENE,
+                            "characters": CHARACTERS,
+                        },
+                    )
+                )
 
     def test_a_binding_failure_after_ownership_releases_the_world_again(self):
         with patch(

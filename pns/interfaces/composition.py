@@ -218,18 +218,24 @@ class WorldControlPlane:
         try:
             client = self._client_factory(api_key, settings=models)
         except Exception as e:
-            # 这个工厂**收到过 API Key**，所以它抛出来的话里可能原样带着那把
-            # key —— "provider rejected sk-…" 是真实会发生的形状。而这句话会
-            # 一路走到 503 的响应正文里，那就等于把凭据发给了浏览器。
+            # 这个工厂**收到过 API Key**，所以从它这里出来的任何东西都是不可信
+            # 数据 —— 包括异常本身。
             #
-            # 所以对外只留异常的**类型名**：它足够让人知道是网络、配置还是
-            # 依赖缺失，而类型名不可能装得下一把 key。原始异常留在 __cause__
-            # 里，谁在服务器侧调试谁自己去看，不经过这条边界。
+            # 消息原文会带 key（"provider rejected sk-…" 是真实形状），这一点
+            # 显而易见。不显而易见的是**类型名也会**：
             #
-            # 同理，这里也刻意不打日志：把原文打出去只是换个地方泄漏。
+            #     raise type(api_key, (RuntimeError,), {})("rejected")
+            #
+            # Python 不校验类名，于是 `type(e).__name__` 就是那把 key。所以
+            # "类型名装不下一把 key"是错的，而只要还有**任何**一处从异常派生
+            # 的数据能过边界，这条边界就还是漏的。
+            #
+            # 因此对外这句话是**完全固定**的：不含 str(e)、repr(e)、类型名、
+            # 也不含异常的任何属性。原始异常留在 __cause__ 里，谁在服务器侧
+            # 调试谁自己去看，不经过这条边界；这里同样刻意不打日志 —— 把原文
+            # 打出去只是换个地方泄漏。
             raise AdaptersUnavailable(
-                f"判分模型客户端建不起来（{type(e).__name__}）；"
-                "请检查服务器侧的 provider 与凭据配置"
+                "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置"
             ) from e
 
         def judge(request: AuditRequest) -> object:
