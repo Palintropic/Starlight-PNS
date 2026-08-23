@@ -409,6 +409,53 @@ class RequirementsTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "", "有代码 import 了 aiohttp")
 
 
+class ProductionDependencySetIsSufficientTests(unittest.TestCase):
+    """装进镜像的那份依赖必须**够开机**。
+
+    这条是真容器烟测抓出来的：`pns/world/codegen.py` 曾经在模块顶层
+    `import black`，而 black 是开发依赖。后果不是"保存时报错"，是生产容器
+    根本起不来并进入重启循环——而所有单元测试都在装了 black 的开发环境里
+    跑，一条都没红。
+
+    所以这里在子进程里把被排除的包**变成不可导入**，再走一遍真实的启动路径。
+    """
+
+    BLOCKED = ("black", "aiohttp")
+
+    def test_the_app_starts_without_development_only_packages(self):
+        script = f"""
+import sys
+BLOCKED = {self.BLOCKED!r}
+
+class Blocker:
+    def find_module(self, name, path=None):
+        return self.find_spec(name, path)
+
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in BLOCKED:
+            raise ImportError(f"{{name}} 不在生产镜像里")
+        return None
+
+sys.meta_path.insert(0, Blocker())
+sys.path[:0] = [{str(REPO_ROOT)!r}, {str(REPO_ROOT / "scripts")!r}]
+from pns.interfaces import create_app
+create_app()
+print("OK")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"缺开发依赖时启动失败了：\n{result.stderr[-2000:]}",
+        )
+        self.assertIn("OK", result.stdout)
+
+
 class HealthProbeTests(unittest.TestCase):
     def serve(self, status):
         class Handler(http.server.BaseHTTPRequestHandler):
