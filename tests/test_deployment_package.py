@@ -145,7 +145,9 @@ class NoLocalSecretInBuildContextTests(unittest.TestCase):
     配置里"是这类事故最常见的形状。
     """
 
-    SKIP_DIRS = {"node_modules", "dist", "__pycache__", ".git"}
+    # 刻意**不**跳过 dashboard/dist：构建产物正是"密钥有没有被打进前端包"
+    # 这个问题的答案所在，跳过它等于绕开了要问的那件事。
+    SKIP_DIRS = {"node_modules", "__pycache__", ".git"}
 
     def local_secrets(self):
         """本机 `.env` 里**凭据**变量的值。
