@@ -45,7 +45,8 @@ from pns.interfaces.composition import (  # noqa: E402
 )
 from pns.interfaces.persistent_worlds import WorldStatusModel, _safe  # noqa: E402
 from pns.runtime.autonomy.coordinator import AutonomyError  # noqa: E402
-from pns.runtime.persistence.lifecycle import LifecycleError  # noqa: E402
+from pns.models.session import SessionState, SessionStateError  # noqa: E402
+from pns.runtime.persistence.lifecycle import CheckpointError, LifecycleError  # noqa: E402
 from pns.runtime.persistence.naming import WorldIdError  # noqa: E402
 from pns.runtime.persistence.ownership import (  # noqa: E402
     WorldAlreadyOwned,
@@ -219,6 +220,101 @@ class OperatorLoopTests(WorldApiTestCase):
 
 
 # ── AC2 创建不覆盖、恢复不兜底 ───────────────────────────────────────────
+class ActivityControlTests(WorldApiTestCase):
+    def test_operator_activity_change_is_event_backed_and_immediately_durable(self):
+        self.open_world()
+        before = self.archive()["revision"]
+        response = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": "mizuki", "activity": "editing_video"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["activity"], "editing_video")
+        self.assertEqual(body["world"]["revision"], before + 1)
+        archive = self.archive()
+        world = archive["state"]["world_state"]
+        self.assertEqual(
+            world["character_activities"]["mizuki"]["kind"], "editing_video"
+        )
+        self.assertTrue(
+            any(
+                event["type"] == "character.activity_changed"
+                and event["event_id"] == body["event_id"]
+                for event in archive["state"]["events"]["events"]
+            )
+        )
+
+    def test_unknown_activity_and_character_are_loudly_rejected(self):
+        self.open_world()
+        invalid = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": "mizuki", "activity": "probably_working"},
+        )
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+        unknown = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": "mafuyu", "activity": "resting"},
+        )
+        self.assertEqual(unknown.status_code, 409, unknown.text)
+        self.assertEqual(self.category(unknown), "event_refused")
+
+    def test_archive_cannot_change_current_activity_away_from_its_last_event(self):
+        self.open_world()
+        response = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": "mizuki", "activity": "editing_video"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = self.plane.service.opened("nightcord").state.to_dict()
+        payload["world_state"]["character_activities"]["mizuki"]["kind"] = "drawing"
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(payload)
+
+    def test_repeating_the_same_activity_is_idempotent_not_a_fake_transition(self):
+        created = self.open_world()
+        response = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": "mizuki", "activity": "online_chatting"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["changed"])
+        self.assertIsNone(response.json()["event_id"])
+        self.assertEqual(response.json()["world"]["revision"], created["revision"])
+        self.assertFalse(
+            any(
+                event["type"] == "character.activity_changed"
+                for event in self.archive()["state"]["events"]["events"]
+            )
+        )
+
+    def test_retry_after_checkpoint_failure_persists_without_a_second_event(self):
+        self.open_world()
+        world = self.plane.service.opened("nightcord")
+        with patch.object(
+            world, "checkpoint", side_effect=CheckpointError("disk unavailable")
+        ):
+            failed = self.client.post(
+                "/api/persistent-worlds/nightcord/activity",
+                json={"character_id": "mizuki", "activity": "editing_video"},
+            )
+        self.assertEqual(failed.status_code, 500, failed.text)
+        self.assertTrue(world.status()["dirty"])
+
+        retried = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": "mizuki", "activity": "editing_video"},
+        )
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertFalse(retried.json()["changed"])
+        self.assertFalse(world.status()["dirty"])
+        events = self.archive()["state"]["events"]["events"]
+        self.assertEqual(
+            len([e for e in events if e["type"] == "character.activity_changed"]),
+            1,
+        )
+
+
 class CreateAndRestoreRefusalTests(WorldApiTestCase):
     def test_create_never_overwrites_an_existing_archive(self):
         first = self.open_world()
@@ -1156,6 +1252,7 @@ class ExistingSurfaceTests(WorldApiTestCase):
             "/api/persistent-worlds/{world_id}",
             "/api/persistent-worlds/{world_id}/restore",
             "/api/persistent-worlds/{world_id}/checkpoint",
+            "/api/persistent-worlds/{world_id}/activity",
             "/api/persistent-worlds/{world_id}/close",
         ):
             self.assertIn(expected, paths)
@@ -1164,9 +1261,9 @@ class ExistingSurfaceTests(WorldApiTestCase):
             "/api/persistent-worlds/{world_id}/autonomy/stop",
         ):
             self.assertIn(expected, paths)
-        # 这个前缀下只有这七条，一条不多。
+        # 这个前缀下只有这八条，一条不多。
         self.assertEqual(
-            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 7
+            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 8
         )
 
 

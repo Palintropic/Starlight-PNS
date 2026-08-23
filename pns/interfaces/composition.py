@@ -47,7 +47,9 @@ from uuid import uuid4
 import pns.logic.router as router_mod
 from pns.logic.simulation import GenerationTruncated, call_character
 from pns.models.agency import AgencyBudget, AgencyError
+from pns.models.event import Event, EventScope, EventType, new_event_id
 from pns.models.session import SessionState
+from pns.models.world_state import ActivityKind
 from pns.runtime.autonomy.audit import AuditRequest, RouterAuditor
 from pns.runtime.autonomy.driver import DriverConfig, DriverError, DriverRegistry
 from pns.runtime.autonomy.generation import AuthoredLinePolicy, GenerationError
@@ -58,6 +60,7 @@ from pns.runtime.autonomy.seeding import (
     seed_character_activations,
 )
 from pns.runtime.content_registry import ContentRegistry
+from pns.runtime.event_commit import EventCommitError
 from pns.runtime.memory.recall import MemoryRecall
 from pns.runtime.persistence import (
     CheckpointPolicy,
@@ -588,6 +591,52 @@ class WorldControlPlane:
 
     def checkpoint(self, world_id: str) -> Dict:
         return self._with_driver(self._service.checkpoint(world_id, "manual"))
+
+    def set_activity(self, world_id: str, character_id: str, activity) -> Dict:
+        """由操作者把一名角色的当前活动作为类型化事件提交并立即存盘。"""
+        world = self._require_open(world_id)
+        try:
+            kind = ActivityKind(activity)
+        except ValueError:
+            raise ContentUnavailable(f"未知的角色活动: {activity!r}") from None
+        if character_id not in world.state.world_state.known_characters():
+            raise EventCommitError(f"世界里不存在角色 '{character_id}'")
+        current = world.state.world_state.activity_of(character_id)
+        if current.kind is kind:
+            status = world.status()
+            # 上一次可能已经提交成功、只在 checkpoint 处失败。原样重试必须
+            # 能把那笔内存状态补存下来，而不是卡在“已经是这个值”的冲突里。
+            if status["dirty"]:
+                status = world.checkpoint("activity_retry")
+            return {
+                "world": self._with_driver(status),
+                "character_id": character_id,
+                "activity": current.kind.value,
+                "since": current.since.isoformat(),
+                "changed": False,
+                "event_id": None,
+            }
+        event = Event(
+            event_id=new_event_id("activity"),
+            type=EventType.CHARACTER_ACTIVITY_CHANGED,
+            occurred_at=world.state.world_state.clock,
+            scope=EventScope.PRIVATE,
+            actor_id=character_id,
+            payload={"activity": kind.value},
+            correlation_id=world.state.session_id,
+        )
+        committed = world.runtime.commit_external_event(event)
+        # 后台明确改状态是一笔操作者事务，不等自动 checkpoint 的节拍。
+        world.checkpoint("activity_changed")
+        record = world.state.world_state.activity_of(character_id)
+        return {
+            "world": self._with_driver(world.status()),
+            "character_id": character_id,
+            "activity": record.kind.value,
+            "since": record.since.isoformat(),
+            "changed": True,
+            "event_id": committed["event_id"],
+        }
 
     def close(self, world_id: str) -> Dict:
         # 刻意不透出 force：`close(force=True)` 会在最后一次 checkpoint 失败时

@@ -8,6 +8,7 @@ import unittest
 from datetime import date, datetime
 
 from pns.world.context import render_session_location, render_world_context
+from pns.models.world_state import ActivityKind
 from pns.world.scene_compat import (
     SCENE_WORLD_MAP,
     SceneMappingError,
@@ -72,6 +73,10 @@ class SceneInitializationTests(unittest.TestCase):
         self.assertEqual(world.location_of("mizuki"), "mizuki_home_room")
         self.assertEqual(world.channel_participants("nightcord"), ["ena", "mizuki"])
         self.assertFalse(world.locations.has("nightcord"))
+        self.assertIs(
+            world.activity_of("mizuki").kind, ActivityKind.ONLINE_CHATTING
+        )
+        self.assertIs(world.activity_of("ena").kind, ActivityKind.ONLINE_CHATTING)
 
     def test_characters_without_a_modelled_home_fall_back_to_the_placeholder(self):
         world = _build("nightcord", characters=("mizuki", "kanade"))

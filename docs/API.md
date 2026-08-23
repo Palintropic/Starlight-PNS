@@ -355,6 +355,29 @@
 
 ---
 
+## 4.1 持久世界角色活动
+
+### `POST /api/persistent-worlds/{world_id}/activity`
+
+请求：
+
+```json
+{"character_id": "mizuki", "activity": "editing_video"}
+```
+
+`activity` 是服务器声明的闭集：`unspecified`、`idle`、`resting`、`studying`、
+`drawing`、`composing`、`editing_video`、`online_chatting`。接口不接受自由文本。
+
+一次成功的新变化会提交 `character.activity_changed` 事件并立即 checkpoint，返回
+`changed=true` 与 `event_id`。同值重试是幂等成功：不产生第二条事件，返回
+`changed=false`；若上一请求已提交事件但 checkpoint 失败，这次重试会补完保存。
+未知角色或不成立的状态转换返回 409，未知活动值由请求校验返回 422。
+
+这条接口只改运行时权威状态，不改角色包或场景文件。生成与 Router 只会看到
+当前行动角色自己的活动。
+
+---
+
 ## 5. 数据文件
 
 | 路径 | 写入时机 | 说明 |

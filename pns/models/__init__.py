@@ -61,11 +61,18 @@ from .location import (
     LocationGraphError,
     LocationKind,
 )
-from .world_state import Availability, WorldState, WorldStateError
+from .world_state import (
+    ActivityKind,
+    Availability,
+    CharacterActivity,
+    WorldState,
+    WorldStateError,
+)
 
 __all__ = [
     'SessionState', 'SessionStateError', 'TransactionBoundaryError', 'Turn',
     'DriftScore', 'WorldState', 'WorldStateError', 'Availability',
+    'ActivityKind', 'CharacterActivity',
     'ScheduledActivation', 'ActivationKind', 'ActivationDue', 'ActivationError',
     'new_activation_id',
     'ActivationQueue', 'ActivationQueueError',

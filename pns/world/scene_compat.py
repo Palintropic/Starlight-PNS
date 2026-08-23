@@ -13,7 +13,7 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 from pns.models.channel import ChannelRegistry
 from pns.models.location import LocationGraph
-from pns.models.world_state import WorldState
+from pns.models.world_state import ActivityKind, WorldState
 from pns.world.channels import build_default_channel_registry
 from pns.world.locations import build_default_location_graph
 
@@ -29,6 +29,8 @@ class SceneWorldMapping:
     default_location_id: str
     character_locations: Mapping[str, str] = field(default_factory=dict)
     channel_ids: Tuple[str, ...] = ()
+    # 只写场景明确成立的当前活动。没有证据就保持 unspecified，绝不从职业猜。
+    character_activities: Mapping[str, ActivityKind] = field(default_factory=dict)
 
 
 SCENE_WORLD_MAP: Dict[str, SceneWorldMapping] = {
@@ -50,6 +52,10 @@ SCENE_WORLD_MAP: Dict[str, SceneWorldMapping] = {
             "mizuki": "mizuki_home_room",
         },
         channel_ids=("nightcord",),
+        character_activities={
+            "ena": ActivityKind.ONLINE_CHATTING,
+            "mizuki": ActivityKind.ONLINE_CHATTING,
+        },
     ),
 }
 
@@ -125,6 +131,11 @@ def build_initial_world_state(
     for channel_id in mapping.channel_ids:
         for character_id in character_ids:
             world.join_channel(character_id, channel_id)
+
+    for character_id in character_ids:
+        activity = mapping.character_activities.get(character_id)
+        if activity is not None:
+            world.set_activity(character_id, activity)
 
     weather = scene.get("weather")
     if weather is not None and not isinstance(weather, str):

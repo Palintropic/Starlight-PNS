@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime
 
 from pns.models.location import Connection, Location, LocationGraph, LocationKind
-from pns.models.world_state import WorldState, WorldStateError
+from pns.models.world_state import ActivityKind, WorldState, WorldStateError
 from pns.world.channels import build_default_channel_registry
 from pns.world.context import day_phase_label, render_clock, render_world_context
 from pns.world.locations import build_default_location_graph
@@ -161,6 +161,46 @@ class WorldEnvironmentTests(unittest.TestCase):
         self.assertEqual(world.environment_of("kamiyama_high_gate"), {"weather": "晴"})
 
 
+class CharacterActivityTests(unittest.TestCase):
+    def setUp(self):
+        self.world = _world(datetime(2026, 8, 20, 2, 0))
+        self.world.place_character("mizuki", "mizuki_home_room")
+
+    def test_unspecified_is_the_honest_default(self):
+        self.assertIs(
+            self.world.activity_of("mizuki").kind, ActivityKind.UNSPECIFIED
+        )
+
+    def test_setting_activity_records_the_authoritative_clock(self):
+        record = self.world.set_activity("mizuki", ActivityKind.EDITING_VIDEO)
+        self.assertIs(record.kind, ActivityKind.EDITING_VIDEO)
+        self.assertEqual(record.since, self.world.clock)
+
+    def test_unknown_activity_and_unknown_character_are_rejected(self):
+        with self.assertRaises(WorldStateError):
+            self.world.set_activity("mizuki", "probably_drawing")
+        with self.assertRaises(WorldStateError):
+            self.world.set_activity("ena", ActivityKind.DRAWING)
+
+    def test_unspecified_clears_an_existing_activity(self):
+        self.world.set_activity("mizuki", ActivityKind.EDITING_VIDEO)
+        self.world.set_activity("mizuki", ActivityKind.UNSPECIFIED)
+        self.assertNotIn("mizuki", self.world.character_activities)
+
+    def test_activity_round_trips_and_rolls_back(self):
+        self.world.set_activity("mizuki", ActivityKind.ONLINE_CHATTING)
+        restored = WorldState.from_dict(self.world.to_dict())
+        self.assertEqual(
+            restored.activity_of("mizuki"), self.world.activity_of("mizuki")
+        )
+        snapshot = self.world.snapshot_mutable_state()
+        self.world.set_activity("mizuki", ActivityKind.RESTING)
+        self.world.restore_mutable_state(snapshot)
+        self.assertIs(
+            self.world.activity_of("mizuki").kind, ActivityKind.ONLINE_CHATTING
+        )
+
+
 class WorldSerializationTests(unittest.TestCase):
     def setUp(self):
         self.world = _world(datetime(2026, 8, 20, 2, 0))
@@ -187,6 +227,7 @@ class WorldSerializationTests(unittest.TestCase):
                 "character_locations",
                 "channel_members",
                 "character_availability",
+                "character_activities",
                 "location_state",
                 "metadata",
             },

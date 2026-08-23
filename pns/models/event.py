@@ -55,6 +55,7 @@ class EventType(str, Enum):
     PRESENCE_LEFT_CHANNEL = "presence.left_channel"
     WORLD_TIME_ADVANCED = "world.time_advanced"
     CHARACTER_LOCATION_CHANGED = "character.location_changed"
+    CHARACTER_ACTIVITY_CHANGED = "character.activity_changed"
 
 
 # payload/provenance 只允许放 JSON 安全的值。这不是洁癖：任何别的对象都可能
@@ -201,6 +202,23 @@ class Event:
             self._require_actor()
             if self.location_id is None:
                 raise EventError("character.location_changed 必须有目标 location_id")
+        elif self.type is EventType.CHARACTER_ACTIVITY_CHANGED:
+            self._require_actor()
+            if self.scope is not EventScope.PRIVATE:
+                raise EventError("character.activity_changed 必须是 private 事件")
+            if self.participants or self.location_id is not None or self.channel_id is not None:
+                raise EventError(
+                    "character.activity_changed 不接受 participants、地点或频道锚点"
+                )
+            if set(self.payload) != {"activity"}:
+                raise EventError(
+                    "character.activity_changed 的 payload 只能包含 activity"
+                )
+            activity = self.payload.get("activity")
+            if not isinstance(activity, str) or not activity:
+                raise EventError(
+                    "character.activity_changed 的 payload.activity 必须是非空字符串"
+                )
 
     def _require_actor(self) -> None:
         if self.actor_id is None:

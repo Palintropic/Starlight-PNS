@@ -453,6 +453,20 @@ class PromptScopeTests(MvpTestCase):
         for forbidden in ("due_id", "activation_id", "sequence", "missed", "next_due"):
             self.assertNotIn(forbidden, situation)
 
+    def test_the_actor_activity_is_an_explicit_generation_fact(self):
+        context = replace(_context("mizuki"), activity="editing_video")
+        situation = render_situation(
+            context, channels=self.registry.new_channel_registry()
+        )
+        self.assertIn("【你此刻正在做的事】制作视频", situation)
+
+        unknown = render_situation(
+            replace(context, activity="unspecified"),
+            channels=self.registry.new_channel_registry(),
+        )
+        self.assertIn("未指定", unknown)
+        self.assertIn("不要根据职业", unknown)
+
     def test_physical_and_online_presence_are_not_described_as_the_same_thing(self):
         base = _context("mizuki")
         context = replace(
@@ -598,6 +612,7 @@ class AuditGateTests(MvpTestCase):
         self.assertIn("同处一地的角色 ID：none", prompt)
         self.assertIn("仅与自己同在线频道、并非同处一地的角色 ID：ena", prompt)
         self.assertNotIn("ena_home_studio", prompt)
+        self.assertIn("自己的当前活动：online_chatting", prompt)
 
     def test_malformed_provider_json_is_not_echoed_to_logs(self):
         output = io.StringIO()

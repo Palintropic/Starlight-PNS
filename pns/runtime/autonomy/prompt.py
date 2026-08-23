@@ -47,6 +47,17 @@ PROMPT_FAILURE = "角色提示词渲染失败；请检查内容包里这个角�
 MAX_OBSERVED_LINES = 12
 MAX_RECALLED_LINES = 8
 
+_ACTIVITY_LABELS = {
+    "unspecified": "未指定（不要根据职业、地点或习惯猜测具体活动）",
+    "idle": "空闲",
+    "resting": "休息",
+    "studying": "学习",
+    "drawing": "画画",
+    "composing": "作曲",
+    "editing_video": "制作视频",
+    "online_chatting": "在线聊天",
+}
+
 
 class _Named:
     """一个只有显示名的最小条目。查不到内容包条目时的兜底形状。"""
@@ -221,6 +232,10 @@ def render_situation(
         # 只读这个角色自己的位置与频道 —— 问它别人在哪，这份投影会抛错。
         "【此刻】" + render_world_context(view, context.character_id)
     ]
+    parts.append(
+        "【你此刻正在做的事】"
+        + _ACTIVITY_LABELS.get(context.activity, context.activity)
+    )
 
     def visible_names(character_ids) -> str:
         return "、".join((names or {}).get(cid, cid) for cid in character_ids)

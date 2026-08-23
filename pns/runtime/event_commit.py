@@ -19,7 +19,7 @@ from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore
 from pns.models.observation import Observation
 from pns.models.session import SessionState, Turn
-from pns.models.world_state import WorldState
+from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.exposure import evaluate_event_exposure, observations_for
 
 
@@ -83,6 +83,17 @@ def validate_against_world(world: WorldState, event: Event) -> None:
         raise EventCommitError(
             f"角色 '{event.actor_id}' 已经位于 '{event.location_id}'"
         )
+    if event.type is EventType.CHARACTER_ACTIVITY_CHANGED:
+        try:
+            activity = ActivityKind(event.payload["activity"])
+        except (KeyError, ValueError):
+            raise EventCommitError(
+                f"事件 '{event.event_id}' 引用了未知的角色活动"
+            ) from None
+        if world.activity_of(event.actor_id).kind is activity:
+            raise EventCommitError(
+                f"角色 '{event.actor_id}' 已经处于活动 '{activity.value}'"
+            )
 
 
 # ── 阶段二：状态效果 ────────────────────────────────────────────────────
@@ -109,6 +120,10 @@ def _apply_location_changed(world: WorldState, event: Event) -> None:
     world.place_character(event.actor_id, event.location_id)
 
 
+def _apply_activity_changed(world: WorldState, event: Event) -> None:
+    world.set_activity(event.actor_id, event.payload["activity"])
+
+
 _APPLY = {
     EventType.DIALOGUE_SPOKEN: _apply_nothing,
     EventType.MESSAGE_SENT: _apply_nothing,
@@ -116,6 +131,7 @@ _APPLY = {
     EventType.PRESENCE_LEFT_CHANNEL: _apply_left_channel,
     EventType.WORLD_TIME_ADVANCED: _apply_time_advanced,
     EventType.CHARACTER_LOCATION_CHANGED: _apply_location_changed,
+    EventType.CHARACTER_ACTIVITY_CHANGED: _apply_activity_changed,
 }
 
 

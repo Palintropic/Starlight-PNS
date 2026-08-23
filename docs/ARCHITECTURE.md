@@ -1369,6 +1369,30 @@ concrete 25ji content, and no background checkpoint writer — automatic
 checkpoints, when enabled, are synchronous, coalesced and taken only at completed
 authoritative boundaries.
 
+### Agent activity boundary
+
+`WorldState.character_activities` is the authoritative answer to “what is this
+character doing now?”. Each entry is a typed `CharacterActivity(kind, since)`;
+absence means `unspecified`, not “infer the most plausible occupation from the
+character pack”. `since` is simulated time and is covered by transaction rollback,
+archive serialization and restore validation.
+
+Activity is intentionally a closed enum. It enters character and Router prompts,
+so accepting authored free text here would create a prompt-injection path as well
+as an unverifiable state vocabulary. A change is represented by
+`character.activity_changed`, applied by the normal event commit boundary, and
+exposed privately to the actor. The operator HTTP endpoint constructs this typed
+event, submits it through the coordinator lifecycle gate and checkpoints it; an
+identical retry creates no duplicate event and can finish a checkpoint that failed
+after the first commit.
+
+The Nightcord compatibility fixture initializes `online_chatting` because channel
+membership is explicit. It does not initialize drawing, composing or video work
+from character occupations. Generation and Router receive only the acting
+character's current activity. Goals, emotions, schedules and autonomous activity
+selection remain separate later product boards rather than fields hidden inside
+the activity string.
+
 ---
 
 ## 4. Architectural Principle
