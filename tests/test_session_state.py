@@ -1,8 +1,10 @@
 import unittest
 from datetime import datetime
 
-from pns.models.session import SessionState, Turn
+from pns.models.event import Event, EventScope, EventType
+from pns.models.session import SessionState, SessionStateError, Turn
 from pns.models.world_state import WorldState
+from pns.runtime.event_commit import commit_session_event
 from pns.world.locations import build_default_location_graph
 
 
@@ -170,6 +172,57 @@ class SessionWorldStateTests(unittest.TestCase):
     def test_world_state_must_be_typed(self):
         with self.assertRaises(TypeError):
             self.state.attach_world_state({"time": "17:30"})
+
+
+class ActivityHistoryRestoreTests(unittest.TestCase):
+    """当前活动必须跟最后一条活动事件对得上 —— 但"回到未指定"没有 since。
+
+    未指定在世界状态里不留记录，activity_of() 交回来的 since 是**此刻**合成的
+    值，不是存下来的事实。拿它跟事件时间比，会让一个完全正常的世界在时钟往前
+    走一分钟之后就再也恢复不了。
+    """
+
+    def _state(self):
+        world = WorldState(
+            clock=datetime(2026, 8, 21, 2, 0),
+            locations=build_default_location_graph(),
+        )
+        world.place_character("mizuki", "mizuki_home_room")
+        state = SessionState(
+            session_id="s1", scene="nightcord", characters=["mizuki"]
+        )
+        state.attach_world_state(world)
+        return state, world
+
+    def _activity_event(self, world, event_id, activity):
+        return Event(
+            event_id=event_id,
+            type=EventType.CHARACTER_ACTIVITY_CHANGED,
+            occurred_at=world.clock,
+            scope=EventScope.PRIVATE,
+            actor_id="mizuki",
+            payload={"activity": activity},
+        )
+
+    def test_returning_to_unspecified_stays_restorable_as_time_moves_on(self):
+        state, world = self._state()
+        commit_session_event(state, self._activity_event(world, "a1", "drawing"))
+        commit_session_event(state, self._activity_event(world, "a2", "unspecified"))
+        world.advance_time(30)
+
+        restored = SessionState.from_dict(state.to_dict())
+        self.assertEqual(restored.world_state.character_activities, {})
+
+    def test_a_current_activity_that_contradicts_the_last_event_is_still_caught(self):
+        state, world = self._state()
+        commit_session_event(state, self._activity_event(world, "a1", "drawing"))
+        commit_session_event(state, self._activity_event(world, "a2", "unspecified"))
+        payload = state.to_dict()
+        payload["world_state"]["character_activities"] = {
+            "mizuki": {"kind": "drawing", "since": world.clock.isoformat()}
+        }
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(payload)
 
 
 if __name__ == "__main__":
