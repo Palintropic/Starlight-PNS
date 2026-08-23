@@ -19,7 +19,13 @@ def probe(url: str, timeout: float = DEFAULT_TIMEOUT) -> int:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return 0 if response.status == 200 else 1
-    except Exception:
+    except Exception as error:
+        # urllib 的 HTTPError 同时也是一个打开的响应对象。探针只关心退出码，
+        # 但仍要显式归还它持有的 socket；否则故障注入会留下 ResourceWarning，
+        # 长期健康检查也只能等 GC 替我们收尾。
+        close = getattr(error, "close", None)
+        if callable(close):
+            close()
         return 1
 
 

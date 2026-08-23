@@ -97,7 +97,13 @@ class ModelStub:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(payload)
+                try:
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    # 停机碰上慢 provider 时，客户端按契约先放弃请求；假端点晚到
+                    # 的响应写回已关闭连接是预期场景，不该把测试服务器的 traceback
+                    # 冒充成应用错误。
+                    pass
 
             def log_message(self, *args):
                 pass
@@ -183,11 +189,16 @@ class ServerProcess:
             with urllib.request.urlopen(request, timeout=30.0) as response:
                 return response.status, json.loads(response.read() or b"null")
         except urllib.error.HTTPError as e:
-            raw = e.read()
             try:
-                return e.code, json.loads(raw or b"null")
-            except json.JSONDecodeError:
-                return e.code, {"raw": raw.decode("utf-8", "replace")}
+                raw = e.read()
+                try:
+                    return e.code, json.loads(raw or b"null")
+                except json.JSONDecodeError:
+                    return e.code, {"raw": raw.decode("utf-8", "replace")}
+            finally:
+                # HTTPError 也是响应对象；读完不 close 会把 socket 留给 GC，导致
+                # 故障路径测试虽然绿、输出却持续报 ResourceWarning。
+                e.close()
 
     def stop(self, sig=signal.SIGTERM, timeout=60.0) -> int:
         if self.process is None or self.process.poll() is not None:
