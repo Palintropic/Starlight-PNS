@@ -46,6 +46,10 @@ class AgencyContext:
     availability: str = "available"
     # 此刻这个角色感知得到的其他角色：同处一地的，以及同在某个频道里的。
     perceived_characters: Tuple[str, ...] = ()
+    # 上面那份兼容并集的两个明确来源。提示词必须区分“同处一室”和“在线同频”，
+    # 否则两个各自在家的角色会被描述成物理上“在一起”。
+    co_located_characters: Tuple[str, ...] = ()
+    channel_characters: Tuple[str, ...] = ()
     observations: Tuple[Observation, ...] = ()
     legal_actions: Tuple[LegalAction, ...] = ()
     legal_actions_truncated: bool = False
@@ -79,6 +83,8 @@ class AgencyContext:
             "channel_ids": list(self.channel_ids),
             "availability": self.availability,
             "perceived_characters": list(self.perceived_characters),
+            "co_located_characters": list(self.co_located_characters),
+            "channel_characters": list(self.channel_characters),
             "observations": [o.to_dict() for o in self.observations],
             "legal_actions": [legal.to_dict() for legal in self.legal_actions],
             "legal_actions_truncated": self.legal_actions_truncated,
@@ -86,17 +92,17 @@ class AgencyContext:
         }
 
 
-def _perceived_characters(world: WorldState, character_id: str) -> Tuple[str, ...]:
-    """此刻这个角色感知得到谁。
-
-    同处一地 + 同在频道里，去掉自己。这跟曝光对**某一条事件**的判定不是同一
-    件事：那边判的是"这条事件传得到你吗"，这里答的是"你现在看得见谁"。两者
-    共用同一份世界状态，所以不会互相矛盾。
-    """
+def _co_located_characters(world: WorldState, character_id: str) -> Tuple[str, ...]:
     found = set()
     location_id = world.location_of(character_id)
     if location_id is not None:
         found.update(world.characters_at(location_id))
+    found.discard(character_id)
+    return tuple(sorted(found))
+
+
+def _channel_characters(world: WorldState, character_id: str) -> Tuple[str, ...]:
+    found = set()
     for channel_id in world.channels_for(character_id):
         found.update(world.channel_participants(channel_id))
     found.discard(character_id)
@@ -150,6 +156,15 @@ def build_agency_context(
 
     legal, truncated = legal_actions(world, character_id, limit=max_legal_actions)
 
+    co_located = _co_located_characters(world, character_id)
+    co_located_ids = set(co_located)
+    channel = tuple(
+        cid
+        for cid in _channel_characters(world, character_id)
+        if cid not in co_located_ids
+    )
+    perceived = tuple(sorted(set(co_located) | set(channel)))
+
     return AgencyContext(
         character_id=character_id,
         activation=activation,
@@ -157,7 +172,9 @@ def build_agency_context(
         location_id=world.location_of(character_id),
         channel_ids=tuple(world.channels_for(character_id)),
         availability=world.availability_of(character_id).value,
-        perceived_characters=_perceived_characters(world, character_id),
+        perceived_characters=perceived,
+        co_located_characters=co_located,
+        channel_characters=channel,
         observations=tuple(own),
         legal_actions=legal,
         legal_actions_truncated=truncated,

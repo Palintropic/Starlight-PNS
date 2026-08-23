@@ -19,6 +19,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -263,6 +264,15 @@ class ProductionPathTests(MvpTestCase):
         second = self.advance(world, 5)
         self.assertEqual([r["character_id"] for r in first["results"]], ["mizuki"])
         self.assertEqual([r["character_id"] for r in second["results"]], ["ena"])
+
+    def test_the_router_sees_the_speakers_recent_dialogue_context(self):
+        world = self.create()
+        self.advance(world, 5)
+        first_line = world.state.events.by_type(EventType.MESSAGE_SENT)[0].payload["text"]
+        self.advance(world, 5)
+        self.assertEqual(len(self.provider.judgements), 2)
+        second_audit = json.dumps(self.provider.judgements[1], ensure_ascii=False)
+        self.assertIn(first_line, second_audit)
         # 两条都提交了，而且是两条不同的事件。
         self.assertEqual(len(world.state.events.by_type(EventType.MESSAGE_SENT)), 2)
 
@@ -433,6 +443,23 @@ class PromptScopeTests(MvpTestCase):
         # 排期簿记一个字都不许出现。
         for forbidden in ("due_id", "activation_id", "sequence", "missed", "next_due"):
             self.assertNotIn(forbidden, situation)
+
+    def test_physical_and_online_presence_are_not_described_as_the_same_thing(self):
+        base = _context("mizuki")
+        context = replace(
+            base,
+            perceived_characters=("ena", "kanade"),
+            co_located_characters=("kanade",),
+            channel_characters=("ena",),
+        )
+        situation = render_situation(
+            context,
+            channels=self.registry.new_channel_registry(),
+            names={"ena": "东云绘名", "kanade": "宵崎奏"},
+        )
+        self.assertIn("【此刻与你同处一地的】宵崎奏", situation)
+        self.assertIn("【此刻与你同一在线频道的】东云绘名", situation)
+        self.assertNotIn("和你在一起", situation)
 
 
 # ── AC3/AC8 provider 侧的东西一个字节都不过边界 ─────────────────────────

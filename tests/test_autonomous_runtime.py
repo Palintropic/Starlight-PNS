@@ -550,13 +550,12 @@ class GenerationScopeTests(unittest.TestCase):
         for key in ("provenance", "drift_score", "correlation_id", "causation_id"):
             self.assertNotIn(key, blob)
 
-    def test_the_context_carries_the_characters_own_recall(self):
+    def test_a_recent_observation_is_not_repeated_as_a_memory(self):
         self.runtime.process_due(_due(self.scheduler, "e1", character_id="ena"))
         context = self._mizuki_context()
-        self.assertTrue(
-            any("绘名" in line or "ena" in line for line in context.recalled),
-            f"瑞希应当想起绘名说过话: {context.recalled}",
-        )
+        self.assertTrue(context.observations)
+        self.assertTrue(self.state.memories.for_owner("mizuki"))
+        self.assertEqual(context.recalled, ())
 
 
 class ActivationPayloadIsNotCharacterVisibleTests(unittest.TestCase):

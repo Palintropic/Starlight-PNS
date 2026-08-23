@@ -127,6 +127,8 @@ class GenerationContext:
     availability: str = "available"
     # 此刻这个角色感知得到的其他角色。
     perceived_characters: Tuple[str, ...] = ()
+    co_located_characters: Tuple[str, ...] = ()
+    channel_characters: Tuple[str, ...] = ()
     # 这个角色**自己的**观察，按感知顺序。
     observations: Tuple[Observation, ...] = ()
     # 这个角色**自己的**记忆此刻想起的那几行（已经过提示投影的白名单删减：
@@ -202,6 +204,8 @@ class GenerationContext:
             "channel_ids": list(self.channel_ids),
             "availability": self.availability,
             "perceived_characters": list(self.perceived_characters),
+            "co_located_characters": list(self.co_located_characters),
+            "channel_characters": list(self.channel_characters),
             "observations": [_perceived(o) for o in self.observations],
             "observed_lines": list(self.observed_lines),
             "recalled": list(self.recalled),
@@ -259,6 +263,8 @@ def build_generation_context(
         channel_ids=tuple(agency_context.channel_ids),
         availability=agency_context.availability,
         perceived_characters=tuple(agency_context.perceived_characters),
+        co_located_characters=tuple(agency_context.co_located_characters),
+        channel_characters=tuple(agency_context.channel_characters),
         observations=tuple(agency_context.observations),
         recalled=tuple(recalled),
         legal_actions=tuple(agency_context.legal_actions),
