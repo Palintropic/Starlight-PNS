@@ -50,7 +50,7 @@ function describe(detail: unknown): { message: string | null; category: string |
  */
 export const UNAUTHENTICATED_EVENT = 'pns:unauthenticated';
 
-async function json<T>(res: Response): Promise<T> {
+async function json<T>(res: Response, options: { authRoute?: boolean } = {}): Promise<T> {
   if (!res.ok) {
     // 服务器出错时正文不一定是 JSON（代理的 502、断掉的连接、静态兜底页）。
     // 解析失败就用状态行，别让一次 SyntaxError 盖住真正的错误。
@@ -58,7 +58,10 @@ async function json<T>(res: Response): Promise<T> {
     const { message, category } = describe(body && (body as { detail?: unknown }).detail);
     // 登录接口自己的 401 是"这次密码不对"，不是"会话没了"——广播它会把用户
     // 从登录框上弹走，然后什么也没发生。
-    if (res.status === 401 && !new URL(res.url, window.location.origin).pathname.startsWith('/api/auth/')) {
+    //
+    // 判据是调用点显式传进来的，不是从 res.url 反推的：`Response.url` 在
+    // 某些环境下是空串，而一个"多数时候对"的判据会在最难复现的那一次出错。
+    if (res.status === 401 && !options.authRoute) {
       window.dispatchEvent(new CustomEvent(UNAUTHENTICATED_EVENT));
     }
     throw new ApiError(message || `${res.status} ${res.statusText}`, res.status, category);
@@ -81,17 +84,17 @@ export interface AuthSession {
 }
 
 export const fetchAuthSession = (): Promise<AuthSession> =>
-  fetch('/api/auth/session').then((res) => json(res));
+  fetch('/api/auth/session').then((res) => json(res, { authRoute: true }));
 
 export const login = (token: string): Promise<AuthSession> =>
   fetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token }),
-  }).then((res) => json(res));
+  }).then((res) => json(res, { authRoute: true }));
 
 export const logout = (): Promise<AuthSession> =>
-  fetch('/api/auth/logout', { method: 'POST' }).then((res) => json(res));
+  fetch('/api/auth/logout', { method: 'POST' }).then((res) => json(res, { authRoute: true }));
 
 export const fetchTurns = (): Promise<Turn[]> =>
   fetch('/api/review/turns').then((res) => json(res));

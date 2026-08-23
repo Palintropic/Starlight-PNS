@@ -421,9 +421,25 @@ def refuse_in_production(request: Request) -> None:
 
     它是一个路由级依赖，所以它在**请求体校验之前**跑：一份畸形请求体在生产
     上拿到的也是 409，而不是一句把 schema 讲出去的 422。
+
+    判据优先取 app 自己那份部署设定；**取不到就回环境变量**，取不出来就当成
+    生产。理由是方向性的：一个不是由 `create_app()` 装配起来的 app 上没有这份
+    设定，而"说不清是不是生产"跟"确定不是生产"不是一回事——前者不该换来一次
+    放行。生产镜像把 PNS_ENV 固化成 production，所以这条回退在真实部署里总能
+    答出正确答案。
     """
     deployment = getattr(request.app.state, "deployment", None)
-    if deployment is not None and deployment.production:
+    if deployment is None:
+        try:
+            deployment = DeploymentSettings.from_env()
+        except DeploymentConfigError:
+            deployment = None
+            production = True
+        else:
+            production = deployment.production
+    else:
+        production = deployment.production
+    if production:
         raise HTTPException(
             409,
             {

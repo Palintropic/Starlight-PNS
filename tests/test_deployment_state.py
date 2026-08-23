@@ -236,6 +236,41 @@ class ImmutableProductionTests(unittest.TestCase):
         self.assertNotEqual(response.status_code, 409)
 
 
+class ImmutabilityGuardFallsClosedTests(unittest.TestCase):
+    """守卫拿不到 app 自己的部署设定时，回环境变量；仍然说不清就当成生产。
+
+    "说不清是不是生产"跟"确定不是生产"不是一回事——前者不该换来一次放行。
+    """
+
+    def app_with_no_deployment_state(self):
+        from fastapi import Depends, FastAPI
+
+        from pns.interfaces.security import refuse_in_production
+
+        app = FastAPI()
+
+        @app.post("/w", dependencies=[Depends(refuse_in_production)])
+        def _w():  # pragma: no cover - 生产下该被 409 挡住
+            return {"ok": True}
+
+        return TestClient(app)
+
+    def test_env_says_production_so_the_write_is_refused(self):
+        client = self.app_with_no_deployment_state()
+        with patch.dict(os.environ, {"PNS_ENV": "production"}):
+            self.assertEqual(client.post("/w").status_code, 409)
+
+    def test_unreadable_deployment_configuration_is_treated_as_production(self):
+        client = self.app_with_no_deployment_state()
+        with patch.dict(os.environ, {"PNS_ENV": "production", "PNS_ADMIN_TOKEN": "短"}):
+            self.assertEqual(client.post("/w").status_code, 409)
+
+    def test_development_still_allows_it(self):
+        client = self.app_with_no_deployment_state()
+        with patch.dict(os.environ, {"PNS_ENV": "development"}):
+            self.assertEqual(client.post("/w").status_code, 200)
+
+
 # ── 5. 运行时数据的位置 ─────────────────────────────────────────────────
 class RuntimeDataLivesUnderDataDirTests(unittest.TestCase):
     def test_review_decisions_are_under_the_mounted_data_dir(self):

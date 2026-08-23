@@ -67,6 +67,8 @@ class ModelStub:
 
     def __init__(self):
         self.requests = []
+        # 单次响应前的停顿。用来制造"停机撞上一次进行中的调用"这个场面。
+        self.delay = 0.0
         self._lock = threading.Lock()
         stub = self
 
@@ -76,6 +78,8 @@ class ModelStub:
                 body = self.rfile.read(length)
                 with stub._lock:
                     stub.requests.append((self.path, body))
+                if stub.delay:
+                    time.sleep(stub.delay)
                 payload = json.dumps(
                     {
                         "id": "stub",
@@ -425,6 +429,41 @@ class ShutdownAndRecoveryTests(ProcessTestCase):
         # 上一个拥有者是被强杀的，所以锁记录里必须留着这件事，而不是
         # 一句"上一个是干净走的"。
         self.assertIsNotNone(world["recovered_from"])
+
+    def test_sigterm_during_an_in_flight_tick_still_settles_the_boundary(self):
+        """停机撞上一次进行中的有界操作。
+
+        假 provider 故意很慢，所以 SIGTERM 到达时驱动多半正卡在一次模型调用上。
+        这时要成立的是三件事：进程仍然在有界时间内退出；关闭报告如实说明结果；
+        磁盘上是一份读得回来的存档。**不**允许的是在边界落定之前就宣布停了。
+        """
+        self.stub.delay = 4.0
+        server = self.started(
+            PNS_AUTONOMY_TICK_MINUTES="10",
+            PNS_AUTONOMY_INTERVAL_SECONDS="0.2",
+            PNS_GRACEFUL_TIMEOUT="5",
+        )
+        self.create_world(server)
+        self.assertEqual(
+            server.request("POST", "/api/persistent-worlds/nightcord/autonomy/start")[0],
+            200,
+        )
+        deadline = time.monotonic() + 25.0
+        while time.monotonic() < deadline and self.stub.count == 0:
+            time.sleep(0.2)
+        self.assertGreater(self.stub.count, 0, "没能让一次 tick 真的开始")
+
+        started = time.monotonic()
+        self.assert_stopped_cleanly(server)
+        elapsed = time.monotonic() - started
+        # Compose 给的 stop_grace_period 是 90s。停机预算必须明显小于它，
+        # 否则容器会在最后一次 checkpoint 完成之前被 SIGKILL。
+        self.assertLess(elapsed, 60.0, f"停机花了 {elapsed:.1f}s，超出预算")
+
+        output = server.output()
+        self.assertRegex(output, r"世界 'nightcord' (已干净关闭|\*\*没有\*\*干净关闭)")
+        # 磁盘上留下的必须是一份读得回来的存档。
+        self.assertGreaterEqual(self.archive()["revision"], 1)
 
     def test_a_second_writer_against_the_same_directory_fails_loudly(self):
         first = self.started()
