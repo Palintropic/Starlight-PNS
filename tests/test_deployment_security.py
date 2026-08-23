@@ -245,8 +245,8 @@ class DefaultDenyTests(AuthTestCase):
 
 # ── 2. 拒绝发生在任何变更之前 ───────────────────────────────────────────
 class RejectionChangesNothingTests(AuthTestCase):
-    """这一组会朝**真的会写仓库源码**的接口打请求（World Editor 写 
-    `pns/world/*.py`，审核决策写 `review_decisions.jsonl`）。
+    """这一组会朝**真的会写仓库源码**的接口打请求：World Editor 写
+    `pns/world/*.py`，审核决策写 `review_decisions.jsonl`。
 
     所以它先把这几份文件的原样存下来，用完逐字节还原并断言没被动过。理由不是
     洁癖：如果哪天守卫真的破了，这组用例本身会把仓库改花——一个在失败时会破坏
