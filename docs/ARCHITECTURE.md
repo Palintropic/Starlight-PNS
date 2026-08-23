@@ -1393,6 +1393,45 @@ character's current activity. Goals, emotions, schedules and autonomous activity
 selection remain separate later product boards rather than fields hidden inside
 the activity string.
 
+### Authored daily rhythm
+
+A character pack may declare `daily_rhythm`: an ordered set of segments, each one
+a minute-of-day start, one closed-enum activity and an optional known
+`location_id`. A segment runs until the next one starts and the last wraps past
+midnight, so “which segment is it now” always has exactly one answer. The table is
+parsed and validated while the `ContentRegistry` snapshot is built — an unknown
+activity, an unknown location, a duplicate minute or any extra (free-text) field
+rejects the whole build rather than surfacing at 3am as a failed commit. Segments
+carry no prose, and `unspecified` is not a legal segment: declaring “no fact” is
+the same as not authoring that segment.
+
+The rhythm proposes; it never writes. `RhythmDirector.plan()` is a pure function
+of the authoritative `WorldState`, and the coordinator commits its output through
+the existing `character.location_changed` / `character.activity_changed` events in
+one atomic transaction inside the lifecycle gate, immediately after a scheduler
+tick and before that tick's activations are processed — so a character generating
+a line in the same tick already sees the new segment's activity. There is no new
+`ActivationKind`, no queue entry, no timer and no new persisted field; a world
+whose clock is not advancing has no rhythm transitions.
+
+Whether the rhythm may speak for a character is re-derived from durable state
+alone: it speaks only when that character has no activity record, or when the
+record predates the current segment's start. Three consequences follow. A failed
+or interrupted transition is retried by the next tick, because nothing about
+“already applied” lives in memory or in the archive. An operator activity change
+or an agent's own movement made inside a segment stands until the next segment
+begins — the rhythm is a default day, not a cage. And a tick that jumps over whole
+segments applies only the segment that is current now; skipped segments did not
+happen and are not replayed.
+
+Rhythms are bound like every other cold adapter: a world uses the snapshot it was
+opened with, so reloading content does not rewrite a world that is already open.
+Boundary transitions are deliberately instantaneous and are not `movement.move_to`
+actions, so travel time is abstracted into the boundary minute; the cycle is one
+24-hour day with no weekday variation. The legacy scene fixture still provides the
+initial world state, and the authored 25ji rhythms agree with the Nightcord
+fixture at its own hour rather than overwriting it.
+
 ---
 
 ## 4. Architectural Principle
