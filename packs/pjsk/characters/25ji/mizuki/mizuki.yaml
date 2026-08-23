@@ -12,7 +12,31 @@ class: 2-B
 class_history: 1-A（进级前）→2-B（现状）
 height: 165
 height_history: 163cm（早期）→165cm（现状）
-schedule: 白天比较自由（经常逃课），下午打工，深夜NIGO活动
+schedule: 深夜Nightcord到2点半→睡到早上→白天上学（经常逃课）→15点起在服装店打工到19点→晚上在家做视频
+
+# 结构化日常作息（CONTENT-1）。运行时按模拟时钟把角色对齐到当前这一段，
+# 变更走 character.activity_changed / character.location_changed 事件。
+# 每段从 at 起一直管到下一段开始，最后一段跨零点接回第一段。
+# activity 只能取世界模型里的闭集值；location_id 必须是位置图里已有的地点。
+daily_rhythm:
+  - at: "00:00"        # 25时的Nightcord，是两人最主要的共同在线时间
+    activity: online_chatting
+    location_id: mizuki_home_room
+  - at: "02:30"
+    activity: resting
+    location_id: mizuki_home_room
+  - at: "08:00"        # 神山高校 2-B；经常逃课是性格，不是作息表的默认值
+    activity: studying
+    location_id: kamiyama_high
+  - at: "15:00"        # 服装店打工（遗留场景 clothes_shop 也是下午15:00）
+    activity: working_part_time
+    location_id: clothing_store_floor
+  - at: "19:00"
+    activity: idle
+    location_id: mizuki_home_room
+  - at: "21:00"        # NIGO 的视频素材
+    activity: editing_video
+    location_id: mizuki_home_room
 
 status: ready
 sample_coverage: 1.0

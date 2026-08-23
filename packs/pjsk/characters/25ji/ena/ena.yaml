@@ -9,7 +9,34 @@ role: 插画负责人
 school: 神山高校
 grade: 3
 class: 3-D
-schedule: 昼夜颠倒，中午起床→傍晚上学→21-22点回家→深夜画画→快天亮睡觉
+schedule: 昼夜颠倒，深夜Nightcord到2点半→接着画画→天快亮时睡→中午起床→17点半去夜间定时制上学→21点半回家→23点起继续画
+
+# 结构化日常作息（CONTENT-1）。运行时按模拟时钟把角色对齐到当前这一段，
+# 变更走 character.activity_changed / character.location_changed 事件。
+# 每段从 at 起一直管到下一段开始，最后一段跨零点接回第一段。
+# activity 只能取世界模型里的闭集值；location_id 必须是位置图里已有的地点。
+daily_rhythm:
+  - at: "00:00"        # 25时的Nightcord
+    activity: online_chatting
+    location_id: ena_home_studio
+  - at: "02:30"        # 深夜画画
+    activity: drawing
+    location_id: ena_home_studio
+  - at: "05:00"        # 快天亮才睡
+    activity: resting
+    location_id: ena_home
+  - at: "12:00"        # 中午起床
+    activity: idle
+    location_id: ena_home
+  - at: "17:30"        # 神山高校夜间定时制 3-D
+    activity: studying
+    location_id: kamiyama_high
+  - at: "21:30"        # 21-22点回家
+    activity: idle
+    location_id: ena_home
+  - at: "23:00"
+    activity: drawing
+    location_id: ena_home_studio
 
 status: ready
 sample_coverage: 1.0
