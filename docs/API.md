@@ -1,6 +1,10 @@
 # PNS Dashboard API
 
-`scripts/server.py` 是 PNS 的唯一服务入口，提供本文档列出的所有 HTTP/WebSocket 接口。目前**没有任何鉴权机制**——服务假定运行在本地或受信任网络里，供单个使用者操作；如果之后要对外暴露，需要在这层之上补鉴权。
+`scripts/server.py` 是 PNS 的唯一服务入口，提供本文档列出的所有 HTTP/WebSocket 接口。
+
+**鉴权见第 6 节。** 简单说：默认拒绝——除了一份显式的公开清单（健康检查、登录三条、前端静态
+资源），其余每一条路径（含 `/ws/run`）都要求一个已认证主体。没配管理凭据的本地开发服务器
+行为不变（不鉴权）；生产模式下缺凭据的进程根本起不来。
 
 所有 JSON 请求/响应均为 `application/json`，字符编码 UTF-8。
 
@@ -389,7 +393,7 @@
 | 路径 | 写入时机 | 说明 |
 |---|---|---|
 | `data/drift_scores.jsonl` | `/ws/run` 每一轮判分后追加一行 | 历史审核模块的数据源。新记录自动标记 `v3_contextual_multidimensional`，并保存七维评分、原始直接要求和实际应用的纠正；历史记录可能是 `v1_prescriptive`、`v2_layered` 或 `unknown`，跨版本不得直接混合比较。 |
-| `review_decisions.jsonl` | `POST /api/review/decision` 追加一行 | 人工审核决策记录 |
+| `data/review_decisions.jsonl` | `POST /api/review/decision` 追加一行 | 人工审核决策记录。DEPLOY-1 之前在仓库根上，之后跟着 `data/` 走——它是运行时数据，容器部署时 `data/` 是一个卷。旧文件需要手动搬一次。 |
 | `history/<session_id>.md` | `/ws/run` 一次完整运行结束后写入 | 人类可读的对话归档，文件名就是 `session_id` |
 | `pns/world/scenes.py.bak` | `POST /api/world/scenes` 或 `/api/world/scenes/source` 写盘前 | 覆盖式单份备份（不是历史版本链，每次保存都会覆盖上一份） |
 | `pns/world/facts.py.bak` | `POST /api/world/facts` 或 `/api/world/facts/source` 写盘前 | 同上 |
@@ -399,4 +403,92 @@
 
 ## 6. 鉴权
 
-目前没有。所有接口对能访问到这个端口的任何请求方开放，包括会直接改写仓库里 `.py` 源码的 World Editor 写接口，以及会停掉所有正在跑的会话的 `POST /api/config/reload`。部署到本机/内网之外之前必须补上这一层。
+### 6.1 默认拒绝
+
+守卫是包在整个应用外面的 ASGI 中间件，不是挂在某几条路由上的依赖。它在路由匹配、请求体解析、
+依赖求解**之前**决定放不放行，所以一次被拒绝的请求连请求体都没被读过，更谈不上改到状态。
+
+公开面是 `pns/interfaces/security.py` 里一份**显式**清单，其余一切默认被保护——以后新加的
+路由默认是保护的，不需要有人记得回来补：
+
+| 公开 | 说明 |
+|---|---|
+| `GET /healthz` `GET /readyz` | 编排系统没有凭据，健康检查必须公开（见 6.4）|
+| `GET /api/auth/session`、`POST /api/auth/login`、`POST /api/auth/logout` | 否则浏览器连"要不要登录"都问不出来 |
+| `GET`/`HEAD` `/`、`/index.html`、`/favicon.svg`、`/icons.svg`、`/assets/*` | 前端外壳与静态资源，里面没有服务器侧秘密 |
+
+被保护的因此包括：所有 `/api/**`（含只读的审核、World Editor 读、配置读）、`/ws/run`，
+以及 FastAPI 自动挂的 `/openapi.json`、`/docs`、`/redoc`。**只读也保护**是一次显式分类，
+不是顺手继承：这是一个操作者控制面，不是公开站点。
+
+### 6.2 两种凭据
+
+**`Authorization: Bearer <PNS_ADMIN_TOKEN>`** —— 给 curl 和运维脚本用。scheme 大小写不敏感；
+比较走 `hmac.compare_digest`。出现**重复** `Authorization` 头一律拒绝，就算其中一份是对的
+——两份凭据的请求没有唯一答案，不许挑一个能过的。
+
+**会话 Cookie `pns_session`** —— 给浏览器用。`HttpOnly`、`SameSite=Strict`、`Path=/`，
+`Secure` 由 `PNS_SESSION_COOKIE_SECURE` 决定。SameSite=Strict 就是这里的 CSRF 机制：跨站
+发起的请求带不上这张 Cookie。WebSocket 走的也是它——浏览器在 WS 握手上设不了请求头。
+
+只要请求里出现了 `Authorization` 头，就**由它决定**，不会因为浏览器里还有一张有效 Cookie
+而放行。否则"这次调用用的是哪个凭据"会变成一个说不清的问题。
+
+管理 token 本身**不是**会话 id：拿 token 当 Cookie 值发过来会被拒绝。
+
+### 6.3 `/api/auth/*`
+
+| 接口 | 行为 |
+|---|---|
+| `GET /api/auth/session` | `{"mode", "auth_required", "authenticated"}`。不带任何凭据材料 |
+| `POST /api/auth/login` | 请求体 `{"token": "..."}`；成功 200 并下发会话 Cookie；错误 401（只说"不对"，不说是长度还是内容）；同一窗口失败 10 次后 429 并带 `Retry-After`；这台服务器没配凭据时 409 `auth_not_configured` |
+| `POST /api/auth/logout` | 作废当前会话并清 Cookie。公开是刻意的：登出不该需要先证明自己登着 |
+
+被拒绝的请求返回 `401` + `WWW-Authenticate: Bearer`，正文是
+`{"detail": {"category": "unauthenticated", "message": "需要管理凭据"}}`，跟持久世界路由
+同一种错误形状。WebSocket 在握手阶段直接关闭，浏览器拿不到一条已建立的连接。
+
+### 6.4 `/healthz` 与 `/readyz`
+
+两条都公开，因此它们同时满足两件事：正文里没有密钥、没有 provider 名、没有世界状态、没有路径；
+并且**没有权威副作用**——不调用模型、不推进时间、不重载配置、不获取世界所有权、不建目录。
+
+```
+GET /healthz  →  {"status": "ok"}
+GET /readyz   →  {"status": "ready", "mode": "production", "auth_required": true, "dashboard": true}
+```
+
+就绪之所以可以这么轻：**配置不可用的生产进程根本起不来**（见 6.5）。所以"起来了并且能应答"
+就是"启动配置完成了"的充分证据。配置坏掉的表现是连接被拒绝，不是一个回答"我不太好"的 200。
+
+### 6.5 生产模式
+
+`PNS_ENV=production`（生产镜像在 Dockerfile 里固化了它）下，这三样缺一不可，缺任何一样
+`create_app()` 直接抛、进程起不来：
+
+1. `PNS_ADMIN_TOKEN`：≥32 字符、首尾无空白、不是示例占位串；
+2. 模型 provider 凭据（`PNS_API_KEY_NAME` 指向的那个变量）非空；
+3. 已构建的 `dashboard/dist`。
+
+不存在"缺了就回落到开发模式"这条路。其它取值（默认 `development`）保持既有本地开发行为：
+没配 `PNS_ADMIN_TOKEN` 就不鉴权。配了就一定强制——它不是开关。
+
+### 6.6 生产模式下被拒绝的写接口
+
+`POST /api/config`、`POST /api/world/scenes`、`/scenes/source`、`/facts`、`/facts/source`
+在生产模式下返回 `409 immutable_deployment`。理由不是"生产要严一点"，而是那种写入在生产里
+**没有意义且会骗人**：它们写的是镜像层里的 `pns/world/*.py` 和 `.env`，下一次容器重建就没了，
+而且容器里的 `.env` 还会盖住 Compose 注入的配置。改法见 `docs/DEPLOY_UBUNTU_DOCKER.md`。
+
+这道守卫是路由级依赖，跑在请求体校验之前：一份畸形请求体拿到的也是 409，而不是一句把 schema
+讲出去的 422。对应的 `GET` 读接口不受影响。`POST /api/config/reload` 不写盘，在生产照常可用。
+
+### 6.7 日志
+
+进程的 stdout/stderr 被换成按行缓冲、按**值**遮蔽的流：`PNS_ADMIN_TOKEN` 与所有 provider key
+变量的当前值在输出里被替换成 `***REDACTED***`。闸设在流上而不是做成 logging 过滤器，是因为
+泄露最可能发生在异常路径——一条被打印的 traceback、SDK 在报错里回显的请求头、uvicorn 自己的
+堆栈——那些都不经过应用的 logger。值在写的时候现取，所以一次配置重载换掉的 key 也照样被盖住。
+
+两条它做不到的事，写在这里而不是假装没有：短于 8 个字符的值不遮蔽（否则会把日志本身抹成噪音）；
+一个恰好被 flush 切成两半的密钥会漏（缓冲按行，正常日志行遇不到）。

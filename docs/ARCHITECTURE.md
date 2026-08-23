@@ -1444,6 +1444,43 @@ fixture at its own hour rather than overwriting it.
 
 ---
 
+### Management authentication boundary
+
+DEPLOY-1 adds the boundary that separates "a process that can serve" from "a caller allowed to
+change the world". It is deliberately a single exclusion mechanism rather than a per-route
+enumeration.
+
+**Default deny.** An ASGI middleware wraps the whole application. Everything outside one explicit
+public allowlist — health checks, the three `/api/auth/*` routes, and the built frontend's static
+assets — requires an authenticated principal, `/ws/run` included because it spends model quota.
+A route added later is protected without anyone remembering to protect it.
+
+**Rejection precedes routing.** Because the guard is middleware rather than a route dependency, a
+denied request is refused before route matching, body parsing and dependency resolution. Its body
+is never read, so it cannot have changed anything.
+
+**Two credentials, one decision.** `Authorization: Bearer <PNS_ADMIN_TOKEN>` for operators and
+scripts; a server-issued `HttpOnly` / `SameSite=Strict` session cookie for the browser. The admin
+token never reaches the built JavaScript, `localStorage` or a URL, and therefore never reaches an
+access log. When an `Authorization` header is present it decides — a wrong bearer is not rescued
+by a valid cookie, and duplicate headers are refused outright.
+
+**Production fails closed at startup, not at first use.** With `PNS_ENV=production` (baked into the
+image), a missing/short/placeholder admin token, a missing provider credential or an unbuilt
+dashboard makes `create_app()` raise. There is no state in which the process runs with an open
+management surface. Development mode with no token configured keeps the previous local behaviour;
+that path is unreachable from the production image.
+
+**Immutability is part of the boundary.** In production the endpoints that write repository sources
+(`POST /api/config`, the four World Editor writes) return `409 immutable_deployment`. Those writes
+land on an image layer that the next rebuild discards, and a container-local `.env` additionally
+shadows injected configuration — a change that silently reverts is worse than a loud refusal.
+
+Runtime authoritative state is unaffected by any of this: authentication decides *who may ask*, not
+what the world is. See `docs/API.md` §6 and `docs/DEPLOY_UBUNTU_DOCKER.md`.
+
+---
+
 ## 4. Architectural Principle
 
 The primary rule is:
