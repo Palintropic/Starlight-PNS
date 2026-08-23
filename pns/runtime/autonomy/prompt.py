@@ -278,8 +278,9 @@ def render_situation(
         + "\n".join(f"- {rule}" for rule in DIALOGUE_OUTPUT_RULES)
     )
     parts.append(
-        "只输出你这一刻要说的那一句话本身：不要旁白、不要动作描写、"
-        "不要加你自己的名字前缀，也不要解释你为什么这么说。"
+        "如果这一刻没有自然开口的必要，只输出 <ABSTAIN>。否则只输出你要说的"
+        "那一句话本身：不要旁白、不要动作描写、不要加你自己的名字前缀，"
+        "也不要解释你为什么这么说。"
     )
     return "\n\n".join(parts)
 

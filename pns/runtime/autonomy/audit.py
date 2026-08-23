@@ -68,6 +68,9 @@ class AuditRequest:
     recent_lines: tuple = ()
     # 生成时收到的直接任务要求。只进判分提示，不进入凭据或世界历史。
     task_instructions: tuple = ()
+    # 从当前世界重建出的角色作用域事实。只告诉 Router 这名角色自己的位置、
+    # 频道，以及谁是同地/仅在线；不把完整 WorldState 交给判分器。
+    situation_facts: tuple = ()
 
     @property
     def text(self) -> str:
@@ -85,6 +88,7 @@ class AuditRequest:
             "now": self.now.isoformat(),
             "recent_lines": list(self.recent_lines),
             "task_instructions": list(self.task_instructions),
+            "situation_facts": list(self.situation_facts),
         }
 
 

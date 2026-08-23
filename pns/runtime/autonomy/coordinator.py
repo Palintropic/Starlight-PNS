@@ -544,6 +544,34 @@ class AutonomousRuntime:
             line = observation.render_line()
             if line is not None:
                 recent_lines.append(line)
+        actor = proposal.character_id
+        location_id = self.world.location_of(actor)
+        channels = tuple(self.world.channels_for(actor))
+        co_located = tuple(
+            character_id
+            for character_id in (
+                self.world.characters_at(location_id) if location_id else ()
+            )
+            if character_id != actor
+        )
+        channel_peers = tuple(
+            sorted(
+                {
+                    character_id
+                    for channel_id in channels
+                    for character_id in self.world.channel_participants(channel_id)
+                    if character_id != actor and character_id not in co_located
+                }
+            )
+        )
+        situation_facts = (
+            f"模拟时间：{plan.proposed_at.isoformat(timespec='minutes')}",
+            f"自己的 location_id：{location_id or 'unknown'}",
+            f"自己加入的 channel_id：{', '.join(channels) if channels else 'none'}",
+            f"与自己同处一地的角色 ID：{', '.join(co_located) if co_located else 'none'}",
+            f"仅与自己同在线频道、并非同处一地的角色 ID："
+            f"{', '.join(channel_peers) if channel_peers else 'none'}",
+        )
         return AuditRequest(
             character_id=proposal.character_id,
             proposal_id=proposal.proposal_id,
@@ -553,6 +581,7 @@ class AutonomousRuntime:
             now=plan.proposed_at,
             recent_lines=tuple(recent_lines[-_AUDIT_RECENT_LINES:]),
             task_instructions=DIALOGUE_OUTPUT_RULES,
+            situation_facts=situation_facts,
         )
 
     @staticmethod

@@ -15,10 +15,12 @@
 #
 # 运行: python -m unittest tests.test_mvp_generation -v
 import json
+import io
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -63,6 +65,7 @@ from pns.runtime.autonomy.seeding import (  # noqa: E402
 )
 from pns.runtime.persistence.lifecycle import LifecycleError  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
+from pns.logic import router as router_mod  # noqa: E402
 
 SCENE = "nightcord"
 CHARACTERS = ["mizuki", "ena"]
@@ -444,6 +447,8 @@ class PromptScopeTests(MvpTestCase):
         self.assertIn("时间：", situation)
         self.assertIn("使用自然的简体中文", situation)
         self.assertIn("不要把当前上下文未提供", situation)
+        self.assertIn("不等于此刻正在做", situation)
+        self.assertIn("合理或常见不算上下文证据", situation)
         # 排期簿记一个字都不许出现。
         for forbidden in ("due_id", "activation_id", "sequence", "missed", "next_due"):
             self.assertNotIn(forbidden, situation)
@@ -584,6 +589,28 @@ class AuditGateTests(MvpTestCase):
         self.advance(world, 5)
         events = json.dumps(world.state.events.to_dict(), ensure_ascii=False)
         self.assertNotIn(self.line, events)
+
+    def test_router_prompt_distinguishes_online_peers_from_colocation(self):
+        world = self.create()
+        self.advance(world, 5)
+        prompt = self.provider.judgements[0]["messages"][0]["content"]
+        self.assertIn("自己的 location_id：mizuki_home_room", prompt)
+        self.assertIn("同处一地的角色 ID：none", prompt)
+        self.assertIn("仅与自己同在线频道、并非同处一地的角色 ID：ena", prompt)
+        self.assertNotIn("ena_home_studio", prompt)
+
+    def test_malformed_provider_json_is_not_echoed_to_logs(self):
+        output = io.StringIO()
+        malformed = "{not-json:" + CANARY
+        with patch.object(router_mod, "_call", return_value=malformed):
+            with redirect_stdout(output):
+                result = router_mod.judge(
+                    object(), "mizuki", "在的哦", 0, registry=self.registry
+                )
+        self.assertNotIn(CANARY, output.getvalue())
+        self.assertNotIn(malformed, output.getvalue())
+        self.assertIn("原文已隐藏", output.getvalue())
+        self.assertTrue(result["needs_human_review"])
 
 
 class AuditUnavailableTests(MvpTestCase):

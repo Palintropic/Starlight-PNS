@@ -54,6 +54,7 @@ from pns.runtime.autonomy.context import (
 )
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.autonomy.generation import (
+    ABSTAIN_TOKEN,
     MAX_LINE_CHARS,
     AuthoredLinePolicy,
     GenerationError,
@@ -207,6 +208,18 @@ class AuthoredTextHasExactlyOnePathTests(unittest.TestCase):
         self.assertIs(record.outcome, AgencyOutcome.REJECTED_ILLEGAL)
         self.assertEqual(record.detail["reason"], "audit_not_bound")
         self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+
+    def test_the_auditor_gets_actor_scoped_physical_and_online_facts(self):
+        state, scheduler, runtime = _rig()
+        plan = state.agency_engine.propose(_due(scheduler))
+        request = runtime._audit_request(plan)
+        facts = "\n".join(request.situation_facts)
+        self.assertIn("自己的 location_id：mizuki_home_room", facts)
+        self.assertIn("自己加入的 channel_id：nightcord", facts)
+        self.assertIn("同处一地的角色 ID：none", facts)
+        self.assertIn("仅与自己同在线频道、并非同处一地的角色 ID：ena", facts)
+        # 绘名自己的物理地点属于她的私有世界视角，不应交给瑞希的 Router。
+        self.assertNotIn("ena_home_studio", facts)
 
     def test_the_display_name_cannot_be_swapped_after_the_audit(self):
         # 凭据绑的是整份 payload，不只是那句话。台词一个字不改、把 char_name
@@ -711,6 +724,44 @@ class UntrustedOutputTests(unittest.TestCase):
 
     def test_a_plain_string_is_accepted_and_stripped(self):
         self.assertEqual(parse_line("  在的哦 \n", self.context), "在的哦")
+
+    def test_a_leading_stage_direction_is_refused(self):
+        for raw in ("（稍微停顿了一下）嗯…", "(sighs) 算了"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(GenerationError):
+                    parse_line(raw, self.context)
+
+    def test_japanese_kana_is_structurally_refused(self):
+        for raw in ("ボク也睡不着", "まだ没睡"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(GenerationError):
+                    parse_line(raw, self.context)
+
+    def test_parentheses_inside_dialogue_are_not_overblocked(self):
+        self.assertEqual(parse_line("这个（大概）没问题。", self.context), "这个（大概）没问题。")
+
+    def test_the_exact_abstain_token_becomes_a_durable_abstention(self):
+        state, scheduler, runtime = _rig(lines={"mizuki": ABSTAIN_TOKEN})
+        result = runtime.process_due(_due(scheduler))
+        self.assertIs(result.outcome, ActivationOutcome.ABSTAINED)
+        self.assertIs(result.agency_outcome, AgencyOutcome.ABSTAINED)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertEqual(len(state.observations), 0)
+        self.assertEqual(len(state.memories), 0)
+        self.assertTrue(state.activation_outbox.is_acknowledged(result.due_id))
+
+    def test_abstention_does_not_bypass_undeclared_key_validation(self):
+        state, scheduler, runtime = _rig(
+            lines={"mizuki": {"text": ABSTAIN_TOKEN, "character_id": "ena"}}
+        )
+        result = runtime.process_due(_due(scheduler))
+        self.assertIs(result.outcome, ActivationOutcome.REJECTED)
+        self.assertIs(result.agency_outcome, AgencyOutcome.REJECTED_POLICY_ERROR)
+
+    def test_the_abstain_token_inside_a_sentence_is_ordinary_dialogue(self):
+        state, scheduler, runtime = _rig(lines={"mizuki": f"不是 {ABSTAIN_TOKEN} 啦"})
+        result = runtime.process_due(_due(scheduler))
+        self.assertIs(result.outcome, ActivationOutcome.ACTED)
 
     def test_a_malformed_generation_is_a_terminal_rejection(self):
         state, scheduler, runtime = _rig(lines={"mizuki": lambda c: {"nope": 1}})
