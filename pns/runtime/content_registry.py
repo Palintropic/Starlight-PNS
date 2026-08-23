@@ -38,6 +38,7 @@ from pns.world.data_module import DataModuleError, evaluate_data_source, require
 from pns.world.characters.registry import CharacterNotReadyError, load_pack_data
 from pns.world.context import render_world_context
 from pns.world.locations import build_default_location_graph
+from pns.world.rhythm import DailyRhythm, RhythmError, parse_daily_rhythm
 from pns.world.scene_compat import (
     SCENE_WORLD_MAP,
     SceneMappingError,
@@ -224,6 +225,9 @@ class CharacterContent:
     compat_prompt: Optional[str]
     constitution: Optional[str]
     router_reference: Optional[str]
+    # 作者写下的日常作息表（`daily_rhythm`）。没写就是 None —— 没有作息表是
+    # 正常的，它是逐个角色补的内容，不是每个角色都必须有的字段。
+    rhythm: Optional[DailyRhythm] = None
 
     @property
     def status(self) -> str:
@@ -243,7 +247,14 @@ def _read_optional(base_dir: Path, filename: Optional[str]) -> Optional[str]:
     return path.read_text(encoding="utf-8").strip()
 
 
-def _build_character(character_id: str, info: Dict, pack_dir: Path) -> CharacterContent:
+def _build_character(
+    character_id: str, info: Dict, pack_dir: Path, locations
+) -> CharacterContent:
+    """读出一个角色在这份快照里的全部内容。
+
+    `locations` 是必填的，不给默认值：作息表里的地点要靠它校验，而一个"忘了
+    传就跳过校验"的参数，会让"地点写错了构建就失败"从机制退化成一次观察。
+    """
     char_dir = pack_dir / "characters" / info["unit"] / character_id
 
     system_prompt: Optional[str] = None
@@ -261,6 +272,18 @@ def _build_character(character_id: str, info: Dict, pack_dir: Path) -> Character
                 f"预期路径 {prompt_path}"
             )
 
+    try:
+        # 作息表在**构建内容快照**时就解析并校验完：它引用的地点属于 cold 结构，
+        # 而它自己是可重载内容，两者对不上必须在切换之前暴露，而不是等到某天
+        # 凌晨那一段作息真的到点、提交事件时才炸。
+        rhythm = parse_daily_rhythm(
+            info.get("daily_rhythm"), character_id=character_id, locations=locations
+        )
+    except RhythmError as e:
+        raise ConfigValidationError(
+            f"角色 {character_id} 的 daily_rhythm 不合法：{e}"
+        ) from e
+
     return CharacterContent(
         character_id=character_id,
         # 角色元数据里有 list（别名、标签等），浅冻结挡不住 append —— 深冻。
@@ -272,6 +295,7 @@ def _build_character(character_id: str, info: Dict, pack_dir: Path) -> Character
         compat_prompt=_read_optional(char_dir, info.get("prompt_file_compat")),
         constitution=_read_optional(char_dir, info.get("constitution_file")),
         router_reference=_read_optional(char_dir, info.get("router_reference_file")),
+        rhythm=rhythm,
     )
 
 
@@ -338,6 +362,21 @@ class ContentRegistry:
     def router_reference(self, character_id: str) -> Optional[str]:
         return self.character(character_id).router_reference
 
+    def rhythm(self, character_id: str) -> Optional[DailyRhythm]:
+        return self.character(character_id).rhythm
+
+    def rhythms(self) -> Dict[str, DailyRhythm]:
+        """这份内容快照里所有写了作息表的角色。
+
+        DailyRhythm 本身是冻结的值对象（构造时校验过、字段不可变），所以这里
+        交出去的是一份新字典，而不是内部表的引用 —— 调用方改它影响不到快照。
+        """
+        return {
+            character_id: content.rhythm
+            for character_id, content in self.characters.items()
+            if content.rhythm is not None
+        }
+
     def character_system(self, character_id: str, context, compat: bool = False) -> str:
         """组装角色 system prompt。等价于 pns.world.get_character_system，
         但文本全部来自本快照，运行期不再回磁盘 —— 会话中途改文件不会串味。"""
@@ -391,6 +430,7 @@ class ContentRegistry:
             "scene_count": len(self.scenes),
             "default_scene": self.default_scene,
             "fact_count": len(self.world_facts),
+            "rhythm_characters": sorted(self.rhythms()),
             "character_count": len(self.characters),
             "ready_characters": sorted(
                 cid for cid, c in self.characters.items() if c.status == "ready"
@@ -508,7 +548,7 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
 
     characters: Dict[str, CharacterContent] = {}
     for character_id, info in pack["characters"].items():
-        content = _build_character(character_id, info, pack["pack_dir"])
+        content = _build_character(character_id, info, pack["pack_dir"], locations)
         # status=ready 的角色必须真的能开口，否则整份配置不算通过。
         if content.status == "ready" and content.system_prompt is None:
             raise ConfigValidationError(content.prompt_error or f"角色 {character_id} 无提示词")

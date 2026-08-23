@@ -77,6 +77,7 @@ from pns.runtime.persistence.store import (
     StorageError,
     WorldStore,
 )
+from pns.runtime.rhythm import RhythmDirector
 from pns.runtime.scheduler import PersistentScheduler
 
 
@@ -112,6 +113,13 @@ class RuntimeAdapters:
     # 这个世界自己的队列，恢复时再播一遍，这些角色就会每个周期被叫醒两次、
     # 花两份 API 额度，而"多了一条排期"在状态面上跟正常世界长得一模一样。
     seed: Optional[Callable[[SessionState], None]] = None
+    # 内容作者写下的日常作息表集合。它跟判分器、策略同一档：是**内容与代码**，
+    # 不是世界状态，所以创建和恢复都由调用方重新交出来，存档里不存它。
+    #
+    # 恢复路径**照样**要交（跟 seed 相反）：作息表不是这个世界与生俱来的一次性
+    # 播种，而是它每一次推进时间都要对照的那张表。恢复之后不交，世界就会停在
+    # 最后一次记下来的活动上，永远不再跟着时间走。
+    rhythm: Optional[RhythmDirector] = None
     name: str = "autonomy"
 
     def __post_init__(self) -> None:
@@ -121,6 +129,10 @@ class RuntimeAdapters:
             raise LifecycleError("policy_factory 必须是可调用对象")
         if self.seed is not None and not callable(self.seed):
             raise LifecycleError("seed 必须是可调用对象")
+        if self.rhythm is not None and not isinstance(self.rhythm, RhythmDirector):
+            # 在这里判，而不是等到 bind()：bind() 发生在所有权已经拿走之后，
+            # 那时失败会留下一个没人能用、又已经被占住的世界。
+            raise LifecycleError("rhythm 必须是 RhythmDirector")
 
     def bind(self, state: SessionState) -> AutonomousRuntime:
         """把服务显式绑到这份**已经恢复好**的状态上。
@@ -151,6 +163,7 @@ class RuntimeAdapters:
             auditor=self.auditor,
             retry=self.retry,
             recall_budget=self.recall_budget,
+            rhythm=self.rhythm,
             name=self.name,
         )
 

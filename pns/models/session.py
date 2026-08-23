@@ -1008,7 +1008,18 @@ def _validate_activity_history(state: "SessionState") -> None:
         latest[event.actor_id] = (kind, event.occurred_at, event.event_id)
     for character_id, (kind, occurred_at, event_id) in latest.items():
         current = state.world_state.activity_of(character_id)
-        if current.kind is not kind or current.since != occurred_at:
+        if current.kind is not kind:
+            raise SessionStateError(
+                f"角色 '{character_id}' 的当前活动与最后一条活动事件 "
+                f"'{event_id}' 不一致"
+            )
+        if kind is ActivityKind.UNSPECIFIED:
+            # "回到未指定"在世界状态里不留记录（没有条目就是未指定），于是
+            # activity_of() 交回来的 since 是**此刻**这个合成值，不是一个存下来
+            # 的事实。拿它跟事件时间比，会让一个完全正常的世界在时钟往前走一分钟
+            # 之后就再也恢复不了 —— 比的是一个不存在的字段。
+            continue
+        if current.since != occurred_at:
             raise SessionStateError(
                 f"角色 '{character_id}' 的当前活动与最后一条活动事件 "
                 f"'{event_id}' 不一致"

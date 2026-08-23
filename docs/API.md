@@ -366,7 +366,8 @@
 ```
 
 `activity` 是服务器声明的闭集：`unspecified`、`idle`、`resting`、`studying`、
-`drawing`、`composing`、`editing_video`、`online_chatting`。接口不接受自由文本。
+`working_part_time`、`drawing`、`composing`、`editing_video`、`online_chatting`。
+接口不接受自由文本。
 
 一次成功的新变化会提交 `character.activity_changed` 事件并立即 checkpoint，返回
 `changed=true` 与 `event_id`。同值重试是幂等成功：不产生第二条事件，返回
@@ -375,6 +376,11 @@
 
 这条接口只改运行时权威状态，不改角色包或场景文件。生成与 Router 只会看到
 当前行动角色自己的活动。
+
+角色包里写了 `daily_rhythm` 的角色，还会在模拟时间推进时被作息表对齐到当前时段
+（见 ARCHITECTURE 的 Authored daily rhythm）。操作者在一个时段之内做的改动不会
+被当次推进覆盖掉：作息表要等下一段开始才重新接手。世界状态投影里
+`autonomy.rhythm_characters` 列出这个世界由作息表管着的角色。
 
 ---
 

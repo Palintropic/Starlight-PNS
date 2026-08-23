@@ -5,7 +5,7 @@
 #
 # 运行: python -m unittest tests.test_event -v
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pns.models.event import (
     Event,
@@ -266,6 +266,27 @@ class EventStoreTests(unittest.TestCase):
             [entry["sequence"] for entry in self.store.to_dict()["events"]],
             [0, 1, 2, 3, 4],
         )
+
+    def test_since_returns_the_tail_at_or_after_a_moment(self):
+        for index, minute in enumerate((0, 0, 30, 30, 60)):
+            self.store._append(
+                _dialogue(f"e{index}", clock=datetime(2026, 8, 20, 2, 0) + timedelta(minutes=minute))
+            )
+        window = self.store.since(datetime(2026, 8, 20, 2, 30))
+        self.assertEqual([event.event_id for event in window], ["e2", "e3", "e4"])
+        # 边界是闭的，而且同一时刻的那一串要么全在、要么全不在。
+        self.assertEqual(len(self.store.since(datetime(2026, 8, 20, 2, 0))), 5)
+        self.assertEqual(self.store.since(datetime(2026, 8, 20, 3, 1)), ())
+        # 03:00 那条自己也在窗口里：边界是闭的。
+        self.assertEqual(len(self.store.since(datetime(2026, 8, 20, 3, 0))), 1)
+
+    def test_since_is_a_snapshot_and_refuses_non_datetimes(self):
+        self.store._append(_dialogue("e1"))
+        window = self.store.since(datetime(2026, 8, 20, 0, 0))
+        self.assertIsInstance(window, tuple)
+        self.assertEqual(len(self.store), 1)
+        with self.assertRaises(EventStoreError):
+            self.store.since("2026-08-20T02:00:00")
 
     def test_events_accessor_does_not_expose_the_internal_list(self):
         self.store._append(_dialogue("e1"))

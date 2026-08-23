@@ -192,6 +192,68 @@ class SmokeSessionTests(WorldApiTestCase):
 
 
 
+class DailyRhythmTests(WorldApiTestCase):
+    """CONTENT-1：作者写下的作息表真的走完了产品路径。
+
+    这里刻意不构造任何测试专用的作息表 —— 用的就是角色包里那两份。世界从
+    遗留 nightcord fixture 起步（深夜 02:00，两个人都在 Nightcord 上），
+    时间推过 02:30 之后，两个人各自回到自己作息表上的那一段。
+    """
+
+    def _activity(self, character_id, world_id="nightcord"):
+        world = self.world(world_id)
+        return world.state.world_state.activity_of(character_id).kind.value
+
+    def test_the_pack_rhythm_moves_a_running_world_through_its_day(self):
+        created = self.create()
+        self.assertEqual(created["clock"][11:16], "02:00")
+        # fixture 给的初始活动：频道在场是明说的，所以它有资格写 online_chatting。
+        self.assertEqual(self._activity("mizuki"), "online_chatting")
+        self.assertEqual(self._activity("ena"), "online_chatting")
+
+        self.start()
+        # 02:30 之后：瑞希去睡了，绘名接着画。两条都来自角色包，不是这里写的。
+        wait_for(
+            lambda: self._activity("mizuki") == "resting"
+            and self._activity("ena") == "drawing",
+            what="作息表把世界推过 02:30 那道边界",
+        )
+        self.stop()
+
+        world = self.world()
+        events = [
+            event
+            for event in world.state.events.events()
+            if event.type is EventType.CHARACTER_ACTIVITY_CHANGED
+        ]
+        self.assertTrue(events, "作息变更必须留在世界历史里")
+        for event in events:
+            self.assertEqual(event.provenance["kind"], "daily_rhythm")
+        # 关掉再恢复：作息表是内容，世界状态是存档 —— 两边都要接得上。
+        self.client.post("/api/persistent-worlds/nightcord/close")
+        restored = self.client.post("/api/persistent-worlds/nightcord/restore")
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(self._activity("mizuki"), "resting")
+
+    def test_an_operator_change_is_not_overwritten_inside_the_segment(self):
+        self.create()
+        # 02:00 属于"深夜 Nightcord"那一段，它一直管到 02:30。
+        response = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": "mizuki", "activity": "editing_video"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        world = self.world()
+        runtime = world.runtime
+        runtime.advance(5)  # 02:05，仍在同一段里
+        runtime.advance(5)  # 02:10
+        self.assertEqual(self._activity("mizuki"), "editing_video")
+
+        runtime.advance(25)  # 02:35，下一段开始，作息表重新接手
+        self.assertEqual(self._activity("mizuki"), "resting")
+
+
 class AutoCheckpointTests(WorldApiTestCase):
     """自动 checkpoint 由 P12 的策略说了算，驱动只负责在边界上问一句。
 

@@ -190,6 +190,36 @@ class BuildEntryPointTests(BoundaryTestBase):
         self.assertEqual(registry.models.evaluator_model, "another-model")
         self.assertEqual(registry.models.key_name, "TEST_API_KEY")
 
+    def test_the_authored_rhythms_are_part_of_the_snapshot(self):
+        registry = build_content_registry()
+        rhythms = registry.rhythms()
+        self.assertIn("mizuki", rhythms)
+        self.assertEqual(
+            registry.rhythm("mizuki").character_id, "mizuki"
+        )
+        self.assertIsNone(registry.rhythm("kanade"), "没写作息表是正常的")
+
+    def test_a_broken_rhythm_fails_the_whole_build(self):
+        """作息表写错了，整份配置作废 —— 而不是那个角色悄悄少一张表。
+
+        它跟"场景没有世界映射"是同一档：内容之间对不上，必须在切换之前暴露。
+        """
+        pack = cr.load_pack_data()
+        broken = dict(pack)
+        characters = dict(pack["characters"])
+        entry = dict(characters["mizuki"])
+        entry["daily_rhythm"] = [
+            {"at": "08:00", "activity": "studying", "location_id": "atlantis"}
+        ]
+        characters["mizuki"] = entry
+        broken["characters"] = characters
+        with patch.object(cr, "load_pack_data", return_value=broken):
+            with self.assertRaises(ConfigValidationError) as ctx:
+                build_content_registry()
+        self.assertIn("daily_rhythm", str(ctx.exception))
+        # 上一份可用快照原样还在。
+        self.assertIn("mizuki", self.boundary.active().rhythms())
+
     def test_a_failed_build_does_not_leak_env_into_the_process(self):
         """失败的重载不能把新 .env 塞进 os.environ —— 否则"仍在用旧配置"是假话。"""
         build_content_registry()

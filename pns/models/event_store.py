@@ -6,6 +6,7 @@
 #
 # 排序策略是显式的：事件的模拟时间不允许倒退，时间相同的事件按追加顺序排列。
 # 因此追加顺序本身就是确定的世界历史顺序，不需要事后再排序。
+from datetime import datetime
 from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from pns.models.event import Event
@@ -90,6 +91,22 @@ class EventStore:
 
     def latest(self) -> Optional[Event]:
         return self._events[-1] if self._events else None
+
+    def since(self, occurred_at: datetime) -> Tuple[Event, ...]:
+        """`occurred_at` 那一刻及之后的事件，按世界历史顺序。
+
+        追加时时间不允许倒退（见 _check_can_append），所以从尾部往回扫、遇到
+        第一条更早的就停是完备的：不可能有更早的事件排在更晚的后面。代价因此
+        只跟窗口内的事件条数有关，而不是整段历史的长度 —— 调用方每次推进都会
+        问一次这个问题（"这个角色在当前时段里有没有发生过状态变更"），拿整份
+        历史的副本去回答它，会让每一次推进的成本随世界寿命一起涨。
+        """
+        if not isinstance(occurred_at, datetime):
+            raise EventStoreError("since() 需要一个 datetime")
+        cut = len(self._events)
+        while cut > 0 and self._events[cut - 1].occurred_at >= occurred_at:
+            cut -= 1
+        return tuple(self._events[cut:])
 
     def by_type(self, event_type) -> Tuple[Event, ...]:
         return tuple(event for event in self._events if event.type == event_type)
