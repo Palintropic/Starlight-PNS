@@ -1,0 +1,18 @@
+# 生产镜像里的运行时依赖。
+#
+# 它是 requirements.txt 的**子集**，刻意分开维护：镜像里不该躺着一个格式化器
+# 和一套只有测试用得上的 HTTP 客户端。两份文件的关系由
+# tests/test_deployment_package.py 盯着——生产这份出现 requirements.txt 里没有
+# 的包，或者少掉一个运行时真的要用的包，测试会红。
+#
+# 相对 requirements.txt 少掉的：
+#   black    —— 格式化器，开发工具
+#   httpx    —— 只有 fastapi.testclient 直接用它（anthropic/openai 会自己带）
+#   aiohttp  —— 当前代码库里没有任何一处 import 它
+anthropic
+openai
+python-dotenv
+fastapi
+uvicorn[standard]
+pydantic
+pyyaml

@@ -1,0 +1,31 @@
+# 默认全部排除，再显式放行构建真正需要的东西。
+#
+# 方向是刻意的：一份"列出不要什么"的清单，在仓库里新出现一个 secrets.yaml
+# 的那天就失效了，而且没有人会发现。默认排除让新文件默认进不了构建上下文——
+# 想让它进镜像，必须有人在这里显式写一行。
+*
+
+!pns
+!scripts
+!packs
+!dashboard
+!config.yaml
+!requirements-prod.txt
+
+# 放行的目录里仍然不要的东西。规则从上往下生效，所以这些排除写在放行之后。
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store
+**/*.bak
+dashboard/node_modules
+dashboard/dist
+
+# 下面这些本来就被上面的 `*` 挡住了，明写一遍是为了让"它绝不进镜像"这件事
+# 在这份文件里读得出来，而不是靠读者自己推导。
+.env
+.env.*
+.git
+data
+history
+review_decisions.jsonl
+tests
