@@ -19,6 +19,7 @@
 #      会被某一版提示词渲染出来，而这张表的每一个字段都是要变成世界事实的。
 #   4. **它是纯内容。** 这个模块不 import 运行时、不 import 会话、不读磁盘，
 #      import 它没有任何副作用。
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, Mapping, Optional, Sequence, Tuple
@@ -45,18 +46,27 @@ def _require_minute(value, label: str) -> int:
     return value
 
 
+# 严格的 HH:MM：两位小时、两位分钟，ASCII 数字，前后不许有别的东西。
+#
+# 每一处收紧都对应一种真的会被写出来、而且会被悄悄接受成别的意思的写法：
+# `str.isdigit()` 对全角"０８"为真、`int()` 也认它；`"1:2"` 和 `"001:02"` 会被
+# 解析成 01:02；`"08:0"` 会被解析成 08:00。一张作息表读错一位就是角色在错误的
+# 时刻换地方，而且没有任何迹象 —— 所以这里宁可拒绝，不猜。
+_DAY_MINUTE_RE = re.compile(r"([0-9]{2}):([0-9]{2})")
+
+
 def parse_day_minute(value, label: str = "at") -> int:
     """把作者写的 "HH:MM"（或整数分钟）解析成当日分钟数。
 
-    只接受严格的 HH:MM —— 不做任何模糊匹配。"傍晚 17:30" 那种带前缀的写法属于
-    遗留 scene 的显示字符串，不该出现在结构化作息表里。
+    只接受严格的 HH:MM：两位小时、两位分钟、ASCII 数字，没有空白、没有前缀、
+    没有别的分隔符。"傍晚 17:30" 那种带前缀的写法属于遗留 scene 的显示字符串，
+    不该出现在结构化作息表里。
     """
     if isinstance(value, str):
-        text = value.strip()
-        parts = text.split(":")
-        if len(parts) != 2 or not all(part.isdigit() for part in parts):
-            raise RhythmError(f"{label} 必须是 HH:MM，收到 {value!r}")
-        hour, minute = int(parts[0]), int(parts[1])
+        match = _DAY_MINUTE_RE.fullmatch(value)
+        if match is None:
+            raise RhythmError(f"{label} 必须是严格的 HH:MM，收到 {value!r}")
+        hour, minute = int(match.group(1)), int(match.group(2))
         if not (0 <= hour < 24 and 0 <= minute < 60):
             raise RhythmError(f"{label} 超出范围：{value!r}")
         return hour * 60 + minute
@@ -87,11 +97,13 @@ class RhythmSegment:
         except ValueError:
             raise RhythmError(f"未知的角色活动: {self.activity!r}") from None
         if self.activity is ActivityKind.UNSPECIFIED:
-            # 一段作息存在的意义是**声明一个事实**。声明"没有事实"跟不给这个
-            # 角色写作息表是同一件事，但代价不同：unspecified 在世界状态里不
-            # 留记录，于是"这一段作息说过话了没有"就没有耐久答案，运行时只能
-            # 每次推进都重新按住这个角色的地点，把段内的其它决定（比如一次
-            # 移动动作）反复撤销掉。所以这里拒绝，而不是接受一个语义更弱的段。
+            # 一段作息存在的意义是**声明一个事实**：这个角色在这段时间里在做
+            # 什么。unspecified 声明的是"没有事实"，而那跟不给这个角色写这一段
+            # 是同一个意思 —— 区别只在于前者看起来像作者想说点什么。所以这里
+            # 拒绝，而不是接受一个什么都没说的段。
+            #
+            # （运行时那边不需要这条禁令：作息表是否已经为当前时段说过话，由
+            # 世界历史回答，跟活动是不是 unspecified 无关。这是一条内容规则。）
             raise RhythmError(
                 "作息表里的活动不能是 unspecified —— 不想声明这一段就别写这一段"
             )

@@ -201,6 +201,40 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self._reject([{"at": bad, "activity": "studying"}])
 
+    def test_the_time_format_is_strict_hh_mm(self):
+        """文档说"严格 HH:MM"，实现就必须真的严格。
+
+        每一条都是会被悄悄读成**别的时刻**的写法：`1:2`/`001:02` 会变成 01:02，
+        `08:0` 会变成 08:00，全角数字 `０８:００` 连 int() 都认。作息表读错一位
+        就是角色在错误的时刻换了地方，而且外面看不出来。
+        """
+        for bad in (
+            "1:2",
+            "001:02",
+            "08:0",
+            "8:00",
+            "０８:００",
+            " 08:00",
+            "08:00 ",
+            "08:00:00",
+            "",
+            ":",
+            "08:60",
+            "24:00",
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(RhythmError):
+                    parse_day_minute(bad)
+
+    def test_the_accepted_times_are_exactly_the_day(self):
+        self.assertEqual(parse_day_minute("00:00"), 0)
+        self.assertEqual(parse_day_minute("23:59"), 24 * 60 - 1)
+        self.assertEqual(parse_day_minute("08:30"), 8 * 60 + 30)
+        # 整数分钟仍然是合法输入（内部构造用），边界照样守着。
+        self.assertEqual(parse_day_minute(0), 0)
+        with self.assertRaises(RhythmError):
+            parse_day_minute(24 * 60)
+
     def test_missing_fields_and_wrong_shapes_are_rejected(self):
         self._reject([{"activity": "studying"}], expect="缺少")
         self._reject([{"at": "08:00"}], expect="缺少")
