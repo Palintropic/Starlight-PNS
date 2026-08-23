@@ -8,13 +8,19 @@
 # 半初始化的模块，也不会停掉正在读旧配置的会话。P7 之后不再这么做。
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from pns.runtime.reload import BOUNDARY, write_and_reload
 from pns.world import codegen
 
+from .security import refuse_in_production
+
 router = APIRouter(prefix="/api/world", tags=["world"])
+
+# 写接口在生产模式下被拒绝：它们改的是镜像层里的源码，那份改动活不过下一次
+# 容器重建。读接口不受影响——在生产上看一眼当前内容是完全正当的。
+WRITE_GUARD = [Depends(refuse_in_production)]
 
 
 def _save(paths, write):
@@ -79,7 +85,7 @@ def get_world_scenes():
     return _scenes()
 
 
-@router.post("/scenes")
+@router.post("/scenes", dependencies=WRITE_GUARD)
 def post_world_scenes(scenes: dict[str, Scene]):
     for key, scene in scenes.items():
         if scene.id != key:
@@ -94,7 +100,7 @@ def get_world_scenes_source():
     return {"source": codegen.SCENES_PATH.read_text(encoding="utf-8")}
 
 
-@router.post("/scenes/source")
+@router.post("/scenes/source", dependencies=WRITE_GUARD)
 def post_world_scenes_source(payload: SourcePayload):
     _save([codegen.SCENES_PATH], lambda: codegen.save_scenes_source(payload.source))
     return {"source": codegen.SCENES_PATH.read_text(encoding="utf-8")}
@@ -105,7 +111,7 @@ def get_world_facts():
     return {"facts": _facts(), "groups": codegen.FACT_GROUPS}
 
 
-@router.post("/facts")
+@router.post("/facts", dependencies=WRITE_GUARD)
 def post_world_facts(payload: FactsPayload):
     _save([codegen.FACTS_PATH], lambda: codegen.save_facts(payload.facts))
     return {"facts": _facts(), "groups": codegen.FACT_GROUPS}
@@ -116,7 +122,7 @@ def get_world_facts_source():
     return {"source": codegen.FACTS_PATH.read_text(encoding="utf-8")}
 
 
-@router.post("/facts/source")
+@router.post("/facts/source", dependencies=WRITE_GUARD)
 def post_world_facts_source(payload: SourcePayload):
     _save([codegen.FACTS_PATH], lambda: codegen.save_facts_source(payload.source))
     return {"source": codegen.FACTS_PATH.read_text(encoding="utf-8")}

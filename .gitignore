@@ -57,6 +57,13 @@ config.secret.py
 
 .claude/session-notes.md
 
+# ─── World Editor 保存前的覆盖式备份（不是历史版本链）───────
+pns/world/*.py.bak
+
+# ─── 人工审核决策（运行时数据，跟着 data/ 卷走）─────────────
+data/review_decisions.jsonl
+/review_decisions.jsonl
+
 # ─── 持久世界存档 / 所有权锁（本地运行时数据）──────────────
 # 存档根默认在 data/worlds/，可用 PNS_WORLD_ROOT 改到别处。
 # 它装的是一个跑着的世界的权威状态和一把进程锁，不是源码。

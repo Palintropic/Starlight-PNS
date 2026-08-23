@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from hmac import compare_digest
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from fastapi import HTTPException, Request
+
 # ── 环境变量名 ──────────────────────────────────────────────────────────
 ENV_MODE = "PNS_ENV"
 ENV_ADMIN_TOKEN = "PNS_ADMIN_TOKEN"
@@ -403,6 +405,37 @@ class AdminAuth:
         return self.authenticated(scope)
 
 
+# ── 生产不可变边界 ──────────────────────────────────────────────────────
+def refuse_in_production(request: Request) -> None:
+    """写回仓库源码的接口在生产模式下一律拒绝。
+
+    理由不是"生产要严一点"，而是那种写入**在生产里没有意义且会骗人**：
+    World Editor 写的是镜像层里的 `pns/world/*.py`，`POST /api/config` 写的是
+    镜像层里的 `.env`。它们在下一次 `docker compose up --build` 之后就没了，
+    而且容器里的 `.env` 还会盖住 Compose 注入的那份配置——于是操作者看到的是
+    "改好了"，实际得到的是一次会在下次重建时静静回退的改动。
+
+    与其让一次写入变成一个定时的谎，不如当场说清楚：生产的内容与配置从仓库和
+    环境注入来，改法是改仓库/改环境再重建（见 docs/DEPLOY_UBUNTU_DOCKER.md）。
+    这跟鉴权是两件事——这些接口首先要通过鉴权，然后才会撞到这一条。
+
+    它是一个路由级依赖，所以它在**请求体校验之前**跑：一份畸形请求体在生产
+    上拿到的也是 409，而不是一句把 schema 讲出去的 422。
+    """
+    deployment = getattr(request.app.state, "deployment", None)
+    if deployment is not None and deployment.production:
+        raise HTTPException(
+            409,
+            {
+                "category": "immutable_deployment",
+                "message": (
+                    "生产部署不接受从浏览器写回仓库源码或 .env："
+                    "那份写入活不过下一次容器重建。请改仓库/改环境后重新部署。"
+                ),
+            },
+        )
+
+
 _DENIED_BODY = (
     b'{"detail":{"category":"unauthenticated",'
     b'"message":"\\u9700\\u8981\\u7ba1\\u7406\\u51ed\\u636e"}}'
@@ -465,6 +498,7 @@ __all__ = [
     "PUBLIC_PATHS",
     "PUBLIC_STATIC_PATHS",
     "PUBLIC_STATIC_PREFIXES",
+    "refuse_in_production",
     "SESSION_COOKIE",
     "SessionStore",
     "DeploymentSettings",

@@ -5,12 +5,14 @@
 # pns.runtime.reload.BOUNDARY.reload()，它会关闸门、停会话、整体重建校验、
 # 原子替换，失败则保留上一份可用配置。改 Python 代码属于 cold update，
 # 必须停服替换文件再重启，后台接口不提供、也不应该提供这种能力。
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import pns.logic.router as router_mod
 from oobe import ENV_FILE, PROVIDERS, write_env
 from pns.runtime.reload import BOUNDARY, write_and_reload
+
+from .security import refuse_in_production
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -38,7 +40,7 @@ class ConfigPayload(BaseModel):
     evaluator_model: str | None = None
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(refuse_in_production)])
 def post_config(payload: ConfigPayload):
     provider = PROVIDERS.get(payload.provider_key)
     if not provider:
