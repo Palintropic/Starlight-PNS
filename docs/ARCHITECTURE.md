@@ -1415,14 +1415,24 @@ a line in the same tick already sees the new segment's activity. There is no new
 whose clock is not advancing has no rhythm transitions.
 
 Whether the rhythm may speak for a character is re-derived from durable state
-alone: it speaks only when that character has no activity record, or when the
-record predates the current segment's start. Three consequences follow. A failed
-or interrupted transition is retried by the next tick, because nothing about
-“already applied” lives in memory or in the archive. An operator activity change
-or an agent's own movement made inside a segment stands until the next segment
-begins — the rhythm is a default day, not a cage. And a tick that jumps over whole
-segments applies only the segment that is current now; skipped segments did not
-happen and are not replayed.
+alone, and the state it reads is the world history: it speaks only while no
+`character.activity_changed` or `character.location_changed` event for that
+character has been committed at or after the current segment's start. The activity
+record's `since` is deliberately *not* the test — it is only a proxy for the last
+activity event, and a segment change that moves a character without changing what
+they are doing commits no activity event at all, so `since` would stay behind in
+the previous segment and the rhythm would keep overriding that character's own
+movement for the rest of the day. Location changes are events too, so the history
+has no such blind spot.
+
+Three consequences follow. A failed or interrupted transition is retried by the
+next tick, because nothing about “already applied” lives in memory or in the
+archive. Any decision made inside a segment — an operator activity change, an
+agent's own `movement.move_to`, or the rhythm's own transition — leaves an event
+inside that segment and therefore closes the gate until the next segment begins;
+the rhythm is a default day, not a cage. And a tick that jumps over whole segments
+applies only the segment that is current now; skipped segments did not happen and
+are not replayed.
 
 Rhythms are bound like every other cold adapter: a world uses the snapshot it was
 opened with, so reloading content does not rewrite a world that is already open.

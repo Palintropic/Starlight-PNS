@@ -20,6 +20,7 @@ from pathlib import Path
 
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.event import Event, EventScope, EventType
+from pns.models.event_store import EventStore
 from pns.models.session import SessionState
 from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.autonomy.audit import ScriptedAuditor
@@ -103,6 +104,21 @@ def _rig(clock=datetime(2026, 8, 21, 7, 55), *, rhythms=None, generator=None):
     return state, scheduler, runtime
 
 
+def _move(state, character_id, location_id, event_id):
+    """角色自己走的那一步：跟 Agency 的 movement.move_to 落成的事件同一条。"""
+    return commit_session_event(
+        state,
+        Event(
+            event_id=event_id,
+            type=EventType.CHARACTER_LOCATION_CHANGED,
+            occurred_at=state.world_state.clock,
+            scope=EventScope.LOCATION,
+            actor_id=character_id,
+            location_id=location_id,
+        ),
+    )
+
+
 def _activity_events(state):
     return [
         event
@@ -144,8 +160,7 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
         )
 
     def test_unspecified_is_not_a_segment(self):
-        # 声明"没有事实"跟不写这一段是同一件事，但它在世界状态里不留记录，
-        # 于是"这一段说过话了没有"就没有耐久答案。
+        # 一段作息是来声明事实的；声明"没有事实"跟不写这一段是同一个意思。
         self._reject(
             [{"at": "08:00", "activity": "unspecified"}], expect="unspecified"
         )
@@ -307,17 +322,32 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
             restored.world_state.location_of("mizuki"), "kamiyama_high"
         )
 
-    def test_applying_twice_in_the_same_minute_is_refused_loudly(self):
-        # 事件 id 是确定性的，所以"同一分钟被应用两次"撞在世界历史上，
-        # 而不是悄悄留下两条一模一样的状态变更。
+    def test_a_second_apply_in_the_same_minute_commits_nothing(self):
+        # 挡住第二次的是判据本身：这一段的世界历史里已经有这个角色的状态变更了。
         state, _scheduler, runtime = _rig()
-        runtime.advance(10)
+        first = runtime.apply_rhythm()
+        self.assertTrue(first)
+        self.assertEqual(runtime.apply_rhythm(), ())
+        self.assertEqual(len(_activity_events(state)), 1)
+
+    def test_the_planned_event_ids_are_deterministic_and_unrepeatable(self):
+        # 判据挡住了正常路径上的第二次；确定性 id 是第二道闸：万一世界状态与
+        # 世界历史真的分了叉，同一分钟的同一条变更也进不了历史两次。
+        state, _scheduler, runtime = _rig()
         world = state.world_state
-        # 手工把活动改回去（绕过事件），再让作息表重算一次：它会产出同一个 id。
-        world.character_activities.pop("mizuki", None)
-        world.place_character("mizuki", "mizuki_home_room")
+        plan = runtime.rhythm.plan(world, state.events, correlation_id=state.session_id)
+        again = runtime.rhythm.plan(world, state.events, correlation_id=state.session_id)
+        self.assertEqual(
+            [event.event_id for event in plan],
+            [event.event_id for event in again],
+        )
+        self.assertTrue(
+            all(event.event_id.startswith("rhythm:mizuki:") for event in plan)
+        )
+        commit_session_event(state, plan[0])
         with self.assertRaises(Exception) as caught:
-            runtime.apply_rhythm()
+            # 同一条事件再来一次：世界历史按 id 拒绝。
+            state.events._check_can_append(plan[0])
         self.assertIn("重复的 event_id", str(caught.exception))
 
     def test_a_settled_segment_produces_nothing_on_later_ticks(self):
@@ -329,6 +359,102 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
         self.assertEqual(len(_activity_events(state)), 1)
         # 只多了两条 world.time_advanced。
         self.assertEqual(len(state.events) - before, 2)
+
+
+# ── 判据本身：相邻同活动异地点的那个盲区 ────────────────────────────────
+class SameActivityDifferentPlaceTests(unittest.TestCase):
+    """相邻两段活动相同、只有地点不同 —— 那次切换不产生任何活动事件。
+
+    判据如果只看当前活动记录的 since，它在这种切换上完全不动，于是这个角色
+    在新时段里自己走的每一步都会被作息表拉回去。判据看世界历史就没有这个盲区：
+    位置变更也是事件。
+    """
+
+    RHYTHM = DailyRhythm(
+        character_id="mizuki",
+        segments=(
+            RhythmSegment(
+                at=parse_day_minute("08:00"),
+                activity=ActivityKind.IDLE,
+                location_id="mizuki_home_room",
+            ),
+            RhythmSegment(
+                at=parse_day_minute("12:00"),
+                activity=ActivityKind.IDLE,
+                location_id="kamiyama_high",
+            ),
+        ),
+    )
+
+    def _rig_same_activity(self):
+        state, scheduler, runtime = _rig(
+            clock=datetime(2026, 8, 21, 7, 55), rhythms={"mizuki": self.RHYTHM}
+        )
+        runtime.advance(10)  # 08:05：第一段，活动 idle
+        self.assertIs(
+            state.world_state.activity_of("mizuki").kind, ActivityKind.IDLE
+        )
+        runtime.advance(4 * 60)  # 12:05：跨段，只换地点
+        self.assertEqual(state.world_state.location_of("mizuki"), "kamiyama_high")
+        # 活动没变过，所以它的 since 仍然停在第一段 —— 这正是旧判据的盲区。
+        self.assertLess(
+            state.world_state.activity_of("mizuki").since,
+            datetime(2026, 8, 21, 12, 0),
+        )
+        return state, scheduler, runtime
+
+    def test_a_move_after_a_location_only_switch_is_not_pulled_back(self):
+        state, _scheduler, runtime = self._rig_same_activity()
+        _move(state, "mizuki", "kamiyama_high_gate", "move-1")
+
+        runtime.advance(5)
+        runtime.advance(5)
+        self.assertEqual(
+            state.world_state.location_of("mizuki"),
+            "kamiyama_high_gate",
+            "时段内自己走的路不该被默认作息拉回去",
+        )
+
+    def test_repeated_ticks_inside_that_segment_commit_nothing(self):
+        state, _scheduler, runtime = self._rig_same_activity()
+        before = len(_location_events(state)), len(_activity_events(state))
+        for _ in range(5):
+            runtime.advance(5)
+        self.assertEqual(
+            (len(_location_events(state)), len(_activity_events(state))), before
+        )
+
+    def test_the_judgement_survives_an_archive_round_trip(self):
+        # 判据整个活在世界历史里，所以存档往返之后它一模一样：恢复出来的世界
+        # 不会把这一段再应用一遍，也不会把段内的移动撤销掉。
+        state, _scheduler, runtime = self._rig_same_activity()
+        _move(state, "mizuki", "kamiyama_high_gate", "move-1")
+
+        restored = SessionState.from_dict(state.to_dict())
+        director = RhythmDirector({"mizuki": self.RHYTHM})
+        self.assertEqual(
+            director.plan(restored.world_state, restored.events), ()
+        )
+
+    def test_a_restore_that_lost_the_switch_re_applies_it(self):
+        # 反过来：如果那次切换提交了但没落盘（可见 ≠ 耐久），恢复出来的历史里
+        # 没有它，判据就会重新算出同样的一批 —— 自愈不需要任何内存标记。
+        state, _scheduler, runtime = self._rig_same_activity()
+        payload = state.to_dict()
+        payload["events"]["events"] = [
+            entry
+            for entry in payload["events"]["events"]
+            if not entry["event_id"].startswith("rhythm:")
+        ]
+        for index, entry in enumerate(payload["events"]["events"]):
+            entry["sequence"] = index
+        payload["world_state"]["character_locations"]["mizuki"] = "mizuki_home_room"
+        restored = SessionState.from_dict(payload)
+
+        director = RhythmDirector({"mizuki": self.RHYTHM})
+        plan = director.plan(restored.world_state, restored.events)
+        self.assertEqual([event.type for event in plan], [EventType.CHARACTER_LOCATION_CHANGED])
+        self.assertEqual(plan[0].location_id, "kamiyama_high")
 
 
 # ── AC4 跨过去的段没有发生过 ────────────────────────────────────────────
@@ -353,6 +479,18 @@ class OnlyTheCurrentSegmentCanBecomeTrueTests(unittest.TestCase):
         self.assertIs(
             state.world_state.activity_of("mizuki").kind, ActivityKind.EDITING_VIDEO
         )
+
+    def test_a_decision_made_before_midnight_still_holds_after_it(self):
+        # 跨零点那一段的起点在昨天，所以判据的扫描窗口也要跨过零点。窗口算错的话，
+        # 零点一过，昨晚在这一段里做过的决定就会被作息表当成没发生过。
+        state, _scheduler, runtime = _rig(clock=datetime(2026, 8, 21, 20, 55))
+        runtime.advance(10)  # 21:05，进入跨零点那一段
+        _move(state, "mizuki", "city_streets", "night-walk")
+
+        runtime.advance(3 * 60)  # → 00:05，同一段，已经跨过零点
+        self.assertEqual(state.world_state.location_of("mizuki"), "city_streets")
+        runtime.advance(60)  # → 01:05，仍在这一段
+        self.assertEqual(state.world_state.location_of("mizuki"), "city_streets")
 
 
 # ── AC5 段内的决定压过作息表 ────────────────────────────────────────────
@@ -389,26 +527,29 @@ class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
         )
 
     def test_a_move_inside_the_segment_is_not_undone_until_the_next_one(self):
-        # 只移动、不碰活动：判据是活动记录的 since 落在这一段之内，所以作息表
-        # 这一段已经说过话了，不会每次推进都把人按回去。
+        # 只移动、不碰活动。走的是 movement.move_to 落成的那条事件本身，
+        # 所以这条用例盯的是角色自己走的路，不是测试里的旁路写法。
         state, _scheduler, runtime = _rig()
         runtime.advance(10)  # 08:05，作息表把人放到了学校
-        state.world_state.place_character("mizuki", "city_streets")
+        _move(state, "mizuki", "kamiyama_high_gate", "move-1")
         runtime.advance(30)
         runtime.advance(30)
-        self.assertEqual(state.world_state.location_of("mizuki"), "city_streets")
+        self.assertEqual(
+            state.world_state.location_of("mizuki"), "kamiyama_high_gate"
+        )
 
         runtime.advance(6 * 60)  # → 15:15，下一段开始
         self.assertEqual(
             state.world_state.location_of("mizuki"), "clothing_store_floor"
         )
 
-    def test_setting_a_character_back_to_unspecified_hands_it_to_the_rhythm(self):
-        # "未指定"是"没有答案"，而作息表有一个。所以它不是一把冻结世界的锁：
-        # 下一次推进作息表就会重新接手（活动和地点一起）。
+    def test_setting_a_character_back_to_unspecified_is_also_an_in_segment_decision(
+        self,
+    ):
+        # 把活动清成"未指定"同样是这一段之内的一次决定，所以它跟别的决定一样
+        # 站得住 —— 判据不看活动是什么，只看这一段里有没有人动过这个角色。
         state, _scheduler, runtime = _rig()
         runtime.advance(10)
-        state.world_state.place_character("mizuki", "city_streets")
         runtime.commit_external_event(
             Event(
                 event_id="operator-unspecified",
@@ -420,12 +561,19 @@ class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
             )
         )
         runtime.advance(5)
+        runtime.advance(5)
         self.assertIs(
-            state.world_state.activity_of("mizuki").kind, ActivityKind.STUDYING
+            state.world_state.activity_of("mizuki").kind, ActivityKind.UNSPECIFIED
         )
-        self.assertEqual(state.world_state.location_of("mizuki"), "kamiyama_high")
         # 而且这样的世界仍然存得下、恢复得回来。
         SessionState.from_dict(state.to_dict())
+
+        # 下一段开始，作息表照常接手。
+        runtime.advance(7 * 60)  # → 15:15
+        self.assertIs(
+            state.world_state.activity_of("mizuki").kind,
+            ActivityKind.WORKING_PART_TIME,
+        )
 
 
 # ── AC3/AC6 一批变更是一个事务，而且失败可以自愈 ────────────────────────
@@ -478,7 +626,9 @@ class RhythmApplicationIsAtomicAndSelfHealingTests(unittest.TestCase):
         """
         state, _scheduler, runtime = _rig(rhythms={"mizuki": self._broken()})
         world = state.world_state
-        plan = runtime.rhythm.plan(world, correlation_id=state.session_id)
+        plan = runtime.rhythm.plan(
+            world, state.events, correlation_id=state.session_id
+        )
         self.assertEqual(len(plan), 2)
         with self.assertRaises(EventCommitError):
             for event in reversed(plan):  # 先活动、后位置：逐条提交
@@ -595,7 +745,7 @@ class CharactersWithoutARhythmAreUntouchedTests(unittest.TestCase):
         world = _world(datetime(2026, 8, 21, 9, 0))
         world.remove_character("mizuki")
         director = RhythmDirector({"mizuki": MIZUKI_RHYTHM})
-        self.assertEqual(director.plan(world), ())
+        self.assertEqual(director.plan(world, EventStore()), ())
 
     def test_a_world_without_any_rhythm_never_changes_shape(self):
         state, _scheduler, runtime = _rig(rhythms={})
@@ -614,7 +764,11 @@ class CharactersWithoutARhythmAreUntouchedTests(unittest.TestCase):
     def test_the_planner_refuses_anything_that_is_not_a_world(self):
         director = RhythmDirector({"mizuki": MIZUKI_RHYTHM})
         with self.assertRaises(RhythmDirectorError):
-            director.plan({"clock": datetime(2026, 8, 21, 9, 0)})
+            director.plan({"clock": datetime(2026, 8, 21, 9, 0)}, EventStore())
+        with self.assertRaises(RhythmDirectorError):
+            # 世界历史是判据的唯一来源，不给就不能规划 —— 少了它，"这一段说过
+            # 话了没有"会退回成一次猜测。
+            director.plan(_world(datetime(2026, 8, 21, 9, 0)), None)
 
 
 if __name__ == "__main__":

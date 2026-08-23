@@ -534,7 +534,8 @@ class AutonomousRuntime:
 
         整批变更共用**一个**事务：一个"人到了店里、却还在家里画画"的中间态
         比晚一拍对齐糟糕得多。任何一条提交失败，这一批一起回滚，而且下一次
-        推进会重新算出同样的一批（判据是耐久状态，不是内存里的标记）。
+        推进会重新算出同样的一批 —— 判据是世界历史（当前时段里这个角色有没有
+        提交过状态变更），不是内存里的标记。
 
         它跟 `commit_external_event()` 走同一条闸门与停机语义：停机之后不提交。
         """
@@ -546,7 +547,9 @@ class AutonomousRuntime:
                 # 重新算出该补的那几条。
                 return ()
             plan = self._rhythm.plan(
-                self.world, correlation_id=self._state.session_id
+                self.world,
+                self._state.events,
+                correlation_id=self._state.session_id,
             )
             if not plan:
                 return ()
