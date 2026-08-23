@@ -241,6 +241,7 @@ def judge(
     original_request: str | None = None,
     recent_history: list | None = None,
     correction_applied: str | None = None,
+    situation_facts: list | None = None,
     registry=None,
 ) -> dict:
     settings = registry.models if registry is not None else None
@@ -277,6 +278,8 @@ def judge(
 
     prompt = (
         f"{lore_context}【原始任务/当前直接要求】\n{original_request or '（未提供）'}\n\n"
+        f"【当前角色可见情境】\n"
+        f"{chr(10).join(str(item) for item in (situation_facts or ())) or '（未提供）'}\n\n"
         f"【生成前最近对话历史】\n{_format_recent_history(recent_history)}\n\n"
         f"【本轮是否注入过纠正】\n{correction_applied or '（无）'}\n\n"
         f"【待验收输出】\n第{turn}轮，{char_name}说：「{message}」\n\n"
@@ -313,8 +316,10 @@ def judge(
         result["evaluator_provider"] = evaluator_provider
         return result
 
-    except json.JSONDecodeError as e:
-        print(f"[Router] ⚠️ JSON解析失败: {e}\n原始: {raw}")
+    except json.JSONDecodeError:
+        # provider 原文可能含凭据、内部提示或其他敏感数据；解析失败只报告固定
+        # 状态，绝不把原文或由它派生的异常文本回显到日志。
+        print("[Router] ⚠️ JSON解析失败（供应商原文已隐藏）")
         return {
             "character": character, "drift_score": 0, "confidence": 0.0,
             "drift_type": "解析失败", "reason": "解析失败", "is_ooc": False,

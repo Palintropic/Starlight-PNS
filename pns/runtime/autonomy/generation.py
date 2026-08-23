@@ -21,6 +21,7 @@
 #
 # 确定性适配器（ScriptedLineGenerator）跟真实模型适配器走的是同一条通道 ——
 # 这是"完整回路可以不联网跑完"的全部实现方式，不需要在运行时里埋测试分支。
+import re
 from typing import Callable, Mapping, Optional, Tuple
 
 from pns.models.action import ActionError, ActionProposal, LegalAction
@@ -41,6 +42,13 @@ from pns.runtime.memory.projection import recalled_lines
 # 上下文吐回来，而那份上下文里有这个角色自己的全部观察与回忆 —— 原样进世界
 # 历史、再被别人观察到，就是一次绕过曝光的泄漏。
 MAX_LINE_CHARS = 2000
+
+# 模型可以明确选择不说话。使用一个不可能被误认成自然台词的精确令牌；只有
+# 整份输出逐字等于它才算弃权，夹在句子里的同样文本仍按普通台词处理。
+ABSTAIN_TOKEN = "<ABSTAIN>"
+
+_LEADING_STAGE_DIRECTION = re.compile(r"^(?:（[^）]*）|\([^)]*\))")
+_JAPANESE_KANA = re.compile(r"[\u3040-\u30ff]")
 
 # 生成器交回来的字典里，允许出现的键。**只有一个**：这句话。
 _ALLOWED_KEYS = frozenset({"text"})
@@ -87,6 +95,10 @@ def parse_line(raw, context: GenerationContext) -> str:
         )
     if not text:
         raise GenerationError("生成输出是空的 —— 没说出口的话不是一句台词")
+    if _LEADING_STAGE_DIRECTION.match(text):
+        raise GenerationError("生成输出不能以括号动作或舞台说明开头")
+    if _JAPANESE_KANA.search(text):
+        raise GenerationError("生成输出包含日文假名；自主中文对话只接受简体中文")
     if len(text) > MAX_LINE_CHARS:
         raise GenerationError(
             f"生成输出超过 {MAX_LINE_CHARS} 字（收到 {len(text)}），"
@@ -237,6 +249,9 @@ class AuthoredLinePolicy(AgencyPolicy):
             # 输出结构不对是**不可重试**的：同一个坏模板会一直吐同样的垃圾。
             raise AgencyPolicyError(f"生成输出不合法: {e}", retryable=False) from e
 
+        if text == ABSTAIN_TOKEN:
+            return PolicyDecision(rationale="model chose silence")
+
         payload = {"text": text}
         char_name = self._names.get(context.character_id)
         if char_name:
@@ -282,6 +297,7 @@ class AuthoredLinePolicy(AgencyPolicy):
 
 
 __all__ = [
+    "ABSTAIN_TOKEN",
     "MAX_LINE_CHARS",
     "AuthoredLinePolicy",
     "GenerationError",
