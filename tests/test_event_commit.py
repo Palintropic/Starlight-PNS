@@ -13,7 +13,7 @@ from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore, EventStoreError
 from pns.models.exposure import ExposureReason
 from pns.models.session import SessionState, Turn
-from pns.models.world_state import WorldState
+from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime import event_commit
 from pns.runtime.event_commit import (
     EventCommitError,
@@ -177,6 +177,58 @@ class CommitStateEffectTests(unittest.TestCase):
         )
         commit_event(self.world, self.store, event)
         self.assertEqual(self.world.clock, datetime(2026, 8, 20, 2, 15))
+
+    def test_activity_change_is_an_event_backed_state_transition(self):
+        event = Event(
+            event_id="activity-1",
+            type=EventType.CHARACTER_ACTIVITY_CHANGED,
+            occurred_at=CLOCK,
+            scope=EventScope.PRIVATE,
+            actor_id="mizuki",
+            payload={"activity": ActivityKind.EDITING_VIDEO.value},
+        )
+        commit_event(self.world, self.store, event)
+        self.assertIs(
+            self.world.activity_of("mizuki").kind, ActivityKind.EDITING_VIDEO
+        )
+        self.assertEqual(len(self.store), 1)
+
+    def test_activity_change_rejects_unknown_and_noop_transitions(self):
+        for event_id, activity in (
+            ("bad-activity", "making_things_up"),
+            ("noop-activity", ActivityKind.UNSPECIFIED.value),
+        ):
+            with self.subTest(activity=activity):
+                event = Event(
+                    event_id=event_id,
+                    type=EventType.CHARACTER_ACTIVITY_CHANGED,
+                    occurred_at=CLOCK,
+                    scope=EventScope.PRIVATE,
+                    actor_id="mizuki",
+                    payload={"activity": activity},
+                )
+                with self.assertRaises(EventCommitError):
+                    commit_event(self.world, self.store, event)
+        self.assertEqual(len(self.store), 0)
+
+    def test_activity_event_is_structurally_private_and_narrow(self):
+        base = {
+            "event_id": "activity-shape",
+            "type": EventType.CHARACTER_ACTIVITY_CHANGED,
+            "occurred_at": CLOCK,
+            "scope": EventScope.PRIVATE,
+            "actor_id": "mizuki",
+            "payload": {"activity": ActivityKind.RESTING.value},
+        }
+        for override in (
+            {"scope": EventScope.PUBLIC},
+            {"location_id": "kamiyama_high_gate"},
+            {"channel_id": "nightcord"},
+            {"participants": ("mizuki",)},
+            {"payload": {"activity": "resting", "note": "inject"}},
+        ):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                Event(**{**base, **override})
 
     def test_presence_events_change_channel_membership(self):
         join = Event(

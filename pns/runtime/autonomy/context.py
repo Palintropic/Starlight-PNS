@@ -137,6 +137,7 @@ class GenerationContext:
     location_id: Optional[str] = None
     channel_ids: Tuple[str, ...] = ()
     availability: str = "available"
+    activity: str = "unspecified"
     # 此刻这个角色感知得到的其他角色。
     perceived_characters: Tuple[str, ...] = ()
     co_located_characters: Tuple[str, ...] = ()
@@ -215,6 +216,7 @@ class GenerationContext:
             "location_id": self.location_id,
             "channel_ids": list(self.channel_ids),
             "availability": self.availability,
+            "activity": self.activity,
             "perceived_characters": list(self.perceived_characters),
             "co_located_characters": list(self.co_located_characters),
             "channel_characters": list(self.channel_characters),
@@ -274,6 +276,7 @@ def build_generation_context(
         location_id=agency_context.location_id,
         channel_ids=tuple(agency_context.channel_ids),
         availability=agency_context.availability,
+        activity=agency_context.activity,
         perceived_characters=tuple(agency_context.perceived_characters),
         co_located_characters=tuple(agency_context.co_located_characters),
         channel_characters=tuple(agency_context.channel_characters),

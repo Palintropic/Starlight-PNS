@@ -38,7 +38,7 @@ from pns.models.action import (
 from pns.models.activation import ActivationDue, ActivationKind, ScheduledActivation
 from pns.models.agency import AgencyOutcome
 from pns.models.authored import AuthoredTextError, GenerationAudit
-from pns.models.event import EventType
+from pns.models.event import Event, EventScope, EventType
 from pns.models.session import SessionState, SessionStateError
 from pns.models.world_state import WorldState
 from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError
@@ -186,6 +186,21 @@ class AuthoredTextHasExactlyOnePathTests(unittest.TestCase):
         self.assertEqual(len(state.observations), 0)
         self.assertEqual(len(state.memories), 0)
 
+    def test_external_event_boundary_cannot_bypass_router_for_dialogue(self):
+        state, scheduler, runtime = _rig()
+        event = Event(
+            event_id="forged-dialogue",
+            type=EventType.MESSAGE_SENT,
+            occurred_at=state.world_state.clock,
+            scope=EventScope.CHANNEL,
+            actor_id="mizuki",
+            channel_id="nightcord",
+            payload={"text": "绕过判分"},
+        )
+        with self.assertRaises(AutonomyError):
+            runtime.commit_external_event(event)
+        self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+
     def test_evaluate_the_direct_agency_path_still_refuses_dialogue(self):
         # P9 的那条规矩没被 P11 放松：直接 evaluate() 没有判分步骤，
         # 所以它永远拿不到审计。
@@ -216,6 +231,7 @@ class AuthoredTextHasExactlyOnePathTests(unittest.TestCase):
         facts = "\n".join(request.situation_facts)
         self.assertIn("自己的 location_id：mizuki_home_room", facts)
         self.assertIn("自己加入的 channel_id：nightcord", facts)
+        self.assertIn("自己的当前活动：unspecified", facts)
         self.assertIn("同处一地的角色 ID：none", facts)
         self.assertIn("仅与自己同在线频道、并非同处一地的角色 ID：ena", facts)
         # 绘名自己的物理地点属于她的私有世界视角，不应交给瑞希的 Router。

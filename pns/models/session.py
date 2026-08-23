@@ -11,6 +11,7 @@ from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog
 from pns.models.authored import AuthoredTextError, GenerationAudit
+from pns.models.event import EventType
 from pns.models.event_store import EventStore
 from pns.models.exposure import ExposureDecision, ExposureLog
 from pns.models.memory import (
@@ -22,7 +23,7 @@ from pns.models.memory import (
     verify_memory_against_observation,
 )
 from pns.models.observation import Observation, ObservationLog
-from pns.models.world_state import WorldState
+from pns.models.world_state import ActivityKind, WorldState
 
 
 class SessionStateError(ValueError):
@@ -988,6 +989,29 @@ def _validate_history_against_clock(state: "SessionState", clock) -> None:
         if decision.evaluated_at > clock:
             raise SessionStateError(
                 f"曝光判定 '{decision.event_id}' 晚于世界时钟 {clock.isoformat()}"
+            )
+    _validate_activity_history(state)
+
+
+def _validate_activity_history(state: "SessionState") -> None:
+    """有活动变更历史时，当前活动必须等于最后一条已提交变更。"""
+    latest = {}
+    for event in state.events.events():
+        if event.type is not EventType.CHARACTER_ACTIVITY_CHANGED:
+            continue
+        try:
+            kind = ActivityKind(event.payload["activity"])
+        except (KeyError, ValueError):
+            raise SessionStateError(
+                f"活动事件 '{event.event_id}' 引用了未知活动"
+            ) from None
+        latest[event.actor_id] = (kind, event.occurred_at, event.event_id)
+    for character_id, (kind, occurred_at, event_id) in latest.items():
+        current = state.world_state.activity_of(character_id)
+        if current.kind is not kind or current.since != occurred_at:
+            raise SessionStateError(
+                f"角色 '{character_id}' 的当前活动与最后一条活动事件 "
+                f"'{event_id}' 不一致"
             )
 
 

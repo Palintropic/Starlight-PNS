@@ -5,6 +5,7 @@
 #     POST /api/persistent-worlds
 #     POST /api/persistent-worlds/{world_id}/restore
 #     POST /api/persistent-worlds/{world_id}/checkpoint
+#     POST /api/persistent-worlds/{world_id}/activity
 #     POST /api/persistent-worlds/{world_id}/close
 #     POST /api/persistent-worlds/{world_id}/autonomy/start
 #     POST /api/persistent-worlds/{world_id}/autonomy/stop
@@ -38,6 +39,8 @@ from pns.runtime.agency.policy import AgencyPolicyError
 from pns.runtime.autonomy.audit import AuditError
 from pns.runtime.autonomy.coordinator import AutonomyError
 from pns.runtime.autonomy.driver import DriverBusy, DriverError
+from pns.runtime.event_commit import EventCommitError
+from pns.models.world_state import ActivityKind
 from pns.runtime.persistence import (
     ArchiveCorrupt,
     ArchiveError,
@@ -224,6 +227,20 @@ class CreateWorldRequest(BaseModel):
     )
 
 
+class ActivityUpdateRequest(BaseModel):
+    character_id: Annotated[str, Field(min_length=1, max_length=64)]
+    activity: ActivityKind
+
+
+class ActivityUpdateModel(BaseModel):
+    world: WorldStatusModel
+    character_id: str
+    activity: ActivityKind
+    since: str
+    changed: bool
+    event_id: Optional[str] = None
+
+
 # ── 依赖 ────────────────────────────────────────────────────────────────
 def get_control_plane(request: Request) -> WorldControlPlane:
     plane = getattr(request.app.state, "world_control_plane", None)
@@ -265,6 +282,8 @@ def _translate(
         return _error(409, "autonomy_busy", e)
     if isinstance(e, DriverError):
         return _error(409, "autonomy_refused", e)
+    if isinstance(e, EventCommitError):
+        return _error(409, "event_refused", e)
     if isinstance(e, WorldAlreadyOwned):
         return _error(409, "world_already_open", e)
     if isinstance(e, OwnershipUnsupported):
@@ -405,6 +424,19 @@ def checkpoint_persistent_world(
     """
     with _translated(plane, "checkpoint", world_id):
         return _status(plane.checkpoint(world_id))
+
+
+@router.post("/{world_id}/activity", response_model=ActivityUpdateModel)
+def set_character_activity(
+    world_id: str,
+    payload: ActivityUpdateRequest,
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """把角色当前活动作为世界事件提交并立即 checkpoint。"""
+    with _translated(plane, "activity", world_id):
+        return ActivityUpdateModel.model_validate(
+            plane.set_activity(world_id, payload.character_id, payload.activity)
+        )
 
 
 @router.post("/{world_id}/autonomy/start", response_model=WorldStatusModel)

@@ -39,6 +39,51 @@ class Availability(str, Enum):
     ASLEEP = "asleep"
 
 
+class ActivityKind(str, Enum):
+    """角色此刻正在进行的、可作为世界事实引用的活动。
+
+    这是一个闭集而不是自由文本：活动会进入生成与 Router 提示，允许任意字符串
+    等于给调用方开了一条提示注入通道。没有可靠事实时必须使用 UNSPECIFIED，
+    不能从角色职业或地点猜一个“很可能”的活动。
+    """
+
+    UNSPECIFIED = "unspecified"
+    IDLE = "idle"
+    RESTING = "resting"
+    STUDYING = "studying"
+    DRAWING = "drawing"
+    COMPOSING = "composing"
+    EDITING_VIDEO = "editing_video"
+    ONLINE_CHATTING = "online_chatting"
+
+
+@dataclass(frozen=True)
+class CharacterActivity:
+    kind: ActivityKind
+    since: datetime
+
+    def __post_init__(self) -> None:
+        set_ = object.__setattr__
+        try:
+            set_(self, "kind", ActivityKind(self.kind))
+        except ValueError:
+            raise WorldStateError(f"未知的角色活动: {self.kind!r}") from None
+        if not isinstance(self.since, datetime):
+            raise WorldStateError("角色活动的 since 必须是 datetime")
+
+    def to_dict(self) -> Dict:
+        return {"kind": self.kind.value, "since": self.since.isoformat()}
+
+    @classmethod
+    def from_dict(cls, payload: Dict) -> "CharacterActivity":
+        if not isinstance(payload, dict):
+            raise WorldStateError("角色活动必须是字典")
+        return cls(
+            kind=payload["kind"],
+            since=datetime.fromisoformat(payload["since"]),
+        )
+
+
 @dataclass
 class WorldState:
     """一个会话里唯一一份可变世界状态。"""
@@ -50,6 +95,7 @@ class WorldState:
     channel_members: Dict[str, Set[str]] = field(default_factory=dict)
     # 只存偏离默认值的角色：没有条目就是 AVAILABLE。
     character_availability: Dict[str, Availability] = field(default_factory=dict)
+    character_activities: Dict[str, CharacterActivity] = field(default_factory=dict)
     location_state: Dict[str, Dict] = field(default_factory=dict)
     metadata: Dict = field(default_factory=dict)
 
@@ -70,6 +116,14 @@ class WorldState:
         self.character_availability = {
             character_id: Availability(value)
             for character_id, value in self.character_availability.items()
+        }
+        self.character_activities = {
+            character_id: (
+                activity
+                if isinstance(activity, CharacterActivity)
+                else CharacterActivity.from_dict(activity)
+            )
+            for character_id, activity in self.character_activities.items()
         }
         self.location_state = deepcopy(self.location_state)
         self.metadata = deepcopy(self.metadata)
@@ -96,6 +150,27 @@ class WorldState:
                 raise WorldStateError(
                     f"角色 '{character_id}' 的可用性必须是 Availability，"
                     f"收到 {availability!r}"
+                )
+        known = set(self.character_locations)
+        for members in self.channel_members.values():
+            known.update(members)
+        for character_id, activity in self.character_activities.items():
+            self._require_character_id(character_id)
+            if character_id not in known:
+                raise WorldStateError(
+                    f"角色活动引用了世界里不存在的角色: {character_id}"
+                )
+            if not isinstance(activity, CharacterActivity):
+                raise WorldStateError(
+                    f"角色 '{character_id}' 的活动必须是 CharacterActivity"
+                )
+            if (activity.since.tzinfo is None) != (self.clock.tzinfo is None):
+                raise WorldStateError(
+                    f"角色 '{character_id}' 的活动起始时间与世界时钟时区语义不一致"
+                )
+            if activity.since > self.clock:
+                raise WorldStateError(
+                    f"角色 '{character_id}' 的活动起始时间晚于世界时钟"
                 )
         for location_id, facts in self.location_state.items():
             if not self.locations.has(location_id):
@@ -132,6 +207,7 @@ class WorldState:
     def remove_character(self, character_id: str) -> None:
         self.character_locations.pop(character_id, None)
         self.character_availability.pop(character_id, None)
+        self.character_activities.pop(character_id, None)
         for members in self.channel_members.values():
             members.discard(character_id)
 
@@ -193,6 +269,29 @@ class WorldState:
     def availability_of(self, character_id: str) -> Availability:
         return self.character_availability.get(character_id, Availability.AVAILABLE)
 
+    # ── 当前活动 ────────────────────────────────────────────────────────
+    def set_activity(self, character_id: str, activity) -> CharacterActivity:
+        self._require_character_id(character_id)
+        if character_id not in self.known_characters():
+            raise WorldStateError(f"世界里不存在角色 '{character_id}'")
+        try:
+            kind = ActivityKind(activity)
+        except ValueError:
+            raise WorldStateError(f"未知的角色活动: {activity!r}") from None
+        record = CharacterActivity(kind=kind, since=self.clock)
+        if record.kind is ActivityKind.UNSPECIFIED:
+            self.character_activities.pop(character_id, None)
+        else:
+            self.character_activities[character_id] = record
+        return record
+
+    def activity_of(self, character_id: str) -> CharacterActivity:
+        self._require_character_id(character_id)
+        return self.character_activities.get(
+            character_id,
+            CharacterActivity(kind=ActivityKind.UNSPECIFIED, since=self.clock),
+        )
+
     # ── 角色 ────────────────────────────────────────────────────────────
     def known_characters(self) -> List[str]:
         """世界当前认识的角色：有物理位置的，或挂在任一频道上的。
@@ -230,6 +329,7 @@ class WorldState:
                 for channel_id, members in self.channel_members.items()
             },
             "character_availability": dict(self.character_availability),
+            "character_activities": dict(self.character_activities),
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
         }
@@ -243,6 +343,7 @@ class WorldState:
             for channel_id, members in snapshot["channel_members"].items()
         }
         self.character_availability = dict(snapshot["character_availability"])
+        self.character_activities = dict(snapshot["character_activities"])
         self.location_state = deepcopy(snapshot["location_state"])
         self.metadata = deepcopy(snapshot["metadata"])
 
@@ -264,6 +365,10 @@ class WorldState:
                 character_id: availability.value
                 for character_id, availability in self.character_availability.items()
             },
+            "character_activities": {
+                character_id: activity.to_dict()
+                for character_id, activity in self.character_activities.items()
+            },
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
         }
@@ -280,6 +385,7 @@ class WorldState:
                 for channel_id, members in payload.get("channel_members", {}).items()
             },
             character_availability=dict(payload.get("character_availability", {})),
+            character_activities=dict(payload.get("character_activities", {})),
             location_state=deepcopy(payload.get("location_state", {})),
             metadata=deepcopy(payload.get("metadata", {})),
         )

@@ -45,6 +45,7 @@ from typing import Dict, List, Mapping, Optional, Set, Tuple
 from pns.models.activation import ActivationDue
 from pns.models.agency import AgencyBudget, AgencyOutcome
 from pns.models.authored import GenerationAudit
+from pns.models.event import Event, EventType
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
@@ -58,6 +59,7 @@ from pns.runtime.autonomy.outcome import (
 )
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.memory.recall import MemoryRecall
+from pns.runtime.event_commit import commit_session_event
 from pns.runtime.scheduler import PersistentScheduler
 
 # 状态投影里默认回看多少条。
@@ -284,6 +286,24 @@ class AutonomousRuntime:
                 )
             with self._state.snapshot_boundary(timeout):
                 yield self
+
+    def commit_external_event(self, event: Event) -> Dict:
+        """在线性化闸门内提交一条由受信接口构造的事件。
+
+        这条入口不给模型，也不接受任意状态字典；调用方必须先构造能通过 Event
+        与提交边界校验的类型化事件。它存在是为了让 Dashboard 等操作者入口与
+        自主提交共用同一条 stop/事务语义。
+        """
+        if not isinstance(event, Event):
+            raise AutonomyError("外部提交只能接受 Event")
+        if event.type is not EventType.CHARACTER_ACTIVITY_CHANGED:
+            raise AutonomyError(
+                "外部提交目前只允许 character.activity_changed；台词必须经过 "
+                "Agency 与 Router 审计路径"
+            )
+        with self._gate:
+            self._require_running("提交外部事件")
+            return commit_session_event(self._state, event)
 
     # ── 启停 ────────────────────────────────────────────────────────────
     def start(self) -> Dict:
@@ -567,6 +587,7 @@ class AutonomousRuntime:
         situation_facts = (
             f"模拟时间：{plan.proposed_at.isoformat(timespec='minutes')}",
             f"自己的 location_id：{location_id or 'unknown'}",
+            f"自己的当前活动：{self.world.activity_of(actor).kind.value}",
             f"自己加入的 channel_id：{', '.join(channels) if channels else 'none'}",
             f"与自己同处一地的角色 ID：{', '.join(co_located) if co_located else 'none'}",
             f"仅与自己同在线频道、并非同处一地的角色 ID："

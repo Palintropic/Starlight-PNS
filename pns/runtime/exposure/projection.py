@@ -28,6 +28,7 @@ _PERCEIVED_PAYLOAD_KEYS: Dict[EventType, Tuple[str, ...]] = {
     EventType.PRESENCE_LEFT_CHANNEL: (),
     EventType.WORLD_TIME_ADVANCED: ("minutes",),
     EventType.CHARACTER_LOCATION_CHANGED: (),
+    EventType.CHARACTER_ACTIVITY_CHANGED: ("activity",),
 }
 
 # participants 只有在这两档里才表示"被点名的人"，也只有这两档的收件人

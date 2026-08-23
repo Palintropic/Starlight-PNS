@@ -44,6 +44,7 @@ class AgencyContext:
     location_id: Optional[str] = None
     channel_ids: Tuple[str, ...] = ()
     availability: str = "available"
+    activity: str = "unspecified"
     # 此刻这个角色感知得到的其他角色：同处一地的，以及同在某个频道里的。
     perceived_characters: Tuple[str, ...] = ()
     # 上面那份兼容并集的两个明确来源。提示词必须区分“同处一室”和“在线同频”，
@@ -82,6 +83,7 @@ class AgencyContext:
             "location_id": self.location_id,
             "channel_ids": list(self.channel_ids),
             "availability": self.availability,
+            "activity": self.activity,
             "perceived_characters": list(self.perceived_characters),
             "co_located_characters": list(self.co_located_characters),
             "channel_characters": list(self.channel_characters),
@@ -172,6 +174,7 @@ def build_agency_context(
         location_id=world.location_of(character_id),
         channel_ids=tuple(world.channels_for(character_id)),
         availability=world.availability_of(character_id).value,
+        activity=world.activity_of(character_id).kind.value,
         perceived_characters=perceived,
         co_located_characters=co_located,
         channel_characters=channel,
