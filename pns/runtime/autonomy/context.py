@@ -31,6 +31,13 @@ class GenerationContextError(ValueError):
     """无法为这个角色构造生成上下文（观察串了台、动作对不上、提示越界等）。"""
 
 
+# 生成与 Router 共用同一份直接要求，避免“生成被要求 A，判分却不知道 A”。
+DIALOGUE_OUTPUT_RULES = (
+    "使用自然的简体中文；除非当前上下文明确要求，不要整句切换成日语或其他语言。",
+    "不要把当前上下文未提供的具体日程、约定或已经发生的事情当作事实。",
+)
+
+
 # 到期资格的 payload 里，**唯一**一个角色看得见的键。默认全部不可见：排期
 # payload 是调度侧与内容侧的簿记（这条排期为什么存在、它属于哪套作息、下游
 # 该怎么处理），把它整份交给模型，等于让内容作者写给系统看的话变成角色的
@@ -276,6 +283,7 @@ def build_generation_context(
 
 __all__ = [
     "CHARACTER_VISIBLE_PAYLOAD_KEYS",
+    "DIALOGUE_OUTPUT_RULES",
     "MAX_CUE_CHARS",
     "ActivationCue",
     "GenerationContext",

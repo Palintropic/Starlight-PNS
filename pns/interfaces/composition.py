@@ -467,6 +467,7 @@ class WorldControlPlane:
                     {"role": "assistant", "content": line}
                     for line in request.recent_lines
                 ],
+                original_request="\n".join(request.task_instructions),
                 registry=registry,
             )
 

@@ -66,6 +66,8 @@ class AuditRequest:
     # 可选的判分参考上下文：生成前这个角色自己看到的最近几行。它只进判分
     # 提示，不进任何事件、观察或记忆。
     recent_lines: tuple = ()
+    # 生成时收到的直接任务要求。只进判分提示，不进入凭据或世界历史。
+    task_instructions: tuple = ()
 
     @property
     def text(self) -> str:
@@ -82,6 +84,7 @@ class AuditRequest:
             "target_id": self.target_id,
             "now": self.now.isoformat(),
             "recent_lines": list(self.recent_lines),
+            "task_instructions": list(self.task_instructions),
         }
 
 

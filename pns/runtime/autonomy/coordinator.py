@@ -49,6 +49,7 @@ from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
 from pns.runtime.autonomy.audit import AuditError, AuditRequest
+from pns.runtime.autonomy.context import DIALOGUE_OUTPUT_RULES
 from pns.runtime.autonomy.outcome import (
     ActivationOutcome,
     ActivationResult,
@@ -551,6 +552,7 @@ class AutonomousRuntime:
             target_id=proposal.target_id,
             now=plan.proposed_at,
             recent_lines=tuple(recent_lines[-_AUDIT_RECENT_LINES:]),
+            task_instructions=DIALOGUE_OUTPUT_RULES,
         )
 
     @staticmethod

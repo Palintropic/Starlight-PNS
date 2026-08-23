@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 from pns.models.action import ActionId
-from pns.runtime.autonomy.context import GenerationContext
+from pns.runtime.autonomy.context import DIALOGUE_OUTPUT_RULES, GenerationContext
 from pns.runtime.autonomy.generation import GenerationError, LineGenerator
 from pns.world.context import render_world_context
 
@@ -273,6 +273,10 @@ def render_situation(
         parts.append(f"【此刻你心里的事】{cue}")
 
     parts.append(_action_line(context, channels))
+    parts.append(
+        "【输出语言与事实边界】\n"
+        + "\n".join(f"- {rule}" for rule in DIALOGUE_OUTPUT_RULES)
+    )
     parts.append(
         "只输出你这一刻要说的那一句话本身：不要旁白、不要动作描写、"
         "不要加你自己的名字前缀，也不要解释你为什么这么说。"

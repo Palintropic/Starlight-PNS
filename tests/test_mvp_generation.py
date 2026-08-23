@@ -273,6 +273,8 @@ class ProductionPathTests(MvpTestCase):
         self.assertEqual(len(self.provider.judgements), 2)
         second_audit = json.dumps(self.provider.judgements[1], ensure_ascii=False)
         self.assertIn(first_line, second_audit)
+        self.assertIn("使用自然的简体中文", second_audit)
+        self.assertIn("不要把当前上下文未提供", second_audit)
         # 两条都提交了，而且是两条不同的事件。
         self.assertEqual(len(world.state.events.by_type(EventType.MESSAGE_SENT)), 2)
 
@@ -440,6 +442,8 @@ class PromptScopeTests(MvpTestCase):
         self.assertIn("我答应过要交那段动画", situation)
         self.assertIn("该睡了吧", situation)
         self.assertIn("时间：", situation)
+        self.assertIn("使用自然的简体中文", situation)
+        self.assertIn("不要把当前上下文未提供", situation)
         # 排期簿记一个字都不许出现。
         for forbidden in ("due_id", "activation_id", "sequence", "missed", "next_due"):
             self.assertNotIn(forbidden, situation)
