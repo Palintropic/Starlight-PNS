@@ -52,6 +52,7 @@ _ACTIVITY_LABELS = {
     "idle": "空闲",
     "resting": "休息",
     "studying": "学习",
+    "working_part_time": "打工",
     "drawing": "画画",
     "composing": "作曲",
     "editing_video": "制作视频",

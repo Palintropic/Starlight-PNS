@@ -51,6 +51,7 @@ class ActivityKind(str, Enum):
     IDLE = "idle"
     RESTING = "resting"
     STUDYING = "studying"
+    WORKING_PART_TIME = "working_part_time"
     DRAWING = "drawing"
     COMPOSING = "composing"
     EDITING_VIDEO = "editing_video"

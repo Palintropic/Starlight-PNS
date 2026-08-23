@@ -60,6 +60,7 @@ from pns.runtime.autonomy.outcome import (
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.memory.recall import MemoryRecall
 from pns.runtime.event_commit import commit_session_event
+from pns.runtime.rhythm import RhythmDirector
 from pns.runtime.scheduler import PersistentScheduler
 
 # 状态投影里默认回看多少条。
@@ -92,6 +93,7 @@ class AutonomousRuntime:
         budget: Optional[AgencyBudget] = None,
         retry: Optional[RetryPolicy] = None,
         recall_budget=None,
+        rhythm: Optional[RhythmDirector] = None,
         name: str = "autonomy",
     ) -> None:
         if not isinstance(state, SessionState):
@@ -107,6 +109,11 @@ class AutonomousRuntime:
         self._retry = retry if retry is not None else RetryPolicy()
         if not isinstance(self._retry, RetryPolicy):
             raise AutonomyError("retry 必须是 RetryPolicy")
+        # 内容作者写下的日常作息表。没有就是没有 —— 绝不在这里造一份默认的：
+        # 一份凭空生成的作息表会让"这个角色此刻在做什么"有一个没人写过的答案。
+        if rhythm is not None and not isinstance(rhythm, RhythmDirector):
+            raise AutonomyError("rhythm 必须是 RhythmDirector")
+        self._rhythm = rhythm
 
         # 已经绑在这个会话上的服务原样复用；没有的才建。协调器不是它们的
         # 拥有者，只是它们的编排者 —— 所以它绝不会造出第二份权威。
@@ -208,6 +215,11 @@ class AutonomousRuntime:
     @property
     def retry(self) -> RetryPolicy:
         return self._retry
+
+    @property
+    def rhythm(self) -> Optional[RhythmDirector]:
+        """这个世界打开时锁定的那份作息表集合；没有就是 None。"""
+        return self._rhythm
 
     @property
     def running(self) -> bool:
@@ -512,6 +524,39 @@ class AutonomousRuntime:
                 continue
         return tuple(results)
 
+    # ── 日常作息 ────────────────────────────────────────────────────────
+    def apply_rhythm(self) -> Tuple[Dict, ...]:
+        """把世界对齐到内容作者写下的作息表，返回这次提交的事件投影。
+
+        产品路径上只有一处调用它：模拟时间刚刚往前走过之后（见 `_tick_report`）。
+        它本身是幂等的、只依赖当前时钟，所以多调一次不会多提交一条 —— 但时钟
+        不动的世界不会因此产生作息变更：作息表是时间的函数，不是后台循环。
+
+        整批变更共用**一个**事务：一个"人到了店里、却还在家里画画"的中间态
+        比晚一拍对齐糟糕得多。任何一条提交失败，这一批一起回滚，而且下一次
+        推进会重新算出同样的一批（判据是耐久状态，不是内存里的标记）。
+
+        它跟 `commit_external_event()` 走同一条闸门与停机语义：停机之后不提交。
+        """
+        if self._rhythm is None:
+            return ()
+        with self._gate:
+            if not self._running:
+                # 还没启动，或者已经停了。什么都不碰 —— 下一次启动后的推进会
+                # 重新算出该补的那几条。
+                return ()
+            plan = self._rhythm.plan(
+                self.world, correlation_id=self._state.session_id
+            )
+            if not plan:
+                return ()
+            committed: List[Dict] = []
+            with self._committing():
+                with self._state.atomic_commit():
+                    for event in plan:
+                        committed.append(commit_session_event(self._state, event))
+            return tuple(committed)
+
     # ── 推进模拟时钟 ────────────────────────────────────────────────────
     def advance(self, minutes: int, *, max_results: Optional[int] = None) -> Dict:
         """把模拟时间往前推，并处理这段时间里到期的一切。
@@ -538,12 +583,17 @@ class AutonomousRuntime:
         return self._tick_report(tick)
 
     def _tick_report(self, tick, *, max_results: Optional[int] = None) -> Dict:
+        # 作息表先对齐，再处理到期资格：顺序是刻意的。生成与判分读的是"这个
+        # 角色此刻在做什么"，所以时间走过一道作息边界之后，那个答案必须在这一
+        # 轮生成之前就已经是新的 —— 反过来的话，角色会按上一段的活动说这一句话。
+        transitions = self.apply_rhythm()
         results = self.process_pending(max_results=max_results)
         return {
             "from_clock": tick.from_clock.isoformat(),
             "to_clock": tick.to_clock.isoformat(),
             "minutes": tick.minutes,
             "due_ids": list(tick.due_ids),
+            "rhythm_events": [record["event_id"] for record in transitions],
             "results": [result.to_dict() for result in results],
         }
 
@@ -858,6 +908,11 @@ class AutonomousRuntime:
             "events": len(state.events),
             "memories": len(state.memories),
             "retry": self._retry.to_dict(),
+            # 哪些角色带着作息表。只报 ID，不报表本身：作息表是内容，操作面
+            # 要回答的是"这个世界的作息由谁在管"。
+            "rhythm_characters": (
+                list(self._rhythm.characters()) if self._rhythm is not None else []
+            ),
             "in_flight_due_ids": sorted(self._in_flight),
             "outcomes": {
                 outcome.value: sum(

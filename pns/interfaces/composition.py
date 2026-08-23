@@ -71,6 +71,7 @@ from pns.runtime.persistence import (
     validate_world_id,
 )
 from pns.runtime.reload import BOUNDARY
+from pns.runtime.rhythm import RhythmDirector
 from pns.world.scene_compat import SceneMappingError
 
 from .paths import DATA_DIR
@@ -533,6 +534,9 @@ class WorldControlPlane:
             # 世界一生的动作上限。P9 的默认 128 是给研究会话定的，用在一个
             # 持久世界上等于给它设了个定时哑火（见 AutonomySettings）。
             budget=self._autonomy.agency_budget(),
+            # 日常作息表来自**这一份**冻结的内容快照，跟提示词、显示名同一条
+            # 规矩：世界打开的那一刻锁定，之后重载内容动不了已经打开的世界。
+            rhythm=RhythmDirector(registry.rhythms()),
             seed=seed,
         )
 
