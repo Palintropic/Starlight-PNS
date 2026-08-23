@@ -61,6 +61,7 @@ from pns.runtime.scheduler import PersistentScheduler
 
 # 状态投影里默认回看多少条。
 _RECENT = 20
+_AUDIT_RECENT_LINES = 12
 
 
 class AutonomyError(ValueError):
@@ -535,6 +536,13 @@ class AutonomousRuntime:
     # ── 各步骤的结局构造 ────────────────────────────────────────────────
     def _audit_request(self, plan: ProposalPlan) -> AuditRequest:
         proposal = plan.proposal
+        recent_lines = []
+        for observation in self._state.observations.for_character(
+            proposal.character_id
+        ):
+            line = observation.render_line()
+            if line is not None:
+                recent_lines.append(line)
         return AuditRequest(
             character_id=proposal.character_id,
             proposal_id=proposal.proposal_id,
@@ -542,6 +550,7 @@ class AutonomousRuntime:
             action_id=proposal.action_id,
             target_id=proposal.target_id,
             now=plan.proposed_at,
+            recent_lines=tuple(recent_lines[-_AUDIT_RECENT_LINES:]),
         )
 
     @staticmethod

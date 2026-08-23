@@ -88,21 +88,29 @@ def _body(record: MemoryRecord) -> str:
     return f"{actor or '某人'} {summary}"
 
 
-def recalled_lines(result: RecallResult) -> Tuple[str, ...]:
+def recalled_lines(
+    result: RecallResult, *, exclude_source_event_ids=()
+) -> Tuple[str, ...]:
     """召回结果渲染成提示词里的那几行，顺序就是召回顺序。
 
     同一段内容只占一行。一条观察会按类别长出好几条记忆（承诺、关系、情节、
     短时痕迹各一条），那是**存储**层面刻意的冗余 —— 它们的衰减和固定行为各不
     相同。但提示词里把同一句话抄四遍毫无价值，所以这里按正文合并，把它们的
     标签并在一起：合并只发生在渲染，存储里那几条一条都没少。
+
+    `exclude_source_event_ids` 只影响提示组合：同一事件仍在近期观察窗口时，
+    显示完整观察，不紧接着再显示一份记忆摘要；存储和召回结果本身都不改变。
     """
     if not isinstance(result, RecallResult):
         raise TypeError("recalled_lines() 需要一个 RecallResult")
+    excluded = frozenset(exclude_source_event_ids)
     now = result.query.now
     order: List[str] = []
     grouped: Dict[str, Dict] = {}
     for scored in result.memories:
         record = scored.record
+        if record.source_event_id in excluded:
+            continue
         body = _body(record)
         if not body:
             continue

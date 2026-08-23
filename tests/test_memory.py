@@ -1112,6 +1112,15 @@ class PromptProjectionTests(unittest.TestCase):
         bodies = [line.split("：", 1)[-1] for line in lines]
         self.assertEqual(len(bodies), len(set(bodies)))
 
+    def test_recent_observation_sources_can_be_excluded_from_prompt_recall(self):
+        sources = {
+            scored.record.source_event_id for scored in self.result.memories
+        }
+        self.assertTrue(recalled_lines(self.result))
+        self.assertEqual(
+            recalled_lines(self.result, exclude_source_event_ids=sources), ()
+        )
+
     def test_the_owners_own_action_reads_as_first_person_on_one_line(self):
         """同一件事不该在自己的提示词里出现两次，一次"我"一次"我的 ID"。"""
         state, encoder = _rig()

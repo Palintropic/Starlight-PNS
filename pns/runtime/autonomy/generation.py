@@ -267,7 +267,14 @@ class AuthoredLinePolicy(AgencyPolicy):
             # 收窄就是这一行：只取这个角色自己的记忆。投影层再按白名单删减
             # （没有记忆 ID、没有曝光理由码、没有显著度、没有 provenance）。
             result = self._recall.recall_for(context.character_id)
-            recalled = recalled_lines(result)
+            # 同一来源事件已经作为近期观察完整出现时，不再立刻用记忆摘要重复
+            # 一遍；记忆仍在存储里，等它离开观察窗口后自然重新进入提示词。
+            observed_event_ids = {
+                observation.source_event_id for observation in context.observations
+            }
+            recalled = recalled_lines(
+                result, exclude_source_event_ids=observed_event_ids
+            )
             truncated = result.truncated
         return build_generation_context(
             context, choice, recalled, recall_truncated=truncated

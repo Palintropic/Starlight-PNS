@@ -222,14 +222,28 @@ def render_situation(
         "【此刻】" + render_world_context(view, context.character_id)
     ]
 
-    if context.perceived_characters:
-        # 显示名来自**冻结的内容包**，不来自模型输出，也不来自世界状态。
-        # 查不到就用 id 本身 —— 不猜，也不因为一个名字查不到就整次生成失败。
+    def visible_names(character_ids) -> str:
+        return "、".join((names or {}).get(cid, cid) for cid in character_ids)
+
+    if context.co_located_characters:
         parts.append(
-            "【此刻和你在一起的】"
-            + "、".join(
-                (names or {}).get(cid, cid) for cid in context.perceived_characters
-            )
+            "【此刻与你同处一地的】"
+            + visible_names(context.co_located_characters)
+        )
+    if context.channel_characters:
+        parts.append(
+            "【此刻与你同一在线频道的】"
+            + visible_names(context.channel_characters)
+        )
+    if (
+        context.perceived_characters
+        and not context.co_located_characters
+        and not context.channel_characters
+    ):
+        # 兼容手工构造的旧 GenerationContext；生产上下文总会给出明确来源。
+        parts.append(
+            "【此刻你能直接感知到的】"
+            + visible_names(context.perceived_characters)
         )
 
     observed = _tail(context.observed_lines, max_observed)
@@ -242,7 +256,15 @@ def render_situation(
 
     recalled = _tail(context.recalled, max_recalled)
     if recalled:
-        parts.append("【你现在想起的】\n" + "\n".join(f"- {line}" for line in recalled))
+        # memory projection 自己已经带项目符号；手工适配器交来的普通行则在
+        # 这里补一个。两种都只得到一层，绝不再渲染成 `- - ...`。
+        parts.append(
+            "【你现在想起的】\n"
+            + "\n".join(
+                line if line.startswith("- ") else f"- {line}"
+                for line in recalled
+            )
+        )
 
     cue = context.activation.cue
     if cue:
