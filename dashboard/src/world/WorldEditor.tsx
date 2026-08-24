@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import SceneEditor from './SceneEditor';
 import FactsEditor from './FactsEditor';
+import { SCOPE_OPERATE } from '../api';
+import { useCan } from '../principal';
 import './world.css';
 
 type Section = 'scenes' | 'facts';
 
 function WorldEditor() {
   const [section, setSection] = useState<Section>('scenes');
+  const canWrite = useCan(SCOPE_OPERATE);
 
   return (
     <div className="world-editor">
@@ -18,6 +21,12 @@ function WorldEditor() {
           世界设定 Facts
         </button>
       </div>
+      {canWrite ? null : (
+        <p className="world-readonly">
+          当前账户只有只读权限：内容看得到，保存按钮是灰的。服务端也会拒绝写入，
+          所以这不是一层只做样子的禁用。
+        </p>
+      )}
       {section === 'scenes' ? <SceneEditor /> : <FactsEditor />}
     </div>
   );

@@ -62,6 +62,14 @@
   color: var(--warn);
 }
 
+.tab-account {
+  margin-left: auto;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .shell-body {
   flex: 1;
   min-height: 0;

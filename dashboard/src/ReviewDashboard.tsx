@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { fetchDecisions, fetchTurns, submitDecision } from './api';
+import { SCOPE_OPERATE, fetchDecisions, fetchTurns, submitDecision } from './api';
+import { useCan } from './principal';
 import { decisionKey } from './types';
 import type { Decision, DecisionMap, DecisionValue, Turn } from './types';
 import './App.css';
@@ -63,6 +64,7 @@ function ReviewDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const canDecide = useCan(SCOPE_OPERATE);
 
   useEffect(() => {
     Promise.all([fetchTurns(), fetchDecisions()])
@@ -263,7 +265,7 @@ function ReviewDashboard() {
               </span>
             )}
           </div>
-          {selectedTurn ? (
+          {selectedTurn && canDecide ? (
             <div className="decision-panel" key={selected}>
               {selectedDecision && (
                 <div className={`current-decision ${selectedDecision.decision}`} key={selectedDecision.decided_at}>
@@ -301,6 +303,10 @@ function ReviewDashboard() {
                 </button>
               </div>
             </div>
+          ) : selectedTurn ? (
+            // 只读账户看得到台词和评分，但下不了判定 —— 服务端也会拒绝
+            // `POST /api/review/decision`，这里只是不摆一个点了会 403 的按钮。
+            <div className="empty-hint">当前账户只有只读权限，看得到但改不了审核结论</div>
           ) : (
             <div className="empty-hint">选择左侧一条台词进行审核</div>
           )}

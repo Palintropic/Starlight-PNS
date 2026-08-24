@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { fetchWorldFacts, saveWorldFacts } from '../api';
+import { SCOPE_OPERATE, fetchWorldFacts, saveWorldFacts } from '../api';
+import { useCan } from '../principal';
 import SourceEditor from './SourceEditor';
 
 interface FactRowProps {
@@ -32,6 +33,7 @@ function FactsEditor() {
   const [mode, setMode] = useState<'form' | 'source'>('form');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const canWrite = useCan(SCOPE_OPERATE);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -136,10 +138,14 @@ function FactsEditor() {
         ) : (
           <div className="world-form facts-form">
             <div className="world-actions">
-              <button className="btn btn-add" onClick={handleAdd} disabled={saving}>
+              <button className="btn btn-add" onClick={handleAdd} disabled={saving || !canWrite}>
                 ＋ 新增 key
               </button>
-              <button className="btn btn-approve" onClick={handleSave} disabled={saving || !dirty}>
+              <button
+                className="btn btn-approve"
+                onClick={handleSave}
+                disabled={saving || !dirty || !canWrite}
+              >
                 {saving ? '保存中…' : dirty ? '保存所有改动' : '没有改动'}
               </button>
             </div>

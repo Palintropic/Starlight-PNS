@@ -14,8 +14,9 @@
 //
 // 每个用例都用**手动兑现的 promise**，不靠计时器：竞态测试不该赌调度。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import PersistentWorlds from './PersistentWorlds';
+import { OPERATOR, renderAs } from './testPrincipal';
 import * as api from './api';
 import type { PersistentWorldStatus } from './api';
 
@@ -93,7 +94,7 @@ describe('持久世界控制面的并发时序', () => {
       id === 'alpha' ? first.promise : second.promise,
     );
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const rows = await screen.findAllByRole('button', { name: '存一次' });
     expect(rows).toHaveLength(2);
 
@@ -129,7 +130,7 @@ describe('持久世界控制面的并发时序', () => {
     vi.spyOn(api, 'closePersistentWorld').mockReturnValue(pendingClose.promise);
     vi.spyOn(window, 'confirm').mockReturnValue(true);
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const closeButton = await screen.findByRole('button', { name: '关闭' });
     await act(async () => {
       closeButton.click();
@@ -161,7 +162,7 @@ describe('持久世界控制面的并发时序', () => {
       return call === 1 ? stale.promise : fresh.promise;
     });
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     // 挂载那次请求还挂着，操作者又点了一次刷新。
     await act(async () => {
       (await screen.findByRole('button', { name: '刷新' })).click();
@@ -196,7 +197,7 @@ describe('持久世界控制面的并发时序', () => {
       errors.push(args);
     });
 
-    const view = render(<PersistentWorlds />);
+    const view = renderAs(OPERATOR, <PersistentWorlds />);
     const button = await screen.findByRole('button', { name: '存一次' });
     await act(async () => {
       button.click();
@@ -223,7 +224,7 @@ describe('持久世界控制面的并发时序', () => {
       .spyOn(api, 'checkpointPersistentWorld')
       .mockReturnValue(pending.promise);
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const button = await screen.findByRole('button', { name: '存一次' });
     await act(async () => {
       button.click();
