@@ -16,3 +16,4 @@ fastapi
 uvicorn[standard]
 pydantic
 pyyaml
+argon2-cffi

@@ -67,6 +67,11 @@ pns/world/*.py.bak
 data/review_decisions.jsonl
 /review_decisions.jsonl
 
+# ─── 账户库（AUTH-1 的用户与安全审计，本地运行时数据）───────
+# 里面是 Argon2id 哈希和审计记录，不是源码。位置可用 PNS_ACCOUNTS_DB 改。
+data/accounts.sqlite3
+data/accounts.sqlite3-journal
+
 # ─── 持久世界存档 / 所有权锁（本地运行时数据）──────────────
 # 存档根默认在 data/worlds/，可用 PNS_WORLD_ROOT 改到别处。
 # 它装的是一个跑着的世界的权威状态和一把进程锁，不是源码。
