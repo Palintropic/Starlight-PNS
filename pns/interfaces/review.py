@@ -57,6 +57,8 @@ def get_review_decisions():
 def post_review_decision(decision: ReviewDecision):
     record = decision.model_dump()
     record["decided_at"] = datetime.now().isoformat()
+    # data/ 在全新的卷上可能还不存在。
+    REVIEW_DECISIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with REVIEW_DECISIONS_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     return record

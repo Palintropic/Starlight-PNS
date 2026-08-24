@@ -26,7 +26,9 @@ Runtime Foundation 第一阶段现已完成。生成模型与评估模型配置�
 
 因此，未来的长期能力——事件传播、感知/曝光、自治 Agency、规划、持久世界状态、主观记忆与生命周期管理——应当作为 PNS 现有运行时能力的演进，而不是取代 PNS，或在旁边再建立一套重复的 Runtime。
 
-当前职责边界与长期架构方向见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+当前职责边界与长期架构方向见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)；
+在 Ubuntu Server 虚拟机上用 Docker Engine + Compose 部署见
+[`docs/DEPLOY_UBUNTU_DOCKER.md`](docs/DEPLOY_UBUNTU_DOCKER.md)。
 
 ---
 
@@ -417,16 +419,23 @@ dashboard/                  # React 前端：simulate / review / World Editor
 preprint/                   # 研究 / preprint 草稿（EN/CN）
 
 docs/
-├── API.md                  # Server API 文档
+├── API.md                  # Server API 文档（鉴权边界见 §6）
 ├── ARCHITECTURE.md         # Runtime ownership + 长期架构
+├── DEPLOY_UBUNTU_DOCKER.md # Ubuntu Server + Docker Engine/Compose 部署
 └── TODO_TECH_DEBT.md       # 已知缺口与延期清理项
 
 data/
 └── drift_scores.jsonl      # 带 methodology_version 的 Router 漂移日志
 
+compose.yaml                # 生产部署（单写者、具名卷）
+Dockerfile                  # 多阶段、非 root 的生产镜像
+.env.example                # 运行时配置：只有变量名和占位符
+
 scripts/
 ├── server.py               # PNS Web 服务入口
-└── oobe.py                 # Setup Wizard
+├── oobe.py                 # Setup Wizard
+├── healthcheck.py          # 容器存活/就绪探针
+└── docker_smoke.sh         # 对真镜像与真容器跑一遍验收条件
 ```
 
 上面列出的 `_prompt_compat.md` 是可选文件，存在有明确原因：部分生成模型在底层角色材料涉及较重的主题时，会把直接、临床式的 system prompt 本身识别成需要提高谨慎度的信号。

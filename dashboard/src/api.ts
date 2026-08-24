@@ -42,16 +42,59 @@ function describe(detail: unknown): { message: string | null; category: string |
   return { message: null, category: null };
 }
 
-async function json<T>(res: Response): Promise<T> {
+/** 会话失效时全局广播一次。
+ *
+ * 每个调用点各自处理 401 的话，总会漏掉一两个，于是后台会停在一个"什么都
+ * 加载不出来"的页面上，而真正的原因（会话过期了）没人说出来。广播让这件事
+ * 只有一处判断、一处反应。
+ */
+export const UNAUTHENTICATED_EVENT = 'pns:unauthenticated';
+
+async function json<T>(res: Response, options: { authRoute?: boolean } = {}): Promise<T> {
   if (!res.ok) {
     // 服务器出错时正文不一定是 JSON（代理的 502、断掉的连接、静态兜底页）。
     // 解析失败就用状态行，别让一次 SyntaxError 盖住真正的错误。
     const body = await res.json().catch(() => null);
     const { message, category } = describe(body && (body as { detail?: unknown }).detail);
+    // 登录接口自己的 401 是"这次密码不对"，不是"会话没了"——广播它会把用户
+    // 从登录框上弹走，然后什么也没发生。
+    //
+    // 判据是调用点显式传进来的，不是从 res.url 反推的：`Response.url` 在
+    // 某些环境下是空串，而一个"多数时候对"的判据会在最难复现的那一次出错。
+    if (res.status === 401 && !options.authRoute) {
+      window.dispatchEvent(new CustomEvent(UNAUTHENTICATED_EVENT));
+    }
     throw new ApiError(message || `${res.status} ${res.statusText}`, res.status, category);
   }
   return res.json() as Promise<T>;
 }
+
+// ─── 操作者会话（DEPLOY-1）──────────────────────────────────────────────
+//
+// 管理凭据**只**在登录那一刻经过浏览器，换成一张 HttpOnly Cookie 之后就不再
+// 出现在前端任何地方：不写 localStorage、不进 URL、不进构建产物。所以这里
+// 没有、也不该有任何"记住 token"的东西。
+
+export interface AuthSession {
+  /** 'production' | 'development' */
+  mode: string;
+  /** 这台服务器要不要凭据。false 表示它是一台没配 token 的开发服务器。 */
+  auth_required: boolean;
+  authenticated: boolean;
+}
+
+export const fetchAuthSession = (): Promise<AuthSession> =>
+  fetch('/api/auth/session').then((res) => json(res, { authRoute: true }));
+
+export const login = (token: string): Promise<AuthSession> =>
+  fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  }).then((res) => json(res, { authRoute: true }));
+
+export const logout = (): Promise<AuthSession> =>
+  fetch('/api/auth/logout', { method: 'POST' }).then((res) => json(res, { authRoute: true }));
 
 export const fetchTurns = (): Promise<Turn[]> =>
   fetch('/api/review/turns').then((res) => json(res));

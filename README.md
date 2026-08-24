@@ -26,7 +26,7 @@ The first Runtime Foundation milestone has now been completed. Generator and eva
 
 Longer-lived capabilities — event propagation, perception/exposure, autonomous agency, planning, persistent world state, subjective memory and lifecycle management — are therefore intended as an evolution of PNS's existing runtime capabilities, not as a replacement for PNS or a parallel duplicate runtime.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current ownership boundaries and long-term architecture direction.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current ownership boundaries and long-term architecture direction, and [`docs/DEPLOY_UBUNTU_DOCKER.md`](docs/DEPLOY_UBUNTU_DOCKER.md) to run this on an Ubuntu Server VM with Docker Engine and Compose.
 
 ---
 
@@ -415,16 +415,23 @@ dashboard/                  # React frontend: simulate / review / World Editor
 preprint/                   # Research/preprint drafts (EN/CN)
 
 docs/
-├── API.md                  # Server API reference
+├── API.md                  # Server API reference (auth boundary in §6)
 ├── ARCHITECTURE.md         # Runtime ownership + long-term architecture
+├── DEPLOY_UBUNTU_DOCKER.md # Ubuntu Server + Docker Engine/Compose deployment
 └── TODO_TECH_DEBT.md       # Known gaps and deferred cleanup
 
 data/
 └── drift_scores.jsonl      # Router drift log with methodology_version
 
+compose.yaml                # Production deployment (single writer, named volumes)
+Dockerfile                  # Multi-stage, non-root production image
+.env.example                # Runtime configuration: names and placeholders only
+
 scripts/
 ├── server.py               # PNS web-service entry point
-└── oobe.py                 # Setup wizard
+├── oobe.py                 # Setup wizard
+├── healthcheck.py          # Container liveness/readiness probe
+└── docker_smoke.sh         # Acceptance checks against a real image and container
 ```
 
 The `_prompt_compat.md` file listed above is optional and exists for a specific reason: some generation models treat a direct, clinical system prompt as itself a signal to become more cautious, especially once the underlying character material touches on heavier subject matter.

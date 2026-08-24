@@ -8,8 +8,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import black
-
 from pns.world.data_module import DataModuleError, evaluate_data_source, require
 
 SCENES_PATH = Path(__file__).parent / "scenes.py"
@@ -153,6 +151,23 @@ def _replace_assignment(original_source: str, var_name: str, new_value_src: str)
 
 
 def format_source(code: str) -> str:
+    """把生成的源码过一遍 black。
+
+    black 在函数里 import，不在模块顶层：这个模块被 `pns.interfaces.world`
+    在 import 期拉起来，而生产镜像里没有 black —— 它是格式化器，只有**写回**
+    这条路用得上，而写回在生产模式下本来就是被拒绝的。顶层 import 的后果不是
+    "保存时报错"，是整个进程起不来。
+
+    缺 black 时给的是一句说得清的话，不是一条 ModuleNotFoundError：读接口
+    照常可用，只有保存这条路走不通。
+    """
+    try:
+        import black
+    except ImportError as e:
+        raise CodegenError(
+            "这台服务器没有安装 black，无法格式化写回的源码；"
+            "World Editor 的保存功能需要开发依赖（requirements.txt）"
+        ) from e
     try:
         return black.format_str(code, mode=black.Mode())
     except Exception as e:

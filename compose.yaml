@@ -1,0 +1,83 @@
+# Starlight-PNS —— Ubuntu Server + Docker Engine + Compose
+#
+# 用法、升级、回滚、备份与异常停机恢复：docs/DEPLOY_UBUNTU_DOCKER.md
+#
+# 单写者拓扑：**一个数据目录同时只允许一个应用容器**。P12 的耐久性建立在
+# 本地文件系统的 flock / 原子替换 / 目录 fsync 上，两个写者会让那三条同时
+# 失效。所以这里没有 replicas，也刻意写死了 container_name——第二次
+# `docker compose up` 会因为容器名冲突而响亮失败，而不是静静共写同一个卷。
+
+name: starlight-pns
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: starlight-pns:local
+    container_name: starlight-pns
+
+    # tini 作 PID 1：转发信号并回收僵尸进程。
+    init: true
+
+    # 配置读不出来时容器会以非零码退出，Docker 按指数退避重启（不是热循环）。
+    # 这是**想要**的行为：一台配置坏掉的生产服务器应该起不来，而不是带着一个
+    # 开着的管理面跑起来。恢复办法见部署文档"启动失败"一节。
+    restart: unless-stopped
+
+    # 运行时凭据只从这里进来。这个文件在宿主上，不在镜像里，也不进构建上下文。
+    env_file:
+      - .env
+
+    environment:
+      # 显式写死，覆盖 .env 里可能出现的任何取值：这是生产。
+      PNS_ENV: production
+      PORT: "7860"
+      # uvicorn 等待连接收尾的上限。它必须小于下面的 stop_grace_period，
+      # 算式见部署文档。
+      PNS_GRACEFUL_TIMEOUT: "30"
+
+    # 默认只绑回环：TLS 与反向代理属于操作者。要在内网直接访问就把
+    # PNS_BIND 设成 0.0.0.0，并且自己清楚这条端口上是什么。
+    ports:
+      - "${PNS_BIND:-127.0.0.1}:${PNS_PORT:-7860}:7860"
+
+    # 运行时数据全部在镜像之外。重建容器、换镜像都不碰它们。
+    # 存档根默认是 /app/data/worlds，所以世界存档和所有权锁都在 pns-data 里。
+    volumes:
+      - pns-data:/app/data
+      - pns-history:/app/history
+
+    # 根文件系统只读：让"镜像层不可写"从一句约定变成一条内核事实。
+    # 应用唯一要写的地方是上面两个卷，加上一块临时空间。
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    # 应用停机预算（uvicorn 30s + 驱动有界停止 + 每个世界最后一次 checkpoint）
+    # 必须放得下。放不下的后果很具体：容器在最后一次 checkpoint 完成之前被
+    # SIGKILL，一次本可以干净的关闭变成一次崩溃恢复。
+    stop_grace_period: 90s
+
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # 日志留在宿主上并且有界。本板不引入集中式日志。
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  pns-data:
+  pns-history:
