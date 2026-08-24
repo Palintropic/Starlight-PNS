@@ -23,6 +23,21 @@ BASE="http://127.0.0.1:${PORT}"
 ADMIN_TOKEN="SMOKE-ADMIN-CANARY-0011223344556677889900aabbccddee"
 KEY_CANARY="SMOKE-MODEL-CANARY-ffeeddccbbaa00998877665544332211"
 
+# AUTH-1：生产模式要求至少一个启用着的管理员，所以冒烟也要引导一个。
+# 这里用便宜的 Argon2 参数现算一个哈希——它只是这次冒烟的账户，参数不是生产
+# 默认值（生产走 PasswordHasher() 的默认参数，由 Python 测试盯着）。明文密码
+# 只活在这个脚本的变量里，不进镜像、不进任何一层。
+SMOKE_USER="smoke-admin"
+SMOKE_PASSWORD="smoke-password-0011"
+SMOKE_PASSWORD_HASH="$(python3 -c '
+import sys
+try:
+    from argon2 import PasswordHasher
+except ImportError:
+    sys.exit("需要 argon2-cffi：pip install -r requirements.txt")
+print(PasswordHasher(time_cost=1, memory_cost=8, parallelism=1).hash("smoke-password-0011"))
+')" || { echo "生成冒烟账户哈希失败"; exit 1; }
+
 WORK="$(mktemp -d)"
 COOKIES="${WORK}/cookies.txt"
 PASS=0
@@ -50,6 +65,8 @@ trap cleanup EXIT
 
 cat > "${WORK}/smoke.env" <<ENV
 PNS_ADMIN_TOKEN=${ADMIN_TOKEN}
+PNS_BOOTSTRAP_ADMIN_USERNAME=${SMOKE_USER}
+PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH='${SMOKE_PASSWORD_HASH}'
 PNS_API_KEY_NAME=SMOKE_KEY
 SMOKE_KEY=${KEY_CANARY}
 API_FORMAT=openai
@@ -65,9 +82,15 @@ services:
     container_name: ${PROJECT}
     env_file:
       - ${WORK}/smoke.env
-    ports:
-      - "127.0.0.1:${PORT}:7860"
 OVERRIDE
+
+# 端口走 compose.yaml 自己的 PNS_BIND/PNS_PORT 变量，而**不是**在 override 里
+# 再加一条 ports。Compose 合并 ports 是追加而不是替换，多加一条的结果是这次
+# 冒烟同时占住默认的 7860 —— 那正好会撞上一台正在跑的部署或一条 SSH 隧道，
+# 而"不碰默认部署"是这个脚本的前提。
+export PNS_BIND=127.0.0.1
+export PNS_PORT="${PORT}"
+
 
 api() {  # api METHOD PATH [BODY]
   local method="$1" path="$2" body="${3:-}"
@@ -82,6 +105,11 @@ api() {  # api METHOD PATH [BODY]
 
 anon() {  # 不带 Cookie 的请求
   curl -sS -o "${WORK}/body" -w '%{http_code}' -X "${1}" "${BASE}${2}"
+}
+
+anon_login() {  # 一次不落 Cookie 的登录尝试
+  curl -sS -o "${WORK}/body" -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -d "$1" "${BASE}/api/auth/login"
 }
 
 body() { cat "${WORK}/body"; }
@@ -137,7 +165,14 @@ check "被拒绝的创建没有在卷上留下世界目录" \
   '! docker exec "$PROJECT" sh -c "test -e /app/data/worlds/unauthorized"'
 
 step "A1  登录之后管理面可用"
-check "登录成功" '[ "$(api POST /api/auth/login "{\"token\":\"${ADMIN_TOKEN}\"}")" = "200" ]'
+# 请求体先落到变量里再比对：把 JSON 塞进 check 的 eval 字符串会引出一层
+# 转义地狱，而这里要证的是登录行为，不是引号功力。
+LOGIN_BODY="{\"username\":\"${SMOKE_USER}\",\"password\":\"${SMOKE_PASSWORD}\"}"
+TOKEN_AS_PASSWORD="{\"username\":\"${SMOKE_USER}\",\"password\":\"${ADMIN_TOKEN}\"}"
+CODE="$(anon_login "$TOKEN_AS_PASSWORD")"
+check "管理 token 不能从登录框进（它只走 bearer）" '[ "'"$CODE"'" = "401" ]'
+CODE="$(api POST /api/auth/login "$LOGIN_BODY")"
+check "用户名+密码登录成功" '[ "'"$CODE"'" = "200" ]'
 check "会话 Cookie 是 HttpOnly" 'grep -q "#HttpOnly_" "$COOKIES"'
 check "带会话可读世界列表" '[ "$(api GET /api/persistent-worlds)" = "200" ]'
 
@@ -161,7 +196,7 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 rm -f "$COOKIES"
-api POST /api/auth/login "{\"token\":\"${ADMIN_TOKEN}\"}" >/dev/null
+api POST /api/auth/login "$LOGIN_BODY" >/dev/null
 code="$(api POST /api/persistent-worlds/smoke/restore)"
 check "重建后恢复 → 200" '[ "'"$code"'" = "200" ]'
 check "revision 没有回退" '[ "$(field revision)" -ge "'"$REVISION"'" ]'
@@ -192,8 +227,17 @@ step "A6  SIGTERM 走文档写明的生命周期"
 compose stop >/dev/null 2>&1
 EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$PROJECT")"
 check "退出码是 143（128+SIGTERM，docker stop 的正常形状）" '[ "'"$EXIT_CODE"'" = "143" ]'
-check "关闭报告如实说明世界已干净关闭" \
-  'compose logs 2>/dev/null | grep -q "已干净关闭"'
+# 有界等待，不是 sleep：`compose stop` 返回之后，那一行还要经过 Docker 的
+# 日志管线才读得到。断言的是"这份报告存在"，不是"它在毫秒级就可见"——按后者
+# 断言得到的是一条会随机变红的用例。
+wait_for_log() {  # wait_for_log PATTERN
+  for _ in $(seq 1 40); do
+    if compose logs 2>/dev/null | grep -q "$1"; then return 0; fi
+    sleep 0.25
+  done
+  return 1
+}
+check "关闭报告如实说明世界已干净关闭" 'wait_for_log "已干净关闭"'
 check "没有把一次失败的收尾说成干净关闭" \
   '! compose logs 2>/dev/null | grep -q "\*\*没有\*\*干净关闭"'
 

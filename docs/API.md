@@ -2,9 +2,10 @@
 
 `scripts/server.py` 是 PNS 的唯一服务入口，提供本文档列出的所有 HTTP/WebSocket 接口。
 
-**鉴权见第 6 节。** 简单说：默认拒绝——除了一份显式的公开清单（健康检查、登录三条、前端静态
-资源），其余每一条路径（含 `/ws/run`）都要求一个已认证主体。没配管理凭据的本地开发服务器
-行为不变（不鉴权）；生产模式下缺凭据的进程根本起不来。
+**鉴权与授权见第 6 节。** 简单说：默认拒绝——除了一份显式的公开清单（健康检查、登录三条、
+前端静态资源），其余每一条路径（含 `/ws/run`）都要求一个已认证主体；而"能做什么"由角色的
+scope 决定，非安全方法默认要求 `operate`。既没配管理凭据、账户库里也没有账户的本地开发
+服务器行为不变（不鉴权）；生产模式下缺凭据或缺管理员的进程根本起不来。
 
 所有 JSON 请求/响应均为 `application/json`，字符编码 UTF-8。
 
@@ -421,28 +422,82 @@
 以及 FastAPI 自动挂的 `/openapi.json`、`/docs`、`/redoc`。**只读也保护**是一次显式分类，
 不是顺手继承：这是一个操作者控制面，不是公开站点。
 
-### 6.2 两种凭据
+### 6.2 两种凭据、两种主体
 
-**`Authorization: Bearer <PNS_ADMIN_TOKEN>`** —— 给 curl 和运维脚本用。scheme 大小写不敏感；
-比较走 `hmac.compare_digest`。出现**重复** `Authorization` 头一律拒绝，就算其中一份是对的
-——两份凭据的请求没有唯一答案，不许挑一个能过的。
+**`Authorization: Bearer <PNS_ADMIN_TOKEN>`** —— 给 curl 和运维脚本用，认成一个稳定的
+**非人类**主体（`principal_id` = `svc-break-glass`，`kind` = `service`，admin scope）。
+scheme 大小写不敏感；比较走 `hmac.compare_digest`。出现**重复** `Authorization` 头一律拒绝，
+就算其中一份是对的——两份凭据的请求没有唯一答案，不许挑一个能过的。
 
-**会话 Cookie `pns_session`** —— 给浏览器用。`HttpOnly`、`SameSite=Strict`、`Path=/`，
-`Secure` 由 `PNS_SESSION_COOKIE_SECURE` 决定。SameSite=Strict 就是这里的 CSRF 机制：跨站
-发起的请求带不上这张 Cookie。WebSocket 走的也是它——浏览器在 WS 握手上设不了请求头。
+它**不接受从登录框进来**。让它同时当网页口令，等于把一把不属于任何人、不会过期、撤销要重启
+进程的钥匙发给每个用浏览器的人，账户体系里的停用/改角色/改密码就全都绕得过去。它也不出现在
+用户列表里，也没有密码可改。
+
+**会话 Cookie `pns_session`** —— 给浏览器用，由用户名 + 密码换来。`HttpOnly`、
+`SameSite=Strict`、`Path=/`，`Secure` 由 `PNS_SESSION_COOKIE_SECURE` 决定。每张会话记着签发
+时的账户和**安全修订号**：停用、改角色、改密码都会推进那个数，于是所有旧会话在下一次请求就
+对不上号——撤销不需要等 TTL，也不依赖一次成功的进程内通知。会话只活在内存里，进程重启就没了。
+
+CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），以及服务端对**所有**非安全
+方法和 WebSocket 握手做的同源检查——有 `Origin` 头且与 `Host` 不同源就 403 `cross_origin`，
+在认证之前。比较的是 host[:port]，**不比 scheme**：终结 TLS 的反向代理会让浏览器的
+`https://` 撞上进程侧的 `http`，按完整源比较会让每一台正常的 TLS 部署全部写操作 403。
+重复的 `Origin` 头和 `Origin: null` 都按跨源处理。反向代理必须透传原始 Host，或者把浏览器
+实际访问的源写进 `PNS_TRUSTED_ORIGINS`。不发 `Origin` 的非浏览器客户端不受影响。
 
 只要请求里出现了 `Authorization` 头，就**由它决定**，不会因为浏览器里还有一张有效 Cookie
 而放行。否则"这次调用用的是哪个凭据"会变成一个说不清的问题。
 
 管理 token 本身**不是**会话 id：拿 token 当 Cookie 值发过来会被拒绝。
 
+### 6.2.1 角色与 scope
+
+角色是**权限的捆绑**，路由问的永远是"有没有这个 scope"，不是"是不是管理员"：
+
+| 角色 | scopes |
+|---|---|
+| `admin` | `read` `operate` `accounts:manage` |
+| `operator` | `read` `operate` |
+| `observer` | `read` |
+
+授权判据来自**方法和路径**，不是路由挂没挂依赖：
+
+- 安全方法（`GET`/`HEAD`/`OPTIONS`）要 `read`；
+- 其余方法要 `operate`；
+- 任何 WebSocket 要 `operate`（`/ws/run` 会花模型额度，它不该因为"不是 POST"就落进只读那档）；
+- `/api/accounts/**` 在此之上再要 `accounts:manage`（挂在路由器上，新增路由自动继承）；
+- 自服务清单（目前只有 `POST /api/auth/password`）只要求已认证，不要求任何 scope。
+
+所以以后新加的那条 POST 默认对 `observer` 是关着的。权限不足返回
+`403 {"detail": {"category": "forbidden", ...}}`。
+
 ### 6.3 `/api/auth/*`
 
 | 接口 | 行为 |
 |---|---|
-| `GET /api/auth/session` | `{"mode", "auth_required", "authenticated"}`。不带任何凭据材料 |
-| `POST /api/auth/login` | 请求体 `{"token": "..."}`；成功 200 并下发会话 Cookie；错误 401（只说"不对"，不说是长度还是内容）；同一窗口失败 10 次后 429 并带 `Retry-After`；这台服务器没配凭据时 409 `auth_not_configured` |
+| `GET /api/auth/session` | `{"mode", "auth_required", "authenticated", "principal"}`。`principal` 是 `{principal_id, username, kind, role, scopes, via}` 或 `null`；**不带任何凭据材料**，也不含密码哈希或安全修订号 |
+| `POST /api/auth/login` | 请求体 `{"username", "password"}`；成功 200 并下发会话 Cookie；失败一律 401 `invalid_credential`——用户名不存在、密码不对、账户被停用三者的响应**逐字节相同**（区别只写进审计）；按账户分桶节流，失败够多返回 429 并带 `Retry-After`；这台服务器没有账户体系时 409 |
 | `POST /api/auth/logout` | 作废当前会话并清 Cookie。公开是刻意的：登出不该需要先证明自己登着 |
+| `POST /api/auth/password` | **需要已认证**（不在公开清单里）。请求体 `{"current_password", "new_password"}`；成功之后该账户的**全部会话（含当前这张）**立刻作废，响应 `authenticated: false`，前端退回登录框。旧密码不对返回 400，并留下一条审计。break-glass 和开放的开发主体没有密码可改，返回 409 `not_an_account` |
+
+### 6.3.1 `/api/accounts/*`（需要 `accounts:manage`）
+
+| 接口 | 行为 |
+|---|---|
+| `GET /api/accounts` | `{"users": [...]}`，只列人类账户；每条是 `{principal_id, username, kind, role, scopes, enabled, created_at, updated_at}` |
+| `GET /api/accounts/audit?limit=` | `{"records": [...]}`，倒序。每条含时间、动作、结果、操作者/目标 principal（顺带翻成用户名）和一个结构化 `detail`。**没有凭据、没有哈希、没有原始异常，也不记尝试过的用户名** |
+| `POST /api/accounts` | `{"username", "password", "role"}` → 201。用户名重复（含大小写/全角折叠之后重复）返回 409 `account_conflict` |
+| `POST /api/accounts/{principal_id}/role` | `{"role"}`。改完立刻作废目标的全部会话，响应里带 `revoked_sessions` |
+| `POST /api/accounts/{principal_id}/enabled` | `{"enabled"}`。同上 |
+| `POST /api/accounts/{principal_id}/password` | `{"password"}`，管理员重置，不需要旧密码。同上 |
+
+最后一个启用着的管理员不能被停用或降级：返回 409 `last_admin`。这条裁决发生在数据库写锁
+之下，所以两个并发的降级请求不可能都通过。
+
+用户名的判重只有一条规则：NFKC 归一 + `casefold`，且限制在 ASCII 字母数字和 `. _ -`。
+限制字符集是这条规则的一部分——西里尔字母 `а` 会 casefold 成它自己，允许它就等于允许一个和
+`admin` 并存、在任何界面上都看不出区别的账户。密码只存 Argon2id 哈希，长度 12–512，
+**不做 strip 也不做归一化**（那是在悄悄改掉一个秘密）。
 
 被拒绝的请求返回 `401` + `WWW-Authenticate: Bearer`，正文是
 `{"detail": {"category": "unauthenticated", "message": "需要管理凭据"}}`，跟持久世界路由
@@ -468,10 +523,19 @@ GET /readyz   →  {"status": "ready", "mode": "production", "auth_required": tr
 
 1. `PNS_ADMIN_TOKEN`：≥32 字符、首尾无空白、不是示例占位串；
 2. 模型 provider 凭据（`PNS_API_KEY_NAME` 指向的那个变量）非空；
-3. 已构建的 `dashboard/dist`。
+3. 已构建的 `dashboard/dist`；
+4. 账户库里至少一个**启用着的管理员**（见 `docs/DEPLOY_UBUNTU_DOCKER.md` 第 8 节）。
 
-不存在"缺了就回落到开发模式"这条路。其它取值（默认 `development`）保持既有本地开发行为：
-没配 `PNS_ADMIN_TOKEN` 就不鉴权。配了就一定强制——它不是开关。
+不存在"缺了就回落到开发模式"这条路。账户库打不开时也一样：那种情况**不**回落成"那就没有
+账户"——那会把一台配好了账户的服务器悄悄变回谁都能进的服务器。
+
+其它取值（默认 `development`）保持既有本地开发行为：既没配 `PNS_ADMIN_TOKEN`、账户库里也
+没有账户时不鉴权。配了任意一样就一定强制——它不是开关。这台服务器要不要凭据在**启动时**
+定下来，不随请求变化。
+
+第一个管理员由 `PNS_BOOTSTRAP_ADMIN_USERNAME` + `PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH`
+（Argon2id 哈希，不是明文）创建，或者由 `scripts/accounts.py` 离线创建。引导是幂等的，而且
+库里已经有任何主体时它什么都不做——所以它不是一条"改一行环境变量就重新拿到管理员"的提权路径。
 
 ### 6.6 生产模式下被拒绝的写接口
 
@@ -485,8 +549,9 @@ GET /readyz   →  {"status": "ready", "mode": "production", "auth_required": tr
 
 ### 6.7 日志
 
-进程的 stdout/stderr 被换成按行缓冲、按**值**遮蔽的流：`PNS_ADMIN_TOKEN` 与所有 provider key
-变量的当前值在输出里被替换成 `***REDACTED***`。闸设在流上而不是做成 logging 过滤器，是因为
+进程的 stdout/stderr 被换成按行缓冲、按**值**遮蔽的流：`PNS_ADMIN_TOKEN`、
+`PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH` 与所有 provider key 变量的当前值在输出里被替换成
+`***REDACTED***`。闸设在流上而不是做成 logging 过滤器，是因为
 泄露最可能发生在异常路径——一条被打印的 traceback、SDK 在报错里回显的请求头、uvicorn 自己的
 堆栈——那些都不经过应用的 logger。值在写的时候现取，所以一次配置重载换掉的 key 也照样被盖住。
 

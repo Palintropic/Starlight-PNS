@@ -447,9 +447,11 @@ whitelist evaluator, not by `exec`. Only top-level `NAME = <literal>` assignment
 survive; calls, attribute access, subscripts, imports, comprehensions, loops,
 branches, and definitions are all rejected before anything is evaluated, so a
 `while True:` in a saved file fails fast instead of hanging the process. The
-World Editor's write endpoints share that evaluator — they have no
-authentication in front of them and they write `.py` files into the repository,
-so a weaker check there would be the weakest link. The snapshot itself is deep
+World Editor's write endpoints share that evaluator — they write `.py` files
+into the repository, so a weaker check there would be the weakest link. They do
+sit behind authentication now (DEPLOY-1's default-deny middleware) and behind
+the `operate` scope (AUTH-1), and in production they are refused outright, but
+the evaluator is what makes the write itself safe rather than merely gated. The snapshot itself is deep
 frozen (`pns/models/frozen.py`): nested dicts become read-only views and lists
 become tuples, so `scenes["gate"]["gate_triggers"]["A"] = ...` cannot quietly
 reshape a live configuration. Readers get thawed copies.
