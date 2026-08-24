@@ -46,6 +46,8 @@ KEY_CANARY = "PROC-MODEL-CANARY-1122334455667788990aabbccddeeff0"
 # tests/test_deployment_package.py 会先红。
 IMAGE_TREE = ("pns", "scripts", "packs", "config.yaml")
 
+from accounts_support import bootstrap_env  # noqa: E402
+
 SCENE = "nightcord"
 CHARACTERS = ["mizuki", "ena"]
 
@@ -253,6 +255,9 @@ class ProcessTestCase(unittest.TestCase):
             "PNS_ENV": "production",
             "PNS_ADMIN_TOKEN": ADMIN_TOKEN,
             "PNS_WORLD_ROOT": str(self.root),
+            # AUTH-1：生产进程要求至少一个启用着的管理员。账户库跟着这次测试
+            # 的临时目录走，所以同一个测试里"换一个进程"仍然看得到同一批账户。
+            **bootstrap_env(self.state / "accounts.sqlite3"),
             "PORT": str(free_port()),
             # provider 指向本地假端点。真调用会被数到，而不是打出去。
             "API_FORMAT": "openai",
