@@ -23,7 +23,7 @@ except ImportError:
 
 from oobe import PROVIDERS
 from pns.interfaces import redaction
-from pns.interfaces.security import ENV_ADMIN_TOKEN
+from pns.interfaces.security import ENV_ADMIN_TOKEN, ENV_BOOTSTRAP_PASSWORD_HASH
 
 
 def secret_env_names():
@@ -32,7 +32,13 @@ def secret_env_names():
     provider 的 key 变量名从 oobe 的 provider 表里取，不写死：新增一个
     provider 就自动进入遮蔽范围，不需要有人记得回来改这里。
     """
-    names = [ENV_ADMIN_TOKEN, os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY")]
+    names = [
+        ENV_ADMIN_TOKEN,
+        # bootstrap 哈希不是明文密码，但它是一份可以拿去离线猜的凭据材料，
+        # 没有理由让它出现在任何一条日志里。
+        ENV_BOOTSTRAP_PASSWORD_HASH,
+        os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY"),
+    ]
     names.extend(provider["key_name"] for provider in PROVIDERS.values())
     return names
 

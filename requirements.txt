@@ -9,3 +9,4 @@ aiohttp
 black
 # fastapi.testclient 用它驱动 ASGI 应用（tests/test_persistent_world_api.py）
 httpx
+argon2-cffi

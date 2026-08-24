@@ -33,7 +33,10 @@ P12 的耐久性建立在**本地文件系统**语义上：`flock` 排他锁、`
 |---|---|---|
 | B1 | 构建期没有任何密钥 | `.dockerignore` 排除 `.env` 与所有运行时数据；镜像里没有 `.env`；凭据只在运行时由 Compose 注入 |
 | B2 | 管理操作必须鉴权 | 默认拒绝：除显式公开清单外的每一条路径（含 `/ws/run`）都要求已认证主体 |
-| B3 | 鉴权在服务端且 fail-closed | 生产模式下缺少/不合法的 `PNS_ADMIN_TOKEN` 让**进程起不来**，不回落到开发模式；浏览器拿到的是服务端签发的 HttpOnly 会话 Cookie，密钥不进 JS 包、不进 URL |
+| B3 | 鉴权在服务端且 fail-closed | 生产模式下缺少/不合法的 `PNS_ADMIN_TOKEN`、或者一个启用着的管理员账户都没有，都让**进程起不来**，不回落到开发模式；浏览器拿到的是服务端签发的 HttpOnly 会话 Cookie，凭据不进 JS 包、不进 URL |
+| B3a | 人与自动化是两种主体 | 浏览器登录只认账户（用户名 + Argon2id 密码）；`PNS_ADMIN_TOKEN` 只走 `Authorization: Bearer`，是 break-glass / 自动化的**非人类**主体，登录框不收它 |
+| B3b | 权限默认拒绝写 | 判据来自方法和路径而不是路由挂没挂依赖：非安全方法与 WebSocket 默认要求 `operate`，账户管理再加一层 `accounts:manage`；`observer` 改不了任何东西 |
+| B3c | 撤销即时且可离线 | 停用/改角色/改密码推进账户库里的安全修订号，目标手上的会话在**下一次请求**就失效——不依赖进程内的一次通知，也不需要重启服务 |
 | B4 | 运行时数据在镜像之外 | 存档、锁文件、评分与审核记录、会话归档全部落在具名卷上；重建容器、换镜像都不碰它们 |
 | B5 | 文件系统语义诚实 | 单写者：一个数据目录同时只允许一个应用容器；重复启动必须响亮失败，不是静默共写 |
 | B6 | 重启不等于 Start | 进程启动、容器重建、恢复世界都不会打开自主驱动；**只有**已认证操作者显式 Start 才开始花模型额度 |
@@ -45,11 +48,14 @@ P12 的耐久性建立在**本地文件系统**语义上：`flock` 排他锁、`
 
 两种模式**显式分开**，由 `PNS_ENV` 决定，生产镜像在 Dockerfile 里把它固化成 `production`：
 
-- `PNS_ENV=production`：`PNS_ADMIN_TOKEN`（≥32 字符）、模型 provider 凭据、已构建的 Dashboard
-  三者缺一不可，缺任何一样**启动失败**；写回仓库源码的接口（World Editor、`POST /api/config`）
-  一律拒绝，因为镜像层的写入在下一次重建时就没了。
-- 其它取值（默认 `development`）：保持既有本地开发行为不变——没有 `PNS_ADMIN_TOKEN` 就不鉴权，
-  启动时打印一条明确的警告。这条路径永远不会被生产镜像走到。
+- `PNS_ENV=production`：`PNS_ADMIN_TOKEN`（≥32 字符）、模型 provider 凭据、已构建的 Dashboard、
+  **至少一个启用着的管理员账户**，四者缺一不可，缺任何一样**启动失败**；写回仓库源码的接口
+  （World Editor、`POST /api/config`）一律拒绝，因为镜像层的写入在下一次重建时就没了。
+  第一个管理员怎么来，见第 8 节。
+- 其它取值（默认 `development`）：保持既有本地开发行为不变——既没有 `PNS_ADMIN_TOKEN`、账户库
+  里也没有任何账户时不鉴权。账户库**只在有理由时才被创建**（生产、配了引导变量、或者库文件
+  已经存在），所以一台从没配过账户的本地机器不会凭空多出一个空库。这条路径永远不会被生产镜像
+  走到。
 
 ---
 
@@ -70,6 +76,14 @@ P12 的耐久性建立在**本地文件系统**语义上：`flock` 排他锁、`
 | A9 | 生产缺少必填安全/配置项时启动失败，测试不能靠宽松默认值拿绿灯 | 逐项删掉 `PNS_ADMIN_TOKEN`、模型凭据、Dashboard 产物，各起一次：任何一次起得来，A9 就是假的。同时：把鉴权中间件摘掉之后，A4 的用例必须变红 |
 | A10 | 公开面是一份显式清单，不是"忘了保护"的默认继承 | 新增一条路由而不改清单：它必须默认被保护。`dashboard/dist` 里出现清单没覆盖的顶层文件时，测试必须失败 |
 | A11 | 健康检查没有权威副作用 | 连续打 `/healthz`、`/readyz`：世界存档根不许被创建，配置 revision 不许前进，模型假端点计数必须是 0，不许有世界被打开 |
+| A13 | 登录失败之间无法区分 | 用未知用户名、错密码、被停用的账户各登一次：三次响应的状态码和正文必须逐字节相同；任何一处区别（含耗时上的分支）都让 A13 变假 |
+| A14 | `observer` 改不了任何东西 | 用只读账户对**全表**每一条非安全方法路由各打一次，必须全是 403；再新加一条路由而不改任何清单，它必须仍然是 403 |
+| A15 | 权威一变，会话立刻失效 | 用 A 的会话确认可用 → 由管理员停用/降级/重置 A 的密码 → A 的下一次请求必须是 401。绕过进程内的会话表、只改账户库（模拟离线命令或另一个进程），结论必须不变 |
+| A16 | 最后一个管理员挪不走 | 停用/降级最后一个启用着的管理员必须 409；两个并发的降级请求只有一个能成功，之后启用着的管理员数必须仍然 ≥1 |
+| A17 | 引导幂等，且不能复活权威 | 带着引导变量启动两次：账户只能有一个；对一个已经有账户的库启动，引导必须什么都不做 |
+| A18 | break-glass 与人类账户互不相干 | 停用全部人类账户之后 bearer 仍然可用；bearer 不出现在用户列表里、没有密码可改；`PNS_ADMIN_TOKEN` 当密码从登录框登录必须失败 |
+| A19 | 跨源写请求在认证之前被拒 | 带着有效会话 Cookie、`Origin` 指向别处发一次 POST 和一次 WebSocket 握手：必须 403 / 握手失败，且服务器侧没有发生任何变更 |
+| A20 | 明文与哈希不出现在任何一处 | 在账户库文件、所有响应正文、前端产物和日志里搜索明文密码与 `$argon2`：命中任意一处 A20 就是假的 |
 | A12 | 既有验证全绿 | 全量 Python 测试、Dashboard 测试与构建、`compileall`、`git diff --check` |
 
 ### 3.1 每条断言由什么盯着
@@ -78,6 +92,7 @@ P12 的耐久性建立在**本地文件系统**语义上：`flock` 排他锁、`
 |---|---|
 | A1 A2 A3 A5 A6 A8 | `scripts/docker_smoke.sh`（真镜像 + 真容器）与 `tests/test_deployment_process.py`（真进程 + 真信号）|
 | A4 A9 A10 A11 | `tests/test_deployment_security.py` |
+| A13–A20 | `tests/test_auth_api.py`（接口边界）与 `tests/test_accounts.py`（存储层不变量）|
 | A5（日志与镜像层） | `tests/test_deployment_state.py`、`tests/test_deployment_package.py` |
 | A7 | `tests/test_world_lifecycle.py`（P12 既有）与 `tests/test_deployment_process.py` |
 | 交付包本身 | `tests/test_deployment_package.py` |
@@ -139,6 +154,7 @@ Docker 具名卷（不在上面这棵树里）
 ├── starlight-pns_pns-data     → /app/data
 │   ├── worlds/<world_id>/world.json    世界存档
 │   ├── worlds/<world_id>/OWNER.lock    所有权锁
+│   ├── accounts.sqlite3                账户与安全审计（0600，见第 8 节）
 │   ├── drift_scores.jsonl              判分记录
 │   └── review_decisions.jsonl          人工审核决策
 └── starlight-pns_pns-history  → /app/history   会话归档 Markdown
@@ -178,6 +194,10 @@ chmod 600 .env
 # 生成管理凭据（至少 32 字符；示例占位串会被服务器拒绝）
 openssl rand -hex 32
 $EDITOR .env        # 填 PNS_ADMIN_TOKEN、provider 那四行、模型名
+
+# 第一个管理员账户（生产模式没有它起不来，详见第 8 节）
+docker compose run --rm --entrypoint "" app python scripts/accounts.py hash-password
+$EDITOR .env        # 填 PNS_BOOTSTRAP_ADMIN_USERNAME 和 PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH
 
 docker compose up -d --build
 docker compose ps   # STATUS 应当从 starting 变成 healthy
@@ -219,14 +239,140 @@ docker compose logs --no-color | grep -c "$TOKEN"                             # 
 docker run --rm --entrypoint sh starlight-pns:local -c 'ls -A /app/data'      # 无输出
 ```
 
-浏览器打开 `http://127.0.0.1:7860`（或你的反代域名），会先看到登录框；贴入 `PNS_ADMIN_TOKEN`
-之后进入后台。凭据换成一张 HttpOnly Cookie，此后不再经过浏览器。
+浏览器打开 `http://127.0.0.1:7860`（或你的反代域名），会先看到登录框；用第 8 节创建的
+**用户名和密码**进去。密码换成一张 HttpOnly Cookie，此后不再经过浏览器。
+
+`PNS_ADMIN_TOKEN` **不能**从登录框进——它只走 `Authorization: Bearer`，上面那几条 curl 用的
+就是它。这是刻意的分工，理由见第 8 节开头。
 
 > **恢复和 Start 都是手动的。** 容器起来之后不会自动打开任何世界，打开世界也不会自动开始
 > 推进时间。要让一个世界活起来：在「持久世界」页按「恢复」，确认状态之后再按「开始自动推进」。
 > 这是刻意的——重启一次就自己开始花模型额度是这套系统明确不做的事。
 
-## 8. 日常操作
+## 8. 账户与角色（AUTH-1）
+
+浏览器登录用的是**账户**（用户名 + 密码），不是 `PNS_ADMIN_TOKEN`。那把 token 仍然有效，
+但它只走 `Authorization: Bearer`，是给自动化和 break-glass 用的**非人类主体**。
+
+让它同时当网页口令的代价很具体：那是一把不属于任何人、不会过期、撤销要重启进程的钥匙。
+一旦它是网页口令，账户体系里的停用、改角色、改密码就全都绕得过去。
+
+### 8.1 三种角色
+
+| 角色 | 权限 | 能做什么 |
+|---|---|---|
+| `admin` | `read` `operate` `accounts:manage` | 账户管理 + 下面两档的全部 |
+| `operator` | `read` `operate` | 建/恢复/推进/停止/关闭世界、改活动、重载配置、审核判定、World Editor 写入 |
+| `observer` | `read` | 只读。任何非安全方法（POST/PUT/PATCH/DELETE）和 `/ws/run` 都是 403 |
+
+授权判据来自**方法和路径**，不是"这条路由记得挂依赖"：任何一条非安全方法默认要求 `operate`，
+任何 WebSocket 默认要求 `operate`，账户管理那一组再显式加一层 `accounts:manage`。所以以后
+新加的路由默认对 `observer` 是关着的。Dashboard 会按角色隐藏入口，但那只是体验——服务端
+独立地拒绝，直接 curl 过来的 `observer` 拿到的一样是 403。
+
+### 8.2 第一个管理员
+
+**生产模式要求至少一个启用着的管理员账户，否则进程起不来。**这跟 `PNS_ADMIN_TOKEN` 是同一
+条纪律：一台没有管理员的生产服务器，浏览器那一侧彻底不可用，而它会安静地退化成"只能用 curl
+管"，运维要到真的需要登录那天才发现。
+
+两条创建路径，任选其一。
+
+**(A) 环境变量引导（推荐，适合首次部署和升级）。** 在**这台机器上**先生成哈希——
+明文密码不进 `.env`、不进日志、不进任何一次网络请求：
+
+```bash
+cd /opt/starlight-pns
+docker compose run --rm --entrypoint "" app python scripts/accounts.py hash-password
+# 输入两遍密码（不回显），它只打印一行 $argon2id$... 的哈希
+```
+
+把结果写进 `.env`——**哈希要用单引号包起来**：
+
+```dotenv
+PNS_BOOTSTRAP_ADMIN_USERNAME=mizuki
+PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH='$argon2id$v=19$m=65536,t=3,p=4$...'
+```
+
+单引号不是可选的。哈希里有好几个 `$`，而 Docker Compose 会对 env_file 里没引号（或用双引号）
+的值做一次变量替换，`$argon2id`、`$v`、`$m` 这些段会被当成未定义变量换成空串。结果是服务器
+起不来并如实报"不是 Argon2id 哈希"——方向是安全的，但那半小时的排查完全可以省掉。这条对
+`.env` 里**任何**含 `$` 的值都成立。
+
+`docker compose up -d` 之后第一个管理员就建好了。**这两行可以一直留在 `.env` 里**：引导是
+幂等的，账户库里只要已经有任何一个主体，它就什么都不做——所以它既不会重复创建，也**不能**
+被用来把一个已存在账户的密码改回去。（正因如此，它也不是一条"改一行环境变量就重新拿到管理员"
+的提权路径。）
+
+**(B) 离线命令（适合已经有库、要加人或救急）。** 一次性容器，不要 exec 进正在跑的那个：
+
+```bash
+docker compose run --rm --entrypoint "" app python scripts/accounts.py create-admin --username mizuki
+docker compose run --rm --entrypoint "" app python scripts/accounts.py list
+docker compose run --rm --entrypoint "" app python scripts/accounts.py create --username ena --role operator
+docker compose run --rm --entrypoint "" app python scripts/accounts.py set-role --username ena --role observer
+docker compose run --rm --entrypoint "" app python scripts/accounts.py disable --username ena
+docker compose run --rm --entrypoint "" app python scripts/accounts.py reset-password --username ena
+docker compose run --rm --entrypoint "" app python scripts/accounts.py audit --limit 50
+```
+
+改权威（角色、停用、重置密码）**不需要重启服务**：账户库里的安全修订号前进之后，那个账户
+手上的会话在下一次请求就失效了。
+
+### 8.3 撤销与会话
+
+- 会话是服务端签发的 HttpOnly / SameSite=Strict Cookie，进程重启就没了——它是这台进程的
+  东西，不是这个世界的状态。
+- 停用、改角色、改密码、管理员重置密码，四种都会**立刻作废该账户的全部会话**。判据是账户库
+  里的安全修订号，所以离线命令做的改动同样即时生效。
+- 改自己的密码之后**当前这张会话也没了**，要重新登录。改密码最常见的理由是"我怀疑它泄露
+  了"，那种时候留着手上这张恰好留错了。
+- 登录失败按账户分桶节流，另有一个宽得多的全局桶。一次成功登录只清掉自己那个桶。
+
+### 8.4 最后一个管理员
+
+最后一个启用着的管理员**不能**被停用或降级，API 会返回 409 `last_admin`，并发的两次降级也
+只有一个能成功（裁决发生在数据库写锁之下）。真把自己锁在门外时，还有两条路：`PNS_ADMIN_TOKEN`
+的 bearer 路径，以及需要文件系统访问的 `scripts/accounts.py`。
+
+### 8.5 账户库在哪
+
+`/app/data/accounts.sqlite3`，也就是 `pns-data` 卷里面，权限 0600，跟世界存档一起被第 12 节
+那套备份覆盖。它不在镜像里，重建容器不会动它。位置可以用 `PNS_ACCOUNTS_DB` 改，改之前先确认
+新位置也在本地文件系统的持久卷上。
+
+里面有两张表：账户（只存 Argon2id 哈希）和安全审计。审计记录登录成功/失败类别、登出、改密码、
+建号、改角色、停用启用和重置密码；**记录里没有密码、没有哈希、没有 bearer 值，连尝试过的用户名
+都不记**——把密码打进用户名框每天都在发生，记下来就等于把明文写进磁盘。
+
+### 8.6 反向代理与跨源
+
+对非安全方法和 WebSocket，服务端会在认证**之前**检查 `Origin` 是否与 `Host` 同源，不同源就
+403（`SameSite=Strict` 是第一把锁，这是第二把）。所以反向代理必须把原始 Host 透传下来：
+
+```nginx
+proxy_set_header Host $host;
+```
+
+比较的是 **host[:port]，不比 scheme**。这一条是为终结 TLS 的代理留的：浏览器发来的是
+`https://amia-nightcord-ubuntu.lan`，而应用在回环上看到的 scheme 是 `http`；按完整源比较的话
+每一台正常的内网 TLS 部署上所有写操作都会 403。换来的风险是窄的——能在
+`http://<同一个 host>` 上放东西的攻击者已经站在这个局域网的中间人位置上了。服务端**不**去信
+`X-Forwarded-Proto`，那把判据交给了一个谁都能伪造的请求头。
+
+代理如果按 `proxy_pass` 的默认行为把 Host 改写成上游地址（`127.0.0.1:7860`），浏览器发来的
+`Origin` 一样对不上，所有写操作都会 403。那种情况把浏览器实际访问的源写进 `.env`：
+
+```dotenv
+PNS_TRUSTED_ORIGINS=https://amia-nightcord-ubuntu.lan,https://192.168.3.115
+```
+
+不做的是"对不上就放行"。curl 和运维脚本不发 `Origin`，不受这条影响。
+
+升级到 AUTH-1 之后，值得在浏览器里**真的点一次**写操作（比如按一下「重新加载配置」）：
+403 `cross_origin` 就是代理没透传 Host，按上面两条之一修。
+
+## 9. 日常操作
 
 ```bash
 docker compose ps                  # 状态与健康
@@ -240,7 +386,7 @@ docker compose down                # 停机并删掉容器；**卷保留**
 > **`docker compose down -v` 会连同两个卷一起删掉——所有世界存档、判分记录和
 > 会话归档就没了，而且没有回收站。** 需要重建容器时用 `down` 或
 > `up -d --build`，`-v` 只在你确实想清空这台服务器上的一切时才用，并且用之前
-> 先做第 11 节的备份。
+> 先做第 12 节的备份。
 
 **正常停机会发生什么**（`docker compose stop` / `docker compose down`）：
 
@@ -273,14 +419,14 @@ docker compose down                # 停机并删掉容器；**卷保留**
 > `docker compose ps -a` 里正常停机的退出码是 **143**（128 + SIGTERM）。这是 `docker stop`
 > 期望看到的形状，不是失败。
 
-## 9. 升级
+## 10. 升级
 
 卷不动，只换镜像。
 
 ```bash
 cd /opt/starlight-pns
 docker compose logs --no-color --tail 200 > /tmp/pns-before-upgrade.log   # 留一份现场
-# 升级前先备份（见第 11 节），跨版本的存档兼容性没有承诺
+# 升级前先备份（见第 12 节），跨版本的存档兼容性没有承诺
 git fetch origin
 git checkout <目标 tag 或 commit>
 docker compose up -d --build
@@ -293,7 +439,12 @@ docker compose ps            # 等 healthy
 升级后至少确认三件事：`/readyz` 是 200、无凭据请求仍然是 401、世界恢复出来的 revision
 不低于升级前记下的那个。
 
-## 10. 回滚
+> **从 DEPLOY-1 升到 AUTH-1 的那一次要多做一步。** 旧版本用 `PNS_ADMIN_TOKEN` 当网页口令，
+> 所以老的 `.env` 里没有任何账户配置，而新版本在生产模式下**没有管理员就起不来**。升级前
+> （或者看到容器起不来之后）按第 8.2 节生成一次哈希、往 `.env` 里加两行、再 `up -d` 即可。
+> 这一步不碰数据卷，世界存档不受影响；`PNS_ADMIN_TOKEN` 也照旧有效，只是从此只走 bearer。
+
+## 11. 回滚
 
 ```bash
 cd /opt/starlight-pns
@@ -305,12 +456,12 @@ docker compose up -d --build
 不保证旧版本读得回来——旧版本可能报 `archive_corrupt` / `archive_unusable`，也可能读出来但
 少了新字段。因此：
 
-- 升级之前一定要按第 11 节备份卷；
+- 升级之前一定要按第 12 节备份卷；
 - 回滚时如果新版本已经写过存档，正确顺序是**先回滚代码，再把备份恢复回去**，而不是让旧代码
   去读新存档；
 - 只跑过读操作、没写过存档的升级可以直接回滚。
 
-## 11. 备份与恢复
+## 12. 备份与恢复
 
 具名卷的备份用一个临时容器打包，宿主上不需要 root 去翻 `/var/lib/docker`：
 
@@ -347,10 +498,15 @@ docker compose up -d
 
 恢复完之后进后台恢复世界，确认 revision 和世界时钟是你期望的那一份，再决定要不要 Start。
 
-`.env` 不在卷里，它在仓库目录下。它是唯一一份**没有**被上面这套备份覆盖的东西——单独备份它，
-并且不要备份到任何会被别人读到的地方。
+账户库（`accounts.sqlite3`）在 `pns-data` 里，所以上面这套备份已经把用户和安全审计一起
+带走了。它是 SQLite 且刻意不开 WAL，所以"拷走这一个文件"就等于"拷走这个库"——前提仍然是
+停机备份，热备份拿到的可能是一次写入中间的样子。
 
-## 12. 异常停机之后
+`.env` 不在卷里，它在仓库目录下。它是唯一一份**没有**被上面这套备份覆盖的东西——单独备份它，
+并且不要备份到任何会被别人读到的地方。里面现在还多了一份 `PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH`：
+它不是明文，但它是可以拿去离线猜的凭据材料，同样按秘密对待。
+
+## 13. 异常停机之后
 
 虚拟机断电、`docker kill`、OOM killer——这几种都属于强杀。此时的承诺**只有一条**：能恢复到的
 是最后一次成功的 checkpoint，一次不多、一次不少。checkpoint 之后提交的东西没了。
@@ -372,7 +528,7 @@ docker compose logs --tail 50
 清理的死锁。如果恢复时报 `world_already_open`，那说明真的还有另一个写者活着——先去找它，
 不要去删锁文件。
 
-## 13. 启动失败
+## 14. 启动失败
 
 生产模式缺必填项时进程会直接起不来，这是**设计如此**：一台配置坏掉的服务器应该起不来，
 而不是带着一个开着的管理面跑起来。
@@ -391,13 +547,18 @@ docker compose logs --tail 30
 | `生产模式必须提供 PNS_ADMIN_TOKEN` | 没设 | 见上 |
 | `生产模式必须注入模型凭据 <VAR>` | provider key 变量名和值对不上 | 核对 `PNS_API_KEY_NAME` 与那一行 key |
 | `生产模式要求已构建的 Dashboard` | 镜像构建阶段出了问题 | `docker compose build --no-cache` |
+| `生产模式需要至少一个启用着的管理员账户` | 还没建第一个管理员（从 DEPLOY-1 升级上来最常见） | 见第 8.2 节：生成哈希、往 `.env` 加两行，或者跑一次 `create-admin` |
+| `PNS_BOOTSTRAP_ADMIN_USERNAME 与 …HASH 必须一起给` | 只写了一半 | 两行都写；只写一个不会创建任何账户 |
+| `PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH 不是 Argon2id 哈希` | 把明文密码填进去了 | 用 `scripts/accounts.py hash-password` 生成，明文永远不进 `.env` |
+| `账户库 … 打不开` | 路径不可写，或者文件坏了 | 检查卷属主（10001:10001）；坏了就按第 12 节从备份恢复 |
+| `账户库 … 的 schema 版本是 N` | 用旧代码去开新版本写过的库 | 回滚到匹配的版本，或按第 12 节恢复升级前的备份 |
 | `环境变量 … 不是合法数值` | 某个可选项写错了 | 按提示改，服务器不会悄悄回落到默认值 |
 
 `restart: unless-stopped` 会让它一直重试，Docker 按指数退避（不是热循环）。修好 `.env`
 之后 `docker compose up -d` 就能起来；确认恢复之前想让它停下就 `docker compose stop`——
 `unless-stopped` 的意思正是"人工停的就别自己起来"。
 
-## 14. 这套部署里做不了的事
+## 15. 这套部署里做不了的事
 
 写下来是为了不让人在生产上试：
 
@@ -411,8 +572,15 @@ docker compose logs --tail 30
 - **反向代理必须把服务挂在路径根上。** 公开面是按精确路径匹配的，代理如果带着
   `/pns` 这样的前缀转发进来（不剥掉前缀），连 `/readyz` 都会变成 401——方向是安全的，
   但那台服务器不会正常工作。用 `proxy_pass http://127.0.0.1:7860/;` 这种剥前缀的写法。
-- **登录节流是全局的，不按来源分桶。** 一分钟内 10 次失败之后，这一分钟内谁都登不进后台。
-  这是刻意的：这是个单操作者的管理面，反向代理之后的来源地址也未必可信，按来源分桶只会
-  给攻击者一个绕过维度。代价是任何能碰到这个端口的人都能让登录框卡一分钟——所以默认只绑
-  回环。用 `Authorization: Bearer` 的 curl 路径不受节流影响，运维脚本不会被这一条挡住。
+- **登录节流按账户分桶，不按来源 IP。** 一分钟内对同一个账户失败 10 次，那个账户这一分钟内
+  登不进来；另有一个宽得多的全局桶挡住"每个用户名试 9 次"这种横扫。不按来源分桶是刻意的：
+  反向代理之后的来源地址未必可信，按来源分桶只会给攻击者一个绕过维度。代价是任何能碰到这个
+  端口的人都能让某个账户卡一分钟——所以默认只绑回环。用 `Authorization: Bearer` 的 curl 路径
+  不受节流影响，运维脚本不会被这一条挡住。
+- **没有 OAuth/OIDC/SSO、没有 MFA/WebAuthn、没有邮箱验证或自助找回密码。** 忘了密码的正路是
+  找管理员重置；管理员全丢了的正路是 `PNS_ADMIN_TOKEN` 或 `scripts/accounts.py`（都需要对这台
+  机器的访问权）。
+- **账户是控制面主体，不是世界里的角色。** 用户名叫 mizuki 不会让谁变成那个 mizuki，也不会让
+  谁能以角色身份发言。Sekai Times 的 service principal 是 `ST-1` 的事，这里只把 principal、
+  scope 和审计词汇准备好。
 - **Sekai Times / WordPress 集成不在这里**，那是 `ST-1`。

@@ -273,3 +273,14 @@
   border-radius: 8px;
   overflow: hidden;
 }
+
+.world-readonly {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}

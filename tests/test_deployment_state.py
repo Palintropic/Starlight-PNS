@@ -33,6 +33,12 @@ from pns.interfaces import paths, redaction  # noqa: E402
 from pns.interfaces.app import create_app  # noqa: E402
 from pns.interfaces.composition import WorldControlPlane  # noqa: E402
 from pns.interfaces.security import DeploymentSettings  # noqa: E402
+
+from accounts_support import (  # noqa: E402
+    ADMIN_PASSWORD,
+    ADMIN_USERNAME,
+    cheap_store,
+)
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.world import codegen  # noqa: E402
 
@@ -156,9 +162,15 @@ class ImmutableProductionTests(unittest.TestCase):
             for path in self.BACKUPS
         }
         self.plane = WorldControlPlane(root=self.root)
+        # AUTH-1：生产进程要求至少一个启用着的管理员。这一组用例全部走 bearer，
+        # 账户库在这里只是让 `create_app()` 的生产必填校验成立。
+        self.accounts = cheap_store(Path(self._tmp.name) / "accounts.sqlite3")
+        self.accounts.create_human(ADMIN_USERNAME, ADMIN_PASSWORD, "admin")
+        self.addCleanup(self.accounts.close)
         self.app = create_app(
             self.plane,
             settings=DeploymentSettings(mode="production", admin_token=ADMIN_TOKEN),
+            account_store=self.accounts,
             dashboard_dist=self.dist,
             registry_provider=lambda: self.registry,
         )

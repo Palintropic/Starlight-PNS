@@ -13,8 +13,9 @@
 //
 // 每个用例都用手动兑现的 promise，不靠计时器：竞态测试不该赌调度。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, screen } from '@testing-library/react';
 import PersistentWorlds from './PersistentWorlds';
+import { OPERATOR, renderAs } from './testPrincipal';
 import * as api from './api';
 import type { PersistentWorldStatus, WorldDriverStatus } from './api';
 
@@ -121,7 +122,7 @@ describe('自动推进的控制与状态', () => {
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
       worlds: [world('alpha')],
     });
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     await screen.findByRole('button', { name: '开始自动推进' });
     expect(screen.queryByRole('button', { name: '停止自动推进' })).toBeNull();
     // P12 的「运行中」和驱动的「未启动」是两件事，两个都要看得见。
@@ -134,7 +135,7 @@ describe('自动推进的控制与状态', () => {
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
       worlds: [world('alpha', { autonomy: driver('alpha', 'running') })],
     });
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     await screen.findByRole('button', { name: '停止自动推进' });
     expect(screen.queryByRole('button', { name: '开始自动推进' })).toBeNull();
     expect(screen.getByText('自动推进中')).toBeTruthy();
@@ -145,7 +146,7 @@ describe('自动推进的控制与状态', () => {
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
       worlds: [world('alpha', { autonomy: driver('alpha', 'stopping') })],
     });
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     // 还没停干净 —— 这一轮仍然可能落地一次提交。
     await screen.findByText('正在停止…');
     expect(screen.queryByText('已停')).toBeNull();
@@ -161,7 +162,7 @@ describe('自动推进的控制与状态', () => {
     const pending = deferred<PersistentWorldStatus>();
     vi.spyOn(api, 'stopWorldAutonomy').mockReturnValue(pending.promise);
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const button = await screen.findByRole('button', { name: '停止自动推进' });
     await act(async () => {
       button.click();
@@ -183,7 +184,7 @@ describe('自动推进的控制与状态', () => {
     const pending = deferred<PersistentWorldStatus>();
     vi.spyOn(api, 'stopWorldAutonomy').mockReturnValue(pending.promise);
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const button = await screen.findByRole('button', { name: '停止自动推进' });
     await act(async () => {
       button.click();
@@ -203,7 +204,7 @@ describe('自动推进的控制与状态', () => {
     const pending = deferred<PersistentWorldStatus>();
     const start = vi.spyOn(api, 'startWorldAutonomy').mockReturnValue(pending.promise);
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const button = await screen.findByRole('button', { name: '开始自动推进' });
     await act(async () => {
       button.click();
@@ -225,7 +226,7 @@ describe('自动推进的控制与状态', () => {
     const pending = deferred<PersistentWorldStatus>();
     vi.spyOn(api, 'startWorldAutonomy').mockReturnValue(pending.promise);
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const button = await screen.findByRole('button', { name: '开始自动推进' });
     await act(async () => {
       button.click();
@@ -252,7 +253,7 @@ describe('自动推进的控制与状态', () => {
     const pending = deferred<PersistentWorldStatus>();
     vi.spyOn(api, 'startWorldAutonomy').mockReturnValue(pending.promise);
 
-    render(<PersistentWorlds />);
+    renderAs(OPERATOR, <PersistentWorlds />);
     const button = await screen.findByRole('button', { name: '开始自动推进' });
     const refresh = await screen.findByRole('button', { name: '刷新' });
     await act(async () => {

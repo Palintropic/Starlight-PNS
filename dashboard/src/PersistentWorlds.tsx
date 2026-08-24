@@ -33,9 +33,11 @@ import {
   restorePersistentWorld,
   startWorldAutonomy,
   stopWorldAutonomy,
+  SCOPE_OPERATE,
   type PersistentWorldStatus,
   type WorldDriverStatus,
 } from './api';
+import { useCan } from './principal';
 import './worlds.css';
 
 type Action = 'create' | 'restore' | 'checkpoint' | 'close' | 'autonomy-start' | 'autonomy-stop';
@@ -316,6 +318,9 @@ export default function PersistentWorlds() {
     );
 
   const creating = pending[CREATE_KEY] !== undefined;
+  // 只读账户看不到这一页上的任何写入口。**服务端独立地拒绝**（中间件按方法
+  // 判 scope），所以这里藏起来的只是一个点了会拿到 403 的按钮。
+  const canOperate = useCan(SCOPE_OPERATE);
 
   return (
     <div className="worlds">
@@ -335,6 +340,7 @@ export default function PersistentWorlds() {
 
       {loadError ? <div className="worlds-error">{loadError}</div> : null}
 
+      {canOperate ? (
       <form className="worlds-create" onSubmit={onCreate}>
         <h3>新建世界</h3>
         <div className="worlds-create-row">
@@ -392,6 +398,7 @@ export default function PersistentWorlds() {
           </div>
         ) : null}
       </form>
+      ) : null}
 
       {worlds === null ? (
         <div className="state-msg">加载中…</div>
@@ -433,7 +440,7 @@ export default function PersistentWorlds() {
                   </span>
                   <span className="worlds-meta">{clockText(world.clock)}</span>
                   <span className="worlds-actions">
-                    {world.owned ? (
+                    {!canOperate ? null : world.owned ? (
                       <>
                         {driving ? (
                           <button

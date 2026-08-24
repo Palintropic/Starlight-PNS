@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { fetchWorldScenes, saveWorldScenes } from '../api';
+import { SCOPE_OPERATE, fetchWorldScenes, saveWorldScenes } from '../api';
+import { useCan } from '../principal';
 import { blankScene } from './types';
 import type { Scene, ScenesMap } from './types';
 import { SCENE_FIELDS } from './scenesSchema';
@@ -14,6 +15,7 @@ function SceneEditor() {
   const [mode, setMode] = useState<'form' | 'source'>('form');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const canWrite = useCan(SCOPE_OPERATE);
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
@@ -82,7 +84,7 @@ function SceneEditor() {
   return (
     <div className="world-panel">
       <aside className="world-sidebar">
-        <button className="btn btn-add" onClick={handleAdd} disabled={saving}>
+        <button className="btn btn-add" onClick={handleAdd} disabled={saving || !canWrite}>
           ＋ 新增场景
         </button>
         <div className="world-list">
@@ -223,10 +225,18 @@ function SceneEditor() {
             </div>
 
             <div className="world-actions">
-              <button className="btn btn-approve" disabled={saving} onClick={handleSave}>
+              <button
+                className="btn btn-approve"
+                disabled={saving || !canWrite}
+                onClick={handleSave}
+              >
                 {saving ? '保存中…' : '保存'}
               </button>
-              <button className="btn btn-reject" disabled={saving} onClick={() => handleDelete(draft.id)}>
+              <button
+                className="btn btn-reject"
+                disabled={saving || !canWrite}
+                onClick={() => handleDelete(draft.id)}
+              >
                 删除这个场景
               </button>
             </div>

@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { SCOPE_OPERATE } from '../api';
+import { useCan } from '../principal';
 import CodeMirror from '@uiw/react-codemirror';
 import { python } from '@codemirror/lang-python';
 import {
@@ -24,6 +26,7 @@ function SourceEditor({ target, onSaved }: Props) {
   const [source, setSource] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const canWrite = useCan(SCOPE_OPERATE);
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
@@ -57,7 +60,11 @@ function SourceEditor({ target, onSaved }: Props) {
   return (
     <div className="source-editor">
       <div className="world-actions">
-        <button className="btn btn-approve" onClick={handleSave} disabled={saving}>
+        <button
+          className="btn btn-approve"
+          onClick={handleSave}
+          disabled={saving || !canWrite}
+        >
           {saving ? '保存中…' : '保存源码'}
         </button>
         <button className="btn btn-reject" onClick={load} disabled={saving}>

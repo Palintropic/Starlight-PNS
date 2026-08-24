@@ -69,32 +69,137 @@ async function json<T>(res: Response, options: { authRoute?: boolean } = {}): Pr
   return res.json() as Promise<T>;
 }
 
-// ─── 操作者会话（DEPLOY-1）──────────────────────────────────────────────
+// ─── 账户与会话（DEPLOY-1 / AUTH-1）────────────────────────────────────
 //
-// 管理凭据**只**在登录那一刻经过浏览器，换成一张 HttpOnly Cookie 之后就不再
-// 出现在前端任何地方：不写 localStorage、不进 URL、不进构建产物。所以这里
-// 没有、也不该有任何"记住 token"的东西。
+// 凭据**只**在提交那一刻经过浏览器，换成一张 HttpOnly Cookie 之后就不再出现
+// 在前端任何地方：不写 localStorage、不进 URL、不进构建产物。所以这里没有、
+// 也不该有任何"记住密码"的东西。
+//
+// `PNS_ADMIN_TOKEN` 不在这条路上：那是 break-glass / 自动化用的 bearer，
+// 浏览器登录只认用户名 + 密码。
+
+/** 权限名。服务端的 scope 词汇，前端只用来决定显示什么。 */
+export const SCOPE_READ = 'read';
+export const SCOPE_OPERATE = 'operate';
+export const SCOPE_ACCOUNTS = 'accounts:manage';
+
+/** 当前请求认下来的主体。`kind: 'service'` 是 break-glass 或开放的开发服务器。 */
+export interface AuthPrincipal {
+  principal_id: string;
+  username: string;
+  kind: string;
+  role: string;
+  scopes: string[];
+  /** 'session' | 'bearer' | 'open-development' */
+  via: string;
+}
 
 export interface AuthSession {
   /** 'production' | 'development' */
   mode: string;
-  /** 这台服务器要不要凭据。false 表示它是一台没配 token 的开发服务器。 */
+  /** 这台服务器要不要凭据。false 表示它是一台没配账户也没配 token 的开发服务器。 */
   auth_required: boolean;
   authenticated: boolean;
+  principal: AuthPrincipal | null;
 }
 
 export const fetchAuthSession = (): Promise<AuthSession> =>
   fetch('/api/auth/session').then((res) => json(res, { authRoute: true }));
 
-export const login = (token: string): Promise<AuthSession> =>
+export const login = (username: string, password: string): Promise<AuthSession> =>
   fetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ username, password }),
   }).then((res) => json(res, { authRoute: true }));
 
 export const logout = (): Promise<AuthSession> =>
   fetch('/api/auth/logout', { method: 'POST' }).then((res) => json(res, { authRoute: true }));
+
+/** 改自己的密码。**成功之后当前会话也没了**，服务端不会补发新的。 */
+export const changePassword = (
+  currentPassword: string,
+  newPassword: string,
+): Promise<AuthSession> =>
+  fetch('/api/auth/password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  }).then((res) => json(res, { authRoute: true }));
+
+// ─── 账户管理（AUTH-1，需要 accounts:manage）──────────────────────────
+
+export interface Account {
+  principal_id: string;
+  username: string;
+  kind: string;
+  role: string;
+  scopes: string[];
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  /** 这次操作踢掉了几张会话。只在改权威/重置密码的响应里出现。 */
+  revoked_sessions?: number;
+}
+
+export interface AuditRecord {
+  sequence: number;
+  occurred_at: string;
+  actor_principal_id: string | null;
+  target_principal_id: string | null;
+  actor_username: string | null;
+  target_username: string | null;
+  action: string;
+  result: string;
+  detail: Record<string, unknown>;
+}
+
+const accountPath = (principalId: string) =>
+  `/api/accounts/${encodeURIComponent(principalId)}`;
+
+export const fetchAccounts = (): Promise<{ users: Account[] }> =>
+  fetch('/api/accounts').then((res) => json(res));
+
+export const fetchAuditRecords = (limit = 200): Promise<{ records: AuditRecord[] }> =>
+  fetch(`/api/accounts/audit?limit=${limit}`).then((res) => json(res));
+
+export const createAccount = (
+  username: string,
+  password: string,
+  role: string,
+): Promise<Account> =>
+  fetch('/api/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, role }),
+  }).then((res) => json(res));
+
+export const setAccountRole = (principalId: string, role: string): Promise<Account> =>
+  fetch(`${accountPath(principalId)}/role`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role }),
+  }).then((res) => json(res));
+
+export const setAccountEnabled = (
+  principalId: string,
+  enabled: boolean,
+): Promise<Account> =>
+  fetch(`${accountPath(principalId)}/enabled`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  }).then((res) => json(res));
+
+export const resetAccountPassword = (
+  principalId: string,
+  password: string,
+): Promise<Account> =>
+  fetch(`${accountPath(principalId)}/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  }).then((res) => json(res));
 
 export const fetchTurns = (): Promise<Turn[]> =>
   fetch('/api/review/turns').then((res) => json(res));

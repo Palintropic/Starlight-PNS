@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +56,12 @@ from pns.interfaces.security import (  # noqa: E402
 )
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 
+from accounts_support import (  # noqa: E402
+    ADMIN_PASSWORD,
+    ADMIN_USERNAME,
+    cheap_store,
+)
+
 SCENE = "nightcord"
 CHARACTERS = ["mizuki", "ena"]
 # 一把只在测试里存在、形状独一无二的管理凭据。任何一条响应里出现它，都说明
@@ -79,7 +86,9 @@ def declared_operations(app):
     为准，新加一条路由就会自动进入这条用例的射程。
     """
     for path, operations in app.openapi()["paths"].items():
-        concrete = path.replace("{world_id}", "nightcord")
+        concrete = path.replace("{world_id}", "nightcord").replace(
+            "{principal_id}", "p-unknown"
+        )
         for method in operations:
             if method.upper() in ("OPTIONS", "HEAD"):
                 continue
@@ -116,12 +125,19 @@ class AuthTestCase(unittest.TestCase):
             mode="production" if self.production else "development",
             admin_token=ADMIN_TOKEN,
         )
+        # AUTH-1：浏览器登录走账户，`PNS_ADMIN_TOKEN` 只走 bearer。两条路
+        # 在这一组用例里都要真的存在，才谈得上"它们互相独立"。
+        self.accounts = cheap_store(Path(self._tmp.name) / "accounts.sqlite3")
+        self.admin = self.accounts.create_human(
+            ADMIN_USERNAME, ADMIN_PASSWORD, "admin"
+        )
         self.plane = WorldControlPlane(
             root=self.root, client_factory=lambda *a, **k: _FakeModelClient()
         )
         self.app = create_app(
             self.plane,
             settings=self.settings,
+            account_store=self.accounts,
             registry_provider=lambda: self.registry,
         )
         self.client = TestClient(self.app)
@@ -130,6 +146,7 @@ class AuthTestCase(unittest.TestCase):
         try:
             self.plane.service.release_all()
         finally:
+            self.accounts.close()
             self._env.stop()
             self._tmp.cleanup()
 
@@ -138,8 +155,10 @@ class AuthTestCase(unittest.TestCase):
     def bearer(self):
         return {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 
-    def login(self):
-        response = self.client.post("/api/auth/login", json={"token": ADMIN_TOKEN})
+    def login(self, username=ADMIN_USERNAME, password=ADMIN_PASSWORD):
+        response = self.client.post(
+            "/api/auth/login", json={"username": username, "password": password}
+        )
         self.assertEqual(response.status_code, 200, response.text)
         return response
 
@@ -411,30 +430,60 @@ class CredentialShapeTests(AuthTestCase):
         app = create_app(
             WorldControlPlane(root=self.root / "secure"),
             settings=settings,
+            account_store=self.accounts,
             registry_provider=lambda: self.registry,
         )
         with TestClient(app, base_url="https://testserver") as client:
             header = client.post(
-                "/api/auth/login", json={"token": ADMIN_TOKEN}
+                "/api/auth/login",
+                json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
             ).headers["set-cookie"]
         self.assertIn("Secure", header)
 
-    def test_login_throttle_blocks_even_the_correct_token(self):
+    def test_login_throttle_blocks_even_the_correct_password(self):
         for _ in range(LOGIN_MAX_FAILURES):
             self.assertEqual(
-                self.client.post("/api/auth/login", json={"token": "wrong"}).status_code,
+                self.client.post(
+                    "/api/auth/login",
+                    json={"username": ADMIN_USERNAME, "password": "wrong-password"},
+                ).status_code,
                 401,
             )
-        blocked = self.client.post("/api/auth/login", json={"token": ADMIN_TOKEN})
+        blocked = self.client.post(
+            "/api/auth/login",
+            json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+        )
         self.assertEqual(blocked.status_code, 429)
         self.assertIn("Retry-After", blocked.headers)
         self.assertEqual(blocked.json()["detail"]["category"], "too_many_attempts")
 
     def test_login_error_does_not_describe_why(self):
-        body = self.client.post("/api/auth/login", json={"token": "wrong"}).json()
+        body = self.client.post(
+            "/api/auth/login",
+            json={"username": ADMIN_USERNAME, "password": "wrong-password"},
+        ).json()
         message = body["detail"]["message"]
-        for leak in ("长度", "length", str(len(ADMIN_TOKEN)), ADMIN_TOKEN[:8]):
+        for leak in ("长度", "length", "不存在", "停用", ADMIN_PASSWORD):
             self.assertNotIn(leak, message)
+
+    def test_the_admin_token_is_not_a_web_password(self):
+        """break-glass token 走 bearer，**不走登录框**。
+
+        让它同时当网页口令，等于把一把不属于任何人、撤销要重启进程的钥匙发给
+        每一个用浏览器的人；账户体系里的停用/改角色/改密码就全都绕得过去。
+        """
+        for payload in (
+            {"username": ADMIN_USERNAME, "password": ADMIN_TOKEN},
+            {"username": "break-glass", "password": ADMIN_TOKEN},
+            {"username": ADMIN_TOKEN[:64], "password": ADMIN_TOKEN},
+        ):
+            with self.subTest(payload=sorted(payload)):
+                response = self.client.post("/api/auth/login", json=payload)
+                self.assertEqual(response.status_code, 401, response.text)
+        # 但同一把 token 走 bearer 仍然通。
+        self.assertEqual(
+            self.client.get("/api/config", headers=self.bearer).status_code, 200
+        )
 
 
 # ── 4. 生产模式 fail-closed ─────────────────────────────────────────────
@@ -567,9 +616,17 @@ class NoSecretInResponsesTests(AuthTestCase):
 
     def test_denied_and_error_responses_carry_no_secret(self):
         self.assert_clean(self.client.get("/api/config"))
-        self.assert_clean(self.client.post("/api/auth/login", json={"token": "wrong"}))
         self.assert_clean(
-            self.client.post("/api/auth/login", json={"token": ADMIN_TOKEN})
+            self.client.post(
+                "/api/auth/login",
+                json={"username": ADMIN_USERNAME, "password": "wrong-password"},
+            )
+        )
+        self.assert_clean(
+            self.client.post(
+                "/api/auth/login",
+                json={"username": ADMIN_USERNAME, "password": ADMIN_TOKEN},
+            )
         )
         self.assert_clean(
             self.client.get("/api/persistent-worlds/missing", headers=self.bearer)
@@ -642,42 +699,86 @@ class MiddlewareIsTheMechanismTests(AuthTestCase):
 
 # ── 会话与节流的行为 ────────────────────────────────────────────────────
 class SessionStoreTests(unittest.TestCase):
+    """会话绑主体（AUTH-1）：每一张会话都记着签发时的账户和安全修订号。"""
+
     def test_sessions_expire(self):
         now = [0.0]
         store = SessionStore(100.0, clock=lambda: now[0])
-        sid = store.issue()
+        sid = store.issue("p1", 1)
         self.assertTrue(store.valid(sid))
         now[0] = 100.0
         self.assertFalse(store.valid(sid))
         self.assertEqual(store.live, 0)
 
+    def test_a_session_remembers_who_and_which_revision(self):
+        store = SessionStore(1000.0)
+        record = store.get(store.issue("p1", 7))
+        self.assertEqual(record.principal_id, "p1")
+        self.assertEqual(record.security_revision, 7)
+
     def test_issuing_beyond_the_cap_drops_the_oldest(self):
         now = [0.0]
         store = SessionStore(1000.0, max_sessions=2, clock=lambda: now[0])
-        first = store.issue()
+        first = store.issue("p1", 1)
         now[0] += 1
-        second = store.issue()
+        second = store.issue("p2", 1)
         now[0] += 1
-        third = store.issue()
+        third = store.issue("p3", 1)
         self.assertFalse(store.valid(first))
         self.assertTrue(store.valid(second))
         self.assertTrue(store.valid(third))
 
     def test_session_ids_are_unique_and_unguessable(self):
         store = SessionStore(1000.0, max_sessions=1000)
-        ids = {store.issue() for _ in range(200)}
+        ids = {store.issue("p1", 1) for _ in range(200)}
         self.assertEqual(len(ids), 200)
         self.assertTrue(all(len(sid) >= 32 for sid in ids))
 
     def test_revoke_is_immediate(self):
         store = SessionStore(1000.0)
-        sid = store.issue()
+        sid = store.issue("p1", 1)
         store.revoke(sid)
         self.assertFalse(store.valid(sid))
 
+    def test_revoking_a_principal_takes_every_one_of_its_sessions(self):
+        """一个人可能同时开着好几个浏览器。撤销不许只撤"当前这一张"。"""
+        store = SessionStore(1000.0)
+        mine = [store.issue("p1", 1) for _ in range(3)]
+        others = [store.issue("p2", 1) for _ in range(2)]
+        self.assertEqual(store.revoke_principal("p1"), 3)
+        self.assertFalse(any(store.valid(sid) for sid in mine))
+        self.assertTrue(all(store.valid(sid) for sid in others))
+
+    def test_concurrent_issue_and_revoke_do_not_race(self):
+        """认证跑在事件循环线程里，签发和撤销跑在线程池里——这张表**同时**被
+        两种线程碰。没有锁的话，"先算出最早到期的那个再删掉它"会在两个线程
+        之间撞出 KeyError，而那会变成一次合法请求上的 500。
+        """
+        store = SessionStore(1000.0, max_sessions=16)
+        errors = []
+        barrier = threading.Barrier(6)
+
+        def churn(index):
+            barrier.wait()
+            try:
+                for _ in range(120):
+                    sid = store.issue(f"p{index}", 1)
+                    store.get(sid)
+                    store.revoke_principal(f"p{index}")
+                    store.live
+            except Exception as exc:  # pragma: no cover - 有锁就不该发生
+                errors.append(exc)
+
+        threads = [threading.Thread(target=churn, args=(i,)) for i in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        self.assertEqual(errors, [])
+
     def test_empty_session_id_is_never_valid(self):
         store = SessionStore(1000.0)
-        store.issue()
+        store.issue("p1", 1)
         for candidate in (None, "", "   "):
             self.assertFalse(store.valid(candidate))
 
@@ -685,19 +786,53 @@ class SessionStoreTests(unittest.TestCase):
 class LoginThrottleTests(unittest.TestCase):
     def test_window_expires(self):
         now = [0.0]
-        throttle = LoginThrottle(max_failures=2, window_seconds=10.0, clock=lambda: now[0])
-        throttle.record_failure()
-        throttle.record_failure()
-        self.assertTrue(throttle.blocked())
+        throttle = LoginThrottle(
+            max_failures=2, window_seconds=10.0, clock=lambda: now[0]
+        )
+        throttle.record_failure("a")
+        throttle.record_failure("a")
+        self.assertTrue(throttle.blocked("a"))
         now[0] = 11.0
-        self.assertFalse(throttle.blocked())
+        self.assertFalse(throttle.blocked("a"))
 
-    def test_success_resets(self):
+    def test_buckets_are_per_account(self):
         throttle = LoginThrottle(max_failures=2, window_seconds=10.0)
-        throttle.record_failure()
-        throttle.reset()
-        throttle.record_failure()
-        self.assertFalse(throttle.blocked())
+        throttle.record_failure("a")
+        throttle.record_failure("a")
+        self.assertTrue(throttle.blocked("a"))
+        self.assertFalse(throttle.blocked("b"))
+
+    def test_success_only_clears_its_own_bucket(self):
+        """一次成功登录不许抹掉**别的**账户的失败史。
+
+        抹掉的话，攻击者只要有一个能登进去的账户（或者等到别人正常登录一次），
+        就把全场的节流预算清零了。
+        """
+        throttle = LoginThrottle(max_failures=2, window_seconds=10.0)
+        throttle.record_failure("a")
+        throttle.record_failure("b")
+        throttle.record_failure("b")
+        throttle.record_success("a")
+        self.assertTrue(throttle.blocked("b"))
+
+    def test_a_global_bucket_stops_a_sweep_across_usernames(self):
+        """每个用户名试到差一次就被挡，横扫也得有个上限。"""
+        throttle = LoginThrottle(
+            max_failures=10, global_max_failures=4, window_seconds=10.0
+        )
+        for name in ("a", "b", "c", "d"):
+            throttle.record_failure(name)
+        self.assertTrue(throttle.blocked("never-tried"))
+
+    def test_tracked_buckets_are_bounded(self):
+        """节流不该变成一条内存增长路径。"""
+        throttle = LoginThrottle(
+            max_failures=2, global_max_failures=10**6,
+            window_seconds=1000.0, max_tracked_keys=8,
+        )
+        for index in range(200):
+            throttle.record_failure(f"user-{index}")
+        self.assertLessEqual(len(throttle._buckets), 8)
 
 
 if __name__ == "__main__":
