@@ -60,7 +60,22 @@
   flex-direction: column;
   gap: 12px;
 }
+
+.accounts-reset {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.accounts-reset label {
+  display: grid;
+  gap: 0.35rem;
+  max-width: 32rem;
+}
 .accounts-create h3,
+.accounts-reset h3,
 .accounts-audit h3 {
   margin: 0;
   font-size: 13px;
@@ -82,6 +97,7 @@
 }
 .accounts-create input,
 .accounts-create select,
+.accounts-reset input,
 .accounts-table select {
   padding: 6px 8px;
   border: 1px solid var(--border);
@@ -92,7 +108,8 @@
   font-size: 13px;
 }
 .accounts-create input:focus,
-.accounts-create select:focus {
+.accounts-create select:focus,
+.accounts-reset input:focus {
   outline: none;
   border-color: var(--accent);
 }

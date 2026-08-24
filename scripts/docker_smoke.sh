@@ -29,7 +29,11 @@ KEY_CANARY="SMOKE-MODEL-CANARY-ffeeddccbbaa00998877665544332211"
 # 只活在这个脚本的变量里，不进镜像、不进任何一层。
 SMOKE_USER="smoke-admin"
 SMOKE_PASSWORD="smoke-password-0011"
-SMOKE_PASSWORD_HASH="$(python3 -c '
+PYTHON_BIN="python3"
+if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
+  PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+fi
+SMOKE_PASSWORD_HASH="$("${PYTHON_BIN}" -c '
 import sys
 try:
     from argon2 import PasswordHasher

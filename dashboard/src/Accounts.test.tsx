@@ -121,6 +121,29 @@ describe('用户管理', () => {
     expect(screen.getByText('ena 已停用，踢掉了 2 张会话')).toBeTruthy();
   });
 
+  it('重置密码使用密码框，提交后从 DOM 擦掉', async () => {
+    stubList([account(), ena]);
+    vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });
+    const reset = vi.spyOn(api, 'resetAccountPassword').mockResolvedValue(
+      account({ ...ena, revoked_sessions: 1 }),
+    );
+
+    render(<Accounts />);
+    await flush();
+    fireEvent.click(screen.getAllByText('重置密码')[1]);
+
+    const password = screen.getByPlaceholderText(
+      '新的密码（至少 12 个字符）',
+    ) as HTMLInputElement;
+    expect(password.type).toBe('password');
+    fireEvent.change(password, { target: { value: 'replacement-password-123' } });
+    fireEvent.click(screen.getByText('确认重置'));
+    await flush();
+
+    expect(reset).toHaveBeenCalledWith('p-2', 'replacement-password-123');
+    expect(document.body.innerHTML).not.toContain('replacement-password-123');
+  });
+
   it('最后一个管理员那条 409 照服务端的话说', async () => {
     stubList([account()]);
     vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });

@@ -52,6 +52,8 @@ export default function Accounts() {
   const [newName, setNewName] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState<string>('observer');
+  const [resetTarget, setResetTarget] = useState<Account | null>(null);
+  const [resetPassword, setResetPassword] = useState('');
 
   const refresh = useCallback(() => {
     setLoadError(null);
@@ -131,14 +133,21 @@ export default function Accounts() {
   };
 
   const onReset = (account: Account) => {
-    const password = window.prompt(
-      `给 ${account.username} 设一个新密码（至少 12 个字符）。` +
-        '提交后该账户的全部会话立刻失效。',
-    );
-    if (!password) return;
+    setResetPassword('');
+    setResetTarget(account);
+  };
+
+  const submitReset = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (resetTarget === null || !resetPassword) return;
+    const target = resetTarget;
+    const password = resetPassword;
+    // 跟新建账户同一条纪律：先从 DOM/state 擦掉，再把那一份局部变量交给请求。
+    setResetPassword('');
+    setResetTarget(null);
     void run(
-      `${account.principal_id}:password`,
-      () => resetAccountPassword(account.principal_id, password),
+      `${target.principal_id}:password`,
+      () => resetAccountPassword(target.principal_id, password),
       (updated) => `已重置 ${updated.username} 的密码${revokedNote(updated)}`,
     );
   };
@@ -209,6 +218,41 @@ export default function Accounts() {
           </span>
         </div>
       </form>
+
+      {resetTarget ? (
+        <form className="accounts-reset" onSubmit={submitReset}>
+          <h3>重置 {resetTarget.username} 的密码</h3>
+          <p className="accounts-hint">
+            提交后该账户的全部会话立即失效。密码不会回显或留在页面中。
+          </p>
+          <label>
+            <span>新密码</span>
+            <input
+              autoFocus
+              type="password"
+              autoComplete="new-password"
+              value={resetPassword}
+              onChange={(event) => setResetPassword(event.target.value)}
+              placeholder="新的密码（至少 12 个字符）"
+            />
+          </label>
+          <div className="accounts-create-actions">
+            <button className="btn btn-approve" type="submit" disabled={!resetPassword}>
+              确认重置
+            </button>
+            <button
+              className="btn"
+              type="button"
+              onClick={() => {
+                setResetPassword('');
+                setResetTarget(null);
+              }}
+            >
+              取消
+            </button>
+          </div>
+        </form>
+      ) : null}
 
       {users === null ? (
         <div className="accounts-empty">加载中…</div>
