@@ -12,6 +12,7 @@
 #
 # 用法： scripts/docker_smoke.sh          （跑完自动清理）
 #        KEEP=1 scripts/docker_smoke.sh   （留下容器和卷供人工查看）
+#        SMOKE_PLATFORM=linux/amd64 scripts/docker_smoke.sh   （按目标架构构建）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +20,16 @@ PROJECT="pns-smoke"
 IMAGE="starlight-pns:smoke"
 PORT="${SMOKE_PORT:-17860}"
 BASE="http://127.0.0.1:${PORT}"
+
+# 构建架构。默认跟着本机走：冒烟证的是镜像内容和编排行为，这两样跟架构无关，本机架构跑
+# 得最快。但要知道它证不了什么——生产投送的是 linux/amd64（见 docs/DEPLOY_UBUNTU_DOCKER.md
+# 第 6.1 节），在一台 arm64 机器上跑完这个脚本，**没有**验证过那个真正要发出去的镜像。
+# 想验那一个，用 SMOKE_PLATFORM=linux/amd64（模拟执行，会明显变慢）。
+# 故意不加引号：值是 linux/amd64 这种单个词元，要的就是它拆成两个参数。
+PLATFORM_ARG=""
+if [ -n "${SMOKE_PLATFORM:-}" ]; then
+  PLATFORM_ARG="--platform ${SMOKE_PLATFORM}"
+fi
 
 ADMIN_TOKEN="SMOKE-ADMIN-CANARY-0011223344556677889900aabbccddee"
 KEY_CANARY="SMOKE-MODEL-CANARY-ffeeddccbbaa00998877665544332211"
@@ -121,7 +132,7 @@ field() { python3 -c "import json,sys;print(json.load(open('${WORK}/body')).get(
 
 # ── A1：构建与启动 ─────────────────────────────────────────────────────
 step "A1  构建镜像并通过 Compose 启动"
-docker build -t "$IMAGE" "$REPO_ROOT" >"${WORK}/build.log" 2>&1 \
+docker build $PLATFORM_ARG -t "$IMAGE" "$REPO_ROOT" >"${WORK}/build.log" 2>&1 \
   && ok "镜像构建成功" || { bad "镜像构建失败（见 ${WORK}/build.log）"; tail -20 "${WORK}/build.log"; exit 1; }
 
 check "镜像不以 root 运行" \
@@ -193,7 +204,7 @@ check "活数据不在镜像层上（无卷启动时 /app/data 是空的）" \
   '[ -z "$(docker run --rm --entrypoint sh "$IMAGE" -c "ls -A /app/data")" ]'
 
 compose down >/dev/null 2>&1
-docker build -t "$IMAGE" "$REPO_ROOT" >/dev/null 2>&1
+docker build $PLATFORM_ARG -t "$IMAGE" "$REPO_ROOT" >/dev/null 2>&1
 compose up -d >/dev/null 2>&1
 for _ in $(seq 1 60); do
   [ "$(docker inspect --format '{{.State.Health.Status}}' "$PROJECT" 2>/dev/null || echo none)" = "healthy" ] && break
