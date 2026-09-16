@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
@@ -34,11 +35,34 @@ class FakeWordPress:
         self.reject_after_create = None
         self.category_name = "暁山瑞希"
         self.on_post = None
+        self.contract_has_submission_id = True
 
     def __call__(self, request, timeout):
         self.calls.append(request)
         parsed = urlparse(request.full_url)
         query = parse_qs(parsed.query)
+        if parsed.path == "/wp-json/":
+            properties = {"pns_submission_id": {"type": "string"}}
+            if not self.contract_has_submission_id:
+                properties = {}
+            return Response(
+                {
+                    "routes": {
+                        "/wp/v2/posts": {
+                            "endpoints": [
+                                {
+                                    "methods": ["GET"],
+                                    "args": {},
+                                },
+                                {
+                                    "methods": ["POST"],
+                                    "args": {"meta": {"properties": properties}},
+                                },
+                            ]
+                        }
+                    }
+                }
+            )
         if parsed.path.endswith("/categories"):
             return Response([{"id": 99, "slug": "mzk", "name": self.category_name}])
         if request.get_method() == "GET":
@@ -129,6 +153,17 @@ class SekaiTimesTests(unittest.TestCase):
             client.submit_once(post())
         self.assertEqual(server.posts, [])
 
+    def test_missing_remote_submission_contract_prevents_write(self):
+        server = FakeWordPress()
+        server.contract_has_submission_id = False
+        client = WordPressPendingPosts(
+            "http://localhost:8090", "pns_bot", "test", opener=server
+        )
+        with self.assertRaises(DeliveryError):
+            client.submit_once(post())
+        self.assertEqual(server.posts, [])
+        self.assertFalse(any(call.get_method() == "POST" for call in server.calls))
+
     def test_lost_response_is_reconciled_without_second_post(self):
         server = FakeWordPress()
         server.lost_response = True
@@ -204,6 +239,56 @@ class SekaiTimesTests(unittest.TestCase):
             self.assertEqual(outbox.dispatch(post().slug, client), 1)
             self.assertEqual(outbox.dispatch(post().slug, client), 1)
             self.assertEqual(len(server.posts), 1)
+            outbox.close()
+
+    def test_operator_can_release_blocked_item_with_recorded_resolution(self):
+        server = FakeWordPress()
+        server.reject = 403
+        client = WordPressPendingPosts(
+            "http://127.0.0.1:8090", "pns_bot", "test", opener=server
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            outbox = PendingPostOutbox(Path(directory) / "posts.sqlite3")
+            outbox.enqueue(post(), audit_for(post()))
+            with self.assertRaises(DeliveryRejected):
+                outbox.dispatch(post().slug, client)
+            with self.assertRaises(SubmissionError):
+                outbox.release_for_retry(post().slug, client, resolution="")
+            server.reject = None
+            self.assertIsNone(
+                outbox.release_for_retry(
+                    post().slug,
+                    client,
+                    resolution="local credential was repaired; remote post confirmed absent",
+                )
+            )
+            self.assertEqual(outbox.dispatch(post().slug, client), 1)
+            row = outbox.db.execute(
+                "SELECT state,resolution FROM pending_posts WHERE slug=?",
+                (post().slug,),
+            ).fetchone()
+            self.assertEqual(row[0], "sent")
+            self.assertIn("credential was repaired", row[1])
+            outbox.close()
+
+    def test_existing_outbox_schema_gains_resolution_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "posts.sqlite3"
+            db = sqlite3.connect(path)
+            try:
+                db.execute(
+                    "CREATE TABLE pending_posts ("
+                    "slug TEXT PRIMARY KEY, envelope TEXT NOT NULL, "
+                    "state TEXT NOT NULL, wp_post_id INTEGER)"
+                )
+                db.commit()
+            finally:
+                db.close()
+            outbox = PendingPostOutbox(path)
+            columns = {
+                row[1] for row in outbox.db.execute("PRAGMA table_info(pending_posts)")
+            }
+            self.assertIn("resolution", columns)
             outbox.close()
 
     def test_second_dispatcher_cannot_post_while_first_is_in_flight(self):

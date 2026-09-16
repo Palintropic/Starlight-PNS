@@ -18,6 +18,9 @@
 `uncertain`；如果响应丢失而远端查不到标记，它保持待对账状态，不自动再次
 POST。4xx 返回也先对账：若能找到文章则进入 `sent`，查不到时进入
 `blocked` 并留待人工检查；成功或找到既有文章进入 `sent`。
+每个客户端首次对账前会读取 REST index，远端未注册 `pns_submission_id` 时
+在 POST 之前失败。人工确认远端没有落稿后，可用 `release_for_retry()` 记录
+非空 resolution 并重新排队；不允许直接改 SQLite 或无记录地清除状态。
 
 WordPress 主题必须注册 edit-context `pns_submission_id` 字段，且低权限
 `pns_bot` 只能提交待审核文章。PNS 和 Sekai Times 两仓库的 ST-1 分支须一起

@@ -130,8 +130,8 @@ class WordPressPendingPosts:
         ).decode("ascii")
         self._authorization = f"Basic {token}"
 
-    def _request(self, method, path, body=None):
-        url = self.base_url + "/wp-json/wp/v2/" + path
+    def _request(self, method, path, body=None, *, expected=None):
+        url = self.base_url + "/wp-json/" + path
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body else None
         request = Request(
             url,
@@ -160,15 +160,32 @@ class WordPressPendingPosts:
             raise DeliveryError("无法读取 WordPress 对账数据") from None
         if not 200 <= status < 300:
             raise DeliveryError(f"WordPress 返回 HTTP {status}")
-        if method == "GET" and not isinstance(result, list):
+        if expected is not None and not isinstance(result, expected):
             raise DeliveryError("WordPress 对账响应格式不合法")
         if method == "POST" and not isinstance(result, dict):
             raise DeliveryUncertain("WordPress 创建结果需要人工对账")
         return result
 
+    def verify_contract(self):
+        if getattr(self, "_contract_verified", False):
+            return
+        index = self._request("GET", "", expected=dict)
+        route = (index.get("routes") or {}).get("/wp/v2/posts") or {}
+        endpoints = route.get("endpoints") or []
+        writers = [item for item in endpoints if "POST" in item.get("methods", [])]
+        if len(writers) != 1:
+            raise DeliveryError("Sekai Times 没有唯一的文章写入契约")
+        meta = (writers[0].get("args") or {}).get("meta") or {}
+        properties = meta.get("properties") or {}
+        if "pns_submission_id" not in properties:
+            raise DeliveryError("Sekai Times 尚未部署 pns_submission_id，拒绝写入")
+        self._contract_verified = True
+
     def _category(self, post):
         slug, expected_name = CHARACTERS[post.character_id]
-        categories = self._request("GET", "categories?" + urlencode({"slug": slug}))
+        categories = self._request(
+            "GET", "wp/v2/categories?" + urlencode({"slug": slug}), expected=list
+        )
         exact = [c for c in categories if c.get("slug") == slug]
         if len(exact) != 1 or exact[0].get("name") != expected_name:
             raise DeliveryError("Sekai Times 角色分类与本地契约不一致")
@@ -178,6 +195,7 @@ class WordPressPendingPosts:
         return term_id
 
     def reconcile(self, post):
+        self.verify_contract()
         found = []
         for status in ("pending", "publish", "draft"):
             offset = 0
@@ -192,7 +210,7 @@ class WordPressPendingPosts:
                         "order": "asc",
                     }
                 )
-                page = self._request("GET", "posts?" + query)
+                page = self._request("GET", "wp/v2/posts?" + query, expected=list)
                 found.extend(page)
                 if len(page) < 100:
                     break
@@ -229,7 +247,9 @@ class WordPressPendingPosts:
 
     def create_pending(self, post, category_id):
         """Call only after reconciliation and category validation."""
-        created = self._request("POST", "posts", post.payload(category_id))
+        created = self._request(
+            "POST", "wp/v2/posts", post.payload(category_id), expected=dict
+        )
         meta = created.get("meta") or {}
         if (
             created.get("status") != "pending"
@@ -253,8 +273,13 @@ class PendingPostOutbox:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS pending_posts ("
             "slug TEXT PRIMARY KEY, envelope TEXT NOT NULL, state TEXT NOT NULL, "
-            "wp_post_id INTEGER)"
+            "wp_post_id INTEGER, resolution TEXT)"
         )
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(pending_posts)")
+        }
+        if "resolution" not in columns:
+            self.db.execute("ALTER TABLE pending_posts ADD COLUMN resolution TEXT")
         self.db.commit()
 
     def close(self):
@@ -346,3 +371,32 @@ class PendingPostOutbox:
                 (found, slug),
             )
         return found
+
+    def release_for_retry(self, slug, client, *, resolution):
+        """Requeue an unresolved write only after an operator records why it is safe."""
+        if not isinstance(resolution, str) or not resolution.strip():
+            raise SubmissionError("人工重试必须记录非空 resolution")
+        row = self.db.execute(
+            "SELECT envelope,state FROM pending_posts WHERE slug=?", (slug,)
+        ).fetchone()
+        if row is None:
+            raise SubmissionError("出站队列里没有这份投稿")
+        envelope, state = row
+        if state not in ("blocked", "uncertain"):
+            raise SubmissionError("只有 blocked 或 uncertain 投稿能人工解除")
+        decoded = json.loads(envelope)
+        post = PendingPost(**decoded["post"])
+        found = client.reconcile(post)
+        with self.db:
+            if found is not None:
+                self.db.execute(
+                    "UPDATE pending_posts SET state='sent',wp_post_id=?,resolution=? "
+                    "WHERE slug=?",
+                    (found, resolution.strip(), slug),
+                )
+                return found
+            self.db.execute(
+                "UPDATE pending_posts SET state='queued',resolution=? WHERE slug=?",
+                (resolution.strip(), slug),
+            )
+        return None
