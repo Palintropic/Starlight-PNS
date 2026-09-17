@@ -86,8 +86,9 @@ def call_character(
         return _strip_prefix(content.strip(), char_name)
     else:
         response = client.messages.create(
-            model=model, max_tokens=max_tokens, temperature=temperature,
+            model=model, max_tokens=max_tokens,
             system=system, messages=history,
+            **router_mod.anthropic_sampling(temperature),
         )
         text = _strip_prefix(router_mod.extract_anthropic_text(response), char_name)
         if getattr(response, "stop_reason", None) == "max_tokens":
