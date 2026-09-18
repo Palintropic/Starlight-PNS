@@ -93,11 +93,50 @@ class _Response:
         self.stop_reason = stop_reason
 
 
+def _anthropic_create_keywords() -> frozenset:
+    """真 SDK 的 `Messages.create()` 到底收哪些关键字。
+
+    这份集合**从安装着的 anthropic 取**，不是我们手抄的一张表。手抄的表会跟
+    SDK 一起漂：SDK 删掉一个参数，抄来的表还留着，于是替身继续接受一个真实
+    调用里会当场 `TypeError` 的关键字。
+    """
+    import inspect
+
+    from anthropic.resources.messages import Messages
+
+    return frozenset(
+        name
+        for name, param in inspect.signature(Messages.create).parameters.items()
+        if name != "self"
+        and param.kind in (param.KEYWORD_ONLY, param.POSITIONAL_OR_KEYWORD)
+    )
+
+
+_ANTHROPIC_CREATE_KEYWORDS = _anthropic_create_keywords()
+
+
 class _Messages:
     def __init__(self, owner):
         self._owner = owner
 
     def create(self, **kwargs):
+        # 替身**必须**在真客户端会拒绝的地方一起拒绝，否则它不是替身，是垫子。
+        #
+        # 这条检查是被一次真实事故加上的：生成与判分两条路都在往
+        # `messages.create()` 传 `temperature`，而 anthropic SDK 1.x 已经没有
+        # 这个形参了 —— 真实调用是发出之前就 `TypeError`。当时这里是
+        # `def create(self, **kwargs)`，照单全收，于是整套测试全绿、生产上
+        # 一句话都生成不出来，而且失败被上游换成了"请检查 provider 与凭据
+        # 配置"，把人指向完全无关的地方。
+        #
+        # 所以这里复现的是**同一个失败**：同样的异常类型、同样的话。替身宽松
+        # 一点点，这一整类"参数表跟着 SDK 漂走"的缺陷就再也不会被测试看见。
+        unknown = sorted(set(kwargs) - _ANTHROPIC_CREATE_KEYWORDS)
+        if unknown:
+            raise TypeError(
+                "Messages.create() got an unexpected keyword argument "
+                f"{unknown[0]!r}"
+            )
         return self._owner._create(**kwargs)
 
 
@@ -131,10 +170,23 @@ class FakeProvider:
 
     # 真实客户端在 anthropic 形态下只被调用这一个方法。
     def _create(self, *, model=None, system="", messages=(), **kwargs):
+        # `extra_body` 一起记下来：采样温度走的就是这条通道，而"没报错"跟
+        # "温度真的发出去了"是两回事，后者只有把实际请求留下来才验得了。
+        extra_body = dict(kwargs.get("extra_body") or {})
         if ROUTER_MARK in system:
-            self.judgements.append({"model": model, "system": system, "messages": list(messages)})
+            self.judgements.append({
+                "model": model,
+                "system": system,
+                "messages": list(messages),
+                "extra_body": extra_body,
+            })
             return _Response(json.dumps(self._verdict(), ensure_ascii=False))
-        call = {"model": model, "system": system, "messages": list(messages)}
+        call = {
+            "model": model,
+            "system": system,
+            "messages": list(messages),
+            "extra_body": extra_body,
+        }
         self.generations.append(call)
         if self._on_generate is not None:
             self._on_generate(call)
@@ -251,6 +303,42 @@ class ProductionPathTests(MvpTestCase):
         # 生成和判分都真的发生过，而且各一次。
         self.assertEqual(len(self.provider.generations), 1)
         self.assertEqual(len(self.provider.judgements), 1)
+
+    def test_generation_and_audit_both_deliver_their_sampling_temperature(self):
+        """采样温度得**真的发出去**，而不只是"这次调用没报错"。
+
+        这两条断言分别盯着一次真实事故的两半：生成和判分是两个独立的调用点，
+        当时两处都在用同一种已经失效的写法，而修好其中一处不会让另一处变绿。
+        """
+        world = self.create()
+        self.advance(world, 5)
+
+        configured = AutonomySettings.from_env().temperature
+        self.assertEqual(
+            self.provider.generations[0]["extra_body"].get("temperature"),
+            configured,
+            "生成没有把配置里的采样温度发给 provider",
+        )
+        # 判分刻意用一个低温常量：它是一次受约束的分类调用，要的是可复现，
+        # 不是多样性。这个值漂了，判分就悄悄变成了另一件事。
+        self.assertEqual(
+            self.provider.judgements[0]["extra_body"].get("temperature"),
+            0.1,
+            "判分没有把它那个低温常量发给 provider",
+        )
+
+    def test_the_stand_in_refuses_a_keyword_the_real_sdk_has_dropped(self):
+        """守卫本身必须有牙 —— 一条永远不可能失败的检查不是检查。
+
+        `temperature` 正是那次事故里的那个关键字：真 SDK 1.x 已经没有这个
+        形参，替身也必须在同一个地方、用同一种异常拒绝它。
+        """
+        self.assertNotIn("temperature", _ANTHROPIC_CREATE_KEYWORDS)
+        with self.assertRaises(TypeError) as caught:
+            self.provider.messages.create(
+                model="m", max_tokens=8, messages=[], temperature=0.5
+            )
+        self.assertIn("temperature", str(caught.exception))
 
     def test_it_runs_through_the_production_composition_not_a_scripted_stand_in(self):
         world = self.create()

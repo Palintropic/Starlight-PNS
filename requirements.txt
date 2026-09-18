@@ -1,4 +1,7 @@
-anthropic
+# 开发这份给一个兼容范围而不是精确版本：本地 venv 被钉死没有收益，而下界
+# 挡住的是真实会出事的那一档 —— 1.x 以下的 SDK 形状不同。生产那份是精确锁的，
+# 理由见 requirements-prod.txt。
+anthropic>=1.5,<2
 openai
 python-dotenv
 fastapi

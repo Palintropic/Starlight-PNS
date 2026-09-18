@@ -9,7 +9,14 @@
 #   black    —— 格式化器，开发工具
 #   httpx    —— 只有 fastapi.testclient 直接用它（anthropic/openai 会自己带）
 #   aiohttp  —— 当前代码库里没有任何一处 import 它
-anthropic
+# 精确锁定。理由是一次真实事故：同一个 commit 的两次镜像构建拿到了不同的
+# anthropic（8-24 那次是 1.0.0，9-17 那次是 1.5.0），而这个包在 1.x 里删掉了
+# `Messages.create()` 的 `temperature` 形参。生产镜像必须是可复现的构建产物，
+# "重新 build 一次就换了一个 SDK"本身就是故障源，跟那次删参数是不是兼容无关。
+#
+# 升级步骤：改这一行 → 跑全量测试 → 重建镜像 → 用真 provider 打一次真实生成
+# 与判分（`pns/logic/router.py` 的 anthropic_sampling 那条通道只有联网才验得到）。
+anthropic==1.5.0
 openai
 python-dotenv
 fastapi

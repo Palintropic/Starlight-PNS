@@ -45,6 +45,26 @@ def create_client(api_key: str = None, *, settings=None):
         return anthropic.Anthropic(api_key=key, base_url=base_url)
 
 
+def anthropic_sampling(temperature: float) -> dict:
+    """采样温度要走的那条通道，返回一份可以并进 `messages.create(**kw)` 的 kwargs。
+
+    anthropic SDK 1.x 的 `Messages.create()` **不再有 `temperature` 形参**，直接
+    传是 `TypeError`，而不是一次被拒的请求 —— 也就是说它在发出之前就死了。
+    `output_config` 也不是去处：那个 TypedDict 只有 `effort` 和 `format`；往里
+    塞 `temperature` 只是利用了 TypedDict 运行时不校验，等于把一个没人认领的键
+    丢进请求体，成没成都看不出来。
+
+    丢掉的是 SDK 的**类型化参数表**，不是**线上协议**：同样的请求体带着顶层
+    `temperature` 直接打 provider 的 `/v1/messages` 是收的。`extra_body` 正是
+    SDK 留给"它没建模、但协议收"的顶层字段的口子，所以这里走它。
+
+    这个函数存在的另一半理由是：它把这条通道**收敛到一处**。两个调用点各写
+    一份，就会重演这次的形状 —— 一处修好了，另一处还在用旧写法，而两处都只有
+    在真的联网调用时才会暴露。
+    """
+    return {"extra_body": {"temperature": temperature}}
+
+
 def extract_anthropic_text(response) -> str:
     """从Anthropic兼容响应中提取全部文本块，跳过MiMo等模型的thinking块。"""
     texts = []
@@ -76,9 +96,9 @@ def _call(client, model: str, system: str, user_msg: str, *, settings=None) -> s
         request = dict(
             model=model,
             max_tokens=1024,
-            temperature=0.1,
             system=system,
             messages=[{"role": "user", "content": user_msg}],
+            **anthropic_sampling(0.1),
         )
         # MiMo 2.5 may spend the entire Router output budget on a ThinkingBlock,
         # leaving no JSON to parse. Router is a constrained classification call,
