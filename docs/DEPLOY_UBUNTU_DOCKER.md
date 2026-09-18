@@ -12,7 +12,7 @@
 
 ```text
 ESXi
-└─ Ubuntu Server VM（本地 ext4）
+└─ Ubuntu Server VM（本地 ext4，linux/amd64）
    └─ Docker Engine + Docker Compose
       └─ starlight-pns 容器（FastAPI + 已构建的 Dashboard，同一个源）
          ├─ 具名卷 pns-data     → /app/data     （世界存档、所有权锁、评分与审核记录）
@@ -24,6 +24,9 @@ ESXi
 
 P12 的耐久性建立在**本地文件系统**语义上：`flock` 排他锁、`os.replace` 原子替换、目录 `fsync`。
 把 `/app/data` 放到 NFS/SMB 上会让这三条同时失去意义，本板不声称支持那种拓扑。
+
+运行架构是 `linux/amd64`。在这台虚拟机上构建时它是默认值，不用管；只有在别的机器上构建再把
+镜像搬过来的时候才需要显式指定，见第 6.1 节。
 
 ---
 
@@ -208,6 +211,49 @@ docker compose ps   # STATUS 应当从 starting 变成 healthy
 **默认只绑回环。** 想从别的机器访问，正确做法是在这台虚拟机上装反向代理（nginx / Caddy）
 终结 TLS 再转发到 127.0.0.1:7860，并把 `.env` 里的 `PNS_SESSION_COOKIE_SECURE` 改成 `true`。
 只有在你明确清楚这条端口上是什么的情况下，才把 `PNS_BIND` 改成 `0.0.0.0`。
+
+### 6.1 虚拟机构建不了时：在别的机器上构建再投送
+
+虚拟机的出站路径如果到不了 Docker Hub（DNS 被污染、国际路由不通），上面那句 `up -d --build`
+会卡在拉基础镜像那一步。**不要为此加一个来路不明的 registry 镜像源**——那等于把整条供应链交给
+一个你没有审计过的第三方。正路是在一台网络正常的机器上构建，再把镜像整个搬过来。
+
+**先看清楚架构。** 虚拟机是 `linux/amd64`。构建机如果是 Apple Silicon 或别的 arm64 机器，
+`docker build` 默认产出 `linux/arm64`，搬过去起不来，报 `exec format error`。
+
+这个错的麻烦之处在于**它不在构建阶段出现**：构建会成功，`docker save` / `docker load` 会成功，
+一直到虚拟机上第一次 `up` 才炸。所以要在投送之前就把架构验出来，别等到生产上。
+
+在构建机上：
+
+```bash
+# --platform 不是可选项：要的是虚拟机的架构，不是构建机的架构
+docker buildx build --platform linux/amd64 -t starlight-pns:local --load .
+
+# 投送之前先验，别信默认值
+docker image inspect starlight-pns:local --format '{{.Architecture}}/{{.Os}}'   # 必须是 amd64/linux
+```
+
+搬过去（走 SSH，中间不落地文件）：
+
+```bash
+docker save starlight-pns:local | ssh <虚拟机> 'docker load'
+```
+
+在虚拟机上再验一次并启动。`compose.yaml` 里的 `image:` 就叫 `starlight-pns:local`，镜像已经在
+本地的时候**用 `up -d`，不要用 `up -d --build`**——后者会重新触发那次拉不动的构建：
+
+```bash
+docker image inspect starlight-pns:local --format '{{.Architecture}}/{{.Os}}'   # amd64/linux
+docker compose up -d
+docker compose ps   # 等 healthy
+```
+
+第 10 节的升级和第 11 节的回滚在这种拓扑下同样走这条路：先在构建机上按目标 tag 构建、验架构、
+投送，再在虚拟机上 `up -d`。
+
+**这是权宜之计，不是目标状态。** 它让每一次部署都依赖某一台特定的构建机——那台机器换了、坏了或者
+架构变了，部署链路就跟着断。正事是把虚拟机的 DNS / 出站路径修好，让它能自己构建。
 
 ## 7. 验证
 
