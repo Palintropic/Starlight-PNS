@@ -184,3 +184,18 @@
   flex-direction: column;
   gap: 10px;
 }
+
+/* UWP list and form surfaces. */
+.accounts { padding: 24px 32px 40px; gap: 20px; }
+.accounts-head h2 { font-size: 22px; font-weight: 400; }
+.accounts-create, .accounts-reset, .accounts-error, .accounts-feedback,
+.accounts-create input, .accounts-create select, .accounts-reset input,
+.accounts-table select, .accounts-badge { border-radius: 0; }
+.accounts-create, .accounts-reset { background: var(--surface); }
+.accounts-table th { background: var(--surface); color: var(--text-dim); font-weight: 400; }
+
+@media (max-width: 680px) {
+  .accounts { padding: var(--space-4); gap: var(--space-4); }.accounts-head { display: block; }.accounts-head .btn { margin-top: var(--space-3); }
+  .accounts-create-row, .accounts-row-actions { display: grid; grid-template-columns: 1fr; }.accounts-create input, .accounts-create select { width: 100%; }
+  .accounts-table { min-width: 620px; }.accounts-audit { overflow-x: auto; }
+}

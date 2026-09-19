@@ -23,8 +23,8 @@
   flex-shrink: 0;
 }
 .status-dot.running {
-  background: var(--stable);
-  box-shadow: 0 0 6px var(--stable);
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent), transparent 55%);
   animation: sim-pulse 1.2s infinite;
 }
 .status-dot.error {
@@ -121,6 +121,7 @@
 
 .simulate-app .btn-start { background: var(--accent); color: var(--bg); width: 100%; margin-bottom: 8px; }
 .simulate-app .btn-stop { background: var(--surface2); color: var(--warn); border-color: var(--warn); width: 100%; margin-bottom: 8px; }
+.simulate-app .btn-stop:disabled { color: var(--text-muted); border-color: var(--border); }
 .simulate-app .btn-clear { background: transparent; color: var(--text-muted); border-color: var(--border); width: 100%; }
 
 .sim-stats-grid {
@@ -194,6 +195,11 @@
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
+}
+.sim-char-col .avatar {
+  width: 34px;
+  height: 34px;
+  margin-bottom: 2px;
 }
 .sim-line-col {
   padding: 12px 0 12px 20px;
@@ -297,11 +303,47 @@
   color: var(--text-muted);
   padding: 40px;
 }
-.sim-empty-big {
-  font-size: 40px;
+.sim-empty-mark {
+  width: 42px;
+  display: grid;
+  gap: 5px;
+  padding: 8px 0;
+  border-top: 1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
 }
+.sim-empty-mark i {
+  display: block;
+  height: 2px;
+  background: var(--text-muted);
+}
+.sim-empty-mark i:nth-child(2) { width: 74%; }
+.sim-empty-mark i:nth-child(3) { width: 46%; }
 .sim-empty-state p {
   font-size: 13px;
   text-align: center;
   line-height: 1.6;
+}
+
+/* UWP controls: quiet neutral surfaces, square geometry, one accent color. */
+.simulate-app .model-badge,
+.simulate-app .sim-sidebar select,
+.simulate-app .sim-stat-card,
+.simulate-app .sim-router-badge,
+.simulate-app .sim-correction-pill,
+.simulate-app .sim-done-block,
+.simulate-app .btn { border-radius: 0; }
+.simulate-app .sim-sidebar { background: var(--bg); }
+.simulate-app .sim-stat-card { background: var(--surface); }
+
+@media (max-width: 760px) {
+  .sim-topbar { height: 36px; padding: 0 var(--space-3); }
+  .sim-body { display: flex; flex-direction: column; overflow-y: auto; }
+  .sim-sidebar { flex: 0 0 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); padding: var(--space-3) var(--space-4); border-right: 0; border-bottom: 1px solid var(--border); overflow: visible; }
+  .sim-sidebar .sim-control-group:last-child { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); align-items: end; gap: var(--space-2); margin-top: 0 !important; }
+  .sim-sidebar .sim-control-group:last-child .sim-section-label { grid-column: 1 / -1; }.simulate-app .btn-start, .simulate-app .btn-stop { margin-bottom: 0; }
+  .sim-main { flex: 1 0 480px; min-height: 480px; }.sim-script-area { padding: var(--space-4); }
+}
+@media (max-width: 480px) {
+  .sim-sidebar { display: flex; }.sim-sidebar .sim-control-group:last-child { display: grid; }
+  .sim-script-line { grid-template-columns: 52px 1fr; }.sim-char-col { padding-right: var(--space-2); }.sim-line-col { padding-left: var(--space-3); }.sim-char-col .avatar { width: 32px; height: 32px; }
 }

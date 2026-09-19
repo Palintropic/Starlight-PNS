@@ -1,26 +1,40 @@
-:root {
-  /* 深夜研究站：暖米色纸感，Anthropic 调性 */
-  --bg: #f4f1ea;
-  --surface: #efeae0;
-  --surface2: #e9e2d2;
-  --border: #ddd7c8;
-  --text: #2a2620;
-  --text-dim: #8a8171;
-  --text-muted: #b0a797;
+@import '@fontsource-variable/noto-sans-sc';
 
-  --accent: #5b7a9d;       /* 雾蓝：主强调色 / 交互态 */
+:root {
+  /* Metro / Windows Phone：高对比、纯色块和简洁的文字层级。 */
+  --bg: #1f1f1f;
+  --surface: #2b2b2b;
+  --surface2: #333333;
+  --border: #454545;
+  --text: #f5f5f5;
+  --text-dim: #d0d0d0;
+  --text-muted: #a0a0a0;
+
+  /* Windows 10 dark theme: neutral surfaces + one system accent. */
+  --accent: #0078d7;
   --accent-mizuki: var(--accent);
-  --accent-ena: #8a7368;   /* 克制的暖褐，第二角色的区分色 */
-  --stable: #6b7a5e;       /* 灰绿：稳定 / 已通过 */
-  --caution: #b8935c;      /* 混浊金：中等 drift / 需重写 */
-  --warn: #b85c3e;         /* 陶土红：drift 偏高 / 拒绝 */
+  --accent-ena: var(--accent);
+  /* A normal / accepted state is not a second theme color. */
+  --stable: var(--accent);
+  --caution: #d9a600;
+  --warn: #d13438;
+
+  /* Windows layout rhythm: controls use 8px, related text uses 12px,
+     and page gutters start at 16px. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
 
   --mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
-  --sans: 'PingFang SC', 'Hiragino Sans GB', 'Hiragino Kaku Gothic ProN', 'Yu Gothic',
-    'Microsoft YaHei', system-ui, sans-serif;
+  --sans: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    'Noto Sans SC Variable', system-ui, sans-serif;
 
-  color-scheme: light;
+  color-scheme: dark;
   font-family: var(--sans);
+  font-synthesis: none;
 }
 
 * {
@@ -41,3 +55,14 @@ textarea {
   font: inherit;
   color: inherit;
 }
+
+/* UWP interaction states: system-blue focus, direct pressed feedback. */
+button { -webkit-tap-highlight-color: transparent; }
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+button:active:not(:disabled) { transform: scale(.985); }

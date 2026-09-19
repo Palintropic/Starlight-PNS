@@ -23,6 +23,14 @@ import './App.css';
 
 type Tab = 'simulate' | 'review' | 'world' | 'worlds' | 'accounts';
 
+const TAB_META: Record<Tab, { title: string }> = {
+  simulate: { title: '模拟工作台' },
+  review: { title: '审核中心' },
+  world: { title: '世界编辑器' },
+  worlds: { title: '持久世界' },
+  accounts: { title: '用户管理' },
+};
+
 function App() {
   const [tab, setTab] = useState<Tab>('simulate');
   const [session, setSession] = useState<AuthSession | null>(null);
@@ -136,59 +144,37 @@ function App() {
     return <SetupWizard onDone={loadConfig} />;
   }
 
+  const activeMeta = TAB_META[tab];
+
+  const open = (next: Tab) => () => setTab(next);
+
   return (
     <PrincipalProvider principal={principal}>
-      <div className="shell">
-        <nav className="tabbar">
-          {canOperate ? (
-            <button className={`tab-btn ${tab === 'simulate' ? 'active' : ''}`} onClick={() => setTab('simulate')}>
-              模拟
-            </button>
-          ) : null}
-          <button className={`tab-btn ${tab === 'review' ? 'active' : ''}`} onClick={() => setTab('review')}>
-            审核
-          </button>
-          <button className={`tab-btn ${tab === 'world' ? 'active' : ''}`} onClick={() => setTab('world')}>
-            World Editor
-          </button>
-          <button className={`tab-btn ${tab === 'worlds' ? 'active' : ''}`} onClick={() => setTab('worlds')}>
-            持久世界
-          </button>
-          {canManageAccounts ? (
-            <button className={`tab-btn ${tab === 'accounts' ? 'active' : ''}`} onClick={() => setTab('accounts')}>
-              用户管理
-            </button>
-          ) : null}
-          {canOperate ? <ConfigReload /> : null}
-          {principal ? (
-            <span className="tab-account" title={`principal ${principal.principal_id}`}>
-              {principal.username} · {principal.role}
-            </span>
-          ) : null}
-          {principal?.via === 'session' ? (
-            <button className="tab-btn" onClick={() => setChangingPassword(true)}>
-              修改密码
-            </button>
-          ) : null}
-          {session.auth_required && (
-            <button className="tab-btn" onClick={handleLogout} title="作废当前会话">
-              登出
-            </button>
-          )}
-        </nav>
-        <div className="shell-body">
-          {tab === 'simulate' && canOperate ? (
-            <Simulate />
-          ) : tab === 'review' ? (
-            <ReviewDashboard />
-          ) : tab === 'world' ? (
-            <WorldEditor />
-          ) : tab === 'accounts' && canManageAccounts ? (
-            <Accounts />
-          ) : (
-            <PersistentWorlds />
-          )}
-        </div>
+      <div className="shell metro-shell">
+        <header className="uwp-appbar">
+          <div className="uwp-app-id"><span className="uwp-app-mark" /><span>PNS</span><em>Nightcord Sanctuary</em></div>
+          <nav className="uwp-nav" aria-label="后台功能">
+            {canOperate ? <button aria-current={tab === 'simulate' ? 'page' : undefined} className={tab === 'simulate' ? 'active' : ''} onClick={open('simulate')}>模拟</button> : null}
+            <button aria-current={tab === 'review' ? 'page' : undefined} className={tab === 'review' ? 'active' : ''} onClick={open('review')}>审核</button>
+            <button aria-current={tab === 'world' ? 'page' : undefined} className={tab === 'world' ? 'active' : ''} onClick={open('world')}>世界编辑</button>
+            <button aria-current={tab === 'worlds' ? 'page' : undefined} className={tab === 'worlds' ? 'active' : ''} onClick={open('worlds')}>持久世界</button>
+            {canManageAccounts ? <button aria-current={tab === 'accounts' ? 'page' : undefined} className={tab === 'accounts' ? 'active' : ''} onClick={open('accounts')}>用户管理</button> : null}
+          </nav>
+          <div className="uwp-global-commands">
+            {canOperate ? <ConfigReload /> : null}
+            <span className="tab-account" title={principal ? `principal ${principal.principal_id}` : undefined}>{principal ? `${principal.username} · ${principal.role}` : null}</span>
+            {principal?.via === 'session' ? <button className="metro-text-button" onClick={() => setChangingPassword(true)}>修改密码</button> : null}
+            {session.auth_required ? <button className="metro-text-button" onClick={handleLogout} title="作废当前会话">登出</button> : null}
+          </div>
+        </header>
+        <main className="uwp-page">
+          <header className="uwp-page-header">
+            <h1 key={tab}>{activeMeta.title}</h1>
+          </header>
+          <div className="shell-body uwp-content-enter" key={tab}>
+            {tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : <PersistentWorlds />}
+          </div>
+        </main>
       </div>
     </PrincipalProvider>
   );

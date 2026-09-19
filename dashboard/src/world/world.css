@@ -284,3 +284,15 @@
   line-height: 1.7;
   color: var(--text-dim);
 }
+
+/* UWP editor controls: rectangles and hierarchy rather than floating cards. */
+.world-subtabs { padding: 0 20px; gap: 0; background: var(--bg); }
+.world-subtabs button { position: relative; padding: 12px 14px; border-radius: 0; }
+.world-subtabs button.active { background: transparent; border-color: transparent; color: var(--text); }
+.world-subtabs button.active::after { content: ''; position: absolute; right: 14px; bottom: 0; left: 14px; height: 2px; background: var(--accent); }
+.world-list-item, .world-mode-switch button, .world-field input, .world-field select,
+.world-field textarea, .gate-trigger-row textarea, .fact-row, .fact-row textarea,
+.source-editor .cm-editor, .world-readonly { border-radius: 0; }
+.world-list-item { background: transparent; border-color: transparent; }
+.world-list-item.active { background: color-mix(in srgb, var(--accent), var(--bg) 90%); border-color: transparent; border-left: 2px solid var(--accent); }
+.world-mode-switch button.active { background: var(--accent); border-color: var(--accent); color: #fff; }

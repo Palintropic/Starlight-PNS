@@ -40,51 +40,49 @@ function Login({ onDone }: LoginProps) {
   };
 
   return (
-    <div className="setup-shell">
-      <div className="setup-wizard">
-        <div className="logo">PNS <span>Console</span></div>
-        <h2>需要登录</h2>
-        <p className="subtitle">
-          这台服务器上的创建、恢复、推进、停止、关闭、重载和活动修改都需要一个账户。
-          登录后浏览器只保留一张会话 Cookie；密码不会被保存在本地。
-        </p>
+    <div className="auth-shell">
+      <header className="auth-titlebar"><span className="uwp-app-mark" /> PNS <em>Nightcord Sanctuary</em></header>
+      <main className="auth-content">
+        <section className="auth-panel">
+          <p className="auth-eyebrow">ACCOUNT</p>
+          <h1>需要登录</h1>
+          <p className="auth-note">
+            使用你的操作者账户继续。浏览器只保留 HttpOnly 会话 Cookie；密码不会写入本地。
+          </p>
 
-        <label className="setup-field">
-          用户名
-          <input
-            type="text"
-            value={username}
-            autoComplete="username"
-            spellCheck={false}
-            onChange={(e) => setUsername(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); }}
-            placeholder="用户名"
-          />
-        </label>
+          <label className="auth-field">
+            用户名
+            <input
+              type="text"
+              value={username}
+              autoComplete="username"
+              spellCheck={false}
+              onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); }}
+              placeholder="用户名"
+            />
+          </label>
 
-        <label className="setup-field">
-          密码
-          <input
-            type="password"
-            value={password}
-            autoComplete="current-password"
-            spellCheck={false}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); }}
-            placeholder="密码"
-          />
-        </label>
+          <label className="auth-field">
+            密码
+            <input
+              type="password"
+              value={password}
+              autoComplete="current-password"
+              spellCheck={false}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); }}
+              placeholder="密码"
+            />
+          </label>
 
-        {error && <p className="setup-error">{error}</p>}
+          {error && <p className="auth-error">{error}</p>}
 
-        <button
-          className="btn btn-approve"
-          onClick={handleSubmit}
-          disabled={!ready || submitting}
-        >
-          {submitting ? '登录中…' : '登录'}
-        </button>
-      </div>
+          <button className="auth-submit" onClick={handleSubmit} disabled={!ready || submitting}>
+            {submitting ? '登录中…' : '登录'}
+          </button>
+        </section>
+      </main>
     </div>
   );
 }
