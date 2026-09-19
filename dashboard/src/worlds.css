@@ -259,3 +259,21 @@
   color: var(--text-dim);
   font-size: 11px;
 }
+
+/* UWP list and form surfaces. */
+.worlds { padding: 24px 32px 40px; gap: 20px; }
+.worlds-head h2 { font-size: 22px; font-weight: 400; }
+.worlds-create, .worlds-item, .worlds-error, .worlds-feedback,
+.worlds-create input, .worlds-create select, .worlds-chip, .worlds-caret,
+.worlds-badge { border-radius: 0; }
+.worlds-create, .worlds-item { background: var(--surface); }
+.worlds-chip.on { background: color-mix(in srgb, var(--accent), var(--surface) 86%); }
+.worlds-item-head { min-height: 48px; }
+
+@media (max-width: 680px) {
+  .worlds { padding: var(--space-4); gap: var(--space-4); }
+  .worlds-head { display: block; }.worlds-head .btn { margin-top: var(--space-3); }
+  .worlds-create-row { display: grid; grid-template-columns: 1fr; }.worlds-create input, .worlds-create select { min-width: 0; width: 100%; }
+  .worlds-characters { align-items: flex-start; flex-direction: column; gap: var(--space-2); }
+  .worlds-item-head { align-items: flex-start; }.worlds-actions { width: 100%; margin-left: 0; }.worlds-detail { grid-template-columns: 1fr; }
+}

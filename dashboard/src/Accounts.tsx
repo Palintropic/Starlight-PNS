@@ -158,8 +158,7 @@ export default function Accounts() {
         <div>
           <h2>用户管理</h2>
           <p className="accounts-note">
-            账户是<strong>控制面主体</strong>，跟世界里的角色是两种东西——
-            用户名叫 mizuki 不会让谁变成那个 mizuki。停用、改角色和重置密码都会
+            账户仅用于<strong>后台权限控制</strong>。停用、改角色和重置密码都会
             <strong>立刻作废目标的全部会话</strong>。
           </p>
         </div>

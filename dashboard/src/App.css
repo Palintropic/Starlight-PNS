@@ -1,27 +1,22 @@
-/* ── App shell (tab switcher between 审核 / World Editor) ── */
+/* ── Windows 10 UWP application shell ── */
 .shell {
   display: flex;
-  flex-direction: column;
   height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
 }
-.tabbar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 16px;
-  height: 40px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-}
-.tab-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 12px;
-  padding: 6px 14px;
-  border-radius: 6px 6px 0 0;
-  cursor: pointer;
+.metro-shell { flex-direction: column; }
+.uwp-appbar { height: 48px; flex: 0 0 48px; display: flex; align-items: stretch; gap: 24px; padding: 0 16px; background: #202020; border-bottom: 1px solid #3b3b3b; color: #d9d9d9; user-select: none; }
+.uwp-app-id { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; font-size: 12px; font-weight: 600; letter-spacing: .02em; }.uwp-app-id em { color: #a6a6a6; font-size: 11px; font-style: normal; font-weight: 400; }.uwp-app-mark { width: 12px; height: 12px; background: var(--accent); }
+.uwp-nav { min-width: 0; display: flex; align-items: stretch; overflow-x: auto; }.uwp-nav button { position: relative; min-width: 82px; padding: 0 12px; border: 0; border-radius: 0; background: transparent; color: #c8c8c8; font-size: 14px; cursor: pointer; white-space: nowrap; transition: background-color 120ms linear, color 120ms linear; }.uwp-nav button:hover { background: #333; color: #fff; }.uwp-nav button.active { color: #fff; }.uwp-nav button.active::after { content: ''; position: absolute; right: 12px; bottom: 0; left: 12px; height: 2px; background: var(--accent); animation: uwp-nav-indicator 167ms cubic-bezier(.1, .9, .2, 1); }
+.uwp-global-commands { margin-left: auto; display: flex; min-width: max-content; align-items: center; gap: 16px; }.metro-text-button { padding: 0; border: 0; border-radius: 0; background: transparent; color: #ccc; font-size: 12px; cursor: pointer; }.metro-text-button:hover { color: #fff; }
+.uwp-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }.uwp-page-header { height: 64px; flex: 0 0 64px; display: flex; align-items: center; padding: 0 32px; background: var(--bg); border-bottom: 1px solid var(--border); }.uwp-page-header h1 { margin: 0; color: #fff; font-size: 28px; line-height: 36px; font-weight: 400; letter-spacing: 0; }
+.uwp-page-header h1 { animation: uwp-title-enter 250ms cubic-bezier(.1, .9, .2, 1) both; }
+.uwp-content-enter { animation: uwp-page-enter 300ms cubic-bezier(.1, .9, .2, 1) both; }
+@keyframes uwp-title-enter { from { opacity: 0; transform: translate3d(0, 8px, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
+@keyframes uwp-page-enter { from { opacity: 0; transform: translate3d(16px, 0, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
+@keyframes uwp-nav-indicator { from { opacity: 0; transform: scaleX(.35); } to { opacity: 1; transform: scaleX(1); } }
+@media (prefers-reduced-motion: reduce) { .uwp-nav button, .uwp-content-enter, .uwp-page-header h1, .uwp-nav button.active::after { animation: none; transition: none; } }
 }
 .tab-btn.active {
   color: var(--text);
@@ -29,18 +24,16 @@
 }
 /* 「重新加载配置」按钮：靠右挂在 tabbar 上，和左边的页签分开 */
 .reload-box {
-  margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
 }
 .reload-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
+  background: #333;
+  border: 0;
+  color: #f4f4f4;
   font-size: 12px;
-  padding: 4px 12px;
-  border-radius: 6px;
+  padding: 7px 10px;
   cursor: pointer;
 }
 .reload-btn:hover:not(:disabled) {
@@ -53,7 +46,7 @@
 .reload-status {
   font-size: 11px;
   color: var(--text-dim);
-  max-width: 420px;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -63,8 +56,7 @@
 }
 
 .tab-account {
-  margin-left: auto;
-  padding: 0 10px;
+  padding: 0;
   font-size: 12px;
   color: var(--text-dim);
   white-space: nowrap;
@@ -77,6 +69,13 @@
 }
 .shell-body > * {
   height: 100%;
+}
+
+@media (max-width: 900px) {
+  .uwp-appbar { gap: 12px; padding: 0 12px; }.uwp-app-id em, .tab-account, .reload-status { display: none; }.uwp-global-commands { gap: 10px; }.uwp-nav button { min-width: auto; padding: 0 10px; }.uwp-page-header { padding: 0 20px; }
+}
+@media (max-width: 640px) {
+  .uwp-appbar { height: 52px; flex-basis: 52px; gap: 8px; }.uwp-app-id > span:not(.uwp-app-mark) { display: none; }.uwp-nav button { font-size: 13px; padding: 0 9px; }.uwp-global-commands .reload-box, .uwp-global-commands .metro-text-button:first-of-type { display: none; }.uwp-page-header { height: 56px; flex-basis: 56px; padding: 0 16px; }.uwp-page-header h1 { font-size: 20px; line-height: 28px; }
 }
 
 .state-msg {
@@ -95,6 +94,14 @@
 .state-msg .btn {
   width: auto;
 }
+
+/* ── Authentication ── */
+.auth-shell { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
+.auth-titlebar { height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 16px; background: #202020; color: #d9d9d9; font-size: 12px; font-weight: 600; }.auth-titlebar em { color: #9b9b9b; font-size: 11px; font-style: normal; font-weight: 400; }
+.auth-content { flex: 1; display: grid; place-items: center; padding: 32px; }
+.auth-panel { width: min(392px, 100%); padding: 30px 32px 32px; border: 1px solid var(--border); border-top: 2px solid var(--accent); background: var(--surface); display: flex; flex-direction: column; gap: 18px; }
+.auth-eyebrow { margin: 0 0 -14px; color: var(--text-muted); font-size: 10px; font-weight: 600; letter-spacing: .14em; }.auth-panel h1 { margin: 0; color: #fff; font-size: 32px; font-weight: 400; }.auth-note { margin: -6px 0 2px; color: var(--text-dim); font-size: 13px; line-height: 1.65; }
+.auth-field { display: flex; flex-direction: column; gap: 6px; color: var(--text-dim); font-size: 12px; }.auth-field input { height: 36px; padding: 0 10px; border: 1px solid #666; border-radius: 0; background: #1f1f1f; color: var(--text); font: inherit; outline: none; }.auth-field input:focus { border-color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }.auth-error { margin: -4px 0 0; color: var(--warn); font-size: 12px; }.auth-submit { height: 38px; margin-top: 2px; border: 0; border-radius: 0; background: var(--accent); color: #fff; font: inherit; font-size: 14px; cursor: pointer; }.auth-submit:hover:not(:disabled) { background: #1687df; }.auth-submit:disabled { opacity: .45; cursor: default; }
 
 /* ── Setup Wizard（首次运行配置向导，has_key=false 时代替整个 shell） ── */
 .setup-shell {
@@ -293,6 +300,10 @@
   border: 1px solid;
   background: var(--surface);
 }
+.avatar-image { position: relative; overflow: hidden; border-color: var(--accent); }
+.avatar-image img { width: 100%; height: 100%; object-fit: cover; }
+.avatar-image .avatar-initial { display: none; }
+.avatar-fallback { color: var(--accent); border-color: var(--accent); }
 .avatar.mizuki {
   color: var(--accent-mizuki);
   border-color: var(--accent-mizuki);
@@ -570,12 +581,12 @@
   cursor: not-allowed;
 }
 .btn-approve {
-  background: var(--stable);
-  color: var(--bg);
+  background: var(--accent);
+  color: #fff;
 }
 .btn-rewrite {
-  background: var(--caution);
-  color: var(--bg);
+  background: var(--accent);
+  color: #fff;
 }
 .btn-reject {
   background: transparent;
@@ -609,3 +620,37 @@
 .skel-card {
   height: 56px;
 }
+
+/* UWP control normalization for the review surface. */
+.review-app .topbar { display: none; }
+.review-app .stats-strip { background: var(--border); }
+.review-app .stat-tile, .review-app .col { background: var(--bg); }
+.review-app .stat-tile { padding: 14px 20px; }
+.review-app .stat-value { font-weight: 400; }
+.review-app .avatar, .review-app .decision-chip, .review-app .current-decision,
+.review-app .note-input, .review-app .btn { border-radius: 0; }
+.review-app .btn-approve, .review-app .btn-rewrite { background: var(--accent); color: #fff; }
+
+/* Content moves as a short, directional hierarchy: page → summary → detail. */
+.review-app .stats-strip { animation: uwp-rise-in 280ms 35ms cubic-bezier(.1, .9, .2, 1) both; }
+.review-app .columns { animation: uwp-rise-in 300ms 75ms cubic-bezier(.1, .9, .2, 1) both; }
+.simulate-app .sim-topbar { animation: uwp-rise-in 240ms 25ms cubic-bezier(.1, .9, .2, 1) both; }
+.simulate-app .sim-body { animation: uwp-rise-in 300ms 65ms cubic-bezier(.1, .9, .2, 1) both; }
+.worlds > *, .accounts > * { animation: uwp-rise-in 260ms cubic-bezier(.1, .9, .2, 1) both; }
+.worlds > *:nth-child(2), .accounts > *:nth-child(2) { animation-delay: 40ms; }
+.worlds > *:nth-child(3), .accounts > *:nth-child(3) { animation-delay: 80ms; }
+@keyframes uwp-rise-in { from { opacity: 0; transform: translate3d(0, 10px, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
+@media (prefers-reduced-motion: reduce) { .review-app .stats-strip, .review-app .columns, .simulate-app .sim-topbar, .simulate-app .sim-body, .worlds > *, .accounts > * { animation: none; } }
+
+
+/* Shared UWP form treatment for page-local controls. */
+.uwp-page input:not([type='range']), .uwp-page select, .uwp-page textarea {
+  border-radius: 0 !important;
+  border-color: #666 !important;
+  background-color: #1f1f1f !important;
+  transition: border-color 100ms linear, background-color 100ms linear;
+}
+.uwp-page input:not([type='range']):hover, .uwp-page select:hover, .uwp-page textarea:hover { border-color: #929292 !important; }
+.uwp-page input:not([type='range']):focus, .uwp-page select:focus, .uwp-page textarea:focus { border-color: var(--accent) !important; box-shadow: inset 0 -1px 0 var(--accent); }
+.uwp-page select { appearance: none; padding-right: 30px !important; background-image: linear-gradient(45deg, transparent 50%, #c8c8c8 50%), linear-gradient(135deg, #c8c8c8 50%, transparent 50%) !important; background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50% !important; background-size: 5px 5px, 5px 5px !important; background-repeat: no-repeat !important; }
+.uwp-page input[type='range'] { accent-color: var(--accent); }

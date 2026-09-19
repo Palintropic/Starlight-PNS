@@ -3,6 +3,7 @@ import { SCOPE_OPERATE, fetchDecisions, fetchTurns, submitDecision } from './api
 import { useCan } from './principal';
 import { decisionKey } from './types';
 import type { Decision, DecisionMap, DecisionValue, Turn } from './types';
+import CharacterAvatar from './CharacterAvatar';
 import './App.css';
 
 function scoreLevel(score: number): 'ok' | 'warn' | 'ooc' {
@@ -24,10 +25,6 @@ const DIMENSION_LABEL: Record<string, string> = {
   unsupported_invention: '无依据补写',
   timeline_boundary: '时间线边界',
 };
-
-function Avatar({ character, name }: { character: string; name: string }) {
-  return <span className={`avatar ${character}`}>{name.charAt(0)}</span>;
-}
 
 function Skeleton() {
   return (
@@ -175,7 +172,7 @@ function ReviewDashboard() {
                       className={`turn-item ${t.character} ${key === selected ? 'active' : ''}`}
                       onClick={() => setSelected(key)}
                     >
-                      <Avatar character={t.character} name={t.char_name} />
+                      <CharacterAvatar character={t.character} name={t.char_name} />
                       <div className="turn-item-body">
                         <div className="turn-item-head">
                           <span className={`char-name ${t.character}`}>{t.char_name}</span>
@@ -199,7 +196,7 @@ function ReviewDashboard() {
             <span className="col-title">Router 打分</span>
             {selectedTurn && (
               <span className="col-context">
-                <Avatar character={selectedTurn.character} name={selectedTurn.char_name} />
+                <CharacterAvatar character={selectedTurn.character} name={selectedTurn.char_name} />
                 {selectedTurn.char_name} · #{selectedTurn.turn}
               </span>
             )}
@@ -260,7 +257,7 @@ function ReviewDashboard() {
             <span className="col-title">人工决策</span>
             {selectedTurn && (
               <span className="col-context">
-                <Avatar character={selectedTurn.character} name={selectedTurn.char_name} />
+                <CharacterAvatar character={selectedTurn.character} name={selectedTurn.char_name} />
                 {selectedTurn.char_name} · #{selectedTurn.turn}
               </span>
             )}

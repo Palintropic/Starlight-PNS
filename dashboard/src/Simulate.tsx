@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchConfig, fetchWorldScenes, type ConfigStatus } from './api';
 import type { ScenesMap } from './world/types';
+import CharacterAvatar from './CharacterAvatar';
 import './simulate.css';
 
 interface SimStats {
@@ -290,7 +291,7 @@ function Simulate() {
           <div className="sim-script-area" ref={scriptRef}>
             {items.length === 0 && (
               <div className="sim-empty-state">
-                <div className="sim-empty-big">🎭</div>
+                <div className="sim-empty-mark" aria-hidden="true"><i /><i /><i /></div>
                 <p>
                   选择场景并点击「开始模拟」
                   <br />
@@ -315,6 +316,7 @@ function Simulate() {
                 return (
                   <div className={`sim-script-line ${item.charKey}`} key={i}>
                     <div className="sim-char-col">
+                      <CharacterAvatar character={item.charKey} name={item.charName} />
                       <div className={`char-name ${item.charKey}`}>{item.charName}</div>
                       <div className="turn-num">#{item.turn}</div>
                     </div>
