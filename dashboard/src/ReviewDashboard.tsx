@@ -29,9 +29,6 @@ const DIMENSION_LABEL: Record<string, string> = {
 function Skeleton() {
   return (
     <div className="review-app">
-      <header className="topbar">
-        <div className="logo">PNS <span>Review</span> Dashboard</div>
-      </header>
       <div className="stats-strip">
         {Array.from({ length: 4 }).map((_, i) => (
           <div key={i} className="stat-tile skel-block" />
@@ -125,11 +122,7 @@ function ReviewDashboard() {
   if (error) return <div className="state-msg error">出错了：{error}</div>;
 
   return (
-    <div className="review-app">
-      <header className="topbar">
-        <div className="logo">PNS <span>Review</span> Dashboard</div>
-        <span className="subtitle">人工审核 · Router 打分复核</span>
-      </header>
+    <div className="review-app entrance">
 
       <div className="stats-strip">
         <div className="stat-tile">
@@ -278,21 +271,21 @@ function ReviewDashboard() {
               />
               <div className="decision-buttons">
                 <button
-                  className="btn btn-approve"
+                  className="btn btn-accent"
                   disabled={submitting}
                   onClick={() => handleDecide('approve')}
                 >
                   ✓ 通过
                 </button>
                 <button
-                  className="btn btn-rewrite"
+                  className="btn"
                   disabled={submitting}
                   onClick={() => handleDecide('rewrite')}
                 >
                   ✎ 需要重写
                 </button>
                 <button
-                  className="btn btn-reject"
+                  className="btn"
                   disabled={submitting}
                   onClick={() => handleDecide('reject')}
                 >

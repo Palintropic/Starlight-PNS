@@ -1,80 +1,101 @@
+/* World editor, in the Windows 10 Mobile language (tokens in index.css). */
 .world-editor {
   display: flex;
   flex-direction: column;
-  height: 100%;
   min-height: 0;
 }
 
+/* Section switch inside a pivot item. W10 guidance is not to nest a second Pivot, so this is a
+   smaller header row in Subtitle 20: selected BaseHigh, others BaseMedium, colour only.
+   The size is a by-eye choice to keep it subordinate to the pivot above. */
 .world-subtabs {
   flex: 0 0 auto;
   display: flex;
-  gap: 4px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  min-height: 40px;
+  padding: 0 calc(var(--page-margin) / 2);
 }
 .world-subtabs button {
+  padding: 0 calc(var(--page-margin) / 2);
+  border: 0;
+  border-radius: 0;
   background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  font-size: 12px;
-  padding: 6px 12px;
-  border-radius: 6px;
+  color: var(--SystemBaseMedium);
+  font: var(--type-subtitle);
   cursor: pointer;
 }
+.world-subtabs button:hover {
+  color: var(--SystemBaseMediumHigh);
+}
 .world-subtabs button.active {
-  color: var(--text);
-  background: var(--surface2);
-  border-color: var(--border);
+  color: var(--SystemBaseHigh);
+  cursor: default;
+}
+
+.world-readonly {
+  margin: 0 var(--page-margin) var(--gutter);
+  font: var(--type-body);
+  line-height: var(--prose-leading);
+  color: var(--SystemBaseMedium);
 }
 
 .world-panel {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 240px 1fr;
+  gap: var(--group-gap);
+  padding: 0 var(--page-margin);
 }
 .world-panel-single {
   grid-template-columns: 1fr;
 }
 
 .world-sidebar {
-  border-right: 1px solid var(--border);
-  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--gutter);
+  padding: var(--gutter) 0 var(--group-gap);
   overflow-y: auto;
 }
+.world-sidebar > .btn {
+  align-self: flex-start;
+}
 
+/* List items: min height 40, no outline; hover BaseLow, selected accent at 60% (by eye, as in
+   the review list). */
 .world-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
 }
 .world-list-item {
+  min-height: var(--list-item-min-height);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  justify-content: center;
+  padding: 4px var(--gutter);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
   text-align: left;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
   cursor: pointer;
 }
+.world-list-item:hover {
+  background: var(--SystemBaseLow);
+}
 .world-list-item.active {
-  border-color: var(--accent);
-  background: var(--surface2);
+  background: rgb(0 120 215 / 0.6);
 }
 .world-list-id {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-dim);
+  font: 400 12px/14px var(--mono);
+  color: var(--SystemBaseMedium);
+}
+.world-list-item.active .world-list-id {
+  color: var(--SystemBaseMediumHigh);
 }
 .world-list-label {
-  font-size: 13px;
+  font: var(--type-body);
 }
 
 .world-main {
@@ -88,121 +109,74 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px 10px;
+  gap: var(--gutter);
+  padding: var(--gutter) 0;
+}
+.world-main-header .col-title {
+  font: var(--type-base);
 }
 .world-mode-switch {
   display: flex;
   gap: 4px;
 }
-.world-mode-switch button {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: 11px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.world-mode-switch button.active {
-  color: var(--text);
-  border-color: var(--accent);
-}
 
 .world-error {
-  height: auto;
-  padding: 8px 16px;
-  justify-content: flex-start;
-  font-size: 12px;
+  align-items: flex-start;
+  padding: 0 0 var(--gutter);
 }
 
 .world-form {
-  padding: 0 16px 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--gutter);
+  max-width: 720px; /* by eye: keeps long text fields readable on wide screens */
+  padding-bottom: var(--group-gap);
 }
 
 .world-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-.world-field-wide {
-  grid-column: 1 / -1;
-}
-.world-field input,
-.world-field select,
-.world-field textarea {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 13px;
-  color: var(--text);
-  outline: none;
+  gap: var(--header-gap);
+  font: var(--type-control);
+  color: var(--SystemBaseHigh);
 }
 .world-field textarea {
   min-height: 64px;
-  resize: vertical;
-}
-.world-field input:focus,
-.world-field select:focus,
-.world-field textarea:focus {
-  border-color: var(--accent);
-}
-.world-field input:disabled {
-  color: var(--text-muted);
 }
 
 .gate-trigger-row {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  margin-top: 6px;
 }
 .gate-trigger-letter {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--surface2);
-  border: 1px solid var(--border);
+  width: var(--control-min-height);
+  height: var(--control-min-height);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
-  font-family: var(--mono);
-  margin-top: 8px;
+  background: var(--SystemBaseLow);
+  font: var(--type-control);
 }
 .gate-trigger-row textarea {
   flex: 1;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 13px;
-  color: var(--text);
   min-height: 48px;
-  resize: vertical;
 }
 
 .world-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  padding: 8px 0 4px;
-}
-
-.btn-add {
-  background: var(--surface2);
-  color: var(--text);
-  border: 1px solid var(--border);
+  padding-top: var(--gutter);
 }
 
 /* ── Facts ── */
 .facts-form {
-  gap: 20px;
+  gap: var(--group-gap);
+}
+.facts-form > .world-actions {
+  padding-top: 0;
 }
 .facts-group {
   display: flex;
@@ -210,89 +184,77 @@
   gap: 8px;
 }
 .facts-group-title {
-  font-size: 11px;
-  letter-spacing: 0.03em;
-  color: var(--text-muted);
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 4px;
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
 }
+/* One fact per flat ChromeLow block (tone by eye). */
 .fact-row {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding: 8px var(--gutter) var(--gutter);
+  background: var(--SystemChromeLow);
 }
 .fact-row-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--gutter);
 }
+/* HyperlinkButton: accent text, no fill. */
 .fact-key {
-  background: transparent;
-  border: none;
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: 12px;
-  cursor: pointer;
   padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--SystemAccent);
+  font: 400 12px/20px var(--mono);
   text-align: left;
+  cursor: pointer;
+}
+.fact-key:hover {
+  text-decoration: underline;
 }
 .fact-delete {
+  padding: 0;
+  border: 0;
   background: transparent;
-  border: none;
-  color: var(--text-muted);
+  color: var(--SystemBaseMedium);
+  font: var(--type-caption);
   cursor: pointer;
-  font-size: 12px;
 }
 .fact-delete:hover {
   color: var(--warn);
 }
 .fact-row textarea {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 13px;
-  color: var(--text);
   min-height: 56px;
-  resize: vertical;
 }
 
 /* ── Source editor ── */
 .source-editor {
-  padding: 0 16px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--gutter);
+  padding-bottom: var(--group-gap);
+}
+.source-editor > .world-actions {
+  padding-top: 0;
 }
 .source-editor .cm-editor {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
+  font-size: 14px; /* ControlContentThemeFontSize, in the editor's monospace face */
 }
 
-.world-readonly {
-  margin: 0 0 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--text-dim);
+@media (max-width: 760px) {
+  .world-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow-y: auto;
+  }
+  .world-sidebar {
+    flex: 0 0 auto;
+    max-height: 40vh;
+  }
+  .world-main {
+    overflow: visible;
+  }
 }
-
-/* UWP editor controls: rectangles and hierarchy rather than floating cards. */
-.world-subtabs { padding: 0 20px; gap: 0; background: var(--bg); }
-.world-subtabs button { position: relative; padding: 12px 14px; border-radius: 0; }
-.world-subtabs button.active { background: transparent; border-color: transparent; color: var(--text); }
-.world-subtabs button.active::after { content: ''; position: absolute; right: 14px; bottom: 0; left: 14px; height: 2px; background: var(--accent); }
-.world-list-item, .world-mode-switch button, .world-field input, .world-field select,
-.world-field textarea, .gate-trigger-row textarea, .fact-row, .fact-row textarea,
-.source-editor .cm-editor, .world-readonly { border-radius: 0; }
-.world-list-item { background: transparent; border-color: transparent; }
-.world-list-item.active { background: color-mix(in srgb, var(--accent), var(--bg) 90%); border-color: transparent; border-left: 2px solid var(--accent); }
-.world-mode-switch button.active { background: var(--accent); border-color: var(--accent); color: #fff; }

@@ -153,16 +153,15 @@ export default function Accounts() {
   };
 
   return (
-    <div className="accounts">
+    <div className="accounts entrance">
       <div className="accounts-head">
         <div>
-          <h2>用户管理</h2>
           <p className="accounts-note">
             账户仅用于<strong>后台权限控制</strong>。停用、改角色和重置密码都会
             <strong>立刻作废目标的全部会话</strong>。
           </p>
         </div>
-        <button className="btn btn-approve" onClick={refresh}>刷新</button>
+        <button className="btn" onClick={refresh}>刷新</button>
       </div>
 
       {loadError ? <div className="accounts-error">{loadError}</div> : null}
@@ -206,7 +205,7 @@ export default function Accounts() {
         </div>
         <div className="accounts-create-actions">
           <button
-            className="btn btn-approve"
+            className="btn btn-accent"
             type="submit"
             disabled={busy === 'create' || !newName.trim() || !newPassword}
           >
@@ -236,7 +235,7 @@ export default function Accounts() {
             />
           </label>
           <div className="accounts-create-actions">
-            <button className="btn btn-approve" type="submit" disabled={!resetPassword}>
+            <button className="btn btn-accent" type="submit" disabled={!resetPassword}>
               确认重置
             </button>
             <button
@@ -295,14 +294,14 @@ export default function Accounts() {
                   <td className="accounts-time">{account.created_at.slice(0, 19).replace('T', ' ')}</td>
                   <td className="accounts-row-actions">
                     <button
-                      className={account.enabled ? 'btn btn-reject' : 'btn btn-approve'}
+                      className="btn"
                       disabled={rowBusy}
                       onClick={() => onToggle(account)}
                     >
                       {account.enabled ? '停用' : '启用'}
                     </button>
                     <button
-                      className="btn btn-approve"
+                      className="btn"
                       disabled={rowBusy}
                       onClick={() => onReset(account)}
                     >

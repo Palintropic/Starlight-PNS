@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { fetchConfig, fetchWorldScenes, type ConfigStatus } from './api';
 import type { ScenesMap } from './world/types';
 import CharacterAvatar from './CharacterAvatar';
@@ -31,6 +31,10 @@ type ScriptItem =
   | { kind: 'done'; stats: SimStats; historyFile?: string };
 
 const levelOf = (score: number) => (score <= 2 ? 'ok' : score <= 5 ? 'warn' : 'ooc');
+
+// Slider 的已填充部分由 CSS 按 --fill 画出（WebKit 的滑轨没有原生的"已选"段）。
+const sliderFill = (value: number, min: number, max: number): CSSProperties =>
+  ({ '--fill': `${((value - min) / (max - min)) * 100}%` }) as CSSProperties;
 
 function Simulate() {
   const [config, setConfig] = useState<ConfigStatus | null>(null);
@@ -183,7 +187,7 @@ function Simulate() {
   };
 
   return (
-    <div className="simulate-app">
+    <div className="simulate-app entrance">
       <header className="sim-topbar">
         <div className={`status-dot${running ? ' running' : ''}${statusError ? ' error' : ''}`} />
         <span className="sim-status-label" style={statusError ? { color: 'var(--warn)' } : undefined}>
@@ -217,6 +221,7 @@ function Simulate() {
                 max={20}
                 step={1}
                 value={maxTurns}
+                style={sliderFill(maxTurns, 2, 20)}
                 onChange={(e) => setMaxTurns(Number(e.target.value))}
               />
               <span className="sim-range-val">{maxTurns}</span>
@@ -229,6 +234,7 @@ function Simulate() {
                 max={1.2}
                 step={0.05}
                 value={temperature}
+                style={sliderFill(temperature, 0.5, 1.2)}
                 onChange={(e) => setTemperature(Number(e.target.value))}
               />
               <span className="sim-range-val">{temperature.toFixed(2)}</span>
@@ -241,6 +247,7 @@ function Simulate() {
                 max={5}
                 step={0.5}
                 value={apiDelay}
+                style={sliderFill(apiDelay, 0, 5)}
                 onChange={(e) => setApiDelay(Number(e.target.value))}
               />
               <span className="sim-range-val">{apiDelay.toFixed(1)}</span>
@@ -249,19 +256,19 @@ function Simulate() {
 
           <div className="sim-control-group" style={{ marginTop: 'auto' }}>
             <div className="sim-section-label">操作</div>
-            <button className="btn btn-start" disabled={running || !sceneId} onClick={startRun}>
+            <button className="btn btn-accent" disabled={running || !sceneId} onClick={startRun}>
               ▶ 开始模拟
             </button>
-            <button className="btn btn-stop" disabled={!running} onClick={stopRun}>
+            <button className="btn" disabled={!running} onClick={stopRun}>
               ■ 停止
             </button>
-            <button className="btn btn-clear" disabled={running} onClick={clearScript}>
+            <button className="btn" disabled={running} onClick={clearScript}>
               清空记录
             </button>
           </div>
 
           <div>
-            <div className="sim-section-label" style={{ marginBottom: 10 }}>
+            <div className="sim-section-label">
               本次统计
             </div>
             <div className="sim-stats-grid">
@@ -291,7 +298,6 @@ function Simulate() {
           <div className="sim-script-area" ref={scriptRef}>
             {items.length === 0 && (
               <div className="sim-empty-state">
-                <div className="sim-empty-mark" aria-hidden="true"><i /><i /><i /></div>
                 <p>
                   选择场景并点击「开始模拟」
                   <br />
@@ -367,7 +373,7 @@ function Simulate() {
                       最高漂移 <b>{item.stats.max_score}/10</b>
                     </div>
                     {item.historyFile && (
-                      <div className="sim-done-stat" style={{ gridColumn: '1/-1', color: 'var(--text-muted)', fontFamily: 'var(--mono)', fontSize: 11 }}>
+                      <div className="sim-done-stat sim-done-file">
                         📄 {item.historyFile}
                       </div>
                     )}

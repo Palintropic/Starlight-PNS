@@ -44,12 +44,12 @@ export default function ChangePassword({ username, onDone, onCancel }: ChangePas
     return (
       <div className="setup-shell">
         <div className="setup-wizard">
-          <div className="logo">PNS <span>Console</span></div>
+          <p className="pivot-title">Nightcord Sanctuary</p>
           <h2>密码已修改</h2>
           <p className="subtitle">
             这个账户的所有会话（包括当前这一张）都已经作废。请用新密码重新登录。
           </p>
-          <button className="btn btn-approve" onClick={onDone}>回到登录</button>
+          <button className="btn btn-accent" onClick={onDone}>回到登录</button>
         </div>
       </div>
     );
@@ -58,7 +58,7 @@ export default function ChangePassword({ username, onDone, onCancel }: ChangePas
   return (
     <div className="setup-shell">
       <div className="setup-wizard">
-        <div className="logo">PNS <span>Console</span></div>
+        <p className="pivot-title">Nightcord Sanctuary</p>
         <h2>修改密码</h2>
         <p className="subtitle">
           当前账户：{username}。改完之后所有会话都会失效，需要用新密码重新登录。
@@ -97,10 +97,10 @@ export default function ChangePassword({ username, onDone, onCancel }: ChangePas
         {error ? <p className="setup-error">{error}</p> : null}
 
         <div className="accounts-row-actions">
-          <button className="btn btn-approve" onClick={submit} disabled={!ready || submitting}>
+          <button className="btn btn-accent" onClick={submit} disabled={!ready || submitting}>
             {submitting ? '提交中…' : '修改密码'}
           </button>
-          <button className="btn btn-reject" onClick={onCancel} disabled={submitting}>
+          <button className="btn" onClick={onCancel} disabled={submitting}>
             取消
           </button>
         </div>

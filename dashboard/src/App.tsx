@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
 import ReviewDashboard from './ReviewDashboard';
 import WorldEditor from './world/WorldEditor';
 import SetupWizard from './SetupWizard';
@@ -23,12 +23,13 @@ import './App.css';
 
 type Tab = 'simulate' | 'review' | 'world' | 'worlds' | 'accounts';
 
-const TAB_META: Record<Tab, { title: string }> = {
-  simulate: { title: '模拟工作台' },
-  review: { title: '审核中心' },
-  world: { title: '世界编辑器' },
-  worlds: { title: '持久世界' },
-  accounts: { title: '用户管理' },
+// Pivot 表头的文字就是页面标题：W10 的 Pivot 不在内容区再重复一遍。
+const TAB_LABEL: Record<Tab, string> = {
+  simulate: '模拟',
+  review: '审核',
+  world: '世界编辑',
+  worlds: '持久世界',
+  accounts: '用户管理',
 };
 
 function App() {
@@ -101,7 +102,7 @@ function App() {
     return (
       <div className="state-msg error">
         {sessionError}
-        <button className="btn btn-approve" onClick={loadSession}>重试</button>
+        <button className="btn btn-accent" onClick={loadSession}>重试</button>
       </div>
     );
   }
@@ -131,7 +132,7 @@ function App() {
     return (
       <div className="state-msg error">
         {configError}
-        <button className="btn btn-approve" onClick={loadConfig}>重试</button>
+        <button className="btn btn-accent" onClick={loadConfig}>重试</button>
       </div>
     );
   }
@@ -144,37 +145,55 @@ function App() {
     return <SetupWizard onDone={loadConfig} />;
   }
 
-  const activeMeta = TAB_META[tab];
+  const tabs: Tab[] = [
+    ...(canOperate ? (['simulate'] as const) : []),
+    'review',
+    'world',
+    'worlds',
+    ...(canManageAccounts ? (['accounts'] as const) : []),
+  ];
 
-  const open = (next: Tab) => () => setTab(next);
+  // Pivot 表头支持左右方向键切换，和 UWP 的 Pivot 一致。
+  const onPivotKey = (event: KeyboardEvent) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const step = event.key === 'ArrowRight' ? 1 : -1;
+    const next = tabs[(tabs.indexOf(tab) + step + tabs.length) % tabs.length];
+    setTab(next);
+    document.getElementById(`pivot-${next}`)?.focus();
+  };
 
   return (
     <PrincipalProvider principal={principal}>
-      <div className="shell metro-shell">
-        <header className="uwp-appbar">
-          <div className="uwp-app-id"><span className="uwp-app-mark" /><span>PNS</span><em>Nightcord Sanctuary</em></div>
-          <nav className="uwp-nav" aria-label="后台功能">
-            {canOperate ? <button aria-current={tab === 'simulate' ? 'page' : undefined} className={tab === 'simulate' ? 'active' : ''} onClick={open('simulate')}>模拟</button> : null}
-            <button aria-current={tab === 'review' ? 'page' : undefined} className={tab === 'review' ? 'active' : ''} onClick={open('review')}>审核</button>
-            <button aria-current={tab === 'world' ? 'page' : undefined} className={tab === 'world' ? 'active' : ''} onClick={open('world')}>世界编辑</button>
-            <button aria-current={tab === 'worlds' ? 'page' : undefined} className={tab === 'worlds' ? 'active' : ''} onClick={open('worlds')}>持久世界</button>
-            {canManageAccounts ? <button aria-current={tab === 'accounts' ? 'page' : undefined} className={tab === 'accounts' ? 'active' : ''} onClick={open('accounts')}>用户管理</button> : null}
+      <div className="shell">
+        <header className="pivot">
+          <div className="pivot-title">Nightcord Sanctuary</div>
+          <nav className="pivot-headers" role="tablist" aria-label="后台功能" onKeyDown={onPivotKey}>
+            {tabs.map((t) => (
+              <button
+                key={t}
+                id={`pivot-${t}`}
+                role="tab"
+                aria-selected={tab === t}
+                tabIndex={tab === t ? 0 : -1}
+                className={`pivot-header-item${tab === t ? ' selected' : ''}`}
+                onClick={() => setTab(t)}
+              >
+                {TAB_LABEL[t]}
+              </button>
+            ))}
           </nav>
-          <div className="uwp-global-commands">
-            {canOperate ? <ConfigReload /> : null}
-            <span className="tab-account" title={principal ? `principal ${principal.principal_id}` : undefined}>{principal ? `${principal.username} · ${principal.role}` : null}</span>
-            {principal?.via === 'session' ? <button className="metro-text-button" onClick={() => setChangingPassword(true)}>修改密码</button> : null}
-            {session.auth_required ? <button className="metro-text-button" onClick={handleLogout} title="作废当前会话">登出</button> : null}
-          </div>
         </header>
-        <main className="uwp-page">
-          <header className="uwp-page-header">
-            <h1 key={tab}>{activeMeta.title}</h1>
-          </header>
-          <div className="shell-body uwp-content-enter" key={tab}>
-            {tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : <PersistentWorlds />}
-          </div>
+        <main className="pivot-item" role="tabpanel" aria-labelledby={`pivot-${tab}`} key={tab}>
+          {tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : <PersistentWorlds />}
         </main>
+        <footer className="command-bar">
+          <span className="command-bar-account" title={principal ? `principal ${principal.principal_id}` : undefined}>{principal ? `${principal.username} · ${principal.role}` : null}</span>
+          <div className="command-bar-commands">
+            {canOperate ? <ConfigReload /> : null}
+            {principal?.via === 'session' ? <button className="command" onClick={() => setChangingPassword(true)}>修改密码</button> : null}
+            {session.auth_required ? <button className="command" onClick={handleLogout} title="作废当前会话">登出</button> : null}
+          </div>
+        </footer>
       </div>
     </PrincipalProvider>
   );

@@ -1,40 +1,121 @@
 @import '@fontsource-variable/noto-sans-sc';
 
-:root {
-  /* Metro / Windows Phone：高对比、纯色块和简洁的文字层级。 */
-  --bg: #1f1f1f;
-  --surface: #2b2b2b;
-  --surface2: #333333;
-  --border: #454545;
-  --text: #f5f5f5;
-  --text-dim: #d0d0d0;
-  --text-muted: #a0a0a0;
+/*
+ * Windows 10 Mobile (UWP) design tokens.
+ *
+ * Every value below comes from the Windows SDK 10.0.26100.0 generic.xaml (Default = dark
+ * dictionary) unless its comment says "by eye" or "project". Names follow the original resource
+ * keys so a value can be looked up in generic.xaml without translation. Units are epx = CSS px.
+ */
 
-  /* Windows 10 dark theme: neutral surfaces + one system accent. */
-  --accent: #0078d7;
-  --accent-mizuki: var(--accent);
-  --accent-ena: var(--accent);
-  /* A normal / accepted state is not a second theme color. */
-  --stable: var(--accent);
+/* Selawik: Microsoft's metric-compatible, OFL-licensed substitute for Segoe UI. It has no Bold
+   and no italic; SemiBold stands in for Bold. Licence: assets/fonts/selawik/Selawik-OFL-1.1.txt
+   unicode-range keeps it to Latin: shared punctuation (…, —, curly quotes) must come from the CJK
+   face, or Chinese text gets Latin-width ellipses and dashes. */
+@font-face {
+  font-family: 'Selawik';
+  src: url('./assets/fonts/selawik/selawik_light.ttf') format('truetype');
+  font-weight: 300;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0100-024F, U+2013, U+2020-2022, U+2030, U+20AC, U+2122;
+}
+@font-face {
+  font-family: 'Selawik';
+  src: url('./assets/fonts/selawik/selawik_semilight.ttf') format('truetype');
+  font-weight: 350;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0100-024F, U+2013, U+2020-2022, U+2030, U+20AC, U+2122;
+}
+@font-face {
+  font-family: 'Selawik';
+  src: url('./assets/fonts/selawik/selawik_regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0100-024F, U+2013, U+2020-2022, U+2030, U+20AC, U+2122;
+}
+@font-face {
+  font-family: 'Selawik';
+  src: url('./assets/fonts/selawik/selawik_semibold.ttf') format('truetype');
+  font-weight: 600;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0100-024F, U+2013, U+2020-2022, U+2030, U+20AC, U+2122;
+}
+
+:root {
+  /* ── Colour ramp (dark). Base = foreground, Alt = its opposite, Chrome = opaque panels. ── */
+  --SystemBaseHigh: #ffffff;
+  --SystemBaseMediumHigh: rgb(255 255 255 / 0.8);
+  --SystemBaseMedium: rgb(255 255 255 / 0.6);
+  --SystemBaseMediumLow: rgb(255 255 255 / 0.4);
+  --SystemBaseLow: rgb(255 255 255 / 0.2);
+  --SystemAltHigh: #000000;
+  --SystemAltMediumHigh: rgb(0 0 0 / 0.8);
+  --SystemAltMedium: rgb(0 0 0 / 0.6);
+  --SystemAltMediumLow: rgb(0 0 0 / 0.4);
+  --SystemAltLow: rgb(0 0 0 / 0.2);
+  --SystemChromeLow: #171717;
+  --SystemChromeMediumLow: #2b2b2b;
+  --SystemChromeMedium: #1f1f1f;
+  --SystemChromeMediumHigh: #323232;
+  --SystemChromeHigh: #767676;
+  --SystemChromeDisabledLow: #858585;
+  --SystemChromeWhite: #ffffff;
+  --SystemChromeBlackHigh: #000000;
+
+  /* ApplicationPageBackground */
+  --ApplicationPageBackground: var(--SystemAltHigh);
+
+  /* Accent (project): Windows 10's default "Blue". One accent, used for affordance only. */
+  --SystemAccent: #0078d7;
+  /* Accent fill while pressed (project, by eye: same 80% the reference implementation uses). */
+  --SystemAccentPressed: rgb(0 120 215 / 0.8);
+
+  /* Semantic colours (project). Each keeps exactly one meaning and is never decoration:
+     ok = accepted / healthy (deliberately the accent, not a second hue),
+     caution = needs a look, warn = failed / rejected / out of character. */
+  --ok: var(--SystemAccent);
   --caution: #d9a600;
   --warn: #d13438;
 
-  /* Windows layout rhythm: controls use 8px, related text uses 12px,
-     and page gutters start at 16px. */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
-
+  /* ── Type ramp. Font weights 300 Light, 350 SemiLight, 400 Regular, 600 SemiBold. ── */
+  --font: 'Selawik', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC Variable', sans-serif;
+  /* Monospace for ids, paths and revisions (project; not part of the W10 ramp). */
   --mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
-  --sans: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei',
-    'Noto Sans SC Variable', system-ui, sans-serif;
+  --type-header: 300 46px/56px var(--font);
+  --type-subheader: 300 34px/40px var(--font);
+  --type-title: 350 24px/28px var(--font);
+  --type-subtitle: 400 20px/24px var(--font);
+  --type-base: 600 15px/20px var(--font);
+  --type-body: 400 15px/20px var(--font);
+  --type-control: 400 14px/20px var(--font); /* ControlContentThemeFontSize */
+  --type-caption: 400 12px/14px var(--font);
+  /* Running prose (dialogue lines, notes). By eye: 20 epx leading is too tight for CJK
+     paragraphs set in the fallback face; single-line UI text keeps the ramp's 20. */
+  --prose-leading: 24px;
+
+  /* ── Metrics: a 4 epx grid. ── */
+  --page-margin: 12px; /* PivotItemMargin 12,0,12,0 */
+  --gutter: 12px; /* between related controls */
+  --group-gap: 24px; /* between groups */
+  --header-gap: 8px; /* control header to control */
+  --control-border: 2px; /* ButtonBorderThemeThickness, TextControlBorderThemeThickness */
+  --control-min-height: 32px; /* TextControlThemeMinHeight */
+  --list-item-min-height: 40px;
+  --pivot-header-height: 48px;
+  --appbar-compact-height: 40px; /* AppBarThemeCompactHeight */
+
+  /* ── Motion. ── */
+  /* Page refresh entrance: slide up + fade. Distance, duration and stagger by eye; the curve is
+     the Windows decelerate curve, not verified against generic.xaml. */
+  --entrance-distance: 28px;
+  --entrance-duration: 300ms;
+  --entrance-stagger: 30ms;
+  --decelerate: cubic-bezier(0.1, 0.9, 0.2, 1);
 
   color-scheme: dark;
-  font-family: var(--sans);
+  font: var(--type-body);
   font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
@@ -46,23 +127,300 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--ApplicationPageBackground);
+  color: var(--SystemBaseHigh);
 }
 
 button,
+input,
+select,
 textarea {
   font: inherit;
   color: inherit;
 }
 
-/* UWP interaction states: system-blue focus, direct pressed feedback. */
-button { -webkit-tap-highlight-color: transparent; }
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+h1,
+h2,
+h3,
+p {
+  margin: 0;
 }
-button:active:not(:disabled) { transform: scale(.985); }
+
+/* ── Button ──────────────────────────────────────────────────────────────
+   Fill BaseLow, pressed BaseMediumLow, 2 epx border transparent at rest, ButtonPadding 8,4,8,5
+   inside the border, no radius, Control 14 in the case it is given. */
+.btn {
+  min-height: var(--control-min-height);
+  padding: 4px 8px 5px;
+  border: var(--control-border) solid transparent;
+  border-radius: 0;
+  background: var(--SystemBaseLow);
+  color: var(--SystemBaseHigh);
+  font: var(--type-control);
+  text-align: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Pointer-over outline: not in reference.md; by eye. */
+.btn:hover:not(:disabled) {
+  border-color: var(--SystemBaseMediumLow);
+}
+.btn:active:not(:disabled) {
+  background: var(--SystemBaseMediumLow);
+  border-color: transparent;
+}
+.btn:disabled {
+  color: var(--SystemBaseMediumLow);
+  cursor: default;
+}
+
+/* AccentButtonStyle: the one primary command on a surface. */
+.btn-accent {
+  background: var(--SystemAccent);
+  color: var(--SystemChromeWhite);
+}
+.btn-accent:active:not(:disabled) {
+  background: var(--SystemAccentPressed);
+}
+.btn-accent:disabled {
+  background: var(--SystemBaseLow);
+}
+
+/* ToggleButton (checked = accent fill). Used for chips and two-way mode switches. The checked
+   brush is inferred from the accent button; ToggleButton's own keys are not in reference.md. */
+.toggle {
+  min-height: var(--control-min-height);
+  padding: 4px 8px 5px;
+  border: var(--control-border) solid transparent;
+  border-radius: 0;
+  background: var(--SystemBaseLow);
+  color: var(--SystemBaseHigh);
+  font: var(--type-control);
+  cursor: pointer;
+}
+.toggle:hover {
+  border-color: var(--SystemBaseMediumLow);
+}
+.toggle:active {
+  background: var(--SystemBaseMediumLow);
+}
+.toggle.on,
+.toggle.active {
+  background: var(--SystemAccent);
+  color: var(--SystemChromeWhite);
+}
+
+/* Text-only command (app bar buttons, inline links to actions). No fill at rest; BaseLow on
+   hover and BaseMediumLow when pressed. By eye: AppBarButton normally carries a glyph. */
+.command {
+  min-height: var(--control-min-height);
+  padding: 0 var(--gutter);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--SystemBaseHigh);
+  font: var(--type-control);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.command:hover:not(:disabled) {
+  background: var(--SystemBaseLow);
+}
+.command:active:not(:disabled) {
+  background: var(--SystemBaseMediumLow);
+}
+.command:disabled {
+  color: var(--SystemBaseMediumLow);
+  cursor: default;
+}
+
+/* ── TextBox / ComboBox ──────────────────────────────────────────────────
+   Rest: 2 epx BaseMediumLow border over AltMediumLow. Focused TextBox: white fill, black text,
+   accent border. TextControlThemePadding 10,3,6,6, MinHeight 32. */
+input:not([type='range']):not([type='checkbox']):not([type='radio']),
+textarea,
+select {
+  min-height: var(--control-min-height);
+  padding: 3px 6px 6px 10px;
+  border: var(--control-border) solid var(--SystemBaseMediumLow);
+  border-radius: 0;
+  background: var(--SystemAltMediumLow);
+  color: var(--SystemBaseHigh);
+  font: var(--type-control);
+  outline: none;
+}
+/* Pointer-over border: not in reference.md; by eye. */
+input:not([type='range']):not([type='checkbox']):not([type='radio']):hover,
+textarea:hover,
+select:hover {
+  border-color: var(--SystemBaseMedium);
+}
+input:not([type='range']):not([type='checkbox']):not([type='radio']):focus,
+textarea:focus {
+  border-color: var(--SystemAccent);
+  background: var(--SystemChromeWhite);
+  color: var(--SystemChromeBlackHigh);
+}
+/* Disabled / read-only field: by eye (dimmed text, no border). */
+input:not([type='range']):not([type='checkbox']):not([type='radio']):is(:disabled, :read-only),
+textarea:is(:disabled, :read-only),
+select:disabled {
+  border-color: var(--SystemBaseLow);
+  background: var(--SystemBaseLow);
+  color: var(--SystemBaseMediumLow);
+}
+::placeholder {
+  color: var(--SystemBaseMedium);
+  opacity: 1;
+}
+input:focus::placeholder,
+textarea:focus::placeholder {
+  color: var(--SystemChromeHigh);
+}
+
+/* ComboBox closed state. It does not take the TextBox's white focus fill (it is not a text
+   entry); focus shows as the accent border. Chevron drawn by eye in place of the E0E5 glyph. */
+select {
+  appearance: none;
+  padding-right: 32px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--SystemBaseHigh) 50%),
+    linear-gradient(135deg, var(--SystemBaseHigh) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) 55%,
+    calc(100% - 11px) 55%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+select:focus {
+  border-color: var(--SystemAccent);
+}
+option {
+  background: var(--SystemChromeMediumLow);
+  color: var(--SystemBaseHigh);
+}
+
+textarea {
+  resize: vertical;
+}
+
+/* Slider: 2 epx track in BaseMediumLow with the value part in accent, and an 8x24 accent thumb.
+   These numbers (SliderTrackThemeHeight, SliderHorizontalThumbWidth/Height) are from memory of
+   generic.xaml and are not in reference.md; check them on a Windows SDK machine. The filled part
+   reads --fill (0%-100%), which the page sets from the value. */
+input[type='range'] {
+  appearance: none;
+  height: var(--control-min-height);
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    var(--SystemAccent) 0 var(--fill, 0%),
+    var(--SystemBaseMediumLow) var(--fill, 0%) 100%
+  );
+}
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 8px;
+  height: 24px;
+  margin-top: -11px;
+  border: 0;
+  border-radius: 0;
+  background: var(--SystemAccent);
+}
+input[type='range']::-moz-range-track {
+  height: 2px;
+  background: var(--SystemBaseMediumLow);
+}
+input[type='range']::-moz-range-progress {
+  height: 2px;
+  background: var(--SystemAccent);
+}
+input[type='range']::-moz-range-thumb {
+  width: 8px;
+  height: 24px;
+  border: 0;
+  border-radius: 0;
+  background: var(--SystemAccent);
+}
+/* Pointer-over thumb: by eye. */
+input[type='range']:hover::-webkit-slider-thumb {
+  background: var(--SystemBaseHigh);
+}
+input[type='range']:hover::-moz-range-thumb {
+  background: var(--SystemBaseHigh);
+}
+
+/* Keyboard focus visual: 2 epx BaseHigh rectangle. Not in reference.md; by eye. Text fields
+   already show focus through their accent border. */
+:focus-visible {
+  outline: 2px solid var(--SystemBaseHigh);
+  outline-offset: 0;
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
+/* ── Press feedback (PointerDownThemeAnimation) ─────────────────────────
+   Sink plus tilt away from the pointer. pressTilt.ts writes --press-x / --press-y (-1..1) on
+   pointer down. 6° / 3% / 90 ms down / 200 ms up are by eye; the perspective distance is by eye. */
+.btn,
+.toggle,
+.tilt {
+  transform: perspective(600px) rotateY(0deg) rotateX(0deg) scale(1);
+  transition:
+    transform 200ms cubic-bezier(0, 0, 0.2, 1),
+    background-color 0ms,
+    border-color 0ms;
+}
+.btn:active:not(:disabled),
+.toggle:active,
+.tilt:active {
+  transform: perspective(600px) rotateY(calc(var(--press-x, 0) * 6deg))
+    rotateX(calc(var(--press-y, 0) * -6deg)) scale(0.97);
+  transition-duration: 90ms;
+}
+
+/* ── Page refresh entrance ────────────────────────────────────────────── */
+@keyframes page-refresh {
+  from {
+    opacity: 0;
+    transform: translate3d(0, var(--entrance-distance), 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.entrance > * {
+  animation: page-refresh var(--entrance-duration) var(--decelerate) both;
+}
+.entrance > :nth-child(2) { animation-delay: calc(1 * var(--entrance-stagger)); }
+.entrance > :nth-child(3) { animation-delay: calc(2 * var(--entrance-stagger)); }
+.entrance > :nth-child(4) { animation-delay: calc(3 * var(--entrance-stagger)); }
+.entrance > :nth-child(5) { animation-delay: calc(4 * var(--entrance-stagger)); }
+.entrance > :nth-child(6) { animation-delay: calc(5 * var(--entrance-stagger)); }
+.entrance > :nth-child(n + 7) { animation-delay: calc(6 * var(--entrance-stagger)); }
+
+@media (prefers-reduced-motion: reduce) {
+  .entrance > * {
+    animation: none;
+  }
+  .btn,
+  .toggle,
+  .tilt {
+    transition: none;
+  }
+  .btn:active:not(:disabled),
+  .toggle:active,
+  .tilt:active {
+    transform: none;
+  }
+}

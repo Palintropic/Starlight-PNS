@@ -323,17 +323,16 @@ export default function PersistentWorlds() {
   const canOperate = useCan(SCOPE_OPERATE);
 
   return (
-    <div className="worlds">
+    <div className="worlds entrance">
       <div className="worlds-head">
         <div>
-          <h2>持久世界</h2>
           <p className="worlds-note">
             每个世界都有自己的权威状态和一把独占锁。恢复只能回到
             <strong>最后一次成功的 checkpoint</strong>
             ——它之后的内存工作在进程被强杀时会丢，这里没有 WAL。
           </p>
         </div>
-        <button className="btn btn-approve" onClick={refresh}>
+        <button className="btn" onClick={refresh}>
           刷新
         </button>
       </div>
@@ -372,7 +371,7 @@ export default function PersistentWorlds() {
               <button
                 key={id}
                 type="button"
-                className={`worlds-chip ${newCharacters.includes(id) ? 'on' : ''}`}
+                className={`toggle worlds-chip${newCharacters.includes(id) ? ' on' : ''}`}
                 onClick={() => toggleCharacter(id)}
               >
                 {id}
@@ -382,7 +381,7 @@ export default function PersistentWorlds() {
         </div>
         <div className="worlds-create-actions">
           <button
-            className="btn btn-approve"
+            className="btn btn-accent"
             type="submit"
             disabled={creating || !newId.trim() || !newScene || newCharacters.length === 0}
           >
@@ -444,7 +443,7 @@ export default function PersistentWorlds() {
                       <>
                         {driving ? (
                           <button
-                            className="btn btn-reject"
+                            className="btn"
                             disabled={busy('autonomy-stop')}
                             onClick={() => onStopAutonomy(world.world_id)}
                           >
@@ -452,7 +451,7 @@ export default function PersistentWorlds() {
                           </button>
                         ) : (
                           <button
-                            className="btn btn-approve"
+                            className="btn"
                             disabled={busy('autonomy-start')}
                             onClick={() => onStartAutonomy(world.world_id)}
                           >
@@ -460,14 +459,14 @@ export default function PersistentWorlds() {
                           </button>
                         )}
                         <button
-                          className="btn btn-approve"
+                          className="btn"
                           disabled={busy('checkpoint')}
                           onClick={() => onCheckpoint(world.world_id)}
                         >
                           {busy('checkpoint') ? '存档中…' : '存一次'}
                         </button>
                         <button
-                          className="btn btn-reject"
+                          className="btn"
                           disabled={busy('close')}
                           onClick={() => onClose(world.world_id)}
                         >
@@ -476,7 +475,7 @@ export default function PersistentWorlds() {
                       </>
                     ) : (
                       <button
-                        className="btn btn-approve"
+                        className="btn"
                         disabled={busy('restore')}
                         onClick={() => onRestore(world.world_id)}
                       >

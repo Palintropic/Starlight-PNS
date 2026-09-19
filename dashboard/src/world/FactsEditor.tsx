@@ -122,10 +122,10 @@ function FactsEditor() {
         <div className="world-main-header">
           <span className="col-title">世界设定 Facts</span>
           <div className="world-mode-switch">
-            <button className={mode === 'form' ? 'active' : ''} onClick={() => setMode('form')}>
+            <button className={`toggle${mode === 'form' ? ' on' : ''}`} onClick={() => setMode('form')}>
               表单模式
             </button>
-            <button className={mode === 'source' ? 'active' : ''} onClick={() => setMode('source')}>
+            <button className={`toggle${mode === 'source' ? ' on' : ''}`} onClick={() => setMode('source')}>
               源码模式
             </button>
           </div>
@@ -138,11 +138,11 @@ function FactsEditor() {
         ) : (
           <div className="world-form facts-form">
             <div className="world-actions">
-              <button className="btn btn-add" onClick={handleAdd} disabled={saving || !canWrite}>
+              <button className="btn" onClick={handleAdd} disabled={saving || !canWrite}>
                 ＋ 新增 key
               </button>
               <button
-                className="btn btn-approve"
+                className="btn btn-accent"
                 onClick={handleSave}
                 disabled={saving || !dirty || !canWrite}
               >
