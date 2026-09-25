@@ -416,7 +416,7 @@ scope 决定，非安全方法默认要求 `operate`。既没配管理凭据、�
 |---|---|
 | `GET /healthz` `GET /readyz` | 编排系统没有凭据，健康检查必须公开（见 6.4）|
 | `GET /api/auth/session`、`POST /api/auth/login`、`POST /api/auth/logout` | 否则浏览器连"要不要登录"都问不出来 |
-| `GET`/`HEAD` `/`、`/index.html`、`/favicon.svg`、`/icons.svg`、`/assets/*` | 前端外壳与静态资源，里面没有服务器侧秘密 |
+| `GET`/`HEAD` `/`、`/index.html`、`/favicon.svg`、`/icons.svg`、`/assets/*`、`/avatars/*` | 前端外壳与静态资源（含角色头像），里面没有服务器侧秘密 |
 
 被保护的因此包括：所有 `/api/**`（含只读的审核、World Editor 读、配置读）、`/ws/run`，
 以及 FastAPI 自动挂的 `/openapi.json`、`/docs`、`/redoc`。**只读也保护**是一次显式分类，

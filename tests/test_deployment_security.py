@@ -252,6 +252,7 @@ class DefaultDenyTests(AuthTestCase):
         for path in (
             "/assets/../api/persistent-worlds",
             "/assets/../../etc/passwd",
+            "/avatars/../api/persistent-worlds",
         ):
             with self.subTest(path=path):
                 self.assertFalse(is_public(path, "GET"))
