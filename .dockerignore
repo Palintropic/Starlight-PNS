@@ -16,6 +16,7 @@
 **/__pycache__
 **/*.py[cod]
 **/.DS_Store
+**/Thumbs.db
 **/*.bak
 dashboard/node_modules
 dashboard/dist

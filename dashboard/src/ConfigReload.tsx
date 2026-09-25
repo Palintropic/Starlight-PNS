@@ -51,7 +51,7 @@ export default function ConfigReload() {
   return (
     <div className="reload-box">
       <button
-        className="reload-btn"
+        className="command reload-btn"
         onClick={onClick}
         disabled={outcome.kind === 'running'}
         title={

@@ -12,7 +12,7 @@ function WorldEditor() {
   const canWrite = useCan(SCOPE_OPERATE);
 
   return (
-    <div className="world-editor">
+    <div className="world-editor entrance">
       <div className="world-subtabs">
         <button className={section === 'scenes' ? 'active' : ''} onClick={() => setSection('scenes')}>
           场景 Scenes

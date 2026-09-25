@@ -509,8 +509,10 @@ PUBLIC_PATHS = frozenset(
 
 # 前端外壳与静态资源。只对 GET/HEAD 公开，且里面**不许**有任何服务器侧秘密
 # ——这一点由"密钥不进构建"那条边界保证，不由这份清单保证。
+# /avatars/ 是角色头像（dashboard/public/avatars/），和 /assets/ 一样属于构建
+# 产物里的前端外壳，内容只有公开的角色图。
 PUBLIC_STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.svg", "/icons.svg"})
-PUBLIC_STATIC_PREFIXES = ("/assets/",)
+PUBLIC_STATIC_PREFIXES = ("/assets/", "/avatars/")
 
 _SAFE_METHODS = frozenset({"GET", "HEAD"})
 

@@ -61,13 +61,13 @@ function SourceEditor({ target, onSaved }: Props) {
     <div className="source-editor">
       <div className="world-actions">
         <button
-          className="btn btn-approve"
+          className="btn btn-accent"
           onClick={handleSave}
           disabled={saving || !canWrite}
         >
           {saving ? '保存中…' : '保存源码'}
         </button>
-        <button className="btn btn-reject" onClick={load} disabled={saving}>
+        <button className="btn" onClick={load} disabled={saving}>
           放弃改动并重新加载
         </button>
       </div>
@@ -75,7 +75,7 @@ function SourceEditor({ target, onSaved }: Props) {
       <CodeMirror
         value={source}
         height="70vh"
-        theme="light"
+        theme="dark"
         extensions={[python()]}
         onChange={(value) => setSource(value)}
       />

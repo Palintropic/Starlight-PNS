@@ -41,10 +41,9 @@ function Login({ onDone }: LoginProps) {
 
   return (
     <div className="auth-shell">
-      <header className="auth-titlebar"><span className="uwp-app-mark" /> PNS <em>Nightcord Sanctuary</em></header>
       <main className="auth-content">
         <section className="auth-panel">
-          <p className="auth-eyebrow">ACCOUNT</p>
+          <p className="pivot-title">Nightcord Sanctuary</p>
           <h1>需要登录</h1>
           <p className="auth-note">
             使用你的操作者账户继续。浏览器只保留 HttpOnly 会话 Cookie；密码不会写入本地。
@@ -78,7 +77,7 @@ function Login({ onDone }: LoginProps) {
 
           {error && <p className="auth-error">{error}</p>}
 
-          <button className="auth-submit" onClick={handleSubmit} disabled={!ready || submitting}>
+          <button className="btn btn-accent auth-submit" onClick={handleSubmit} disabled={!ready || submitting}>
             {submitting ? '登录中…' : '登录'}
           </button>
         </section>

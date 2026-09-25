@@ -84,7 +84,7 @@ function SceneEditor() {
   return (
     <div className="world-panel">
       <aside className="world-sidebar">
-        <button className="btn btn-add" onClick={handleAdd} disabled={saving || !canWrite}>
+        <button className="btn" onClick={handleAdd} disabled={saving || !canWrite}>
           ＋ 新增场景
         </button>
         <div className="world-list">
@@ -105,10 +105,10 @@ function SceneEditor() {
         <div className="world-main-header">
           <span className="col-title">场景表单</span>
           <div className="world-mode-switch">
-            <button className={mode === 'form' ? 'active' : ''} onClick={() => setMode('form')}>
+            <button className={`toggle${mode === 'form' ? ' on' : ''}`} onClick={() => setMode('form')}>
               表单模式
             </button>
-            <button className={mode === 'source' ? 'active' : ''} onClick={() => setMode('source')}>
+            <button className={`toggle${mode === 'source' ? ' on' : ''}`} onClick={() => setMode('source')}>
               源码模式
             </button>
           </div>
@@ -226,14 +226,14 @@ function SceneEditor() {
 
             <div className="world-actions">
               <button
-                className="btn btn-approve"
+                className="btn btn-accent"
                 disabled={saving || !canWrite}
                 onClick={handleSave}
               >
                 {saving ? '保存中…' : '保存'}
               </button>
               <button
-                className="btn btn-reject"
+                className="btn"
                 disabled={saving || !canWrite}
                 onClick={() => handleDelete(draft.id)}
               >

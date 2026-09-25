@@ -1,618 +1,537 @@
-/* ── Windows 10 UWP application shell ── */
+/*
+ * Application shell, full-page flows and the review surface, in the Windows 10 Mobile language.
+ * Tokens live in index.css; values not taken from there are marked "by eye" where they appear.
+ */
+
+/* ── Shell: stationary Pivot over the content, compact command bar at the bottom ── */
 .shell {
-  display: flex;
   height: 100vh;
-  overflow: hidden;
-  background: var(--bg);
-}
-.metro-shell { flex-direction: column; }
-.uwp-appbar { height: 48px; flex: 0 0 48px; display: flex; align-items: stretch; gap: 24px; padding: 0 16px; background: #202020; border-bottom: 1px solid #3b3b3b; color: #d9d9d9; user-select: none; }
-.uwp-app-id { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; font-size: 12px; font-weight: 600; letter-spacing: .02em; }.uwp-app-id em { color: #a6a6a6; font-size: 11px; font-style: normal; font-weight: 400; }.uwp-app-mark { width: 12px; height: 12px; background: var(--accent); }
-.uwp-nav { min-width: 0; display: flex; align-items: stretch; overflow-x: auto; }.uwp-nav button { position: relative; min-width: 82px; padding: 0 12px; border: 0; border-radius: 0; background: transparent; color: #c8c8c8; font-size: 14px; cursor: pointer; white-space: nowrap; transition: background-color 120ms linear, color 120ms linear; }.uwp-nav button:hover { background: #333; color: #fff; }.uwp-nav button.active { color: #fff; }.uwp-nav button.active::after { content: ''; position: absolute; right: 12px; bottom: 0; left: 12px; height: 2px; background: var(--accent); animation: uwp-nav-indicator 167ms cubic-bezier(.1, .9, .2, 1); }
-.uwp-global-commands { margin-left: auto; display: flex; min-width: max-content; align-items: center; gap: 16px; }.metro-text-button { padding: 0; border: 0; border-radius: 0; background: transparent; color: #ccc; font-size: 12px; cursor: pointer; }.metro-text-button:hover { color: #fff; }
-.uwp-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }.uwp-page-header { height: 64px; flex: 0 0 64px; display: flex; align-items: center; padding: 0 32px; background: var(--bg); border-bottom: 1px solid var(--border); }.uwp-page-header h1 { margin: 0; color: #fff; font-size: 28px; line-height: 36px; font-weight: 400; letter-spacing: 0; }
-.uwp-page-header h1 { animation: uwp-title-enter 250ms cubic-bezier(.1, .9, .2, 1) both; }
-.uwp-content-enter { animation: uwp-page-enter 300ms cubic-bezier(.1, .9, .2, 1) both; }
-@keyframes uwp-title-enter { from { opacity: 0; transform: translate3d(0, 8px, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
-@keyframes uwp-page-enter { from { opacity: 0; transform: translate3d(16px, 0, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
-@keyframes uwp-nav-indicator { from { opacity: 0; transform: scaleX(.35); } to { opacity: 1; transform: scaleX(1); } }
-@media (prefers-reduced-motion: reduce) { .uwp-nav button, .uwp-content-enter, .uwp-page-header h1, .uwp-nav button.active::after { animation: none; transition: none; } }
-}
-.tab-btn.active {
-  color: var(--text);
-  background: var(--bg);
-}
-/* 「重新加载配置」按钮：靠右挂在 tabbar 上，和左边的页签分开 */
-.reload-box {
   display: flex;
-  align-items: center;
-  gap: 5px;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--ApplicationPageBackground);
 }
-.reload-btn {
-  background: #333;
+
+.pivot {
+  flex: 0 0 auto;
+  padding-top: var(--page-margin);
+}
+
+/* PivotTitleFontSize 14, Bold in the spec; Selawik has no Bold, so SemiBold. The title is
+   Collapsed by default; this app shows it because nothing else on screen names the app. */
+.pivot-title {
+  margin: 0;
+  padding: 0 var(--page-margin);
+  font: 600 14px/20px var(--font);
+  color: var(--SystemBaseHigh);
+}
+
+/* All header items the same size (24 SemiLight), selected BaseHigh, others BaseMedium,
+   margin 12,0,12,0, strip 48 high, character spacing -25 (= -0.025em). Every header fits on a
+   desktop screen, so the pivot is stationary. On a phone-width screen the strip scrolls
+   instead of carouselling; that is a deviation from the spec. */
+.pivot-headers {
+  height: var(--pivot-header-height);
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.pivot-headers::-webkit-scrollbar {
+  display: none;
+}
+.pivot-header-item {
+  flex: 0 0 auto;
+  padding: 0 var(--page-margin);
   border: 0;
-  color: #f4f4f4;
-  font-size: 12px;
-  padding: 7px 10px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--SystemBaseMedium);
+  font: var(--type-title);
+  letter-spacing: -0.025em;
+  white-space: nowrap;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-.reload-btn:hover:not(:disabled) {
-  color: var(--text);
-}
-.reload-btn:disabled {
-  opacity: 0.5;
+.pivot-header-item.selected {
+  color: var(--SystemBaseHigh);
   cursor: default;
 }
-.reload-status {
-  font-size: 11px;
-  color: var(--text-dim);
-  max-width: 200px;
+/* Pointer-over on an unselected header: BaseMediumHigh. By eye. */
+.pivot-header-item:not(.selected):hover {
+  color: var(--SystemBaseMediumHigh);
+}
+.pivot-header-item:focus-visible {
+  outline-offset: -2px;
+}
+
+.pivot-item {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.pivot-item > * {
+  height: 100%;
+}
+
+/* CommandBar in its compact height, ChromeMedium like the platform's app bar. Commands are
+   right-aligned. By eye: text-only commands, since the app has no glyph font. */
+.command-bar {
+  flex: 0 0 var(--appbar-compact-height);
+  display: flex;
+  align-items: stretch;
+  gap: var(--gutter);
+  padding-left: var(--page-margin);
+  background: var(--SystemChromeMedium);
+}
+.command-bar-account {
+  align-self: center;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.command-bar-commands {
+  margin-left: auto;
+  display: flex;
+  align-items: stretch;
+}
+.command-bar .command {
+  min-height: var(--appbar-compact-height);
+}
+
+/* ConfigReload lives in the command bar: a command plus a caption with its last outcome. */
+.reload-box {
+  display: flex;
+  align-items: stretch;
+  flex-direction: row-reverse;
+}
+.reload-status {
+  align-self: center;
+  max-width: 240px;
+  padding-right: var(--gutter);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.reload-status:empty {
+  display: none;
 }
 .reload-status.error {
   color: var(--warn);
 }
 
-.tab-account {
-  padding: 0;
-  font-size: 12px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-
-.shell-body {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-.shell-body > * {
-  height: 100%;
-}
-
-@media (max-width: 900px) {
-  .uwp-appbar { gap: 12px; padding: 0 12px; }.uwp-app-id em, .tab-account, .reload-status { display: none; }.uwp-global-commands { gap: 10px; }.uwp-nav button { min-width: auto; padding: 0 10px; }.uwp-page-header { padding: 0 20px; }
-}
 @media (max-width: 640px) {
-  .uwp-appbar { height: 52px; flex-basis: 52px; gap: 8px; }.uwp-app-id > span:not(.uwp-app-mark) { display: none; }.uwp-nav button { font-size: 13px; padding: 0 9px; }.uwp-global-commands .reload-box, .uwp-global-commands .metro-text-button:first-of-type { display: none; }.uwp-page-header { height: 56px; flex-basis: 56px; padding: 0 16px; }.uwp-page-header h1 { font-size: 20px; line-height: 28px; }
+  .command-bar-account,
+  .reload-status {
+    display: none;
+  }
 }
 
+/* ── Full-screen states (loading / fatal error) and inline ones ── */
 .state-msg {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
-  height: 100vh;
-  color: var(--text-dim);
-  font-size: 14px;
+  gap: var(--gutter);
+  padding: var(--page-margin);
+  font: var(--type-body);
+  color: var(--SystemBaseMedium);
+}
+#root > .state-msg {
+  min-height: 100vh;
 }
 .state-msg.error {
   color: var(--warn);
 }
-.state-msg .btn {
-  width: auto;
+
+.empty-hint {
+  padding: var(--gutter) 0;
+  font: var(--type-body);
+  color: var(--SystemBaseMedium);
 }
 
-/* ── Authentication ── */
-.auth-shell { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
-.auth-titlebar { height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 16px; background: #202020; color: #d9d9d9; font-size: 12px; font-weight: 600; }.auth-titlebar em { color: #9b9b9b; font-size: 11px; font-style: normal; font-weight: 400; }
-.auth-content { flex: 1; display: grid; place-items: center; padding: 32px; }
-.auth-panel { width: min(392px, 100%); padding: 30px 32px 32px; border: 1px solid var(--border); border-top: 2px solid var(--accent); background: var(--surface); display: flex; flex-direction: column; gap: 18px; }
-.auth-eyebrow { margin: 0 0 -14px; color: var(--text-muted); font-size: 10px; font-weight: 600; letter-spacing: .14em; }.auth-panel h1 { margin: 0; color: #fff; font-size: 32px; font-weight: 400; }.auth-note { margin: -6px 0 2px; color: var(--text-dim); font-size: 13px; line-height: 1.65; }
-.auth-field { display: flex; flex-direction: column; gap: 6px; color: var(--text-dim); font-size: 12px; }.auth-field input { height: 36px; padding: 0 10px; border: 1px solid #666; border-radius: 0; background: #1f1f1f; color: var(--text); font: inherit; outline: none; }.auth-field input:focus { border-color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }.auth-error { margin: -4px 0 0; color: var(--warn); font-size: 12px; }.auth-submit { height: 38px; margin-top: 2px; border: 0; border-radius: 0; background: var(--accent); color: #fff; font: inherit; font-size: 14px; cursor: pointer; }.auth-submit:hover:not(:disabled) { background: #1687df; }.auth-submit:disabled { opacity: .45; cursor: default; }
-
-/* ── Setup Wizard（首次运行配置向导，has_key=false 时代替整个 shell） ── */
+/* ── Full-page flows: login, first-run setup, change password ──
+   Plain page, no card: app name as a pivot title, a Subheader, then fields. The column width
+   (360) and its centring on wide screens are by eye. */
+.auth-shell,
 .setup-shell {
+  min-height: 100vh;
   display: flex;
-  align-items: center;
   justify-content: center;
-  height: 100vh;
-  background: var(--bg);
+  align-items: center;
+  padding: var(--group-gap) var(--page-margin);
+  background: var(--ApplicationPageBackground);
 }
+.auth-content {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+.auth-panel,
 .setup-wizard {
-  width: 360px;
-  max-width: calc(100vw - 48px);
+  width: min(360px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 28px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  gap: var(--gutter);
 }
+.auth-panel .pivot-title,
+.setup-wizard .pivot-title {
+  padding: 0;
+}
+.auth-panel h1,
 .setup-wizard h2 {
-  margin: 0;
-  font-size: 16px;
-  color: var(--text);
+  margin-bottom: var(--gutter);
+  font: var(--type-subheader);
+  color: var(--SystemBaseHigh);
 }
+.auth-note,
 .setup-wizard .subtitle {
-  margin: -8px 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-dim);
+  margin-bottom: var(--gutter);
+  font: var(--type-body);
+  line-height: var(--prose-leading);
+  color: var(--SystemBaseMediumHigh);
 }
+/* Control header above the field, 8 clear of it. */
+.auth-field,
 .setup-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-dim);
+  gap: var(--header-gap);
+  font: var(--type-control);
+  color: var(--SystemBaseHigh);
 }
-.setup-field select,
-.setup-field input {
-  font: inherit;
-  font-size: 13px;
-  color: var(--text);
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  padding: 8px 10px;
-  outline: none;
-  transition: border-color 0.15s ease;
-}
-.setup-field select:focus,
-.setup-field input:focus {
-  border-color: var(--accent);
-}
+.auth-error,
 .setup-error {
-  margin: 0;
-  font-size: 12px;
+  font: var(--type-body);
   color: var(--warn);
 }
-.setup-wizard .btn {
+.auth-submit,
+.setup-wizard > .btn {
+  align-self: flex-start;
+  min-width: 120px; /* by eye */
+  margin-top: var(--gutter);
+}
+.setup-wizard .accounts-row-actions {
+  display: flex;
+  gap: var(--gutter);
+  margin-top: var(--gutter);
+}
+
+/* ── Avatars ──
+   Round, deliberately: the W10M People hub drew contact pictures as circles. Not covered by
+   reference.md; kept as the one exception to square geometry. */
+.avatar {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--SystemAccent);
+  color: var(--SystemChromeWhite);
+  font: var(--type-caption);
+}
+.avatar img {
   width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.avatar-image .avatar-initial {
+  display: none;
 }
 
-.review-app {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-}
-
-/* ── Topbar ── */
-.topbar {
+/* ── Status marks shared by review, simulate and worlds ── */
+/* Score level dot: a small square in the semantic colour. Size by eye. */
+.score-dot {
   flex: 0 0 auto;
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 0 20px;
-  height: 48px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  position: relative;
-  z-index: 2;
+  width: 8px;
+  height: 8px;
+  background: var(--SystemBaseMedium);
 }
-.logo {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  font-family: var(--mono);
+.score-dot.ok { background: var(--ok); }
+.score-dot.warn { background: var(--caution); }
+.score-dot.ooc { background: var(--warn); }
+
+.char-name {
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
 }
-.logo span {
-  color: var(--accent);
-}
-.subtitle {
-  font-size: 12px;
-  color: var(--text-dim);
+.turn-num {
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
 }
 
-/* ── Stats overview strip ── */
-.stats-strip {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 1px;
-  background: var(--border);
-  border-bottom: 1px solid var(--border);
-}
-.stat-tile {
-  background: var(--surface);
-  padding: 12px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
 .stat-value {
-  font-family: var(--mono);
-  font-size: 24px;
-  font-weight: 700;
-  font-variant-numeric: proportional-nums;
-  line-height: 1.1;
-  color: var(--text);
+  font: var(--type-subheader);
+  font-variant-numeric: tabular-nums;
+  color: var(--SystemBaseHigh);
 }
-.stat-value.ok { color: var(--stable); }
+.stat-value.ok { color: var(--ok); }
 .stat-value.warn { color: var(--caution); }
 .stat-value.ooc { color: var(--warn); }
 .stat-value-of {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-muted);
+  font: var(--type-subtitle);
+  color: var(--SystemBaseMedium);
 }
 .stat-label {
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-  text-transform: uppercase;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
 }
 
-/* ── Columns ── */
-.columns {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 1.3fr 1fr 0.9fr;
-  min-height: 0;
-  background: var(--bg);
-}
-
-.col {
+/* ── Review surface ── */
+.review-app {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--border);
-  overflow: hidden;
-}
-.col:last-child {
-  border-right: none;
 }
 
+.stats-strip {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--gutter);
+  padding: var(--gutter) var(--page-margin) var(--group-gap);
+}
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.columns {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 0.9fr;
+  gap: var(--group-gap);
+  padding: 0 var(--page-margin);
+}
+.col {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Group header: Base 15 SemiBold, 8 above its content. */
 .col-header {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid transparent;
+  gap: var(--gutter);
+  min-height: var(--control-min-height);
+  margin-bottom: var(--header-gap);
 }
 .col-title {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
 }
 .col-context {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-dim);
-  font-family: var(--mono);
-}
-
-.empty-hint {
-  padding: 16px;
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-/* ── Avatar ── */
-.avatar {
-  flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  font-family: var(--mono);
-  border: 1px solid;
-  background: var(--surface);
-}
-.avatar-image { position: relative; overflow: hidden; border-color: var(--accent); }
-.avatar-image img { width: 100%; height: 100%; object-fit: cover; }
-.avatar-image .avatar-initial { display: none; }
-.avatar-fallback { color: var(--accent); border-color: var(--accent); }
-.avatar.mizuki {
-  color: var(--accent-mizuki);
-  border-color: var(--accent-mizuki);
-}
-.avatar.ena {
-  color: var(--accent-ena);
-  border-color: var(--accent-ena);
+  gap: 8px;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
 }
 .col-context .avatar {
-  width: 18px;
-  height: 18px;
-  font-size: 9px;
+  width: 20px;
+  height: 20px;
 }
 
-/* ── ① 对话展示 ── */
 .turn-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0 12px 16px;
+  padding-bottom: var(--group-gap);
 }
-
 .session-header {
-  font-size: 11px;
+  padding: var(--gutter) 0 4px;
+  font: var(--type-caption);
   font-family: var(--mono);
-  color: var(--text-muted);
-  padding: 8px 4px;
+  color: var(--SystemBaseMedium);
 }
 
+/* List item: min height 40, no dividers. Hover BaseLow and selected accent at 60% are by eye
+   (ListViewItem's own brushes are not in reference.md). */
 .turn-item {
+  width: 100%;
+  min-height: var(--list-item-min-height);
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  width: 100%;
-  text-align: left;
+  gap: var(--gutter);
+  padding: 8px var(--gutter);
+  border: 0;
+  border-radius: 0;
   background: transparent;
-  border: none;
-  border-left: 2px solid transparent;
-  border-bottom: 1px solid var(--border);
-  padding: 10px 10px 10px 12px;
+  color: inherit;
+  text-align: left;
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
 }
 .turn-item:hover {
-  background: var(--surface);
+  background: var(--SystemBaseLow);
 }
 .turn-item.active {
-  background: var(--surface2);
-  border-left-color: var(--accent-mizuki);
+  background: rgb(0 120 215 / 0.6);
 }
-.turn-item.ena.active {
-  border-left-color: var(--accent-ena);
-}
-
 .turn-item-body {
-  min-width: 0;
   flex: 1;
+  min-width: 0;
 }
-
 .turn-item-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 4px;
 }
-.char-name {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+.turn-item-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font: var(--type-body);
+  color: var(--SystemBaseMediumHigh);
 }
-.char-name.mizuki {
-  color: var(--accent-mizuki);
+.turn-item.active .turn-item-text {
+  color: var(--SystemBaseHigh);
 }
-.char-name.ena {
-  color: var(--accent-ena);
-}
-.turn-num {
-  font-size: 10px;
-  color: var(--text-muted);
-  font-family: var(--mono);
-}
-.score-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-.score-dot.ok {
-  background: var(--stable);
-}
-.score-dot.warn {
-  background: var(--caution);
-}
-.score-dot.ooc {
-  background: var(--warn);
-}
+
+/* Decision marker: the semantic colour on caption text, no outline. */
 .decision-chip {
   margin-left: auto;
-  font-size: 10px;
-  font-family: var(--mono);
-  padding: 2px 6px;
-  border: 1px solid;
+  font: var(--type-caption);
 }
-.decision-chip.approve {
-  color: var(--stable);
-  border-color: var(--stable);
-}
-.decision-chip.reject {
-  color: var(--warn);
-  border-color: var(--warn);
-}
-.decision-chip.rewrite {
-  color: var(--caution);
-  border-color: var(--caution);
-}
+.decision-chip.approve { color: var(--ok); }
+.decision-chip.rewrite { color: var(--caution); }
+.decision-chip.reject { color: var(--warn); }
 
-.turn-item-text {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* ── ② Router 打分 ── */
 .router-detail {
   overflow-y: auto;
-  padding: 0 16px 16px;
+  padding-bottom: var(--group-gap);
 }
 .score-badge {
   display: flex;
   align-items: baseline;
-  font-family: var(--mono);
-  font-size: 30px;
-  font-weight: 700;
-  font-variant-numeric: proportional-nums;
-  margin-bottom: 8px;
+  margin-bottom: var(--gutter);
+  font: var(--type-header);
+  font-variant-numeric: tabular-nums;
 }
-.score-badge-max {
-  font-size: 14px;
-  font-weight: 500;
-  opacity: 0.6;
-  margin-left: 2px;
-}
-.score-badge.ok { color: var(--stable); }
+.score-badge.ok { color: var(--ok); }
 .score-badge.warn { color: var(--caution); }
 .score-badge.ooc { color: var(--warn); }
+.score-badge-max {
+  margin-left: 4px;
+  font: var(--type-subtitle);
+  color: var(--SystemBaseMedium);
+}
 
+/* A ProgressBar-like track: BaseLow track, semantic fill, 4 high (by eye). */
 .score-bar {
-  height: 3px;
-  background: var(--border);
-  margin-bottom: 16px;
+  height: 4px;
+  margin-bottom: var(--group-gap);
+  background: var(--SystemBaseLow);
 }
 .score-bar-fill {
   height: 100%;
 }
-.score-bar-fill.ok { background: var(--stable); }
+.score-bar-fill.ok { background: var(--ok); }
 .score-bar-fill.warn { background: var(--caution); }
 .score-bar-fill.ooc { background: var(--warn); }
 
 .detail-row {
   display: flex;
   justify-content: space-between;
-  font-size: 13px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--border);
+  gap: var(--gutter);
+  min-height: var(--control-min-height);
+  align-items: center;
+  font: var(--type-body);
 }
 .detail-label {
-  color: var(--text-dim);
+  font: var(--type-body);
+  color: var(--SystemBaseMedium);
 }
-.detail-block {
-  margin-top: 16px;
-  padding: 12px 14px;
-  border-top: 1px solid var(--border);
+.detail-block,
+.dimension-list {
+  margin-top: var(--group-gap);
+}
+.detail-block > .detail-label,
+.dimension-list > .detail-label {
+  margin-bottom: var(--header-gap);
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
 }
 .detail-block p {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text);
-  margin: 4px 0 0;
+  font: var(--type-body);
+  line-height: var(--prose-leading);
+  color: var(--SystemBaseMediumHigh);
 }
-.detail-block.correction {
-  border-top-color: var(--caution);
-}
-.detail-block.correction p {
-  color: var(--text);
-}
-.detail-block.correction .detail-label {
+.detail-block.correction > .detail-label {
   color: var(--caution);
-}
-.dimension-list {
-  margin-top: 16px;
-  padding: 12px 14px;
-  border-top: 1px solid var(--border);
 }
 .dimension-item {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
-  padding: 5px 0;
-  font-size: 12px;
+  gap: var(--gutter);
+  min-height: 28px; /* by eye: a denser list than the 40 epx default */
+  align-items: center;
+  font: var(--type-body);
 }
 .dimension-item strong {
-  font-family: var(--mono);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
-.dimension-item strong.ok { color: var(--stable); }
+.dimension-item strong.ok { color: var(--ok); }
 .dimension-item strong.warn { color: var(--caution); }
 .dimension-item strong.ooc { color: var(--warn); }
 
-/* ── ③ 人工决策 ── */
 .decision-panel {
-  padding: 0 16px 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--gutter);
+  padding-bottom: var(--group-gap);
+  overflow-y: auto;
 }
-
 .current-decision {
-  font-size: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  font: var(--type-base);
 }
-.current-decision.approve {
-  color: var(--stable);
-  border-color: var(--stable);
-}
-.current-decision.reject {
-  color: var(--warn);
-  border-color: var(--warn);
-}
-.current-decision.rewrite {
-  color: var(--caution);
-  border-color: var(--caution);
-}
+.current-decision.approve { color: var(--ok); }
+.current-decision.rewrite { color: var(--caution); }
+.current-decision.reject { color: var(--warn); }
 .decided-at {
-  font-size: 10px;
-  color: var(--text-muted);
+  margin-top: 4px;
+  font: var(--type-caption);
   font-family: var(--mono);
-  margin-top: 2px;
+  color: var(--SystemBaseMedium);
 }
-
 .note-input {
   width: 100%;
   min-height: 72px;
-  resize: vertical;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  padding: 8px 10px;
-  font-size: 13px;
-  outline: none;
-  transition: border-color 0.15s ease;
 }
-.note-input:focus {
-  border-color: var(--accent);
-}
-
 .decision-buttons {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.btn {
-  border: 1px solid transparent;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  padding: 11px 14px;
-  letter-spacing: 0.02em;
-  transition: background 0.15s ease;
-}
-.btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.btn-approve {
-  background: var(--accent);
-  color: #fff;
-}
-.btn-rewrite {
-  background: var(--accent);
-  color: #fff;
-}
-.btn-reject {
-  background: transparent;
-  color: var(--warn);
-  border-color: var(--warn);
-}
-.btn:hover:not(:disabled) {
-  opacity: 0.85;
-}
 
-/* ── Skeleton loading（静态，不做动效——全局唯一动效留给 Router 判断中脉冲） ── */
+/* Static loading placeholders: BaseLow blocks, no shimmer. */
 .skel-block {
-  background: var(--surface2);
-  border: 1px solid var(--border);
+  background: var(--SystemBaseLow);
 }
 .stats-strip .skel-block {
-  height: 48px;
-  border: none;
+  height: 56px;
 }
 .skel-title {
   width: 64px;
-  height: 12px;
-  border: none;
+  height: 16px;
 }
 .skel-body {
-  padding: 0 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -621,36 +540,21 @@
   height: 56px;
 }
 
-/* UWP control normalization for the review surface. */
-.review-app .topbar { display: none; }
-.review-app .stats-strip { background: var(--border); }
-.review-app .stat-tile, .review-app .col { background: var(--bg); }
-.review-app .stat-tile { padding: 14px 20px; }
-.review-app .stat-value { font-weight: 400; }
-.review-app .avatar, .review-app .decision-chip, .review-app .current-decision,
-.review-app .note-input, .review-app .btn { border-radius: 0; }
-.review-app .btn-approve, .review-app .btn-rewrite { background: var(--accent); color: #fff; }
-
-/* Content moves as a short, directional hierarchy: page → summary → detail. */
-.review-app .stats-strip { animation: uwp-rise-in 280ms 35ms cubic-bezier(.1, .9, .2, 1) both; }
-.review-app .columns { animation: uwp-rise-in 300ms 75ms cubic-bezier(.1, .9, .2, 1) both; }
-.simulate-app .sim-topbar { animation: uwp-rise-in 240ms 25ms cubic-bezier(.1, .9, .2, 1) both; }
-.simulate-app .sim-body { animation: uwp-rise-in 300ms 65ms cubic-bezier(.1, .9, .2, 1) both; }
-.worlds > *, .accounts > * { animation: uwp-rise-in 260ms cubic-bezier(.1, .9, .2, 1) both; }
-.worlds > *:nth-child(2), .accounts > *:nth-child(2) { animation-delay: 40ms; }
-.worlds > *:nth-child(3), .accounts > *:nth-child(3) { animation-delay: 80ms; }
-@keyframes uwp-rise-in { from { opacity: 0; transform: translate3d(0, 10px, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
-@media (prefers-reduced-motion: reduce) { .review-app .stats-strip, .review-app .columns, .simulate-app .sim-topbar, .simulate-app .sim-body, .worlds > *, .accounts > * { animation: none; } }
-
-
-/* Shared UWP form treatment for page-local controls. */
-.uwp-page input:not([type='range']), .uwp-page select, .uwp-page textarea {
-  border-radius: 0 !important;
-  border-color: #666 !important;
-  background-color: #1f1f1f !important;
-  transition: border-color 100ms linear, background-color 100ms linear;
+@media (max-width: 900px) {
+  .stats-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .review-app {
+    overflow-y: auto;
+  }
+  .columns {
+    display: flex;
+    flex-direction: column;
+  }
+  .col {
+    overflow: visible;
+  }
+  .turn-list {
+    max-height: 50vh;
+  }
 }
-.uwp-page input:not([type='range']):hover, .uwp-page select:hover, .uwp-page textarea:hover { border-color: #929292 !important; }
-.uwp-page input:not([type='range']):focus, .uwp-page select:focus, .uwp-page textarea:focus { border-color: var(--accent) !important; box-shadow: inset 0 -1px 0 var(--accent); }
-.uwp-page select { appearance: none; padding-right: 30px !important; background-image: linear-gradient(45deg, transparent 50%, #c8c8c8 50%), linear-gradient(135deg, #c8c8c8 50%, transparent 50%) !important; background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50% !important; background-size: 5px 5px, 5px 5px !important; background-repeat: no-repeat !important; }
-.uwp-page input[type='range'] { accent-color: var(--accent); }

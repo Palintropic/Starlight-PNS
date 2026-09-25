@@ -1,31 +1,29 @@
-/* ── Simulate tab (实时对话模拟，from the old static/index.html panel) ── */
+/* ── Simulate tab (实时对话模拟), in the Windows 10 Mobile language (tokens in index.css) ── */
 .simulate-app {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  min-height: 0;
 }
 
+/* Status line under the pivot: a caption, not a bar. */
 .sim-topbar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  height: 40px;
-  padding: 0 20px;
-  gap: 10px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  min-height: var(--control-min-height);
+  padding: 0 var(--page-margin);
 }
 .status-dot {
+  flex-shrink: 0;
   width: 8px;
   height: 8px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  flex-shrink: 0;
+  background: var(--SystemBaseMedium);
 }
+/* Running: the accent square pulses. Pulse timing is by eye; no glow (no shadows). */
 .status-dot.running {
-  background: var(--accent);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent), transparent 55%);
-  animation: sim-pulse 1.2s infinite;
+  background: var(--SystemAccent);
+  animation: sim-pulse 1.2s linear infinite;
 }
 .status-dot.error {
   background: var(--warn);
@@ -35,117 +33,94 @@
   50% { opacity: 0.4; }
 }
 .sim-status-label {
-  font-size: 12px;
-  color: var(--text-dim);
+  font: var(--type-caption);
+  color: var(--SystemBaseMediumHigh);
 }
 .sim-spacer {
   flex: 1;
 }
 .model-badge {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-family: var(--mono);
-  padding: 3px 8px;
-  background: var(--surface2);
-  border-radius: 4px;
-  border: 1px solid var(--border);
+  font: 400 12px/14px var(--mono);
+  color: var(--SystemBaseMedium);
 }
 
 .sim-body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 272px 1fr;
+  gap: var(--group-gap);
+  padding: 0 var(--page-margin);
 }
 
-/* ── Sidebar ── */
+/* ── Sidebar: settings-style groups ── */
 .sim-sidebar {
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  padding: 20px 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--group-gap);
+  padding: var(--gutter) 0 var(--group-gap);
   overflow-y: auto;
 }
 .sim-section-label {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  margin-bottom: 6px;
+  margin-bottom: 0;
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
 }
 .sim-control-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--header-gap);
 }
 .sim-control-group label {
-  font-size: 12px;
-  color: var(--text-dim);
+  margin-top: 4px;
+  font: var(--type-control);
+  color: var(--SystemBaseHigh);
 }
-.sim-sidebar select,
-.sim-sidebar input[type='range'] {
+.sim-sidebar select {
   width: 100%;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 13px;
-  padding: 6px 10px;
-  outline: none;
-}
-.sim-sidebar select:focus {
-  border-color: var(--accent);
-}
-.sim-sidebar input[type='range'] {
-  padding: 4px 0;
-  cursor: pointer;
-  accent-color: var(--accent);
 }
 .sim-range-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--gutter);
 }
 .sim-range-row input {
   flex: 1;
+  min-width: 0;
 }
 .sim-range-val {
-  font-size: 12px;
-  font-family: var(--mono);
-  color: var(--text-dim);
-  min-width: 28px;
+  min-width: 32px;
   text-align: right;
+  font: var(--type-control);
+  font-variant-numeric: tabular-nums;
+  color: var(--SystemBaseMediumHigh);
 }
-
-.simulate-app .btn-start { background: var(--accent); color: var(--bg); width: 100%; margin-bottom: 8px; }
-.simulate-app .btn-stop { background: var(--surface2); color: var(--warn); border-color: var(--warn); width: 100%; margin-bottom: 8px; }
-.simulate-app .btn-stop:disabled { color: var(--text-muted); border-color: var(--border); }
-.simulate-app .btn-clear { background: transparent; color: var(--text-muted); border-color: var(--border); width: 100%; }
+.sim-control-group .btn {
+  width: 100%;
+}
 
 .sim-stats-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: var(--gutter);
+  margin-top: var(--header-gap);
 }
 .sim-stat-card {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .sim-stat-card .stat-value {
-  font-size: 20px;
+  font: var(--type-title);
 }
 .sim-stat-lbl {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-top: 4px;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
 }
 
 /* ── Script area ── */
 .sim-main {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -153,197 +128,158 @@
 .sim-script-area {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 32px;
+  padding: var(--gutter) 0 var(--group-gap);
 }
 
 .sim-scene-header {
-  text-align: center;
-  margin-bottom: 28px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--group-gap);
 }
 .sim-scene-label {
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
+  font: var(--type-title);
+  color: var(--SystemBaseHigh);
 }
 .sim-scene-trigger {
-  font-size: 14px;
-  color: var(--text-dim);
-  line-height: 1.6;
+  font: var(--type-body);
+  line-height: var(--prose-leading);
+  color: var(--SystemBaseMediumHigh);
 }
 .sim-scene-meta {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 6px;
-  font-family: var(--mono);
+  margin-top: 4px;
+  font: 400 12px/14px var(--mono);
+  color: var(--SystemBaseMedium);
 }
 
 .sim-script-line {
   display: grid;
-  grid-template-columns: 80px 1fr;
-  padding: 8px 0;
-}
-.sim-script-line + .sim-script-line {
-  border-top: 1px solid var(--border);
+  grid-template-columns: 72px 1fr;
+  gap: var(--gutter);
+  padding: var(--gutter) 0;
 }
 .sim-char-col {
-  padding: 12px 16px 12px 0;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
+  text-align: right;
 }
 .sim-char-col .avatar {
-  width: 34px;
-  height: 34px;
-  margin-bottom: 2px;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
 }
 .sim-line-col {
-  padding: 12px 0 12px 20px;
-  border-left: 2px solid var(--border);
+  min-width: 0;
 }
-.sim-script-line.mizuki .sim-line-col { border-left-color: var(--accent-mizuki); }
-.sim-script-line.ena .sim-line-col { border-left-color: var(--accent-ena); }
-
 .sim-line-text {
-  font-size: 15px;
-  line-height: 1.75;
-  color: var(--text);
+  font: var(--type-body);
+  line-height: var(--prose-leading);
+  color: var(--SystemBaseHigh);
 }
+/* Generating: dimmed text that pulses (by eye). Selawik has no italic, so none is used. */
 .sim-line-text.generating {
-  color: var(--text-muted);
-  font-style: italic;
-  animation: sim-blink 1s infinite;
-}
-@keyframes sim-blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+  color: var(--SystemBaseMedium);
+  animation: sim-pulse 1s linear infinite;
 }
 
 .sim-router-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   margin-top: 8px;
-  font-size: 11px;
-  font-family: var(--mono);
-  border-radius: 4px;
-  padding: 3px 8px;
-  border: 1px solid;
+  font: var(--type-caption);
 }
-.sim-router-badge.ok { color: var(--stable); border-color: var(--stable); }
-.sim-router-badge.warn { color: var(--caution); border-color: var(--caution); }
-.sim-router-badge.ooc { color: var(--warn); border-color: var(--warn); }
+.sim-router-badge.ok { color: var(--ok); }
+.sim-router-badge.warn { color: var(--caution); }
+.sim-router-badge.ooc { color: var(--warn); }
 .sim-router-reason {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 3px;
-  line-height: 1.4;
+  margin-top: 4px;
+  font: var(--type-caption);
+  line-height: 16px;
+  color: var(--SystemBaseMedium);
 }
 .sim-correction-pill {
-  margin-top: 6px;
-  font-size: 11px;
+  margin-top: 8px;
+  font: var(--type-caption);
+  line-height: 16px;
   color: var(--caution);
-  background: var(--surface2);
-  border: 1px solid var(--caution);
-  border-radius: 4px;
-  padding: 4px 8px;
-  line-height: 1.5;
 }
 
 .sim-sys-line {
-  text-align: center;
-  padding: 12px 0;
-  font-size: 12px;
-  color: var(--text-muted);
-  font-style: italic;
+  padding: var(--gutter) 0;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
 }
 .sim-sys-line.error {
   color: var(--warn);
-  font-style: normal;
 }
 
+/* End-of-run summary: a flat ChromeLow block (tone by eye). */
 .sim-done-block {
-  margin: 24px 0;
-  padding: 20px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  margin: var(--group-gap) 0;
+  padding: var(--gutter);
+  background: var(--SystemChromeLow);
 }
 .sim-done-block h3 {
-  font-size: 13px;
-  color: var(--text-dim);
-  margin-bottom: 12px;
-  letter-spacing: 0.04em;
+  margin-bottom: var(--gutter);
+  font: var(--type-subtitle);
+  color: var(--SystemBaseHigh);
 }
 .sim-done-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: var(--gutter) var(--group-gap);
 }
 .sim-done-stat {
-  font-size: 12px;
-  color: var(--text-dim);
+  font: var(--type-body);
+  color: var(--SystemBaseMedium);
+}
+.sim-done-file {
+  flex-basis: 100%;
+  font: 400 12px/14px var(--mono);
 }
 .sim-done-stat b {
-  color: var(--text);
-  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--SystemBaseHigh);
 }
 
 .sim-empty-state {
   height: 100%;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  color: var(--text-muted);
-  padding: 40px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: var(--gutter);
+  padding: var(--gutter) 0;
+  color: var(--SystemBaseMedium);
 }
-.sim-empty-mark {
-  width: 42px;
-  display: grid;
-  gap: 5px;
-  padding: 8px 0;
-  border-top: 1px solid var(--accent);
-  border-bottom: 1px solid var(--accent);
-}
-.sim-empty-mark i {
-  display: block;
-  height: 2px;
-  background: var(--text-muted);
-}
-.sim-empty-mark i:nth-child(2) { width: 74%; }
-.sim-empty-mark i:nth-child(3) { width: 46%; }
 .sim-empty-state p {
-  font-size: 13px;
-  text-align: center;
-  line-height: 1.6;
+  font: var(--type-body);
+  line-height: var(--prose-leading);
 }
-
-/* UWP controls: quiet neutral surfaces, square geometry, one accent color. */
-.simulate-app .model-badge,
-.simulate-app .sim-sidebar select,
-.simulate-app .sim-stat-card,
-.simulate-app .sim-router-badge,
-.simulate-app .sim-correction-pill,
-.simulate-app .sim-done-block,
-.simulate-app .btn { border-radius: 0; }
-.simulate-app .sim-sidebar { background: var(--bg); }
-.simulate-app .sim-stat-card { background: var(--surface); }
 
 @media (max-width: 760px) {
-  .sim-topbar { height: 36px; padding: 0 var(--space-3); }
-  .sim-body { display: flex; flex-direction: column; overflow-y: auto; }
-  .sim-sidebar { flex: 0 0 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); padding: var(--space-3) var(--space-4); border-right: 0; border-bottom: 1px solid var(--border); overflow: visible; }
-  .sim-sidebar .sim-control-group:last-child { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); align-items: end; gap: var(--space-2); margin-top: 0 !important; }
-  .sim-sidebar .sim-control-group:last-child .sim-section-label { grid-column: 1 / -1; }.simulate-app .btn-start, .simulate-app .btn-stop { margin-bottom: 0; }
-  .sim-main { flex: 1 0 480px; min-height: 480px; }.sim-script-area { padding: var(--space-4); }
+  .sim-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow-y: auto;
+  }
+  .sim-sidebar {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+  .sim-main {
+    flex: 1 0 480px;
+    min-height: 480px;
+  }
 }
 @media (max-width: 480px) {
-  .sim-sidebar { display: flex; }.sim-sidebar .sim-control-group:last-child { display: grid; }
-  .sim-script-line { grid-template-columns: 52px 1fr; }.sim-char-col { padding-right: var(--space-2); }.sim-line-col { padding-left: var(--space-3); }.sim-char-col .avatar { width: 32px; height: 32px; }
+  .sim-script-line {
+    grid-template-columns: 48px 1fr;
+  }
+  .sim-char-col .avatar {
+    width: 32px;
+    height: 32px;
+  }
 }

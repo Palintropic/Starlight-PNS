@@ -41,7 +41,7 @@ function SetupWizard({ onDone }: SetupWizardProps) {
   return (
     <div className="setup-shell">
       <div className="setup-wizard">
-        <div className="logo">PNS <span>Setup</span></div>
+        <p className="pivot-title">Nightcord Sanctuary</p>
         <h2>首次运行配置</h2>
         <p className="subtitle">选择模型提供商并填入 API Key，配置会保存到本地 .env 文件。</p>
 
@@ -99,7 +99,7 @@ function SetupWizard({ onDone }: SetupWizardProps) {
 
         {error && <p className="setup-error">{error}</p>}
 
-        <button className="btn btn-approve" onClick={handleSubmit} disabled={!canSubmit}>
+        <button className="btn btn-accent" onClick={handleSubmit} disabled={!canSubmit}>
           {submitting ? '保存中…' : '保存并进入'}
         </button>
       </div>
