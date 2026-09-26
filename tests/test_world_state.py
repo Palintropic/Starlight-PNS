@@ -230,6 +230,8 @@ class WorldSerializationTests(unittest.TestCase):
                 "character_activities",
                 "location_state",
                 "metadata",
+                "location_grants",
+                "channel_grants",
             },
         )
         self.assertEqual(payload["clock"], "2026-08-20T02:00:00")

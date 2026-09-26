@@ -64,6 +64,21 @@ def validate_against_world(world: WorldState, event: Event) -> None:
             f"与当前世界时钟 {world.clock.isoformat()} 不一致"
         )
 
+    # 授权在事实判断之前：一个无权进入/加入的角色，不管此刻在不在那里，都不能
+    # 靠一条事件把自己放进去。授予来自世界的静态结构（见 WorldState.may_enter /
+    # may_join），调用方是谁、为什么想去都不影响答案（Articles VIII–IX）。
+    if event.type is EventType.PRESENCE_JOINED_CHANNEL and not world.may_join(
+        event.actor_id, event.channel_id
+    ):
+        raise EventCommitError(
+            f"角色 '{event.actor_id}' 不是频道 '{event.channel_id}' 的成员，不能加入"
+        )
+    if event.type is EventType.CHARACTER_LOCATION_CHANGED and not world.may_enter(
+        event.actor_id, event.location_id
+    ):
+        raise EventCommitError(
+            f"角色 '{event.actor_id}' 没有进入 '{event.location_id}' 的授予"
+        )
     if event.type is EventType.PRESENCE_JOINED_CHANNEL and world.is_in_channel(
         event.actor_id, event.channel_id
     ):

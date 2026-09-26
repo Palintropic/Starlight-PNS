@@ -85,6 +85,20 @@ def _actor_not_in_target_channel(
     return target is not None and not world.is_in_channel(actor, target)
 
 
+def _actor_may_enter_target_location(
+    world: WorldState, actor: str, target: Optional[str]
+) -> bool:
+    # 口径跟提交边界完全一样（同一个 WorldState.may_enter）：这里拦下是为了让
+    # Agency 记下一个明确的"无权进入"，而不是等到提交时才撞墙。
+    return target is not None and world.may_enter(actor, target)
+
+
+def _actor_may_join_target_channel(
+    world: WorldState, actor: str, target: Optional[str]
+) -> bool:
+    return target is not None and world.may_join(actor, target)
+
+
 _EVALUATORS: Dict[
     Precondition, Callable[[WorldState, str, Optional[str]], bool]
 ] = {
@@ -97,6 +111,8 @@ _EVALUATORS: Dict[
     Precondition.TARGET_CHANNEL_EXISTS: _target_channel_exists,
     Precondition.ACTOR_IN_TARGET_CHANNEL: _actor_in_target_channel,
     Precondition.ACTOR_NOT_IN_TARGET_CHANNEL: _actor_not_in_target_channel,
+    Precondition.ACTOR_MAY_ENTER_TARGET_LOCATION: _actor_may_enter_target_location,
+    Precondition.ACTOR_MAY_JOIN_TARGET_CHANNEL: _actor_may_join_target_channel,
 }
 
 

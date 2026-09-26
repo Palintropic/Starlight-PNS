@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from grants_support import grant_everything
 from pns.models.event import Event, EventScope, EventType
 from pns.models.exposure import ExposureReason
 from pns.models.memory import (
@@ -93,6 +94,7 @@ def _world(clock=CLOCK, *, join_nightcord=("mizuki", "ena")):
     world.place_character("ena", "ena_home_studio")
     for character_id in join_nightcord:
         world.join_channel(character_id, "nightcord")
+    grant_everything(world)
     return world
 
 

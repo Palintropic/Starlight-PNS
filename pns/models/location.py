@@ -93,6 +93,21 @@ class Location:
         )
 
 
+def access_admits(access: Dict, role: Optional[str]) -> bool:
+    """一个地点的 access 规则，是否放行持有 `role` 授予的角色（None 表示没有授予）。
+
+    这是进入规则的唯一实现：世界状态（提交边界、Agency 前置条件）和内容快照
+    （作息表校验）都调它。只有 `public is True` 对所有人开放；没写 access 的
+    地点不算公开。地点声明了 role 时，授予的身份必须一致。
+    """
+    if access.get("public") is True:
+        return True
+    if role is None:
+        return False
+    required = access.get("role")
+    return required is None or role == required
+
+
 class LocationGraphError(ValueError):
     """位置图自身不自洽（重复 ID、悬空 parent/connection、父级成环等）。"""
 

@@ -47,6 +47,17 @@ daily_rhythm:
     location_id: ena_home_studio
     source: inferred
 
+access_grants:
+  locations:
+    - location_id: ena_home
+      role: household
+    - location_id: ena_home_studio
+      role: household
+    - location_id: kamiyama_high        # 神山高校夜间定时制 3-D
+      role: student
+  channels:
+    - nightcord
+
 status: ready
 sample_coverage: 1.0
 

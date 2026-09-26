@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
+from grants_support import grant_everything
 from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore, EventStoreError
 from pns.models.exposure import ExposureReason
@@ -44,6 +45,7 @@ def _world(clock=CLOCK, *, channel=False):
     else:
         world.place_character("mizuki", "kamiyama_high_gate")
         world.place_character("ena", "kamiyama_high_gate")
+    grant_everything(world)
     return world
 
 

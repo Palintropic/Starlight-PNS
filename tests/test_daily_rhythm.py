@@ -18,6 +18,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from grants_support import grant_everything
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore
@@ -75,6 +76,7 @@ def _world(clock, *, join_nightcord=("mizuki", "ena")):
     world.place_character("ena", "ena_home_studio")
     for character_id in join_nightcord:
         world.join_channel(character_id, "nightcord")
+    grant_everything(world)
     return world
 
 
@@ -309,6 +311,7 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
                 },
                 Path("."),
                 self.locations,
+                build_default_channel_registry(),
             )
 
     def test_real_pack_rhythms_are_loadable_and_cover_the_two_leads(self):

@@ -46,6 +46,19 @@ daily_rhythm:
     location_id: mizuki_home_room
     source: inferred
 
+access_grants:
+  locations:
+    - location_id: mizuki_home
+      role: household
+    - location_id: mizuki_home_room
+      role: household
+    - location_id: kamiyama_high        # 神山高校 2-B
+      role: student
+    - location_id: clothing_store_floor # 服装店店员
+      role: staff
+  channels:
+    - nightcord
+
 status: ready
 sample_coverage: 1.0
 

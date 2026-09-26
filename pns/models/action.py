@@ -65,9 +65,11 @@ class Precondition(str, Enum):
     TARGET_LOCATION_EXISTS = "target_location_exists"
     TARGET_LOCATION_IS_ELSEWHERE = "target_location_is_elsewhere"  # 不是当前所在地
     TARGET_LOCATION_REACHABLE = "target_location_reachable"  # 位置图上直接相邻
+    ACTOR_MAY_ENTER_TARGET_LOCATION = "actor_may_enter_target_location"  # 有进入授予或公开
     TARGET_CHANNEL_EXISTS = "target_channel_exists"
     ACTOR_IN_TARGET_CHANNEL = "actor_in_target_channel"
     ACTOR_NOT_IN_TARGET_CHANNEL = "actor_not_in_target_channel"
+    ACTOR_MAY_JOIN_TARGET_CHANNEL = "actor_may_join_target_channel"  # 是频道成员
 
 
 class ParticipantSource(str, Enum):
@@ -182,6 +184,7 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
         + (
             Precondition.TARGET_CHANNEL_EXISTS,
             Precondition.ACTOR_NOT_IN_TARGET_CHANNEL,
+            Precondition.ACTOR_MAY_JOIN_TARGET_CHANNEL,
         ),
         participants_from=ParticipantSource.CHANNEL_MEMBERS,
     ),
@@ -208,6 +211,7 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
             Precondition.TARGET_LOCATION_EXISTS,
             Precondition.TARGET_LOCATION_IS_ELSEWHERE,
             Precondition.TARGET_LOCATION_REACHABLE,
+            Precondition.ACTOR_MAY_ENTER_TARGET_LOCATION,
         ),
         # 目的地的在场名单在状态效果应用之后立刻作废，写一份注定过期的
         # 花名册不如不写 —— 于是它也是唯一一档可以被精确校验的。

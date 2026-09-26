@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 
 from pns.models.channel import ChannelRegistry
-from pns.models.location import LocationGraph
+from pns.models.location import LocationGraph, access_admits
 
 
 class WorldStateError(ValueError):
@@ -99,6 +99,14 @@ class WorldState:
     character_activities: Dict[str, CharacterActivity] = field(default_factory=dict)
     location_state: Dict[str, Dict] = field(default_factory=dict)
     metadata: Dict = field(default_factory=dict)
+    # 进入非公开地点、加入频道的静态授予。它们跟位置图、频道表一样是这个世界
+    # 的静态结构：只在建世界时由内容注册表装入，没有任何事件能改它们，所以也
+    # 不在提交回滚快照里。关系、意愿、模型文本都没有通往这里的路（Articles
+    # VIII–IX）。没有授予就是拒绝。
+    #   location_grants: 角色 → {location_id: role}
+    #   channel_grants:  角色 → {channel_id}
+    location_grants: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    channel_grants: Dict[str, Set[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Own and validate all mutable state supplied at construction time."""
@@ -128,6 +136,14 @@ class WorldState:
         }
         self.location_state = deepcopy(self.location_state)
         self.metadata = deepcopy(self.metadata)
+        self.location_grants = {
+            character_id: dict(grants)
+            for character_id, grants in self.location_grants.items()
+        }
+        self.channel_grants = {
+            character_id: set(grants)
+            for character_id, grants in self.channel_grants.items()
+        }
         self.validate()
 
     def validate(self) -> None:
@@ -180,6 +196,26 @@ class WorldState:
                 )
             if not isinstance(facts, dict):
                 raise WorldStateError(f"地点 '{location_id}' 的状态必须是字典")
+        for character_id, grants in self.location_grants.items():
+            self._require_character_id(character_id)
+            for location_id, role in grants.items():
+                if not self.locations.has(location_id):
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 的进入授予引用了未知的 location_id: "
+                        f"{location_id}"
+                    )
+                if not isinstance(role, str) or not role:
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 对 '{location_id}' 的授予必须写明角色身份"
+                    )
+        for character_id, grants in self.channel_grants.items():
+            self._require_character_id(character_id)
+            for channel_id in grants:
+                if not self.channels.has(channel_id):
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 的频道授予引用了未知的 channel_id: "
+                        f"{channel_id}"
+                    )
 
     # ── 时间 ────────────────────────────────────────────────────────────
     @property
@@ -231,6 +267,41 @@ class WorldState:
             )
         ]
         return sorted(found)
+
+    # ── 进入与加入的授权 ────────────────────────────────────────────────
+    def may_enter(self, character_id: str, location_id: str) -> bool:
+        """这个角色有没有资格出现在这个地点。
+
+        只有 `access.public is True` 的地点对所有人开放；其余一律要一条针对
+        这个地点的授予，地点声明了 `access.role` 时授予的身份还必须一致。
+        没写 access 的地点不算公开 —— 缺省只能往拒绝那边偏。
+        """
+        if not self.locations.has(location_id):
+            return False
+        return access_admits(
+            self.locations.get(location_id).access,
+            self.location_grants.get(character_id, {}).get(location_id),
+        )
+
+    def may_join(self, character_id: str, channel_id: str) -> bool:
+        """这个角色是不是这个频道的成员（有没有资格加入，不是此刻在不在）。"""
+        return channel_id in self.channel_grants.get(character_id, set())
+
+    def grant_location(self, character_id: str, location_id: str, role: str) -> None:
+        """建世界时装入一条进入授予。运行期没有任何事件会调用它。"""
+        self._require_character_id(character_id)
+        if not self.locations.has(location_id):
+            raise WorldStateError(f"未知的 location_id: {location_id}")
+        if not isinstance(role, str) or not role:
+            raise WorldStateError("进入授予必须写明角色身份")
+        self.location_grants.setdefault(character_id, {})[location_id] = role
+
+    def grant_channel(self, character_id: str, channel_id: str) -> None:
+        """建世界时装入一条频道成员资格。运行期没有任何事件会调用它。"""
+        self._require_character_id(character_id)
+        if not self.channels.has(channel_id):
+            raise WorldStateError(f"未知的 channel_id: {channel_id}")
+        self.channel_grants.setdefault(character_id, set()).add(channel_id)
 
     # ── 线上频道 ────────────────────────────────────────────────────────
     def join_channel(self, character_id: str, channel_id: str) -> None:
@@ -372,6 +443,14 @@ class WorldState:
             },
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
+            "location_grants": {
+                character_id: dict(grants)
+                for character_id, grants in self.location_grants.items()
+            },
+            "channel_grants": {
+                character_id: sorted(grants)
+                for character_id, grants in self.channel_grants.items()
+            },
         }
 
     @classmethod
@@ -389,6 +468,14 @@ class WorldState:
             character_activities=dict(payload.get("character_activities", {})),
             location_state=deepcopy(payload.get("location_state", {})),
             metadata=deepcopy(payload.get("metadata", {})),
+            location_grants={
+                character_id: dict(grants)
+                for character_id, grants in payload.get("location_grants", {}).items()
+            },
+            channel_grants={
+                character_id: set(grants)
+                for character_id, grants in payload.get("channel_grants", {}).items()
+            },
         )
 
     @staticmethod
