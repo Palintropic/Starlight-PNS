@@ -154,7 +154,10 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
             self.assertIn(expect, str(caught.exception))
 
     def test_unknown_activity_is_rejected(self):
-        self._reject([{"at": "08:00", "activity": "probably_working"}])
+        self._reject(
+            [{"at": "08:00", "activity": "probably_working", "source": "inferred"}],
+            expect="未知的角色活动",
+        )
 
     def test_unknown_location_is_rejected(self):
         self._reject(
@@ -252,7 +255,12 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
     def test_malformed_times_are_rejected(self):
         for bad in ("傍晚 17:30", "8:0:0", "25:00", "08-00", -1, 24 * 60, True):
             with self.subTest(bad=bad):
-                self._reject([{"at": bad, "activity": "studying"}])
+                # 带上 source，确保被拒是因为时间本身，而不是提前卡在缺字段上；
+                # 错误信息必须点名是 at 这一项。
+                self._reject(
+                    [{"at": bad, "activity": "studying", "source": "inferred"}],
+                    expect="的 at",
+                )
 
     def test_the_time_format_is_strict_hh_mm(self):
         """文档说"严格 HH:MM"，实现就必须真的严格。

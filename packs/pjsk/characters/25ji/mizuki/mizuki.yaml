@@ -19,12 +19,13 @@ schedule: 25时（凌晨1点）上Nightcord，结束时间看进度→睡到上�
 # 每段从 at 起一直管到下一段开始，最后一段跨零点接回第一段。
 # activity 只能取世界模型里的闭集值；location_id 必须是位置图里已有的地点。
 daily_rhythm:
-  # 只有 25 時集合是官方给出的时刻（官方组合页、奏的自我介绍）；
+  # 25 時集合是官方给出的时刻（官方组合页、奏的自我介绍），但一段作息同时声明了物理地点，
+  # 地点没有同等粒度的出处，所以没有一段能整体标 official；
   # 其余时刻是在官方粗粒度描述（出勤不规律、服装店打工、在家做 MV）之上推断的。
-  - at: "01:00"        # 25時：Nightcord 约定的集合时间
+  - at: "01:00"        # 25時上线是官方的；此刻人在哪个房间是推断，所以整段标 inferred
     activity: online_chatting
     location_id: mizuki_home_room
-    source: official
+    source: inferred
   - at: "04:00"        # 结束时间随进度变化；取主线第 2 话凌晨 4 时仍在线的一例
     activity: resting
     location_id: mizuki_home_room

@@ -5,6 +5,9 @@
 #   2. 记录必须说清全部原因（闭集、去重、排序）并指向时间线区间，不许冒充问过策略；
 #   3. 跟着存档走，被改过的记录在加载时就被拒绝。
 #
+# `_close_unavailable` 是引擎内部能力，这里直接调用它只为测记录本身的形状与
+# 原子性；产品路径只能经由协调器的到期收尾入口到达它。
+#
 # 运行: python -m unittest discover -s tests -p test_cognition_unavailable.py
 import unittest
 from datetime import datetime, timedelta
@@ -65,7 +68,7 @@ class ClosingIsAnOrdinaryAtomicOutcomeTests(unittest.TestCase):
     def test_it_leaves_an_audit_record_and_nothing_in_the_world(self):
         state, engine, due = _rig()
         events, observations, memories, agency, pending = _counts(state)
-        record = engine.close_unavailable(
+        record = engine._close_unavailable(
             due,
             [CognitionCause.OPERATOR_PAUSED, CognitionCause.NOT_STARTED],
             interval=3,
@@ -83,9 +86,9 @@ class ClosingIsAnOrdinaryAtomicOutcomeTests(unittest.TestCase):
 
     def test_a_due_is_closed_at_most_once(self):
         state, engine, due = _rig()
-        engine.close_unavailable(due, ["fault"], interval=0)
+        engine._close_unavailable(due, ["fault"], interval=0)
         with self.assertRaises(AgencyEngineError):
-            engine.close_unavailable(due, ["fault"], interval=0)
+            engine._close_unavailable(due, ["fault"], interval=0)
         self.assertEqual(len(state.agency), 1)
 
     def test_a_failed_acknowledgement_rolls_the_record_back(self):
@@ -97,7 +100,7 @@ class ClosingIsAnOrdinaryAtomicOutcomeTests(unittest.TestCase):
             side_effect=RuntimeError("disk said no"),
         ):
             with self.assertRaises(RuntimeError):
-                engine.close_unavailable(due, ["fault"], interval=0)
+                engine._close_unavailable(due, ["fault"], interval=0)
         self.assertEqual(_counts(state), before)
         self.assertFalse(state.activation_outbox.is_acknowledged(due.due_id))
 
@@ -107,11 +110,11 @@ class ClosingIsAnOrdinaryAtomicOutcomeTests(unittest.TestCase):
         for causes in ([], ["bored"], "fault", ["fault", "fault"], None):
             with self.subTest(causes=causes):
                 with self.assertRaises(AgencyEngineError):
-                    engine.close_unavailable(due, causes, interval=0)
+                    engine._close_unavailable(due, causes, interval=0)
         for interval in (-1, True, "0", None):
             with self.subTest(interval=interval):
                 with self.assertRaises(AgencyEngineError):
-                    engine.close_unavailable(due, ["fault"], interval=interval)
+                    engine._close_unavailable(due, ["fault"], interval=interval)
         self.assertEqual(_counts(state), before)
 
     def test_the_runtime_sees_it_as_a_rejection(self):
@@ -171,7 +174,7 @@ class RecordShapeTests(unittest.TestCase):
 class ArchiveTests(unittest.TestCase):
     def test_it_survives_a_round_trip(self):
         state, engine, due = _rig()
-        engine.close_unavailable(due, ["process_stopped"], interval=1)
+        engine._close_unavailable(due, ["process_stopped"], interval=1)
         restored = SessionState.from_dict(state.to_dict())
         record = restored.agency.records()[-1]
         self.assertIs(record.outcome, AgencyOutcome.REJECTED_UNAVAILABLE)
@@ -179,7 +182,7 @@ class ArchiveTests(unittest.TestCase):
 
     def test_a_tampered_record_is_refused_on_load(self):
         state, engine, due = _rig()
-        engine.close_unavailable(due, ["process_stopped"], interval=1)
+        engine._close_unavailable(due, ["process_stopped"], interval=1)
         payload = state.to_dict()
         payload["agency"]["log"]["records"][-1]["policy"] = "first_legal"
         with self.assertRaises(SessionStateError):
