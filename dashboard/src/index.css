@@ -94,7 +94,9 @@
   --prose-leading: 24px;
 
   /* ── Metrics: a 4 epx grid. ── */
-  --page-margin: 12px; /* PivotItemMargin 12,0,12,0 */
+  /* Page edge: PivotItemMargin 12 at phone width, widened on larger windows (see below). */
+  --page-margin: 12px;
+  --header-item-margin: 12px; /* PivotHeaderItemMargin 12,0,12,0; fixed, not the page edge */
   --gutter: 12px; /* between related controls */
   --group-gap: 24px; /* between groups */
   --header-gap: 8px; /* control header to control */
@@ -116,6 +118,19 @@
   font: var(--type-body);
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
+}
+
+/* The 12 epx margin is a phone metric and reads cramped on a desktop window. Window size
+   classes follow the UWP breakpoints (640 / 1008); the widths per class are by eye. */
+@media (min-width: 640px) {
+  :root {
+    --page-margin: 24px;
+  }
+}
+@media (min-width: 1008px) {
+  :root {
+    --page-margin: 40px;
+  }
 }
 
 * {

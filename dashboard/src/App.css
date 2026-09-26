@@ -34,6 +34,7 @@
   height: var(--pivot-header-height);
   display: flex;
   align-items: stretch;
+  padding: 0 calc(var(--page-margin) - var(--header-item-margin));
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -42,7 +43,7 @@
 }
 .pivot-header-item {
   flex: 0 0 auto;
-  padding: 0 var(--page-margin);
+  padding: 0 var(--header-item-margin);
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -81,7 +82,7 @@
   display: flex;
   align-items: stretch;
   gap: var(--gutter);
-  padding-left: var(--page-margin);
+  padding: 0 calc(var(--page-margin) - var(--gutter)) 0 var(--page-margin);
   background: var(--SystemChromeMedium);
 }
 .command-bar-account {
