@@ -1,0 +1,271 @@
+/* World overview (世界), in the Windows 10 Mobile language (tokens in index.css). */
+.world-overview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.wo-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--gutter) var(--group-gap);
+  padding: var(--gutter) var(--page-margin) 0;
+}
+.wo-clock {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gutter);
+}
+/* The world clock is the page's one large figure: Subheader. */
+.wo-time {
+  font: var(--type-subheader);
+  color: var(--SystemBaseHigh);
+  font-variant-numeric: tabular-nums;
+}
+.wo-date {
+  font: var(--type-body);
+  color: var(--SystemBaseMedium);
+}
+.wo-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font: var(--type-caption);
+  color: var(--SystemBaseMediumHigh);
+}
+.wo-mono {
+  font: 400 12px/14px var(--mono);
+  color: var(--SystemBaseMedium);
+}
+
+.wo-sample-note {
+  flex: 0 0 auto;
+  margin: var(--gutter) var(--page-margin) 0;
+  padding-left: var(--gutter);
+  border-left: 2px solid var(--caution);
+  font: var(--type-caption);
+  line-height: 18px;
+  color: var(--SystemBaseMediumHigh);
+}
+
+.wo-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: var(--group-gap);
+  padding: 0 var(--page-margin);
+}
+
+.wo-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--group-gap);
+  padding: var(--group-gap) 0;
+  overflow-y: auto;
+}
+.wo-section {
+  margin: 0 0 var(--gutter);
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
+}
+.wo-subsection {
+  margin: var(--gutter) 0 4px;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.wo-hint {
+  margin: 8px 0 0;
+  font: var(--type-caption);
+  line-height: 18px;
+  color: var(--SystemBaseMedium);
+}
+
+/* Unit filter: a secondary lens, not the primary grouping. */
+.wo-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.wo-group + .wo-group {
+  margin-top: var(--gutter);
+}
+.wo-group > .wo-subsection {
+  margin-top: 0;
+}
+
+/* ── Residents: a People-style list; selecting one filters the history. ── */
+.wo-residents,
+.wo-timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wo-resident {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gutter);
+  padding: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.wo-resident:hover {
+  background: var(--SystemChromeMediumLow);
+}
+.wo-resident.active {
+  background: var(--SystemChromeMediumHigh);
+}
+.wo-resident .avatar {
+  width: 40px;
+  height: 40px;
+}
+.wo-resident-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wo-resident-name {
+  font: var(--type-body);
+  color: var(--SystemBaseHigh);
+}
+.wo-unit {
+  margin-left: 8px;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.wo-resident-meta {
+  font: var(--type-caption);
+  line-height: 16px;
+  color: var(--SystemBaseMedium);
+}
+
+/* Sleepers: compact avatar grid. Asleep is still a life state, so they stay listed. */
+.wo-sleepers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 4px;
+}
+.wo-sleeper {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--SystemBaseMedium);
+  font: var(--type-caption);
+  cursor: pointer;
+}
+.wo-sleeper .avatar {
+  opacity: 0.6;
+}
+.wo-sleeper:hover {
+  background: var(--SystemChromeMediumLow);
+}
+.wo-sleeper.active {
+  background: var(--SystemChromeMediumHigh);
+  color: var(--SystemBaseHigh);
+}
+
+/* ── History ── */
+.wo-main {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--group-gap);
+}
+.wo-main-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gutter);
+}
+.wo-main-head .command {
+  margin-top: -6px;
+}
+.wo-main > .wo-hint {
+  margin: -4px 0 var(--gutter);
+}
+.wo-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--group-gap);
+}
+.wo-date-row {
+  padding: var(--gutter) 0 4px;
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.wo-event {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: var(--gutter);
+  padding: 6px 0;
+  font: var(--type-body);
+  line-height: var(--prose-leading);
+  color: var(--SystemBaseMediumHigh);
+}
+.wo-event strong {
+  font-weight: 600;
+  color: var(--SystemBaseHigh);
+}
+.wo-event-time {
+  font: 400 12px/24px var(--mono);
+  color: var(--SystemBaseMedium);
+}
+.wo-quote {
+  display: block;
+  color: var(--SystemBaseHigh);
+}
+/* Events revealed by the last advance: an accent bar on the left, no motion beyond the page's. */
+.wo-event.new {
+  margin-left: -14px;
+  padding-left: 12px;
+  border-left: 2px solid var(--SystemAccent);
+}
+.wo-advance {
+  flex: 0 0 auto;
+  margin: 8px var(--page-margin) 0;
+  font: var(--type-caption);
+  line-height: 18px;
+  color: var(--SystemBaseMediumHigh);
+}
+
+/* Quiet stretch: a fact, not a warning, so no semantic colour. */
+.wo-quiet {
+  margin: 4px 0 4px 68px;
+  padding: 4px 0 4px var(--gutter);
+  border-left: 2px solid var(--SystemBaseLow);
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+
+@media (max-width: 760px) {
+  .wo-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow-y: auto;
+  }
+  .wo-side,
+  .wo-timeline {
+    overflow: visible;
+  }
+}

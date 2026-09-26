@@ -19,12 +19,14 @@ import {
   type ConfigStatus,
 } from './api';
 import { PrincipalProvider } from './PrincipalProvider';
+import WorldOverview from './WorldOverview';
 import './App.css';
 
-type Tab = 'simulate' | 'review' | 'world' | 'worlds' | 'accounts';
+type Tab = 'overview' | 'simulate' | 'review' | 'world' | 'worlds' | 'accounts';
 
 // Pivot 表头的文字就是页面标题：W10 的 Pivot 不在内容区再重复一遍。
 const TAB_LABEL: Record<Tab, string> = {
+  overview: '世界',
   simulate: '模拟',
   review: '审核',
   world: '世界编辑',
@@ -33,7 +35,7 @@ const TAB_LABEL: Record<Tab, string> = {
 };
 
 function App() {
-  const [tab, setTab] = useState<Tab>('simulate');
+  const [tab, setTab] = useState<Tab>('overview');
   const [session, setSession] = useState<AuthSession | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [config, setConfig] = useState<ConfigStatus | null>(null);
@@ -146,6 +148,7 @@ function App() {
   }
 
   const tabs: Tab[] = [
+    'overview',
     ...(canOperate ? (['simulate'] as const) : []),
     'review',
     'world',
@@ -184,7 +187,7 @@ function App() {
           </nav>
         </header>
         <main className="pivot-item" role="tabpanel" aria-labelledby={`pivot-${tab}`} key={tab}>
-          {tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : <PersistentWorlds />}
+          {tab === 'overview' ? <WorldOverview /> : tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : <PersistentWorlds />}
         </main>
         <footer className="command-bar">
           <span className="command-bar-account" title={principal ? `principal ${principal.principal_id}` : undefined}>{principal ? `${principal.username} · ${principal.role}` : null}</span>
