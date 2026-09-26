@@ -4,6 +4,7 @@
 import unittest
 from datetime import datetime
 
+from grants_support import grant_everything
 from pns.models.location import Connection, Location, LocationGraph, LocationKind
 from pns.models.world_state import ActivityKind, WorldState, WorldStateError
 from pns.world.channels import build_default_channel_registry
@@ -12,11 +13,13 @@ from pns.world.locations import build_default_location_graph
 
 
 def _world(clock=datetime(2026, 8, 20, 17, 30)):
-    return WorldState(
+    world = WorldState(
         clock=clock,
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
+    return world
 
 
 class WorldClockTests(unittest.TestCase):
@@ -307,6 +310,9 @@ class WorldSerializationTests(unittest.TestCase):
             character_locations=character_locations,
             channel_members=channel_members,
             location_state=location_state,
+            # 构造时就校验在场与授予一致，所以授予必须跟在场一起给进来。
+            location_grants={"ena": {"ena_home_studio": "household"}},
+            channel_grants={"ena": {"nightcord"}},
         )
 
         character_locations["ena"] = "kamiyama_high_gate"
@@ -335,6 +341,7 @@ class WorldStateAcceptsCustomGraphTests(unittest.TestCase):
             ]
         )
         world = WorldState(clock=datetime(2026, 1, 1, 9, 0), locations=graph)
+        world._grant_location("someone", "cell", "resident")
         world.place_character("someone", "cell")
         self.assertEqual(world.characters_at("cell"), ["someone"])
 

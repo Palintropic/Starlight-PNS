@@ -76,7 +76,7 @@ DEFAULT_LOCATIONS = (
         parent_id="clothing_store",
         description="服装店，整理区，挂满新季衣架",
         connections=(Connection("clothing_store", travel_minutes=1),),
-        access={"public": False, "role": "staff"},
+        access={"public": False, "role": ["staff", "guest"]},
         perception={"indoor": True},
     ),
     # ── 住处 ───────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ DEFAULT_LOCATIONS = (
             Connection("city_streets", travel_minutes=12),
             Connection("ena_home_studio", travel_minutes=1),
         ),
-        access={"public": False, "role": "household"},
+        access={"public": False, "role": ["household", "guest"]},
         perception={"indoor": True},
     ),
     Location(
@@ -100,7 +100,7 @@ DEFAULT_LOCATIONS = (
         parent_id="ena_home",
         description="绘名家，她的画室，台灯开着",
         connections=(Connection("ena_home", travel_minutes=1),),
-        access={"public": False, "role": "household"},
+        access={"public": False, "role": ["household", "guest"]},
         perception={"indoor": True, "private": True},
     ),
     Location(
@@ -113,7 +113,7 @@ DEFAULT_LOCATIONS = (
             Connection("city_streets", travel_minutes=12),
             Connection("mizuki_home_room", travel_minutes=1),
         ),
-        access={"public": False, "role": "household"},
+        access={"public": False, "role": ["household", "guest"]},
         perception={"indoor": True},
     ),
     Location(
@@ -123,7 +123,7 @@ DEFAULT_LOCATIONS = (
         parent_id="mizuki_home",
         description="瑞希的房间",
         connections=(Connection("mizuki_home", travel_minutes=1),),
-        access={"public": False, "role": "household"},
+        access={"public": False, "role": ["household", "guest"]},
         perception={"indoor": True, "private": True},
     ),
     # 还没有单独建模住处的角色的占位容器：让 "各自在自己房间上线" 这种

@@ -7,6 +7,7 @@
 import unittest
 from datetime import datetime
 
+from grants_support import grant_everything
 from pns.models.event import Event, EventScope, EventType
 from pns.models.exposure import ExposureDecision, ExposureReason
 from pns.models.observation import Observation, ObservationError, ObservationLog
@@ -29,6 +30,7 @@ def _world(**placements) -> WorldState:
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     for character_id, location_id in (
         placements or {"mizuki": "kamiyama_high_gate", "ena": "kamiyama_high_gate"}
     ).items():

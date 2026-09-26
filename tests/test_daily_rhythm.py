@@ -72,11 +72,11 @@ def _world(clock, *, join_nightcord=("mizuki", "ena")):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     world.place_character("mizuki", "mizuki_home_room")
     world.place_character("ena", "ena_home_studio")
     for character_id in join_nightcord:
         world.join_channel(character_id, "nightcord")
-    grant_everything(world)
     return world
 
 

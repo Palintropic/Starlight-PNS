@@ -99,10 +99,13 @@ class WorldState:
     character_activities: Dict[str, CharacterActivity] = field(default_factory=dict)
     location_state: Dict[str, Dict] = field(default_factory=dict)
     metadata: Dict = field(default_factory=dict)
-    # 进入非公开地点、加入频道的静态授予。它们跟位置图、频道表一样是这个世界
-    # 的静态结构：只在建世界时由内容注册表装入，没有任何事件能改它们，所以也
-    # 不在提交回滚快照里。关系、意愿、模型文本都没有通往这里的路（Articles
-    # VIII–IX）。没有授予就是拒绝。
+    # 进入非公开地点、加入频道的静态授予。只在建世界时由内容注册表（以及遗留
+    # 场景声明的访客身份）装入，没有任何事件能改它们。关系、意愿、模型文本都
+    # 没有通往这里的路（Articles VIII–IX）。没有授予就是拒绝。
+    #
+    # 不变量：任何时刻，一个角色所在的地点它都 may_enter，所在的频道它都
+    # may_join。place_character / join_channel 执行它，validate()（含存档加载）
+    # 校验它。
     #   location_grants: 角色 → {location_id: role}
     #   channel_grants:  角色 → {channel_id}
     location_grants: Dict[str, Dict[str, str]] = field(default_factory=dict)
@@ -216,6 +219,17 @@ class WorldState:
                         f"角色 '{character_id}' 的频道授予引用了未知的 channel_id: "
                         f"{channel_id}"
                     )
+        for character_id, location_id in self.character_locations.items():
+            if not self.may_enter(character_id, location_id):
+                raise WorldStateError(
+                    f"角色 '{character_id}' 位于 '{location_id}'，但没有进入它的授予"
+                )
+        for channel_id, members in self.channel_members.items():
+            for character_id in members:
+                if not self.may_join(character_id, channel_id):
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 在频道 '{channel_id}' 里，但不是它的成员"
+                    )
 
     # ── 时间 ────────────────────────────────────────────────────────────
     @property
@@ -239,6 +253,10 @@ class WorldState:
         self._require_character_id(character_id)
         if not self.locations.has(location_id):
             raise WorldStateError(f"未知的 location_id: {location_id}")
+        if not self.may_enter(character_id, location_id):
+            raise WorldStateError(
+                f"角色 '{character_id}' 没有进入 '{location_id}' 的授予"
+            )
         self.character_locations[character_id] = location_id
 
     def remove_character(self, character_id: str) -> None:
@@ -287,8 +305,8 @@ class WorldState:
         """这个角色是不是这个频道的成员（有没有资格加入，不是此刻在不在）。"""
         return channel_id in self.channel_grants.get(character_id, set())
 
-    def grant_location(self, character_id: str, location_id: str, role: str) -> None:
-        """建世界时装入一条进入授予。运行期没有任何事件会调用它。"""
+    def _grant_location(self, character_id: str, location_id: str, role: str) -> None:
+        """建世界时装入一条进入授予。**只给建世界的代码用**，运行期没有调用方。"""
         self._require_character_id(character_id)
         if not self.locations.has(location_id):
             raise WorldStateError(f"未知的 location_id: {location_id}")
@@ -296,8 +314,8 @@ class WorldState:
             raise WorldStateError("进入授予必须写明角色身份")
         self.location_grants.setdefault(character_id, {})[location_id] = role
 
-    def grant_channel(self, character_id: str, channel_id: str) -> None:
-        """建世界时装入一条频道成员资格。运行期没有任何事件会调用它。"""
+    def _grant_channel(self, character_id: str, channel_id: str) -> None:
+        """建世界时装入一条频道成员资格。**只给建世界的代码用**。"""
         self._require_character_id(character_id)
         if not self.channels.has(channel_id):
             raise WorldStateError(f"未知的 channel_id: {channel_id}")
@@ -308,6 +326,10 @@ class WorldState:
         self._require_character_id(character_id)
         if not self.channels.has(channel_id):
             raise WorldStateError(f"未知的 channel_id: {channel_id}")
+        if not self.may_join(character_id, channel_id):
+            raise WorldStateError(
+                f"角色 '{character_id}' 不是频道 '{channel_id}' 的成员"
+            )
         self.channel_members.setdefault(channel_id, set()).add(character_id)
 
     def leave_channel(self, character_id: str, channel_id: str) -> None:
@@ -404,6 +426,16 @@ class WorldState:
             "character_activities": dict(self.character_activities),
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
+            # 授予没有运行期写入口，但回滚快照照样覆盖它：一次在事务里误装的
+            # 授予必须跟着事务一起撤销，而不是因为"本来就不该变"而漏掉。
+            "location_grants": {
+                character_id: dict(grants)
+                for character_id, grants in self.location_grants.items()
+            },
+            "channel_grants": {
+                character_id: set(grants)
+                for character_id, grants in self.channel_grants.items()
+            },
         }
 
     def restore_mutable_state(self, snapshot: Dict) -> None:
@@ -418,6 +450,14 @@ class WorldState:
         self.character_activities = dict(snapshot["character_activities"])
         self.location_state = deepcopy(snapshot["location_state"])
         self.metadata = deepcopy(snapshot["metadata"])
+        self.location_grants = {
+            character_id: dict(grants)
+            for character_id, grants in snapshot["location_grants"].items()
+        }
+        self.channel_grants = {
+            character_id: set(grants)
+            for character_id, grants in snapshot["channel_grants"].items()
+        }
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:

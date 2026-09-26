@@ -104,35 +104,35 @@ class EntryRuleTests(unittest.TestCase):
         self.assertFalse(self.world.may_enter("mizuki", "tokyo"))
 
     def test_the_grant_role_must_match_the_declared_role(self):
-        self.world.grant_location("mizuki", "kamiyama_high", "staff")
+        self.world._grant_location("mizuki", "kamiyama_high", "staff")
         self.assertFalse(self.world.may_enter("mizuki", "kamiyama_high"))
-        self.world.grant_location("mizuki", "kamiyama_high", "student")
+        self.world._grant_location("mizuki", "kamiyama_high", "student")
         self.assertTrue(self.world.may_enter("mizuki", "kamiyama_high"))
 
     def test_a_grant_belongs_to_one_character(self):
-        self.world.grant_location("mizuki", "kamiyama_high", "student")
+        self.world._grant_location("mizuki", "kamiyama_high", "student")
         self.assertFalse(self.world.may_enter("ena", "kamiyama_high"))
 
     def test_a_grant_on_a_home_does_not_cover_its_rooms(self):
         # 授予逐个地点写，不沿 parent 继承：进得了家门不等于进得了每个房间。
-        self.world.grant_location("mizuki", "ena_home", "household")
+        self.world._grant_location("mizuki", "ena_home", "household")
         self.assertTrue(self.world.may_enter("mizuki", "ena_home"))
         self.assertFalse(self.world.may_enter("mizuki", "ena_home_studio"))
 
     def test_channel_membership_is_not_presence(self):
         self.assertFalse(self.world.may_join("mizuki", "nightcord"))
-        self.world.grant_channel("mizuki", "nightcord")
+        self.world._grant_channel("mizuki", "nightcord")
         self.assertTrue(self.world.may_join("mizuki", "nightcord"))
         self.assertFalse(self.world.is_in_channel("mizuki", "nightcord"))
         self.assertFalse(self.world.may_join("ena", "nightcord"))
 
     def test_grants_must_reference_real_places(self):
         with self.assertRaises(WorldStateError):
-            self.world.grant_location("mizuki", "atlantis", "student")
+            self.world._grant_location("mizuki", "atlantis", "student")
         with self.assertRaises(WorldStateError):
-            self.world.grant_channel("mizuki", "discord")
+            self.world._grant_channel("mizuki", "discord")
         with self.assertRaises(WorldStateError):
-            self.world.grant_location("mizuki", "kamiyama_high", "")
+            self.world._grant_location("mizuki", "kamiyama_high", "")
 
 
 # ── 2. 提交边界 ─────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ class CommitBoundaryTests(unittest.TestCase):
         self.assertEqual(len(self.store), 0)
 
     def test_a_granted_move_commits(self):
-        self.world.grant_location("mizuki", "kamiyama_high", "student")
+        self.world._grant_location("mizuki", "kamiyama_high", "student")
         commit_event(self.world, self.store, _move("mizuki", "kamiyama_high"))
         self.assertEqual(self.world.location_of("mizuki"), "kamiyama_high")
 
@@ -161,12 +161,12 @@ class CommitBoundaryTests(unittest.TestCase):
         self.assertFalse(self.world.is_in_channel("mizuki", "nightcord"))
 
     def test_a_member_can_join(self):
-        self.world.grant_channel("mizuki", "nightcord")
+        self.world._grant_channel("mizuki", "nightcord")
         commit_event(self.world, self.store, _join("mizuki"))
         self.assertTrue(self.world.is_in_channel("mizuki", "nightcord"))
 
-    def test_leaving_needs_no_grant(self):
-        # 离开永远可以：把人困在频道里不是授权该管的事。
+    def test_a_member_can_leave(self):
+        self.world._grant_channel("mizuki", "nightcord")
         self.world.join_channel("mizuki", "nightcord")
         commit_event(
             self.world,
@@ -183,8 +183,8 @@ class CommitBoundaryTests(unittest.TestCase):
         self.assertFalse(self.world.is_in_channel("mizuki", "nightcord"))
 
     def test_no_event_changes_the_grants(self):
-        self.world.grant_location("mizuki", "kamiyama_high", "student")
-        self.world.grant_channel("mizuki", "nightcord")
+        self.world._grant_location("mizuki", "kamiyama_high", "student")
+        self.world._grant_channel("mizuki", "nightcord")
         before = (
             self.world.to_dict()["location_grants"],
             self.world.to_dict()["channel_grants"],
@@ -209,20 +209,20 @@ class AgencyUsesTheSameRuleTests(unittest.TestCase):
         legal = self._legal(world, "mizuki")
         self.assertIn((ActionId.MOVE_TO, "city_streets"), legal)
         self.assertNotIn((ActionId.MOVE_TO, "kamiyama_high"), legal)
-        world.grant_location("mizuki", "kamiyama_high", "student")
+        world._grant_location("mizuki", "kamiyama_high", "student")
         self.assertIn((ActionId.MOVE_TO, "kamiyama_high"), self._legal(world, "mizuki"))
 
     def test_a_non_member_has_no_join_action(self):
         world = _world()
         self.assertNotIn((ActionId.JOIN_CHANNEL, "nightcord"), self._legal(world, "ena"))
-        world.grant_channel("ena", "nightcord")
+        world._grant_channel("ena", "nightcord")
         self.assertIn((ActionId.JOIN_CHANNEL, "nightcord"), self._legal(world, "ena"))
 
     def test_every_legal_move_or_join_actually_commits(self):
         # 枚举出来的每一条都必须过得了提交边界，反过来也一样。
         world = _world()
-        world.grant_location("mizuki", "kamiyama_high", "student")
-        world.grant_channel("mizuki", "nightcord")
+        world._grant_location("mizuki", "kamiyama_high", "student")
+        world._grant_channel("mizuki", "nightcord")
         for action_id, target in sorted(self._legal(world, "mizuki")):
             if action_id is ActionId.MOVE_TO:
                 event = _move("mizuki", target, f"m-{target}")
@@ -371,14 +371,51 @@ class PackGrantTests(unittest.TestCase):
                 self.assertIsNone(self.registry.grants(character_id))
 
     def test_a_new_world_carries_exactly_the_content_grants(self):
+        # gate 场景在公开地点、不带频道：世界里只有内容包声明的授予。
         world = self.registry.new_world_state(
-            self.registry.scene("nightcord"), ["mizuki", "ena", "kanade"]
+            self.registry.scene("gate"), ["mizuki", "ena", "kanade"]
         )
+        self.assertEqual(world.metadata["origin"]["scene_grants"], [])
         self.assertTrue(world.may_enter("mizuki", "clothing_store_floor"))
         self.assertFalse(world.may_enter("ena", "clothing_store_floor"))
         self.assertFalse(world.may_enter("ena", "mizuki_home_room"))
         self.assertTrue(world.may_join("ena", "nightcord"))
         self.assertFalse(world.may_join("kanade", "nightcord"))
+
+
+class PresenceInvariantTests(unittest.TestCase):
+    """EC-1/EC-2：人在哪里、在哪个频道，任何时刻都必须有授予支撑。"""
+
+    def test_placing_or_joining_without_a_grant_is_refused(self):
+        world = _world()
+        with self.assertRaises(WorldStateError):
+            world.place_character("mizuki", "kamiyama_high")
+        with self.assertRaises(WorldStateError):
+            world.join_channel("mizuki", "nightcord")
+        self.assertEqual(world.location_of("mizuki"), "kamiyama_high_gate")
+        self.assertFalse(world.is_in_channel("mizuki", "nightcord"))
+
+    def test_an_archive_with_ungranted_presence_is_refused(self):
+        registry = build_content_registry()
+        world = registry.new_world_state(registry.scene("gate"), ["mizuki", "ena"])
+        for mutate in (
+            lambda p: p["character_locations"].update(ena="mizuki_home_room"),
+            lambda p: p["channel_members"].setdefault("nightcord", []).append("mafuyu"),
+            lambda p: p["location_grants"].pop("mizuki")
+            and p["character_locations"].update(mizuki="mizuki_home_room"),
+        ):
+            payload = world.to_dict()
+            mutate(payload)
+            with self.subTest(payload=payload["character_locations"]):
+                with self.assertRaises(WorldStateError):
+                    WorldState.from_dict(payload)
+
+    def test_a_grant_installed_inside_a_failed_transaction_rolls_back(self):
+        world = _world()
+        snapshot = world.snapshot_mutable_state()
+        world._grant_channel("ena", "nightcord")
+        world.restore_mutable_state(snapshot)
+        self.assertFalse(world.may_join("ena", "nightcord"))
 
 
 class GrantPersistenceTests(unittest.TestCase):

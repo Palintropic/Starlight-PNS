@@ -90,11 +90,11 @@ def _world(clock=CLOCK, *, join_nightcord=("mizuki",)):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     world.place_character("mizuki", "mizuki_home_room")
     world.place_character("ena", "ena_home_studio")
     for character_id in join_nightcord:
         world.join_channel(character_id, "nightcord")
-    grant_everything(world)
     return world
 
 
@@ -589,6 +589,7 @@ class PolicyTests(unittest.TestCase):
             locations=build_default_location_graph(),
             channels=ChannelRegistry(),
         )
+        grant_everything(world)
         world.place_character("mizuki", "tokyo")
         state, scheduler, engine = _rig(world=world)
         context = engine.context_for(_due(scheduler))

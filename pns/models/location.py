@@ -98,14 +98,25 @@ def access_admits(access: Dict, role: Optional[str]) -> bool:
 
     这是进入规则的唯一实现：世界状态（提交边界、Agency 前置条件）和内容快照
     （作息表校验）都调它。只有 `public is True` 对所有人开放；没写 access 的
-    地点不算公开。地点声明了 role 时，授予的身份必须一致。
+    地点不算公开。地点声明了 role 时，授予的身份必须是它接受的之一 —— role 可以
+    是一个身份，也可以是一组（例如家接受 household 或 guest）。
     """
     if access.get("public") is True:
         return True
     if role is None:
         return False
+    accepted = accepted_roles(access)
+    return accepted is None or role in accepted
+
+
+def accepted_roles(access: Dict) -> Optional[Tuple[str, ...]]:
+    """地点接受的身份；None 表示不限身份（任何一条针对它的授予都行）。"""
     required = access.get("role")
-    return required is None or role == required
+    if required is None:
+        return None
+    if isinstance(required, str):
+        return (required,)
+    return tuple(required)
 
 
 class LocationGraphError(ValueError):

@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime
 
+from grants_support import grant_everything
 from pns.models.event import Event, EventScope, EventType
 from pns.models.session import SessionState, SessionStateError, Turn
 from pns.models.world_state import WorldState
@@ -187,6 +188,7 @@ class ActivityHistoryRestoreTests(unittest.TestCase):
             clock=datetime(2026, 8, 21, 2, 0),
             locations=build_default_location_graph(),
         )
+        grant_everything(world)
         world.place_character("mizuki", "mizuki_home_room")
         state = SessionState(
             session_id="s1", scene="nightcord", characters=["mizuki"]

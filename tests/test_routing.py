@@ -129,20 +129,14 @@ class EntryRulesTests(unittest.TestCase):
             )
 
         self.assertIsNone(route())
-        world.grant_location("mizuki", "kamiyama_high", "student")
+        world._grant_location("mizuki", "kamiyama_high", "student")
         self.assertEqual(route().total_minutes, 3)
 
-    def test_leaving_a_private_home_needs_no_grant_for_it(self):
-        # 起点不问：人在别人家里（比如被操作员放进去）也走得出来。
-        world = WorldState(
-            clock=datetime(2026, 9, 26, 11, 0),
-            locations=build_default_location_graph(),
-            channels=build_default_channel_registry(),
-        )
-        world.place_character("mizuki", "ena_home")
+    def test_an_origin_the_character_could_not_enter_does_not_block_leaving(self):
+        # 起点不问：即使谓词对起点说"不能进"，也照样走得出去。
         route = plan_route(
-            world.locations,
-            lambda l: world.may_enter("mizuki", l),
+            build_default_location_graph(),
+            lambda l: l != "ena_home",
             "ena_home",
             "city_streets",
         )

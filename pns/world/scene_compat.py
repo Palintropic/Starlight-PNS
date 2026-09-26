@@ -13,8 +13,9 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 from pns.models.channel import ChannelRegistry
 from pns.models.location import LocationGraph
-from pns.models.world_state import ActivityKind, WorldState
+from pns.models.world_state import ActivityKind, WorldState, WorldStateError
 from pns.world.channels import build_default_channel_registry
+from pns.world.grants import CharacterGrants, install_grants
 from pns.world.locations import build_default_location_graph
 
 
@@ -31,6 +32,10 @@ class SceneWorldMapping:
     channel_ids: Tuple[str, ...] = ()
     # 只写场景明确成立的当前活动。没有证据就保持 unspecified，绝不从职业猜。
     character_activities: Mapping[str, ActivityKind] = field(default_factory=dict)
+    # 场景把角色放进这些地点时，没有内容授予的人以访客（guest）身份在场。
+    # 这是场景作者显式声明的初始条件，不是从关系推出来的权限；地点本身也必须
+    # 接受 guest 身份，否则建世界失败。
+    guest_locations: Tuple[str, ...] = ()
 
 
 SCENE_WORLD_MAP: Dict[str, SceneWorldMapping] = {
@@ -39,9 +44,11 @@ SCENE_WORLD_MAP: Dict[str, SceneWorldMapping] = {
     ),
     "ena_room": SceneWorldMapping(
         default_location_id="ena_home_studio",
+        guest_locations=("ena_home_studio",),
     ),
     "clothes_shop": SceneWorldMapping(
         default_location_id="clothing_store_floor",
+        guest_locations=("clothing_store_floor",),
     ),
     # 遗留 scene 把 "各自房间·Nightcord 语音频道" 挤进一个 location 字符串里。
     # 拆开之后：每个人待在自己的物理房间，同时都在 nightcord 频道上。
@@ -56,6 +63,7 @@ SCENE_WORLD_MAP: Dict[str, SceneWorldMapping] = {
             "ena": ActivityKind.ONLINE_CHATTING,
             "mizuki": ActivityKind.ONLINE_CHATTING,
         },
+        guest_locations=("private_residence",),
     ),
 }
 
@@ -93,8 +101,14 @@ def build_initial_world_state(
     start_date: Optional[date] = None,
     locations: Optional[LocationGraph] = None,
     channels: Optional[ChannelRegistry] = None,
+    grants: Optional[Mapping[str, CharacterGrants]] = None,
 ) -> WorldState:
-    """把一个遗留 scene 投影成会话的初始 WorldState。"""
+    """把一个遗留 scene 投影成会话的初始 WorldState。
+
+    顺序是刻意的：先装内容授予，再装场景声明的访客身份与频道成员资格，最后才
+    放人。放人走 WorldState 的授权检查，所以场景没声明、内容也没授予的在场
+    会让建世界失败，而不是造出一个"人在那里却无权在那里"的世界。
+    """
     scene_id = scene.get("id") if isinstance(scene, Mapping) else None
     if not scene_id:
         raise SceneMappingError("遗留场景缺少 id，无法建立初始世界状态")
@@ -123,14 +137,43 @@ def build_initial_world_state(
 
     character_ids = list(character_ids)
     for character_id in character_ids:
+        content = (grants or {}).get(character_id)
+        if content is not None:
+            install_grants(world, content)
+
+    scene_grants = []
+    placements = {}
+    for character_id in character_ids:
         location_id = mapping.character_locations.get(
             character_id, mapping.default_location_id
         )
-        world.place_character(character_id, location_id)
-
+        placements[character_id] = location_id
+        if (
+            not world.may_enter(character_id, location_id)
+            and location_id in mapping.guest_locations
+        ):
+            world._grant_location(character_id, location_id, "guest")
+            scene_grants.append(
+                {"character_id": character_id, "location_id": location_id, "role": "guest"}
+            )
     for channel_id in mapping.channel_ids:
         for character_id in character_ids:
-            world.join_channel(character_id, channel_id)
+            if not world.may_join(character_id, channel_id):
+                world._grant_channel(character_id, channel_id)
+                scene_grants.append(
+                    {"character_id": character_id, "channel_id": channel_id}
+                )
+    # 哪些授予是场景给的，留在来源信息里：它们不是内容包声明的身份。
+    world.metadata["origin"]["scene_grants"] = scene_grants
+
+    try:
+        for character_id, location_id in placements.items():
+            world.place_character(character_id, location_id)
+        for channel_id in mapping.channel_ids:
+            for character_id in character_ids:
+                world.join_channel(character_id, channel_id)
+    except WorldStateError as e:
+        raise SceneMappingError(f"场景 '{scene_id}' 的初始安排没有授予支撑：{e}") from e
 
     for character_id in character_ids:
         activity = mapping.character_activities.get(character_id)

@@ -17,7 +17,7 @@
 from dataclasses import dataclass
 from typing import FrozenSet, Mapping, Optional, Sequence, Tuple
 
-from pns.models.location import access_admits
+from pns.models.location import access_admits, accepted_roles
 
 
 class GrantError(ValueError):
@@ -85,10 +85,11 @@ def parse_access_grants(
         if access.get("public") is True:
             # 公开地点不需要授予；写了多半是地点 id 写错了。
             raise GrantError(f"{label}：'{location_id}' 是公开地点，不需要授予")
-        required = access.get("role")
-        if required is not None and role != required:
+        accepted = accepted_roles(access)
+        if accepted is not None and role not in accepted:
             raise GrantError(
-                f"{label}：'{location_id}' 要求身份 {required!r}，授予写的是 {role!r}"
+                f"{label}：'{location_id}' 接受的身份是 {'、'.join(accepted)}，"
+                f"授予写的是 {role!r}"
             )
         if location_id in location_roles:
             raise GrantError(f"{label}：'{location_id}' 重复授予")
@@ -142,9 +143,9 @@ def require_rhythm_is_enterable(rhythm, grants, locations) -> None:
 def install_grants(world, grants: CharacterGrants) -> None:
     """建世界时把一个角色的授予装进 WorldState。"""
     for location_id, role in grants.locations:
-        world.grant_location(grants.character_id, location_id, role)
+        world._grant_location(grants.character_id, location_id, role)
     for channel_id in sorted(grants.channels):
-        world.grant_channel(grants.character_id, channel_id)
+        world._grant_channel(grants.character_id, channel_id)
 
 
 __all__ = [

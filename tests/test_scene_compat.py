@@ -7,6 +7,7 @@
 import unittest
 from datetime import date, datetime
 
+from pns.runtime.content_registry import build_content_registry
 from pns.world.context import render_session_location, render_world_context
 from pns.models.world_state import ActivityKind
 from pns.world.scene_compat import (
@@ -20,9 +21,17 @@ from pns.world.scenes import SCENES
 _DAY = date(2026, 8, 20)
 
 
+# 真实角色包里声明的授予：场景投影必须先装它们才能把人放进自己家。
+_PACK_GRANTS = {
+    character_id: content.grants
+    for character_id, content in build_content_registry().characters.items()
+    if content.grants is not None
+}
+
+
 def _build(scene_id, characters=("mizuki", "ena")):
     return build_initial_world_state(
-        SCENES[scene_id], list(characters), start_date=_DAY
+        SCENES[scene_id], list(characters), start_date=_DAY, grants=_PACK_GRANTS
     )
 
 
@@ -95,7 +104,10 @@ class SceneInitializationTests(unittest.TestCase):
 
     def test_start_date_is_injectable_and_the_world_carries_a_real_date(self):
         world = build_initial_world_state(
-            SCENES["nightcord"], ["mizuki", "ena"], start_date=date(2027, 3, 1)
+            SCENES["nightcord"],
+            ["mizuki", "ena"],
+            start_date=date(2027, 3, 1),
+            grants=_PACK_GRANTS,
         )
         self.assertEqual(world.clock, datetime(2027, 3, 1, 2, 0))
         self.assertEqual(world.date, "2027-03-01")
@@ -161,6 +173,51 @@ class ScenePromptProjectionTests(unittest.TestCase):
         self.assertIn("深夜 02:30", context)
         self.assertIn("瑞希的房间", context)
         self.assertNotIn(SCENES["gate"]["location"], context)
+
+
+
+class SceneGrantTests(unittest.TestCase):
+    """遗留场景的初始安排必须有授予支撑：内容授予，或场景显式声明的访客身份。"""
+
+    def test_a_visitor_is_a_declared_guest_not_a_household_member(self):
+        world = _build("ena_room")
+        self.assertEqual(world.location_of("mizuki"), "ena_home_studio")
+        self.assertEqual(world.location_grants["mizuki"]["ena_home_studio"], "guest")
+        self.assertEqual(world.location_grants["ena"]["ena_home_studio"], "household")
+        self.assertIn(
+            {"character_id": "mizuki", "location_id": "ena_home_studio", "role": "guest"},
+            world.metadata["origin"]["scene_grants"],
+        )
+
+    def test_a_guest_of_one_room_is_not_a_guest_elsewhere(self):
+        world = _build("ena_room")
+        self.assertFalse(world.may_enter("mizuki", "ena_home"))
+
+    def test_scene_channel_membership_is_recorded_as_scene_given(self):
+        world = _build("nightcord", characters=("mizuki", "kanade"))
+        self.assertTrue(world.may_join("kanade", "nightcord"))
+        scene_grants = world.metadata["origin"]["scene_grants"]
+        self.assertIn({"character_id": "kanade", "channel_id": "nightcord"}, scene_grants)
+        # 瑞希的成员资格来自内容包，不是场景给的。
+        self.assertNotIn({"character_id": "mizuki", "channel_id": "nightcord"}, scene_grants)
+
+    def test_without_content_grants_a_resident_cannot_be_placed_at_home(self):
+        # 瑞希的房间不是 nightcord 场景声明的访客地点；没有内容授予就放不进去。
+        with self.assertRaises(SceneMappingError):
+            build_initial_world_state(SCENES["nightcord"], ["mizuki"], start_date=_DAY)
+
+    def test_every_shipped_scene_bootstraps_with_real_pack_grants(self):
+        for scene_id in SCENES:
+            for characters in (("mizuki", "ena"), ("mizuki", "ena", "kanade", "mafuyu")):
+                with self.subTest(scene=scene_id, characters=characters):
+                    world = _build(scene_id, characters=characters)
+                    restored = type(world).from_dict(world.to_dict())
+                    for character_id in characters:
+                        self.assertTrue(
+                            restored.may_enter(
+                                character_id, restored.location_of(character_id)
+                            )
+                        )
 
 
 if __name__ == "__main__":

@@ -41,7 +41,6 @@ from pns.world.locations import build_default_location_graph
 from pns.world.grants import (
     CharacterGrants,
     GrantError,
-    install_grants,
     parse_access_grants,
     require_rhythm_is_enterable,
 )
@@ -445,18 +444,21 @@ class ContentRegistry:
         没有任何反向通道能让重载去改一个已经存在的 WorldState。
         """
         character_ids = list(character_ids)
-        world = build_initial_world_state(
+        # 授予是这个世界的静态结构，跟位置图一样只在建世界时装入一次；它必须在
+        # 放人之前装好，否则放人那一步的授权检查会拒绝合法的初始安排。
+        grants = {
+            character_id: self.characters[character_id].grants
+            for character_id in character_ids
+            if character_id in self.characters
+            and self.characters[character_id].grants is not None
+        }
+        return build_initial_world_state(
             scene,
             character_ids,
             locations=self.new_location_graph(),
             channels=self.new_channel_registry(),
+            grants=grants,
         )
-        # 授予是这个世界的静态结构，跟位置图一样只在建世界时装入一次。
-        for character_id in character_ids:
-            content = self.characters.get(character_id)
-            if content is not None and content.grants is not None:
-                install_grants(world, content.grants)
-        return world
 
     def to_dict(self) -> Dict:
         return {
