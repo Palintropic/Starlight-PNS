@@ -12,10 +12,10 @@
   flex: 0 0 auto;
   display: flex;
   min-height: 40px;
-  padding: 0 calc(var(--page-margin) / 2);
+  padding: 0 calc(var(--page-margin) - var(--header-item-margin) / 2);
 }
 .world-subtabs button {
-  padding: 0 calc(var(--page-margin) / 2);
+  padding: 0 calc(var(--header-item-margin) / 2);
   border: 0;
   border-radius: 0;
   background: transparent;
