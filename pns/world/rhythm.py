@@ -17,11 +17,15 @@
 #      两样都在构建内容快照时校验，一条不过整份内容作废。
 #   3. **段里没有散文。** 没有 note、没有 description、没有 label —— 那些迟早
 #      会被某一版提示词渲染出来，而这张表的每一个字段都是要变成世界事实的。
-#   4. **它是纯内容。** 这个模块不 import 运行时、不 import 会话、不读磁盘，
+#   4. **每一段都说清楚出处。** `source` 只有 official / inferred 两档，YAML 里
+#      必须显式写：没有官方原文支撑的精确时刻就是 inferred。它是给官方资料更新门
+#      和审计看的系统侧信息，跟活动一样不进角色提示词。
+#   5. **它是纯内容。** 这个模块不 import 运行时、不 import 会话、不读磁盘，
 #      import 它没有任何副作用。
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from enum import Enum
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from pns.models.world_state import ActivityKind
@@ -35,6 +39,17 @@ MAX_SEGMENTS = 48
 
 class RhythmError(ValueError):
     """这份作息表本身不合法（时间越界、重复、未知活动/地点、多余字段等）。"""
+
+
+class RhythmSource(str, Enum):
+    """一段作息的出处。
+
+    official：官方资料或能定位到原文的游戏内文本直接给出这一段（含时刻）。
+    inferred：官方只给出粗粒度描述，精确时刻或安排是内容作者推断的。
+    """
+
+    OFFICIAL = "official"
+    INFERRED = "inferred"
 
 
 def _require_minute(value, label: str) -> int:
@@ -88,10 +103,19 @@ class RhythmSegment:
     at: int
     activity: ActivityKind
     location_id: Optional[str] = None
+    # 代码里直接构造时缺省为 inferred：缺省值绝不能替作者声称"这是官方的"。
+    # YAML 路径不走这个缺省，必须显式写（见 parse_daily_rhythm）。
+    source: RhythmSource = RhythmSource.INFERRED
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
         set_(self, "at", _require_minute(self.at, "at"))
+        try:
+            set_(self, "source", RhythmSource(self.source))
+        except ValueError:
+            raise RhythmError(
+                f"未知的作息出处: {self.source!r}（只接受 official、inferred）"
+            ) from None
         try:
             set_(self, "activity", ActivityKind(self.activity))
         except ValueError:
@@ -120,6 +144,7 @@ class RhythmSegment:
             "at": format_day_minute(self.at),
             "activity": self.activity.value,
             "location_id": self.location_id,
+            "source": self.source.value,
         }
 
 
@@ -225,7 +250,7 @@ class DailyRhythm:
 
 # 作息表条目里允许出现的键。白名单 —— 多写一个键就是拒绝，因为多出来的那个
 # 键最可能是一句散文，而这张表的每一项都要变成世界事实。
-_SEGMENT_KEYS = frozenset({"at", "activity", "location_id"})
+_SEGMENT_KEYS = frozenset({"at", "activity", "location_id", "source"})
 
 
 def parse_daily_rhythm(
@@ -262,9 +287,12 @@ def parse_daily_rhythm(
                 f"角色 '{character_id}' 的 daily_rhythm 第 {index + 1} 项有多余字段："
                 f"{'、'.join(unknown)}（只接受 {'、'.join(sorted(_SEGMENT_KEYS))}）"
             )
-        if "at" not in entry or "activity" not in entry:
+        missing = [key for key in ("at", "activity", "source") if key not in entry]
+        if missing:
+            # source 也是必填：作者不写出处，就等于让缺省值替他声明一次。
             raise RhythmError(
-                f"角色 '{character_id}' 的 daily_rhythm 第 {index + 1} 项缺少 at 或 activity"
+                f"角色 '{character_id}' 的 daily_rhythm 第 {index + 1} 项缺少 "
+                f"{'、'.join(missing)}"
             )
         location_id = entry.get("location_id")
         if location_id is not None and locations is not None:
@@ -280,6 +308,7 @@ def parse_daily_rhythm(
                 ),
                 activity=entry["activity"],
                 location_id=location_id,
+                source=entry["source"],
             )
         )
     return DailyRhythm(character_id=character_id, segments=tuple(segments))
@@ -291,6 +320,7 @@ __all__ = [
     "DailyRhythm",
     "RhythmError",
     "RhythmSegment",
+    "RhythmSource",
     "format_day_minute",
     "parse_daily_rhythm",
     "parse_day_minute",

@@ -37,6 +37,7 @@ from pns.world.rhythm import (
     DailyRhythm,
     RhythmError,
     RhythmSegment,
+    RhythmSource,
     parse_daily_rhythm,
     parse_day_minute,
 )
@@ -155,14 +156,22 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
 
     def test_unknown_location_is_rejected(self):
         self._reject(
-            [{"at": "08:00", "activity": "studying", "location_id": "atlantis"}],
+            [
+                {
+                    "at": "08:00",
+                    "activity": "studying",
+                    "location_id": "atlantis",
+                    "source": "inferred",
+                }
+            ],
             expect="未知的 location_id",
         )
 
     def test_unspecified_is_not_a_segment(self):
         # 一段作息是来声明事实的；声明"没有事实"跟不写这一段是同一个意思。
         self._reject(
-            [{"at": "08:00", "activity": "unspecified"}], expect="unspecified"
+            [{"at": "08:00", "activity": "unspecified", "source": "inferred"}],
+            expect="unspecified",
         )
 
     def test_free_text_cannot_ride_along(self):
@@ -181,8 +190,8 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
     def test_two_segments_at_the_same_minute_are_rejected(self):
         self._reject(
             [
-                {"at": "08:00", "activity": "studying"},
-                {"at": "08:00", "activity": "drawing"},
+                {"at": "08:00", "activity": "studying", "source": "inferred"},
+                {"at": "08:00", "activity": "drawing", "source": "inferred"},
             ],
             expect="冲突",
         )
@@ -190,11 +199,53 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
     def test_identical_neighbours_are_rejected(self):
         self._reject(
             [
-                {"at": "08:00", "activity": "studying", "location_id": "kamiyama_high"},
-                {"at": "12:00", "activity": "studying", "location_id": "kamiyama_high"},
+                {
+                    "at": "08:00",
+                    "activity": "studying",
+                    "location_id": "kamiyama_high",
+                    "source": "inferred",
+                },
+                {
+                    "at": "12:00",
+                    "activity": "studying",
+                    "location_id": "kamiyama_high",
+                    "source": "official",
+                },
             ],
             expect="完全相同",
         )
+
+    def test_source_is_required(self):
+        # 不写出处就等于让缺省值替作者声明一次，所以 YAML 路径上它是必填。
+        self._reject([{"at": "08:00", "activity": "studying"}], expect="source")
+
+    def test_unknown_source_is_rejected(self):
+        for bad in ("canon", "OFFICIAL", "", None, True, ["official"]):
+            with self.subTest(source=bad):
+                self._reject(
+                    [{"at": "08:00", "activity": "studying", "source": bad}],
+                    expect="出处",
+                )
+
+    def test_source_is_carried_on_the_segment(self):
+        rhythm = parse_daily_rhythm(
+            [
+                {"at": "01:00", "activity": "online_chatting", "source": "official"},
+                {"at": "04:00", "activity": "resting", "source": "inferred"},
+            ],
+            character_id="mizuki",
+            locations=self.locations,
+        )
+        self.assertEqual(
+            [segment.source for segment in rhythm.segments],
+            [RhythmSource.OFFICIAL, RhythmSource.INFERRED],
+        )
+        self.assertEqual(rhythm.segments[0].to_dict()["source"], "official")
+
+    def test_a_directly_built_segment_never_defaults_to_official(self):
+        # 缺省值只能往保守那边偏：代码里忘了传，也不会被当成官方出处。
+        segment = RhythmSegment(at=480, activity="studying")
+        self.assertIs(segment.source, RhythmSource.INFERRED)
 
     def test_malformed_times_are_rejected(self):
         for bad in ("傍晚 17:30", "8:0:0", "25:00", "08-00", -1, 24 * 60, True):
@@ -342,6 +393,8 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
         self.assertEqual(activity_event.payload, {"activity": "studying"})
         self.assertEqual(activity_event.provenance["kind"], "daily_rhythm")
         self.assertEqual(activity_event.provenance["segment_at"], "08:00")
+        # 出处跟着这一段进审计记录：官方资料更新门要能区分推断出来的变更。
+        self.assertEqual(activity_event.provenance["segment_source"], "inferred")
 
     def test_the_world_stays_restorable_after_a_transition(self):
         state, _scheduler, runtime = _rig()

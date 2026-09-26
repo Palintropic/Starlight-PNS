@@ -199,6 +199,7 @@ class RhythmDirector:
         provenance = {
             "kind": "daily_rhythm",
             "segment_at": format_day_minute(segment.at),
+            "segment_source": segment.source.value,
             "segment_started_at": started_at.isoformat(),
         }
         if correlation_id is not None:

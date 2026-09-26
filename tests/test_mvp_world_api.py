@@ -197,7 +197,7 @@ class DailyRhythmTests(WorldApiTestCase):
 
     这里刻意不构造任何测试专用的作息表 —— 用的就是角色包里那两份。世界从
     遗留 nightcord fixture 起步（深夜 02:00，两个人都在 Nightcord 上），
-    时间推过 02:30 之后，两个人各自回到自己作息表上的那一段。
+    时间推过 04:00 之后，两个人各自回到自己作息表上的那一段。
     """
 
     def _activity(self, character_id, world_id="nightcord"):
@@ -212,11 +212,11 @@ class DailyRhythmTests(WorldApiTestCase):
         self.assertEqual(self._activity("ena"), "online_chatting")
 
         self.start()
-        # 02:30 之后：瑞希去睡了，绘名接着画。两条都来自角色包，不是这里写的。
+        # 04:00 之后：瑞希去睡了，绘名接着画。两条都来自角色包，不是这里写的。
         wait_for(
             lambda: self._activity("mizuki") == "resting"
             and self._activity("ena") == "drawing",
-            what="作息表把世界推过 02:30 那道边界",
+            what="作息表把世界推过 04:00 那道边界",
         )
         self.stop()
 
@@ -237,7 +237,7 @@ class DailyRhythmTests(WorldApiTestCase):
 
     def test_an_operator_change_is_not_overwritten_inside_the_segment(self):
         self.create()
-        # 02:00 属于"深夜 Nightcord"那一段，它一直管到 02:30。
+        # 02:00 属于"25 時 Nightcord"那一段，它一直管到 04:00。
         response = self.client.post(
             "/api/persistent-worlds/nightcord/activity",
             json={"character_id": "mizuki", "activity": "editing_video"},
@@ -250,7 +250,7 @@ class DailyRhythmTests(WorldApiTestCase):
         runtime.advance(5)  # 02:10
         self.assertEqual(self._activity("mizuki"), "editing_video")
 
-        runtime.advance(25)  # 02:35，下一段开始，作息表重新接手
+        runtime.advance(115)  # 04:05，下一段开始，作息表重新接手
         self.assertEqual(self._activity("mizuki"), "resting")
 
 
