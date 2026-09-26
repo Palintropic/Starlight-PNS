@@ -39,6 +39,7 @@ from pns.models.agency import (
     AgencyRecord,
 )
 from pns.models.activation_outbox import ActivationOutboxError
+from pns.models.cognition import CognitionCauseError, normalize_causes
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.agency.context import AgencyContext, build_agency_context
@@ -379,6 +380,39 @@ class AgencyEngine:
                 "failed": [precondition.value for precondition in failed],
             }
         return None
+
+    # ── 认知不可用 ──────────────────────────────────────────────────────
+    def close_unavailable(
+        self, due: ActivationDue, causes, *, interval: int
+    ) -> AgencyRecord:
+        """这条到期资格到来时认知不可用：不问策略、不建上下文，直接收尾。
+
+        世界照常发生了，这一刻的决定没有发生。它走跟其它结论完全相同的提交
+        路径（审计记录 + 交接确认同一个事务），所以"这条到期处理过没有"仍然
+        只有一个答案；它不产出事件、观察或记忆。
+        """
+        self._require_handoff(due)
+        character_id = self._require_character(due)
+        try:
+            normalized = normalize_causes(causes)
+        except CognitionCauseError as e:
+            raise AgencyEngineError(str(e)) from None
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0:
+            raise AgencyEngineError("interval 必须是非负整数（认知时间线区间序号）")
+        return self.commit(
+            ProposalPlan(
+                due=due,
+                character_id=character_id,
+                policy="",
+                proposed_at=self.clock,
+                verdict=AgencyOutcome.REJECTED_UNAVAILABLE,
+                detail={
+                    "reason": "cognition_unavailable",
+                    "causes": [cause.value for cause in normalized],
+                    "interval": interval,
+                },
+            )
+        )
 
     # ── 提交（事务） ────────────────────────────────────────────────────
     def commit(self, plan: ProposalPlan) -> AgencyRecord:
