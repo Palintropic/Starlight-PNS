@@ -183,7 +183,7 @@ def commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
         apply_event(world, event)
         sequence = store._append(event)
     except BaseException:
-        world.restore_mutable_state(snapshot)
+        world._restore_mutable_state(snapshot)
         store._rollback_to(length)
         raise
 

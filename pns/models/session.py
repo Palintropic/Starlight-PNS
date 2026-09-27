@@ -11,8 +11,10 @@ from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
 from pns.models.cognition import (
+    CognitionCause,
     CognitionTimeline,
     CognitionTimelineError,
+    TransitionKind,
     consumes_allowance,
     unavailable_causes,
 )
@@ -406,6 +408,11 @@ class SessionState:
             raise RuntimeError("这份 WorldState 已经挂在另一个会话上")
         # 世界状态的每个写方法都先问这份会话还能不能写（fence / 只读快照块）。
         world_state._write_guard = self.require_writable
+        # 位置图与频道表是随存档走的静态结构，会话期间不变（运行期没有任何
+        # 入口改它们，回滚快照也不覆盖它们）。挂上会话就冻结，让它们各自的
+        # add() 也不再是一条绕过栅栏的写入口。
+        world_state.locations._freeze()
+        world_state.channels._freeze()
         self.world_state = world_state
 
     def attach_scheduler(self, scheduler) -> None:
@@ -657,7 +664,7 @@ class SessionState:
             self.cognition = cognition
             self.rhythm_dispositions = dispositions
             if world_snapshot is not None:
-                world.restore_mutable_state(world_snapshot)
+                world._restore_mutable_state(world_snapshot)
             self.events._rollback_to(events_length)
             self.observations._rollback_to(observations_length)
             self.exposures._rollback_to(exposures_length)
@@ -1149,6 +1156,40 @@ def _validate_cognition(state: "SessionState") -> None:
                 raise SessionStateError(
                     f"Agency 记录 '{record.due_id}' 超出了单次额度 {interval.run_allowance}"
                 )
+            if (
+                used == interval.run_allowance
+                and CognitionCause.RUN_BUDGET_EXHAUSTED not in interval.causes
+                and not _opens_exhaustion(timeline, interval, position + 1)
+            ):
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 用完了单次额度，紧随其后却没有"
+                    f"额度耗尽的区间"
+                )
+    # 额度耗尽区间只能开在"用完最后一次额度的那条记录"之后，不能挪早也不能挪晚。
+    for interval in timeline.intervals[1:]:
+        if interval.opened_by is not TransitionKind.RUN_BUDGET_EXHAUSTED:
+            continue
+        previous = timeline.intervals[interval.index - 1]
+        spent = [
+            consumes_allowance(record.outcome)
+            for record in records[previous.allowance_since_log : interval.from_log]
+        ]
+        if sum(spent) != previous.run_allowance or not spent or not spent[-1]:
+            raise SessionStateError(
+                f"认知区间 {interval.index} 声称额度耗尽，但 Agency 日志在那里并没有"
+                f"恰好用完额度 {previous.run_allowance}"
+            )
+
+
+def _opens_exhaustion(timeline, interval, log_position: int) -> bool:
+    """interval 之后紧接着的是不是一个从 log_position 开始的额度耗尽区间。"""
+    following = timeline.intervals[interval.index + 1 : interval.index + 2]
+    return bool(following) and (
+        following[0].opened_by is TransitionKind.RUN_BUDGET_EXHAUSTED
+        and following[0].from_log == log_position
+    )
+
+
 def _parse_clock(value, label: str) -> Optional[datetime]:
     if value is None:
         return None
@@ -1254,6 +1295,14 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
             raise SessionStateError("没有世界状态的会话不能持有 Agency 记录")
         return
     outbox = state.activation_outbox
+    # 反过来也必须成立：确认过的到期资格一定有一条 Agency 记录说明它的结局
+    # （ack ⇔ record，设计 §13.5）。否则存档可以声称"这条处理过了"却说不出
+    # 结果是什么——恢复后它既不待处理、也不会重试，静默丢失。
+    for due_id in outbox.acknowledged_ids():
+        if not log.has(due_id):
+            raise SessionStateError(
+                f"到期资格 '{due_id}' 已被确认，却没有任何 Agency 记录说明它的结局"
+            )
     for record in log.records():
         if record.decided_at > clock:
             raise SessionStateError(

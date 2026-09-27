@@ -460,8 +460,14 @@ class WorldState:
             },
         }
 
-    def restore_mutable_state(self, snapshot: Dict) -> None:
-        """就地恢复到 snapshot_mutable_state() 的那一刻。"""
+    def _restore_mutable_state(self, snapshot: Dict) -> None:
+        """就地恢复到 snapshot_mutable_state() 的那一刻。只给提交失败时的回滚用。
+
+        它整体替换全部权威可变状态，所以跟其它写方法一样先过写守卫：会话 fence
+        之后、或处在只读快照块里时，它同样失败。回滚总发生在一次仍可写的提交
+        里面，守卫不会挡住正常的回滚。
+        """
+        self._check_writable()
         self.clock = snapshot["clock"]
         self.character_locations = dict(snapshot["character_locations"])
         self.channel_members = {

@@ -60,7 +60,7 @@ from pns.runtime.autonomy.outcome import (
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.memory.recall import MemoryRecall
 from pns.runtime.event_commit import commit_session_event
-from pns.runtime.rhythm import RhythmDirector
+from pns.runtime.rhythm import RhythmDirector, claims_rhythm
 from pns.runtime.scheduler import PersistentScheduler
 
 # 状态投影里默认回看多少条。
@@ -313,6 +313,10 @@ class AutonomousRuntime:
                 "外部提交目前只允许 character.activity_changed；台词必须经过 "
                 "Agency 与 Router 审计路径"
             )
+        if claims_rhythm(event.provenance):
+            # 作息凭 provenance 认领"本段自己的决定"。外部事件冒用它，作息就会
+            # 把一个外部决定当成自己的行程继续走下去。
+            raise AutonomyError("外部事件不能带作息的 provenance（kind/segment_key/trip_leg）")
         with self._gate:
             self._require_running("提交外部事件")
             return commit_session_event(self._state, event)
@@ -589,27 +593,47 @@ class AutonomousRuntime:
         时钟步本身是原子的（见 `_clock_step_locked`）；步与步之间 checkpoint、
         close、stop 都可以插进来，插进来之后看到的是一个完整的边界。停机之后不再
         开新的一步。
+
+        投递箱里还有待处理的到期资格时，**不开下一步**（设计 §5.2）：到期问的是
+        它触发那一刻的世界，时钟、作息、位置先走过去，它再被处理就是在回答一个
+        更晚的世界。额度（`max_results`）用完、可重试失败、别的线程正拿着——
+        无论哪种原因没处理完，时钟都停在这一刻，等下一次调用先把它们处理掉。
         """
         from_clock = self.world.clock
         due_ids: List[str] = []
         rhythm_events: List[str] = []
         results: List[Dict] = []
         remaining = max_results
+
+        def process(tick=None) -> None:
+            nonlocal remaining
+            if tick is None:
+                batch = [r.to_dict() for r in self.process_pending(max_results=remaining)]
+            elif remaining is None:
+                # 保留既有的 `_tick_report(tick)` 调用形状：生命周期并发测试会替换
+                # 这条内部缝来精确停在"推进后、处理前"。
+                batch = self._tick_report(tick)["results"]
+            else:
+                batch = self._tick_report(tick, max_results=remaining)["results"]
+            if remaining is not None:
+                remaining = max(0, remaining - len(batch))
+            results.extend(batch)
+
+        # 上一次调用留下的（额度用完、可重试失败、恢复前就待处理的）先处理。
+        if self._agency.pending_due():
+            process()
         while True:
             with self._gate:
-                if not self._running or self.world.clock >= target:
+                if (
+                    not self._running
+                    or self.world.clock >= target
+                    or self._agency.pending_due()
+                ):
                     break
                 tick, transitions = self._clock_step_locked(target)
             due_ids.extend(tick.due_ids)
             rhythm_events.extend(record["event_id"] for record in transitions)
-            # 保留既有的 `_tick_report(tick)` 调用形状：生命周期并发测试会替换这条
-            # 内部缝来精确停在"推进后、处理前"。
-            if remaining is None:
-                report = self._tick_report(tick)
-            else:
-                report = self._tick_report(tick, max_results=remaining)
-                remaining = max(0, remaining - len(report["results"]))
-            results.extend(report["results"])
+            process(tick)
         to_clock = self.world.clock
         return {
             "from_clock": from_clock.isoformat(),

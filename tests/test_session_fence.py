@@ -101,6 +101,10 @@ def _writes(state, scheduler):
             "mizuki", "ena_home", "guest"
         ),
         "world._grant_channel": lambda: world._grant_channel("mizuki", "nightcord"),
+        # 回滚用的整体替换也是写入口：它能换掉时钟、位置、频道和授予（审查 F4）。
+        "world._restore_mutable_state": lambda: world._restore_mutable_state(
+            dict(world.snapshot_mutable_state(), clock=datetime(2026, 9, 27, 23, 0))
+        ),
     }
 
 
@@ -156,6 +160,7 @@ class ReadOnlySnapshotTests(unittest.TestCase):
             "scheduler.schedule",
             "world.set_environment",
             "world.place_character",
+            "world._restore_mutable_state",
         ):
             with self.subTest(write=name):
                 with state.snapshot_boundary():
@@ -192,6 +197,27 @@ class BuildingOnlyTests(unittest.TestCase):
             with self.subTest(action=name):
                 with self.assertRaises(SessionStateError):
                     action()
+
+    def test_the_static_registries_are_frozen_once_attached(self):
+        # 位置图与频道表随存档走、会话期间不变；挂上会话之后它们的 add() 不能
+        # 再是一条绕过栅栏的写入口。
+        state, _scheduler = _state()
+        world = state.world_state
+        before = state.to_dict()
+        location = next(iter(world.locations))
+        channel = next(iter(world.channels))
+        for name, action in {
+            "locations.add": lambda: world.locations.add(
+                type(location).from_dict(dict(location.to_dict(), location_id="new_place"))
+            ),
+            "channels.add": lambda: world.channels.add(
+                type(channel).from_dict(dict(channel.to_dict(), channel_id="new_channel"))
+            ),
+        }.items():
+            with self.subTest(action=name):
+                with self.assertRaisesRegex(ValueError, "已经挂在会话上"):
+                    action()
+        self.assertEqual(state.to_dict(), before)
 
     def test_a_world_state_belongs_to_one_session(self):
         state, _scheduler = _state()

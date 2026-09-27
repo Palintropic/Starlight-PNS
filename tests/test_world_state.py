@@ -198,7 +198,7 @@ class CharacterActivityTests(unittest.TestCase):
         )
         snapshot = self.world.snapshot_mutable_state()
         self.world.set_activity("mizuki", ActivityKind.RESTING)
-        self.world.restore_mutable_state(snapshot)
+        self.world._restore_mutable_state(snapshot)
         self.assertIs(
             self.world.activity_of("mizuki").kind, ActivityKind.ONLINE_CHATTING
         )

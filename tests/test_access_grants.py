@@ -414,7 +414,7 @@ class PresenceInvariantTests(unittest.TestCase):
         world = _world()
         snapshot = world.snapshot_mutable_state()
         world._grant_channel("ena", "nightcord")
-        world.restore_mutable_state(snapshot)
+        world._restore_mutable_state(snapshot)
         self.assertFalse(world.may_join("ena", "nightcord"))
 
 

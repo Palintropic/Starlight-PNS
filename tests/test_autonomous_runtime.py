@@ -1959,6 +1959,70 @@ class ConcurrentProcessingTests(unittest.TestCase):
         self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
 
 
+class ClockWaitsForItsDuesTests(unittest.TestCase):
+    """审查 F1 / 设计 §5.2：本步的可用到期没处理完，下一个时钟步不开始。"""
+
+    def _schedule(self, scheduler, activation_id, minutes, character_id="mizuki"):
+        scheduler.schedule(
+            ScheduledActivation(
+                activation_id=activation_id,
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=CLOCK + timedelta(minutes=minutes),
+                character_id=character_id,
+            )
+        )
+
+    def test_a_zero_allowance_holds_the_clock_at_the_due(self):
+        # 23:50 排一条 23:55 的到期，额度 0 推进 10 分钟：时钟不许越过 23:55。
+        state, scheduler, runtime = _rig()
+        self._schedule(scheduler, "wake", 5)
+        report = runtime.advance(10, max_results=0)
+        self.assertEqual(report["results"], [])
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+        self.assertEqual(len(state.activation_outbox.pending()), 1)
+
+        # 下一次推进先处理它——在它自己那一刻——然后时钟才继续走。
+        report = runtime.advance(10)
+        (result,) = report["results"]
+        self.assertEqual(result["outcome"], ActivationOutcome.ACTED.value)
+        (record,) = state.agency.records()
+        self.assertEqual(record.decided_at, CLOCK + timedelta(minutes=5))
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=15))
+
+    def test_an_allowance_running_out_mid_advance_stops_at_the_next_due(self):
+        state, scheduler, runtime = _rig()
+        self._schedule(scheduler, "first", 2)
+        self._schedule(scheduler, "second", 5, character_id="ena")
+        report = runtime.advance(10, max_results=1)
+        self.assertEqual(len(report["results"]), 1)
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+        self.assertEqual(
+            [due.activation_id for due in state.activation_outbox.pending()], ["second"]
+        )
+
+    def test_a_retryable_failure_holds_the_clock_until_it_is_settled(self):
+        calls = {"n": 0}
+
+        def flaky(context):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise GenerationError("模型暂时不可用", retryable=True)
+            return "在的哦"
+
+        state, scheduler, runtime = _rig(lines={"mizuki": flaky})
+        self._schedule(scheduler, "wake", 5)
+        report = runtime.advance(10)
+        (result,) = report["results"]
+        self.assertEqual(result["outcome"], ActivationOutcome.FAILED_RETRYABLE.value)
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+
+        runtime.advance(10)
+        (record,) = state.agency.records()
+        self.assertIs(record.outcome, AgencyOutcome.ACTED)
+        self.assertEqual(record.decided_at, CLOCK + timedelta(minutes=5))
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=15))
+
+
 class ServiceApiTests(unittest.TestCase):
     def test_status_reports_the_shape_web1_needs(self):
         state, scheduler, runtime = _rig()

@@ -131,11 +131,18 @@ class LocationGraph:
 
     def __init__(self, locations: Iterable[Location] = ()):
         self._locations: Dict[str, Location] = {}
+        self._frozen = False
         for location in locations:
             self.add(location)
         self.validate()
 
+    def _freeze(self) -> None:
+        """挂到会话上之后，位置图不再接受新地点。"""
+        self._frozen = True
+
     def add(self, location: Location) -> None:
+        if self._frozen:
+            raise LocationGraphError("位置图已经挂在会话上，不能再添加地点")
         if not location.location_id:
             raise LocationGraphError("location_id 不能为空")
         if location.location_id in self._locations:

@@ -9,13 +9,14 @@
 #
 # 运行: python -m unittest discover -s tests -p test_cognition_unavailable.py
 import unittest
+from copy import deepcopy
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from grants_support import grant_everything
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.agency import AgencyBudget, AgencyError, AgencyOutcome, AgencyRecord
-from pns.models.cognition import CognitionCause as C, CognitionTimeline, next_minute_after
+from pns.models.cognition import CognitionCause as C, CognitionTimeline
 from pns.models.event import EventType
 from pns.models.session import SessionState, SessionStateError
 from pns.models.world_state import WorldState
@@ -58,8 +59,7 @@ def _start(state, allowance=None):
     _transition(
         state,
         lambda tl, n: tl.started(
-            log_length=n, sim=now, wall="w", backlog_until=next_minute_after(now),
-            run_allowance=allowance,
+            log_length=n, sim=now, wall="w", run_allowance=allowance,
         ),
     )
 
@@ -239,7 +239,7 @@ class AllowanceAndCapTests(unittest.TestCase):
         _transition(
             state,
             lambda tl, n: tl.fault_cleared(
-                log_length=n, sim=now, wall="w", backlog_until=next_minute_after(now)
+                log_length=n, sim=now, wall="w"
             ),
         )
         # 故障解除后的新区间不许把额度重新装满：消耗从 Start 那一刻起算。
@@ -391,6 +391,91 @@ class LoadCrossCheckTests(unittest.TestCase):
                 interval["run_allowance"] = 1
         with self.assertRaises(SessionStateError):
             SessionState.from_dict(payload)
+
+    def test_a_bare_acknowledgement_is_refused(self):
+        # 审查 F2：ack ⇒ record。只确认、不写 Agency 记录的到期资格是静默丢失。
+        state, scheduler, _engine = _rig()
+        (due,) = _dues(scheduler, "mizuki")
+        scheduler.acknowledge(due.due_id)
+        with self.assertRaisesRegex(SessionStateError, "没有任何 Agency 记录"):
+            SessionState.from_dict(state.to_dict())
+
+    def test_timeline_tampering_without_a_record_behind_it_is_refused(self):
+        # 审查 F3：被篡改的区间后面没有任何 Agency 记录，逐条记录复核发现不了，
+        # 只能靠转换重放。
+        def stopped():
+            state, _scheduler, _engine = _rig()
+            _start(state, allowance=2)
+            _stop(state)
+            return state
+
+        def restored():
+            state, _scheduler, _engine = _rig()
+            now = state.world_state.clock
+            _transition(state, lambda tl, n: tl.restored(log_length=n, sim=now, wall="w"))
+            return state
+
+        def intervals(p):
+            return p["cognition"]["intervals"]
+
+        cases = {
+            "not_started relabeled as fault": (
+                lambda: _rig()[0],
+                lambda p: intervals(p)[-1].update(causes=["fault"]),
+            ),
+            "pause relabeled as fault": (
+                stopped,
+                lambda p: intervals(p)[-1].update(causes=["fault"]),
+            ),
+            "restore cutoff moved a minute later": (
+                restored,
+                lambda p: intervals(p)[-1]["backlog"][-1].update(
+                    until_sim=(CLOCK + timedelta(minutes=2)).isoformat()
+                ),
+            ),
+            "carried allowance raised": (
+                stopped,
+                lambda p: intervals(p)[-1].update(run_allowance=3),
+            ),
+        }
+        for label, (make, mutate) in cases.items():
+            with self.subTest(label):
+                payload = make().to_dict()
+                SessionState.from_dict(deepcopy(payload))  # 未篡改的能加载
+                mutate(payload)
+                with self.assertRaises(SessionStateError):
+                    SessionState.from_dict(payload)
+
+    def test_the_exhaustion_interval_sits_right_after_the_last_allowance(self):
+        state, scheduler, engine = _rig(policy=AbstainPolicy())
+        _start(state, allowance=2)
+        dues = _dues(scheduler, "mizuki", "ena")
+        _decide(engine, dues[0])
+        _decide(engine, dues[1])
+        self.assertEqual(state.cognition.current.causes, {C.RUN_BUDGET_EXHAUSTED})
+        archive = state.to_dict()
+        SessionState.from_dict(deepcopy(archive))
+
+        def intervals(p):
+            return p["cognition"]["intervals"]
+
+        def raise_allowance(p):
+            # 额度改大（带着它的区间一起改，重放仍然自洽）：日志并没有在耗尽区间
+            # 那里用完额度。
+            for interval in intervals(p):
+                if interval["run_allowance"] is not None:
+                    interval["run_allowance"] = 3
+
+        cases = {
+            "exhaustion dropped": lambda p: intervals(p).pop(),
+            "allowance raised everywhere": raise_allowance,
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                payload = deepcopy(archive)
+                mutate(payload)
+                with self.assertRaises(SessionStateError):
+                    SessionState.from_dict(payload)
 
     def test_the_timeline_only_changes_inside_a_transaction(self):
         state, _scheduler, _engine = _rig(timeline=False)

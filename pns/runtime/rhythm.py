@@ -219,7 +219,7 @@ class RhythmDirector:
         decided = any(
             event.actor_id == character_id
             and event.type in _STATE_CHANGE_TYPES
-            and (event.provenance or {}).get("segment_key") != key
+            and _rhythm_key(event) != key
             for event in events.since(window)
         )
         return _CharacterState(
@@ -240,7 +240,7 @@ class RhythmDirector:
         for event in events.since(segment_start - timedelta(days=1)):
             if (
                 event.actor_id == character_id
-                and (event.provenance or {}).get("segment_key") == key
+                and _rhythm_key(event) == key
                 and event.occurred_at < earliest
             ):
                 earliest = event.occurred_at
@@ -260,11 +260,7 @@ class RhythmDirector:
         departed_at = None
         hops = 0
         for event in events.since(state.segment_start - timedelta(days=1)):
-            provenance = event.provenance or {}
-            if (
-                event.actor_id != state.character_id
-                or provenance.get("segment_key") != state.key
-            ):
+            if event.actor_id != state.character_id or _rhythm_key(event) != state.key:
                 continue
             if (
                 event.type is EventType.CHARACTER_ACTIVITY_CHANGED
@@ -418,7 +414,7 @@ class RhythmDirector:
         """
         segment = state.segment
         provenance = {
-            "kind": "daily_rhythm",
+            "kind": RHYTHM_PROVENANCE_KIND,
             "segment_at": format_day_minute(segment.at),
             "segment_started_at": state.segment_start.isoformat(),
             "segment_source": segment.source.value,
@@ -448,6 +444,29 @@ class _CharacterState:
     next_start: datetime
     departure: Optional[datetime]
     channels: frozenset
+
+
+RHYTHM_PROVENANCE_KIND = "daily_rhythm"
+
+# 作息认领自己事件的字段。别的写入口不许带它们：带上当前段的 key，一条外部
+# 决定就会被当成作息自己做的，外部决定压过作息的契约随之失效。
+RHYTHM_RESERVED_PROVENANCE = frozenset({"segment_key", "trip_leg"})
+
+
+def claims_rhythm(provenance) -> bool:
+    """这份 provenance 是否冒用了作息的身份（种类或保留字段）。"""
+    provenance = provenance or {}
+    return provenance.get("kind") == RHYTHM_PROVENANCE_KIND or any(
+        key in provenance for key in RHYTHM_RESERVED_PROVENANCE
+    )
+
+
+def _rhythm_key(event) -> Optional[str]:
+    """作息自己提交的事件所属的段；不是作息的事件一律 None。"""
+    provenance = event.provenance or {}
+    if provenance.get("kind") != RHYTHM_PROVENANCE_KIND:
+        return None
+    return provenance.get("segment_key")
 
 
 def segment_key(character_id: str, segment, segment_start: datetime) -> str:

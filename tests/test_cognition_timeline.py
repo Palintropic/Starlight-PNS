@@ -17,7 +17,6 @@ from pns.models.cognition import (
     CognitionTimeline,
     CognitionTimelineError,
     TransitionKind,
-    next_minute_after,
     unavailable_causes,
 )
 
@@ -37,7 +36,6 @@ def _restore(timeline, *, log_length, now):
         log_length=log_length,
         sim=now.replace(second=0, microsecond=0),
         wall=WALL,
-        backlog_until=next_minute_after(now),
     )
 
 
@@ -46,7 +44,6 @@ def _start(timeline, *, log_length, now, allowance=None):
         log_length=log_length,
         sim=now.replace(second=0, microsecond=0),
         wall=WALL,
-        backlog_until=next_minute_after(now),
         run_allowance=allowance,
     )
 
@@ -93,7 +90,7 @@ class UnionJudgementTests(unittest.TestCase):
         timeline = _start(timeline, log_length=0, now=t(12, 10))
         self.assertEqual(timeline.current.causes, {C.FAULT})
         timeline = timeline.fault_cleared(
-            log_length=0, sim=t(12, 20), wall=WALL, backlog_until=t(12, 21)
+            log_length=0, sim=t(12, 20), wall=WALL
         )
         self.assertTrue(timeline.current.available)
         self.assertEqual(
@@ -112,7 +109,7 @@ class UnionJudgementTests(unittest.TestCase):
         timeline = timeline.world_action_cap(log_length=5, sim=t(9, 30), wall=WALL)
         timeline = timeline.fault_began(log_length=5, sim=t(10), wall=WALL)
         timeline = timeline.fault_cleared(
-            log_length=5, sim=t(11), wall=WALL, backlog_until=t(11, 1)
+            log_length=5, sim=t(11), wall=WALL
         )
         self.assertEqual(
             unavailable_causes(timeline.current, t(10, 30)),
@@ -124,7 +121,7 @@ class UnionJudgementTests(unittest.TestCase):
         timeline = _start(_open(), log_length=0, now=t(9))
         timeline = timeline.fault_began(log_length=0, sim=t(10), wall=WALL)
         timeline = timeline.fault_cleared(
-            log_length=0, sim=t(12), wall=WALL, backlog_until=next_minute_after(t(12))
+            log_length=0, sim=t(12), wall=WALL
         )
         self.assertEqual(unavailable_causes(timeline.current, t(12)), {C.FAULT})
         self.assertEqual(unavailable_causes(timeline.current, t(12, 1)), frozenset())
@@ -167,11 +164,11 @@ class TransitionRuleTests(unittest.TestCase):
             timeline.stopped(log_length=4, sim=t(9, 5), wall=WALL)
 
     def test_a_backlog_cutoff_cannot_move_backwards(self):
+        # cutoff 由转换时刻决定；转换时刻不能倒退，cutoff 也就不能。
         timeline = _restore(_open(), log_length=0, now=t(12))
+        timeline = timeline.fault_began(log_length=0, sim=t(12), wall=WALL)
         with self.assertRaises(CognitionTimelineError):
-            timeline.fault_cleared(
-                log_length=0, sim=t(12), wall=WALL, backlog_until=t(11)
-            )
+            timeline.fault_cleared(log_length=0, sim=t(11), wall=WALL)
 
     def test_timelines_are_immutable_values(self):
         timeline = _open()
@@ -180,6 +177,50 @@ class TransitionRuleTests(unittest.TestCase):
         self.assertEqual(len(started.intervals), 2)
         with self.assertRaises(Exception):
             timeline.intervals = ()
+
+
+class CutoffIsNotTheCallersChoiceTests(unittest.TestCase):
+    """审查 F3：cutoff 恒为转换时刻 + 1min，由转换规则决定，调用方给不了。"""
+
+    def test_start_puts_the_cutoff_one_minute_after_its_moment(self):
+        timeline = _start(_open(), log_length=0, now=t(12))
+        self.assertEqual(timeline.current.backlog[-1].until_sim, t(12, 1))
+        # fired_at == R 仍带旧原因。
+        self.assertEqual(unavailable_causes(timeline.current, t(12)), {C.NOT_STARTED})
+        self.assertEqual(unavailable_causes(timeline.current, t(12, 1)), frozenset())
+
+    def test_no_transition_takes_a_cutoff(self):
+        timeline = _open()
+        for name, call in {
+            "restored": lambda: timeline.restored(
+                log_length=0, sim=t(12), wall=WALL, backlog_until=t(12)
+            ),
+            "started": lambda: timeline.started(
+                log_length=0, sim=t(12), wall=WALL, backlog_until=t(12), run_allowance=None
+            ),
+        }.items():
+            with self.subTest(name):
+                with self.assertRaises(TypeError):
+                    call()
+
+    def test_clearing_a_cause_that_is_not_there_is_refused(self):
+        timeline = _start(_open(), log_length=0, now=t(9))
+        for clear in (timeline.fault_cleared, timeline.wall_clock_caught_up):
+            with self.subTest(clear.__name__):
+                with self.assertRaises(CognitionTimelineError):
+                    clear(log_length=0, sim=t(10), wall=WALL)
+
+    def test_exhausting_an_allowance_that_was_never_set_is_refused(self):
+        timeline = _start(_open(), log_length=0, now=t(9))
+        with self.assertRaises(CognitionTimelineError):
+            timeline.run_budget_exhausted(log_length=0, sim=t(10), wall=WALL)
+
+
+class ZeroAllowanceTests(unittest.TestCase):
+    def test_a_zero_allowance_is_not_a_legal_start(self):
+        # 审查 F5：额度在记录落地之后才结算，零额度会先放行一条认知结局。
+        with self.assertRaises(CognitionTimelineError):
+            _start(_open(), log_length=0, now=t(9), allowance=0)
 
 
 class LocatorTests(unittest.TestCase):
@@ -197,7 +238,7 @@ class LocatorTests(unittest.TestCase):
         self.assertEqual(timeline.locate(10).index, 0)
 
     def test_positions_fall_into_their_own_interval(self):
-        timeline = _start(_open(), log_length=0, now=t(9))
+        timeline = _start(_open(), log_length=0, now=t(9), allowance=41)
         timeline = timeline.run_budget_exhausted(log_length=41, sim=t(12), wall=WALL)
         self.assertEqual(timeline.locate(40).index, 1)
         self.assertTrue(timeline.locate(40).available)
@@ -210,7 +251,7 @@ class ArchiveTests(unittest.TestCase):
         timeline = _start(timeline, log_length=0, now=datetime(2026, 9, 27, 12, 0, 40), allowance=5)
         timeline = timeline.fault_began(log_length=3, sim=t(12, 5), wall=WALL)
         return timeline.fault_cleared(
-            log_length=4, sim=t(12, 9), wall=WALL, backlog_until=t(12, 10)
+            log_length=4, sim=t(12, 9), wall=WALL
         )
 
     def test_it_round_trips(self):
@@ -244,6 +285,30 @@ class ArchiveTests(unittest.TestCase):
                 until_sim="2026-09-27T12:01:30"
             ),
             "negative allowance": lambda p: p["intervals"][2].update(run_allowance=-1),
+            # 审查 F3：形状合法、语义不对的单字段篡改。每个区间都必须能由前一个
+            # 区间按它自己的转换种类重放出来。
+            "first interval relabeled": lambda p: p["intervals"][0].update(
+                causes=["fault"]
+            ),
+            "later causes relabeled": lambda p: p["intervals"][3].update(
+                causes=["operator_paused"]
+            ),
+            "restore cutoff moved": lambda p: p["intervals"][1]["backlog"][0].update(
+                until_sim="2026-09-27T12:02:00"
+            ),
+            "fault cutoff moved": lambda p: p["intervals"][4]["backlog"][-1].update(
+                until_sim="2026-09-27T12:11:00"
+            ),
+            "transition kind relabeled": lambda p: p["intervals"][3].update(
+                opened_by="wall_clock_behind"
+            ),
+            "carried allowance changed": lambda p: p["intervals"][3].update(
+                run_allowance=6
+            ),
+            "allowance origin moved": lambda p: p["intervals"][4].update(
+                allowance_since_log=3
+            ),
+            "zero allowance": lambda p: p["intervals"][2].update(run_allowance=0),
             "empty timeline": lambda p: p.update(intervals=[]),
         }
         for label, mutate in cases.items():

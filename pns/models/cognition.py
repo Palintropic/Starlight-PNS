@@ -195,9 +195,11 @@ class CognitionInterval:
         set_(self, "backlog", backlog)
         allowance = self.run_allowance
         if allowance is not None and (
-            isinstance(allowance, bool) or not isinstance(allowance, int) or allowance < 0
+            isinstance(allowance, bool) or not isinstance(allowance, int) or allowance < 1
         ):
-            raise CognitionTimelineError("run_allowance 必须是非负整数或 None")
+            # 0 不是"一次也不许用"的写法：额度在记录落地**之后**才结算，零额度
+            # 会先放行一条认知结局再关门。不想让认知运行，就不要 Start。
+            raise CognitionTimelineError("run_allowance 必须是正整数或 None")
         since = self.allowance_since_log
         if (allowance is None) != (since is None):
             raise CognitionTimelineError("run_allowance 与 allowance_since_log 必须同时给出或同时为空")
@@ -286,16 +288,34 @@ class CognitionTimeline:
                 raise CognitionTimelineError("时间线里只能放 CognitionInterval")
             if interval.index != position:
                 raise CognitionTimelineError("区间 index 必须从 0 连续编号")
-            if position:
-                previous = intervals[position - 1]
-                if interval.from_log < previous.from_log:
-                    raise CognitionTimelineError("区间的 from_log 不能倒退")
-                if interval.opened_at_sim < previous.opened_at_sim:
-                    raise CognitionTimelineError("区间的开始模拟时刻不能倒退")
-                if interval.backlog[: len(previous.backlog)] != previous.backlog and not (
-                    _is_merged_extension(previous.backlog, interval.backlog)
-                ):
-                    raise CognitionTimelineError("backlog 只能追加（或合并末项），不能删改")
+        first = intervals[0]
+        if (
+            first.opened_by is not TransitionKind.OPENED
+            or first.causes != {CognitionCause.NOT_STARTED}
+            or first.backlog
+            or first.run_allowance is not None
+        ):
+            raise CognitionTimelineError("时间线必须从一个\"世界打开、还没 Start\"的区间开始")
+        # 之后的每个区间都必须能由前一个区间按它自己的转换种类重放出来。只查
+        # 形状的话，单改一个区间的原因或 cutoff 仍是一条"合法"的时间线。
+        for previous, interval in zip(intervals, intervals[1:]):
+            replayed = _next_interval(
+                previous,
+                interval.opened_by,
+                log_length=interval.from_log,
+                sim=interval.opened_at_sim,
+                wall=interval.opened_at_wall,
+                run_allowance=(
+                    interval.run_allowance
+                    if interval.opened_by is TransitionKind.STARTED
+                    else None
+                ),
+            )
+            if replayed != interval:
+                raise CognitionTimelineError(
+                    f"区间 {interval.index} 不是区间 {previous.index} 经 "
+                    f"{interval.opened_by.value} 转换的结果"
+                )
         object.__setattr__(self, "intervals", intervals)
 
     # ── 构造 ────────────────────────────────────────────────────────────
@@ -340,158 +360,72 @@ class CognitionTimeline:
         return found
 
     # ── 转换 ────────────────────────────────────────────────────────────
-    def transition(
-        self,
-        kind,
-        *,
-        log_length: int,
-        sim: datetime,
-        wall: str,
-        add: Iterable = (),
-        remove: Iterable = (),
-        backlog_until: Optional[datetime] = None,
-        backlog_extra: Iterable = (),
-        run_allowance: Optional[int] = None,
-        keep_allowance: bool = True,
-    ) -> "CognitionTimeline":
-        """开启一个新区间。
-
-        `backlog_until` 给了，就把"上一区间的原因 ∪ backlog_extra"作为一条 backlog
-        追加：在 backlog_until 之前触发的到期资格，是在那些原因生效时到期的。
-        """
-        current = self.current
-        if isinstance(log_length, bool) or not isinstance(log_length, int):
-            raise CognitionTimelineError("log_length 必须是整数")
-        if log_length < current.from_log:
-            raise CognitionTimelineError("转换的日志位置不能早于当前区间")
-        causes = (current.causes - _causes(remove, allow_empty=True)) | _causes(
-            add, allow_empty=True
-        )
-        backlog = current.backlog
-        if backlog_until is not None:
-            carried = current.causes | _causes(backlog_extra, allow_empty=True)
-            if carried:
-                backlog = _append_backlog(backlog, BacklogItem(backlog_until, carried))
-        if keep_allowance:
-            allowance, since = current.run_allowance, current.allowance_since_log
-        else:
-            allowance = run_allowance
-            since = None if run_allowance is None else log_length
+    #
+    # 每种转换怎么改原因、要不要追加 backlog、cutoff 落在哪，全部由
+    # `_next_interval()` 按转换种类决定；调用方只给"何时（日志位置、模拟分钟、
+    # 现实时间）"和 Start 的额度。存档加载用同一个函数把每个区间从前一个区间
+    # 重放出来，于是单改一个区间的原因、cutoff 或额度都对不上。
+    def _append(self, kind, *, log_length, sim, wall, run_allowance=None):
         return CognitionTimeline(
             self.intervals
             + (
-                CognitionInterval(
-                    index=len(self.intervals),
-                    from_log=log_length,
-                    causes=causes,
-                    backlog=backlog,
-                    run_allowance=allowance,
-                    allowance_since_log=since,
-                    opened_by=kind,
-                    opened_at_sim=sim,
-                    opened_at_wall=wall,
+                _next_interval(
+                    self.current,
+                    kind,
+                    log_length=log_length,
+                    sim=sim,
+                    wall=wall,
+                    run_allowance=run_allowance,
                 ),
             )
         )
 
-    # 各种转换的规则写在这里，调用方不自己拼 add/remove。
-    def restored(self, *, log_length, sim, wall, backlog_until) -> "CognitionTimeline":
+    def restored(self, *, log_length, sim, wall) -> "CognitionTimeline":
         """恢复：停机期间（与恢复后的第一个完整分钟之前）触发的，一律 process_stopped。
 
         世界一生的动作上限跨重启仍然成立；故障与现实时钟落后随旧进程结束，由新进程
-        重新判定。
+        重新判定。`sim` 是恢复那一刻的模拟分钟（anchor_now 向下取整）。
         """
-        keep = self.current.causes & {CognitionCause.WORLD_ACTION_CAP}
-        return self.transition(
-            TransitionKind.RESTORED,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            add={CognitionCause.NOT_STARTED} | keep,
-            remove=set(CognitionCause) - keep,
-            backlog_until=backlog_until,
-            backlog_extra={CognitionCause.PROCESS_STOPPED},
-            keep_allowance=False,
-            run_allowance=None,
-        )
+        return self._append(TransitionKind.RESTORED, log_length=log_length, sim=sim, wall=wall)
 
-    def started(self, *, log_length, sim, wall, backlog_until, run_allowance) -> "CognitionTimeline":
-        return self.transition(
+    def started(self, *, log_length, sim, wall, run_allowance) -> "CognitionTimeline":
+        return self._append(
             TransitionKind.STARTED,
             log_length=log_length,
             sim=sim,
             wall=wall,
-            remove=OPERATOR_CLEARABLE,
-            backlog_until=backlog_until,
-            keep_allowance=False,
             run_allowance=run_allowance,
         )
 
     def stopped(self, *, log_length, sim, wall) -> "CognitionTimeline":
-        return self.transition(
-            TransitionKind.STOPPED,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            add={CognitionCause.OPERATOR_PAUSED},
-        )
+        return self._append(TransitionKind.STOPPED, log_length=log_length, sim=sim, wall=wall)
 
     def run_budget_exhausted(self, *, log_length, sim, wall) -> "CognitionTimeline":
-        return self.transition(
-            TransitionKind.RUN_BUDGET_EXHAUSTED,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            add={CognitionCause.RUN_BUDGET_EXHAUSTED},
+        return self._append(
+            TransitionKind.RUN_BUDGET_EXHAUSTED, log_length=log_length, sim=sim, wall=wall
         )
 
     def world_action_cap(self, *, log_length, sim, wall) -> "CognitionTimeline":
-        return self.transition(
-            TransitionKind.WORLD_ACTION_CAP,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            add={CognitionCause.WORLD_ACTION_CAP},
+        return self._append(
+            TransitionKind.WORLD_ACTION_CAP, log_length=log_length, sim=sim, wall=wall
         )
 
     def fault_began(self, *, log_length, sim, wall) -> "CognitionTimeline":
-        return self.transition(
-            TransitionKind.FAULT_BEGAN,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            add={CognitionCause.FAULT},
-        )
+        return self._append(TransitionKind.FAULT_BEGAN, log_length=log_length, sim=sim, wall=wall)
 
-    def fault_cleared(self, *, log_length, sim, wall, backlog_until) -> "CognitionTimeline":
-        return self.transition(
-            TransitionKind.FAULT_CLEARED,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            remove={CognitionCause.FAULT},
-            backlog_until=backlog_until,
+    def fault_cleared(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        return self._append(
+            TransitionKind.FAULT_CLEARED, log_length=log_length, sim=sim, wall=wall
         )
 
     def wall_clock_behind(self, *, log_length, sim, wall) -> "CognitionTimeline":
-        return self.transition(
-            TransitionKind.WALL_CLOCK_BEHIND,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            add={CognitionCause.WALL_CLOCK_BEHIND},
+        return self._append(
+            TransitionKind.WALL_CLOCK_BEHIND, log_length=log_length, sim=sim, wall=wall
         )
 
-    def wall_clock_caught_up(
-        self, *, log_length, sim, wall, backlog_until
-    ) -> "CognitionTimeline":
-        return self.transition(
-            TransitionKind.WALL_CLOCK_CAUGHT_UP,
-            log_length=log_length,
-            sim=sim,
-            wall=wall,
-            remove={CognitionCause.WALL_CLOCK_BEHIND},
-            backlog_until=backlog_until,
+    def wall_clock_caught_up(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        return self._append(
+            TransitionKind.WALL_CLOCK_CAUGHT_UP, log_length=log_length, sim=sim, wall=wall
         )
 
     # ── 序列化 ──────────────────────────────────────────────────────────
@@ -508,16 +442,98 @@ class CognitionTimeline:
         return cls(tuple(CognitionInterval.from_dict(item) for item in intervals))
 
 
-def _is_merged_extension(previous, current) -> bool:
-    """current 是否是 previous 在末项合并一次之后再追加的结果。"""
-    if not previous:
-        return True
-    if len(current) < len(previous):
-        return False
-    if current[: len(previous) - 1] != previous[:-1]:
-        return False
-    last, merged = previous[-1], current[len(previous) - 1]
-    return merged.until_sim == last.until_sim and last.causes <= merged.causes
+_ADDED_BY = {
+    TransitionKind.STOPPED: CognitionCause.OPERATOR_PAUSED,
+    TransitionKind.RUN_BUDGET_EXHAUSTED: CognitionCause.RUN_BUDGET_EXHAUSTED,
+    TransitionKind.WORLD_ACTION_CAP: CognitionCause.WORLD_ACTION_CAP,
+    TransitionKind.FAULT_BEGAN: CognitionCause.FAULT,
+    TransitionKind.WALL_CLOCK_BEHIND: CognitionCause.WALL_CLOCK_BEHIND,
+}
+
+_CLEARED_BY = {
+    TransitionKind.FAULT_CLEARED: CognitionCause.FAULT,
+    TransitionKind.WALL_CLOCK_CAUGHT_UP: CognitionCause.WALL_CLOCK_BEHIND,
+}
+
+
+def _next_interval(
+    current: CognitionInterval,
+    kind,
+    *,
+    log_length: int,
+    sim,
+    wall: str,
+    run_allowance: Optional[int] = None,
+) -> CognitionInterval:
+    """一次转换之后的区间。转换规则的唯一实现（设计 §13.3、§14.1）。
+
+    | 转换 | 新区间的原因 | backlog 追加（cutoff 恒为 sim + 1min） |
+    |---|---|---|
+    | 恢复 | {not_started} ∪（上一区间 ∩ {world_action_cap}） | 上一区间 ∪ {process_stopped} |
+    | Start | 上一区间 − 操作员可清的原因 | 上一区间 |
+    | 故障解除 / 现实时钟追上 | 上一区间 − 对应原因 | 上一区间 |
+    | 其余 | 上一区间 ∪ 对应原因 | 无 |
+
+    cutoff 不由调用方给：`fired_at == sim` 的到期资格仍在旧原因下触发，
+    `sim + 1min` 是它们与之后的分界（§14.1）。
+    """
+    try:
+        kind = TransitionKind(kind)
+    except ValueError:
+        raise CognitionTimelineError(f"未知的转换: {kind!r}") from None
+    sim = _sim_time(sim, "sim")
+    if isinstance(log_length, bool) or not isinstance(log_length, int):
+        raise CognitionTimelineError("log_length 必须是整数")
+    if log_length < current.from_log:
+        raise CognitionTimelineError("转换的日志位置不能早于当前区间")
+    if sim < current.opened_at_sim:
+        raise CognitionTimelineError("转换的模拟时刻不能早于当前区间的开始")
+    if kind is not TransitionKind.STARTED and run_allowance is not None:
+        raise CognitionTimelineError("只有 Start 设置单次额度")
+
+    allowance, since = current.run_allowance, current.allowance_since_log
+    carried: FrozenSet[CognitionCause] = frozenset()
+    if kind is TransitionKind.OPENED:
+        raise CognitionTimelineError("opened 只能是时间线的第一个区间")
+    if kind is TransitionKind.RESTORED:
+        causes = frozenset({CognitionCause.NOT_STARTED}) | (
+            current.causes & {CognitionCause.WORLD_ACTION_CAP}
+        )
+        carried = current.causes | {CognitionCause.PROCESS_STOPPED}
+        allowance = since = None
+    elif kind is TransitionKind.STARTED:
+        causes = current.causes - OPERATOR_CLEARABLE
+        carried = current.causes
+        allowance = run_allowance
+        since = None if run_allowance is None else log_length
+    elif kind in _CLEARED_BY:
+        cleared = _CLEARED_BY[kind]
+        if cleared not in current.causes:
+            raise CognitionTimelineError(f"{kind.value}：当前并没有 {cleared.value}")
+        causes = current.causes - {cleared}
+        carried = current.causes
+    else:
+        added = _ADDED_BY[kind]
+        if kind is not TransitionKind.STOPPED and added in current.causes:
+            raise CognitionTimelineError(f"{kind.value}：{added.value} 已经生效")
+        if kind is TransitionKind.RUN_BUDGET_EXHAUSTED and current.run_allowance is None:
+            raise CognitionTimelineError("没有单次额度，谈不上额度用完")
+        causes = current.causes | {added}
+
+    backlog = current.backlog
+    if carried:
+        backlog = _append_backlog(backlog, BacklogItem(sim + timedelta(minutes=1), carried))
+    return CognitionInterval(
+        index=current.index + 1,
+        from_log=log_length,
+        causes=causes,
+        backlog=backlog,
+        run_allowance=allowance,
+        allowance_since_log=since,
+        opened_by=kind,
+        opened_at_sim=sim,
+        opened_at_wall=wall,
+    )
 
 
 def wall_now() -> str:

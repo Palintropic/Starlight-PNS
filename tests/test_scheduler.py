@@ -1381,16 +1381,16 @@ class DurableDueTests(unittest.TestCase):
         self.assertTrue(self.scheduler.outbox.has(due_id))
         self.assertTrue(self.scheduler.outbox.is_acknowledged(due_id))
 
-    def test_an_acknowledgement_is_not_lost_and_not_redelivered(self):
+    def test_a_bare_acknowledgement_cannot_be_archived(self):
+        # ack ⇔ record（WORLD-1 设计 §13.5）：确认过、却没有 Agency 记录说明结局
+        # 的到期资格，是一条静默丢失的决定。带记录的往返见 test_agency。
         self.scheduler.schedule(_activation("once", minutes_ahead=10))
         self.scheduler.schedule(_activation("other", minutes_ahead=10, character_id="ena"))
-        first, second = self.scheduler.advance_by(10).due
+        first, _second = self.scheduler.advance_by(10).due
         self.scheduler.acknowledge(first.due_id)
 
-        _, restored = _reopen(self.state)
-        self.assertEqual([r.due_id for r in restored.pending_due()], [second.due_id])
-        self.assertTrue(restored.outbox.is_acknowledged(first.due_id))
-        self.assertFalse(restored.acknowledge(first.due_id))
+        with self.assertRaisesRegex(SessionStateError, "没有任何 Agency 记录"):
+            _reopen(self.state)
 
     def test_acknowledging_something_that_never_happened_is_loud(self):
         for bad in ("nope@2026-08-22T00:00:00", "", None, 7):

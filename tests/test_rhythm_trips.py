@@ -19,7 +19,7 @@ from pns.models.event import Event, EventScope, EventType
 from pns.models.session import SessionState
 from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.autonomy.audit import ScriptedAuditor
-from pns.runtime.autonomy.coordinator import AutonomousRuntime
+from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.event_commit import commit_session_event
 from pns.runtime.rhythm import RhythmDirector
 from pns.world.channels import build_default_channel_registry
@@ -267,6 +267,52 @@ class TripRuntimeTests(unittest.TestCase):
         )
         runtime.advance(60)  # 12:50
         self.assertEqual(state.world_state.location_of("mizuki"), "mizuki_home_room")
+
+    def _commuting_key(self, state):
+        commuting = [
+            e for e in _of(state, EventType.CHARACTER_ACTIVITY_CHANGED)
+            if e.payload["activity"] == "commuting"
+        ]
+        return commuting[-1].provenance["segment_key"]
+
+    def _idle(self, state, provenance):
+        return Event(
+            event_id="operator-idle",
+            type=EventType.CHARACTER_ACTIVITY_CHANGED,
+            occurred_at=state.world_state.clock,
+            scope=EventScope.PRIVATE,
+            actor_id="mizuki",
+            payload={"activity": ActivityKind.IDLE.value},
+            provenance=provenance,
+        )
+
+    def test_an_operator_event_cannot_borrow_the_rhythm_identity(self):
+        # 审查 F6：外部事件带上本段的 segment_key，作息就会把它当成自己的决定、
+        # 把行程继续走下去。受支持的外部入口直接拒绝作息的 provenance。
+        state, runtime = _runtime(t(11, 30))
+        runtime.advance(14)  # 11:44 出门
+        key = self._commuting_key(state)
+        before = len(state.events)
+        for label, provenance in {
+            "segment_key": {"segment_key": key},
+            "kind": {"kind": "daily_rhythm"},
+            "trip_leg": {"trip_leg": 0},
+        }.items():
+            with self.subTest(label):
+                with self.assertRaises(AutonomyError):
+                    runtime.commit_external_event(self._idle(state, provenance))
+        self.assertEqual(len(state.events), before)
+
+    def test_only_rhythm_events_carry_a_segment_key(self):
+        # 入口之外（直接提交）带了 key、却不是作息事件的，仍然是外部决定：
+        # 行程停下，角色留在原地。
+        state, runtime = _runtime(t(11, 30))
+        runtime.advance(14)  # 11:44 出门，还在 mizuki_home_room
+        key = self._commuting_key(state)
+        commit_session_event(state, self._idle(state, {"segment_key": key}))
+        runtime.advance(1)  # 11:45：作息自己的话这一刻走到 mizuki_home
+        self.assertEqual(state.world_state.location_of("mizuki"), "mizuki_home_room")
+        self.assertIs(state.world_state.activity_of("mizuki").kind, ActivityKind.IDLE)
 
     def test_an_unreachable_segment_is_recorded_once_and_not_retried(self):
         # 没有学生授予：到不了学校。这一段沉默，记一次处置，不瞬移、不反复记。
