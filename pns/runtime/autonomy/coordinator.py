@@ -53,6 +53,7 @@ from pns.models.cognition import (
 )
 from pns.models.event import Event, EventType
 from pns.models.session import SessionState
+from pns.models.time_events import QuietTime, TimeEventPolicy, quiet_time_report
 from pns.models.world_state import WorldState
 from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
 from pns.runtime.autonomy.audit import AuditError, AuditRequest
@@ -80,6 +81,10 @@ class AutonomyError(ValueError):
     它跟 ActivationOutcome 里的失败码是两类东西：失败码是"处理过，结论是
     没成"，会留下可查的结果；AutonomyError 是"这次调用的前提就不成立"。
     """
+
+
+class _NotQuiet(Exception):
+    """按安静的一步走，作息却在这一刻交出了事件：整步回滚，改记录模式重走。"""
 
 
 class AutonomousRuntime:
@@ -919,15 +924,34 @@ class AutonomousRuntime:
         完成这一刻的全部确定性后果：时钟与时间事件、作息与行程、频道进出、以及
         此刻认知不可用的到期资格的收尾。任何一步失败整步回滚；checkpoint 与
         close 走同一把闸门和会话边界，只可能看到步前或步后（设计 §3.1）。
+
+        世界拨到"安静的分钟不记"时（存档增长设计 §3），落点既不是到期也不是
+        作息边界的一步先按安静的一步走：只推时钟、不写时间事件。作息若仍在这
+        一刻交出了事件（它本该在 next_boundary_after 里声明），这一步不算安静：
+        整步回滚，按记录模式重走一遍。宁可多记一条，也不让时钟卡住。
         """
+        if self._quiet_time_skipped():
+            try:
+                return self._clock_step_once(target, quiet=True)
+            except _NotQuiet:
+                pass
+        return self._clock_step_once(target, quiet=False)
+
+    def _quiet_time_skipped(self) -> bool:
+        policy = self._state.time_events
+        return policy is not None and policy.current is QuietTime.SKIP
+
+    def _clock_step_once(self, target: datetime, *, quiet: bool):
         state = self._state
         with self._committing():
             with state.atomic_commit():
                 clock = self.world.clock
                 candidates = [target]
                 due_at = self._scheduler.next_due_at()
+                boundaries = set()
                 if due_at is not None:
                     candidates.append(_ceil_minute(due_at))
+                    boundaries.add(_ceil_minute(due_at))
                 if self._rhythm is not None:
                     boundary = self._rhythm.next_boundary_after(
                         self.world,
@@ -936,11 +960,45 @@ class AutonomousRuntime:
                     )
                     if boundary is not None:
                         candidates.append(boundary)
+                        boundaries.add(boundary)
                 step_to = min(moment for moment in candidates if moment > clock)
-                tick = self._scheduler.advance_to(step_to)
+                silent = quiet and step_to not in boundaries
+                tick = self._scheduler.advance_to(step_to, record=not silent)
                 transitions = self._apply_rhythm_locked()
+                if silent and transitions:
+                    raise _NotQuiet()
                 self._close_unavailable_dues(tick.due)
         return tick, transitions
+
+    # ── 安静的分钟（存档增长设计 §3）───────────────────────────────────
+    def set_quiet_time_events(
+        self, record: bool, *, wall: Optional[datetime] = None
+    ) -> Dict:
+        """拨"记录安静的分钟"。只影响之后：已经写下的时间事件一条都不动。
+
+        拨动与策略记录在同一个事务里，from_sim 是此刻的世界时钟（闸门内，
+        与时钟步全序）。值与当前相同不是拨动，不记，changed=False。
+        """
+        if not isinstance(record, bool):
+            raise AutonomyError("record 必须是布尔值")
+        value = QuietTime.RECORD if record else QuietTime.SKIP
+        stamp = self._wall(wall)
+        changed = []
+
+        def change(state: SessionState) -> None:
+            policy = state.time_events if state.time_events is not None else TimeEventPolicy()
+            if policy.current is value:
+                return
+            state.set_time_events(policy.flipped(value, sim=self.clock, wall=stamp))
+            changed.append(True)
+
+        with self._gate:
+            self._require_running("拨安静分钟的开关")
+        self._ledger(change)
+        return dict(self.quiet_time_status(), changed=bool(changed))
+
+    def quiet_time_status(self) -> Dict:
+        return quiet_time_report(self._state.time_events)
 
     def _close_unavailable_dues(self, dues) -> None:
         """本步触发、此刻认知不可用的到期资格，当场以 REJECTED_UNAVAILABLE 收尾。"""

@@ -67,6 +67,7 @@ from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.formal_world import gated_rhythms
 from pns.runtime.memory.encoder import MemoryEncoder
+from pns.models.time_events import TimeEventPolicy, TimeEventPolicyError, quiet_time_report
 from pns.runtime.persistence.archive import ArchiveError, EventSegment, WorldArchive
 from pns.runtime.persistence.naming import validate_world_id
 from pns.runtime.persistence.ownership import (
@@ -285,6 +286,7 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
         len(state.rhythm_dispositions),
         state.anchor.to_dict() if state.anchor is not None else None,
         state.content.to_dict() if state.content is not None else None,
+        state.time_events.to_dict() if state.time_events is not None else None,
         digest,
     )
 
@@ -649,6 +651,7 @@ class PersistentWorld:
             "archive_path": str(self._store.archive_path(self._world_id)),
             "boundaries_since_checkpoint": self._boundaries,
             "policy": self._policy.to_dict(),
+            "quiet_time_events": quiet_time_report(self._state.time_events),
             "archive": _footprint(
                 self._store.archive_bytes(self._world_id),
                 self._segments,
@@ -929,6 +932,7 @@ class WorldLifecycleService:
             "archive_path": None,
             "boundaries_since_checkpoint": None,
             "policy": None,
+            "quiet_time_events": None,
             "archive": None,
         }
         try:
@@ -958,6 +962,13 @@ class WorldLifecycleService:
         report["durable_revision"] = archive.revision
         report["last_saved_at"] = archive.saved_at
         report["clock"] = archive.clock.isoformat()
+        try:
+            raw = archive.state.get("time_events")
+            report["quiet_time_events"] = quiet_time_report(
+                TimeEventPolicy.from_dict(raw) if raw is not None else None
+            )
+        except TimeEventPolicyError as e:
+            report["error"] = f"{type(e).__name__}: {e}"
         return report
 
     def list_worlds(self) -> Tuple[Dict, ...]:

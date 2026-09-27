@@ -9,9 +9,13 @@
 #
 # 三条硬约束：
 #
-#   1. 时间只能通过 world.time_advanced 事件推进。这里从不调用
+#   1. 时间只能通过 world.time_advanced 事件推进。这里从不直接调用
 #      WorldState.advance_time() —— 那会是一次没有记录在世界历史里的状态变更，
 #      而世界历史必须能解释时钟为什么是现在这个值。
+#      唯一的明示例外（WORLD-1 存档增长设计 §3）：持久世界拨到"安静的分钟不
+#      记"之后，一个**什么都没到期**的时钟步可以 `record=False` 只推时钟。那时
+#      解释时钟的是时间事件加上 SessionState.time_events 这份策略账本：空档
+#      必须落在 skip 生效的范围里，存档加载时逐段核对。
 #   2. 一次推进是一个事务。时钟、事件历史、曝光判定、激活队列、产出的到期
 #      记录，要么全部成立，要么一起回到推进之前的样子。中途失败留下"时间走了
 #      但队列没动"或者"队列动了但事件没记下"都是不可接受的。
@@ -214,7 +218,7 @@ class PersistentScheduler:
             raise SchedulerError("推进后的模拟时间超出可表示的时间范围") from None
         return self._tick(target, minutes)
 
-    def advance_to(self, target: datetime) -> TickResult:
+    def advance_to(self, target: datetime, *, record: bool = True) -> TickResult:
         """把模拟时间推进到 target。
 
         target 必须严格晚于当前时钟，并且距离当前时钟是整分钟 —— 世界历史里
@@ -231,7 +235,7 @@ class PersistentScheduler:
             raise SchedulerError(
                 f"目标时间必须与当前时钟相差整分钟，收到 {target.isoformat()}"
             )
-        return self._tick(target, delta // _MINUTE)
+        return self._tick(target, delta // _MINUTE, record=record)
 
     def advance_to_next_due(self) -> Optional[TickResult]:
         """推进到下一条激活到期的那一刻；队列为空就返回 None，不动时钟。"""
@@ -250,8 +254,11 @@ class PersistentScheduler:
         return self._tick(self.clock + timedelta(minutes=minutes), minutes)
 
     # ── 事务本体 ────────────────────────────────────────────────────────
-    def _tick(self, target: datetime, minutes: int) -> TickResult:
+    def _tick(self, target: datetime, minutes: int, *, record: bool = True) -> TickResult:
         """一次推进 = 一条 world.time_advanced 事件 + 队列变更，同生共死。
+
+        `record=False` 是安静的一步：这段时间里什么都不能到期（到期了就不安静，
+        响亮拒绝），时钟前进，但不写事件，返回的 event 为空。
 
         顺序是刻意的：先在不改任何状态的前提下算出"这次会触发什么"，再进事务。
         事务里出任何岔子 —— 事件校验失败、追加失败、队列变更失败 —— 世界时钟、
@@ -269,6 +276,18 @@ class PersistentScheduler:
             )
 
         plan = self._plan_due(target)
+        if not record:
+            if plan:
+                raise SchedulerError(
+                    "这一步有到期，不是安静的一步，必须记成时间事件："
+                    + ", ".join(activation.activation_id for _, activation, _, _ in plan)
+                )
+            with state.atomic_commit():
+                state.require_writable()
+                world.advance_time(minutes)
+            return TickResult(
+                from_clock=from_clock, to_clock=world.clock, minutes=minutes
+            )
         event = self._time_advanced_event(minutes, target, plan)
 
         # 队列和投递箱都在 SessionState.atomic_commit() 的回滚范围内，所以这里

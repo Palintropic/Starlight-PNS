@@ -32,16 +32,26 @@ import {
   fetchReloadStatus,
   fetchWorldScenes,
   restorePersistentWorld,
+  setQuietTimeEvents,
   startWorldAutonomy,
   stopWorldAutonomy,
   SCOPE_OPERATE,
+  type ArchiveFootprint,
   type PersistentWorldStatus,
   type WorldDriverStatus,
 } from './api';
 import { useCan } from './principal';
 import './worlds.css';
 
-type Action = 'create' | 'bootstrap' | 'restore' | 'checkpoint' | 'close' | 'autonomy-start' | 'autonomy-stop';
+type Action =
+  | 'create'
+  | 'bootstrap'
+  | 'restore'
+  | 'checkpoint'
+  | 'close'
+  | 'autonomy-start'
+  | 'autonomy-stop'
+  | 'quiet-time';
 
 interface Feedback {
   worldId: string;
@@ -119,6 +129,19 @@ const clockText = (iso: string | null): string =>
 
 const boolText = (value: boolean | null, yes: string, no: string): string =>
   value === null ? '未知' : value ? yes : no;
+
+const bytesText = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+};
+
+const archiveText = (archive: ArchiveFootprint | null): string =>
+  archive === null
+    ? '—'
+    : `${bytesText(archive.total_bytes)}（已封存 ${archive.segments} 卷、` +
+      `${archive.sealed_events} 条事件；world.json 里 ${archive.active_events} 条）`;
 
 export default function PersistentWorlds() {
   const [worlds, setWorlds] = useState<PersistentWorldStatus[] | null>(null);
@@ -335,6 +358,32 @@ export default function PersistentWorlds() {
         // 正在飞的那次调用回来之后，提交时按新区间判为不可用：不会再落地。
         '已停止认知（时间与作息照走，可以再启动）',
     );
+
+  const onQuietTime = (worldId: string, record: boolean) => {
+    // 这个开关决定之后的世界历史长什么样，所以拨之前确认一次。
+    const confirmed = window.confirm(
+      record
+        ? `让「${worldId}」重新记录安静的分钟？\n\n` +
+            '从此刻起每个时钟步都记一条时间事件。之前没记的那段不会补上——' +
+            '那段时间里确实什么都没发生，账本里记着它从哪一刻开始不记。'
+        : `让「${worldId}」不再记录安静的分钟？\n\n` +
+            '只影响之后：从此刻起，没有到期、没有作息变化的时钟步照样往前走，但不再记成' +
+            '世界事件。已经存下的每一条都不动；这次拨动本身会记进运维账本，随时可以拨回来。',
+    );
+    if (!confirmed) return;
+    run(
+      `${worldId}:quiet-time`,
+      'quiet-time',
+      worldId,
+      () => setQuietTimeEvents(worldId, record),
+      (status) => {
+        const since = status.quiet_time_events?.since_sim ?? null;
+        return record
+          ? `已开始记录安静的分钟（从 ${clockText(since)} 起）`
+          : `已停止记录安静的分钟（从 ${clockText(since)} 起）`;
+      },
+    );
+  };
 
   const onClose = (worldId: string) => {
     // 关闭会停掉一个正在跑的世界，所以先确认。
@@ -716,6 +765,36 @@ export default function PersistentWorlds() {
                     <div>
                       <dt>读取状态时的错误</dt>
                       <dd>{world.error ?? '无'}</dd>
+                    </div>
+                    <div>
+                      <dt>记录安静的分钟</dt>
+                      <dd>
+                        {world.quiet_time_events === null
+                          ? '—'
+                          : (world.quiet_time_events.record ? '记录' : '不记录') +
+                            (world.quiet_time_events.since_sim
+                              ? `（从 ${clockText(world.quiet_time_events.since_sim)} 起）`
+                              : '（默认）')}
+                        {canOperate && world.owned && world.quiet_time_events !== null ? (
+                          <button
+                            className="btn worlds-inline-btn"
+                            disabled={busy('quiet-time')}
+                            onClick={() =>
+                              onQuietTime(world.world_id, !world.quiet_time_events!.record)
+                            }
+                          >
+                            {busy('quiet-time')
+                              ? '拨动中…'
+                              : world.quiet_time_events.record
+                                ? '不再记录'
+                                : '重新记录'}
+                          </button>
+                        ) : null}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>存档大小</dt>
+                      <dd>{archiveText(world.archive)}</dd>
                     </div>
                     <div>
                       <dt>存档位置</dt>

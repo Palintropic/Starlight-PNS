@@ -736,6 +736,15 @@ class WorldControlPlane:
         self._worker(world).stop_cognition()
         return self._with_driver(world.status())
 
+    def set_quiet_time_events(self, world_id: str, record: bool) -> Dict:
+        """拨「记录安静的分钟」，并立即存盘：运维决定不等自动 checkpoint 的节拍。"""
+        world = self._require_open(world_id)
+        result = world.runtime.set_quiet_time_events(record)
+        if result["changed"] or world.status()["dirty"]:
+            # 上一次可能拨成功了、只在 checkpoint 处失败；原样重试要把它补存下来。
+            return self._with_driver(world.checkpoint("quiet_time_events"))
+        return self._with_driver(world.status())
+
     def autonomy_status(self, world_id: str) -> Optional[Dict]:
         world = self._service.opened(validate_world_id(world_id))
         if world is None or world.clock_worker is None:

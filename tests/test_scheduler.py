@@ -440,14 +440,33 @@ class TimeAdvanceEventTests(unittest.TestCase):
         self.assertEqual(second.event["correlation_id"], self.state.session_id)
 
     def test_the_scheduler_module_never_mutates_the_clock_directly(self):
-        """静态检查：调度器里不允许出现 advance_time() 或对 clock 的赋值。"""
+        """静态检查：调度器里不允许对 clock 赋值；advance_time() 只有一处明示例外。
+
+        例外是安静的一步（WORLD-1 存档增长设计 §3）：它只能在 `_tick` 里、
+        而且只能在 `if not record:` 分支里。
+        """
         source = inspect.getsource(scheduler_mod)
         tree = ast.parse(source)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == "advance_time"
+        ]
+        self.assertEqual(len(calls), 1, "调度器不能绕过事件推进时钟")
+        tick = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_tick"
+        )
+        quiet = [
+            node
+            for node in ast.walk(tick)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "not record"
+        ]
+        self.assertEqual(len(quiet), 1)
+        self.assertIn(calls[0], list(ast.walk(quiet[0])))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                self.assertNotEqual(
-                    node.attr, "advance_time", "调度器不能绕过事件推进时钟"
-                )
             if isinstance(node, (ast.Assign, ast.AugAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:

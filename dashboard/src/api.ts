@@ -449,6 +449,26 @@ export interface WorldDriverStatus {
   cognition_causes: string[];
 }
 
+/** 「记录安静的分钟」开关（WORLD-1 存档增长设计 §3）。 */
+export interface QuietTimeEvents {
+  /** true = 每个时钟步都记一条时间事件（默认）；false = 安静的步不记。 */
+  record: boolean;
+  /** 当前值从哪一刻起生效；从没拨过是 null。 */
+  since_sim: string | null;
+  since_wall: string | null;
+  flips: number;
+}
+
+/** 存档在磁盘上占了多少、分成了几卷。 */
+export interface ArchiveFootprint {
+  total_bytes: number;
+  world_bytes: number | null;
+  segments: number;
+  sealed_events: number;
+  sealed_bytes: number;
+  active_events: number;
+}
+
 export interface PersistentWorldStatus {
   world_id: string;
   session_id: string | null;
@@ -475,6 +495,9 @@ export interface PersistentWorldStatus {
   archive_path: string | null;
   boundaries_since_checkpoint: number | null;
   policy: WorldCheckpointPolicy | null;
+  /** 没有存档、或存档读不出来时是 null。 */
+  quiet_time_events: QuietTimeEvents | null;
+  archive: ArchiveFootprint | null;
   /** `null` = 这个世界没有在本进程里开着。开着的世界一定有时钟 worker。 */
   autonomy: WorldDriverStatus | null;
 }
@@ -519,3 +542,14 @@ export const startWorldAutonomy = (worldId: string): Promise<PersistentWorldStat
 /** 请驱动暂停。可重启，不关闭世界。 */
 export const stopWorldAutonomy = (worldId: string): Promise<PersistentWorldStatus> =>
   fetch(`${worldPath(worldId)}/autonomy/stop`, { method: 'POST' }).then((res) => json(res));
+
+/** 拨「记录安静的分钟」。只影响之后；拨动本身记进运维账本并立即存盘。 */
+export const setQuietTimeEvents = (
+  worldId: string,
+  record: boolean,
+): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/quiet-time-events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ record }),
+  }).then((res) => json(res));

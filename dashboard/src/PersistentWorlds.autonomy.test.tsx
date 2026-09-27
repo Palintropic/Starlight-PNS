@@ -105,6 +105,15 @@ const world = (
   archive_path: `/tmp/worlds/${world_id}/world.json`,
   boundaries_since_checkpoint: 0,
   policy: { every_boundaries: 1, min_interval_seconds: 60, on_close: true },
+  quiet_time_events: { record: true, since_sim: null, since_wall: null, flips: 0 },
+  archive: {
+    total_bytes: 3_400_000,
+    world_bytes: 1_300_000,
+    segments: 2,
+    sealed_events: 2880,
+    sealed_bytes: 2_100_000,
+    active_events: 700,
+  },
   autonomy: driver(world_id, 'stopped'),
   ...overrides,
 });
@@ -360,5 +369,101 @@ describe('正式世界开局', () => {
     renderAs(OPERATOR, <PersistentWorlds />);
     await screen.findByText('yoake-mae');
     expect(screen.queryByRole('button', { name: '建立「夜明け前」' })).toBeNull();
+  });
+
+  it('展开之后看得见「记录安静的分钟」与存档大小', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText(/^记录（默认）/)).toBeTruthy();
+    expect(
+      screen.getByText('3.2 MB（已封存 2 卷、2880 条事件；world.json 里 700 条）'),
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: '不再记录' })).toBeTruthy();
+  });
+
+  it('拨开关要先确认；取消就什么都不发', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    const flip = vi.spyOn(api, 'setQuietTimeEvents');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: '不再记录' }).click();
+    });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(String(confirm.mock.calls[0][0])).toContain('只影响之后');
+    expect(flip).not.toHaveBeenCalled();
+  });
+
+  it('确认之后拨下去，并说清楚从哪一刻起', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const pending = deferred<PersistentWorldStatus>();
+    const flip = vi.spyOn(api, 'setQuietTimeEvents').mockReturnValue(pending.promise);
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: '不再记录' }).click();
+    });
+    expect(flip).toHaveBeenCalledWith('alpha', false);
+    await act(async () => {
+      pending.resolve(
+        world('alpha', {
+          quiet_time_events: {
+            record: false,
+            since_sim: '2026-08-23T02:05:00',
+            since_wall: '2026-08-22T17:05:00+00:00',
+            flips: 1,
+          },
+        }),
+      );
+      await pending.promise;
+    });
+    await screen.findByText('已停止记录安静的分钟（从 2026-08-23 02:05 起）');
+  });
+
+  it('没开着的世界只显示开关状态，不给拨', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('alpha', {
+          owned: false,
+          running: null,
+          autonomy: null,
+          quiet_time_events: {
+            record: false,
+            since_sim: '2026-08-23T02:05:00',
+            since_wall: null,
+            flips: 1,
+          },
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText(/^不记录（从 2026-08-23 02:05 起）/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重新记录' })).toBeNull();
   });
 });

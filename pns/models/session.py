@@ -12,6 +12,7 @@ from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
 from pns.models.clock_anchor import ClockAnchor, ClockAnchorError
 from pns.models.content_ledger import ContentLedger, ContentLedgerError
+from pns.models.time_events import TimeEventPolicy, TimeEventPolicyError, time_gaps
 from pns.models.cognition import (
     CognitionCause,
     CognitionTimeline,
@@ -244,6 +245,9 @@ class SessionState:
     # 正式世界采用了哪一版内容、以及冲突待决记录（WORLD-1 计划 §4.3）。只有
     # 正式世界有它；运维记录，不进任何角色的上下文。
     content: Optional[ContentLedger] = None
+    # 安静的分钟记不记成世界事件（WORLD-1 存档增长设计 §3）。None 等于从没拨过
+    # （record）。运维记录，不进任何角色的上下文。
+    time_events: Optional[TimeEventPolicy] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -688,10 +692,12 @@ class SessionState:
         dispositions = self.rhythm_dispositions
         anchor = self.anchor
         content = self.content
+        time_events = self.time_events
         try:
             yield self
         except BaseException:
             self.content = content
+            self.time_events = time_events
             self.cognition = cognition
             self.rhythm_dispositions = dispositions
             self.anchor = anchor
@@ -764,6 +770,22 @@ class SessionState:
         ):
             raise SessionStateError("冲突记录只能追加或被决定，不能删改")
         self.content = ledger
+
+    def set_time_events(self, policy: TimeEventPolicy) -> None:
+        """在当前事务内换安静分钟策略（一次拨动）。只追加，随事务回滚。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("时间事件策略只能在本线程的提交事务里修改")
+        if not isinstance(policy, TimeEventPolicy):
+            raise SessionStateError("只能设置 TimeEventPolicy")
+        previous = self.time_events.records if self.time_events is not None else ()
+        if policy.records[: len(previous)] != previous or len(policy.records) != len(
+            previous
+        ) + 1:
+            raise SessionStateError("时间事件策略一次只能追加一条拨动记录")
+        if self.world_state is None or policy.records[-1].from_sim != self.world_state.clock:
+            raise SessionStateError("拨动记录的 from_sim 必须是此刻的世界时钟")
+        self.time_events = policy
 
     def add_rhythm_dispositions(self, keys) -> None:
         """在当前事务内记下新的"走不到"的作息段。只增不减。"""
@@ -1127,6 +1149,13 @@ class SessionState:
                 state.content = ContentLedger.from_dict(content)
             except ContentLedgerError as e:
                 raise SessionStateError(f"内容账本不合法：{e}") from e
+        time_events = payload.get("time_events")
+        if time_events is not None:
+            try:
+                state.time_events = TimeEventPolicy.from_dict(time_events)
+            except TimeEventPolicyError as e:
+                raise SessionStateError(f"时间事件策略不合法：{e}") from e
+        _validate_time_gaps(state)
         dispositions = payload.get("rhythm_dispositions", [])
         if not isinstance(dispositions, list) or not all(
             isinstance(key, str) and key for key in dispositions
@@ -1167,6 +1196,7 @@ class SessionState:
             "rhythm_dispositions": sorted(self.rhythm_dispositions),
             "anchor": self.anchor.to_dict() if self.anchor else None,
             "content": self.content.to_dict() if self.content else None,
+            "time_events": self.time_events.to_dict() if self.time_events else None,
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
@@ -1175,6 +1205,36 @@ class SessionState:
 
 
 # ── 存档校验辅助 ────────────────────────────────────────────────────────
+def _validate_time_gaps(state: "SessionState") -> None:
+    """时间事件之间的每一段空档，都必须整个落在 skip 生效的范围里。
+
+    这是"没记"与"丢了"的分界（WORLD-1 存档增长设计 §3.3）：record 生效时每个
+    时钟步都写一条时间事件，所以那里出现空档只能是存档缺了事件。
+    """
+    world = state.world_state
+    if world is None:
+        return
+    policy = state.time_events if state.time_events is not None else TimeEventPolicy()
+    if state.time_events is not None and state.time_events.records:
+        last = state.time_events.records[-1].from_sim
+        if last > world.clock:
+            raise SessionStateError("时间事件策略的拨动时刻晚于世界时钟")
+    steps = (
+        (event.occurred_at, int(event.payload["minutes"]))
+        for event in state.events.by_type(EventType.WORLD_TIME_ADVANCED)
+    )
+    try:
+        gaps = time_gaps(steps, world.clock)
+    except TimeEventPolicyError as e:
+        raise SessionStateError(str(e)) from e
+    for start, end in gaps:
+        if not policy.covers(start, end):
+            raise SessionStateError(
+                f"世界历史在 {start.isoformat()} 到 {end.isoformat()} 之间没有时间事件，"
+                "而这段时间里安静的分钟是要记录的 —— 存档缺了事件"
+            )
+
+
 def _validate_cognition(state: "SessionState") -> None:
     """每条 Agency 记录的认知判定，都必须能从这份存档本身重新推出来。
 

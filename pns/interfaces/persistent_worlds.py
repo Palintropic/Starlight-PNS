@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from pns.runtime.agency.policy import AgencyPolicyError
 from pns.runtime.autonomy.audit import AuditError
@@ -192,6 +192,22 @@ class ArchiveFootprintModel(BaseModel):
     active_events: int
 
 
+class QuietTimeEventsModel(BaseModel):
+    """「记录安静的分钟」开关（WORLD-1 存档增长设计 §3）。"""
+
+    # true = 每个时钟步都记一条 world.time_advanced（默认）；false = 安静的步不记。
+    record: bool
+    # 当前值从哪一刻起生效（最近一次拨动的模拟时刻 / 现实时刻）；从没拨过是 null。
+    since_sim: Optional[str] = None
+    since_wall: Optional[str] = None
+    flips: int = 0
+
+
+class QuietTimeEventsRequest(BaseModel):
+    # 严格布尔：一个拨了就影响整份世界历史的开关，不接受 "no" / 0 这类猜测。
+    record: StrictBool
+
+
 class WorldStatusModel(BaseModel):
     """一个世界此刻的样子。字段含义与 P12 `PersistentWorld.status()` 一致。
 
@@ -229,6 +245,7 @@ class WorldStatusModel(BaseModel):
     archive_path: Optional[str] = None
     boundaries_since_checkpoint: Optional[int] = None
     policy: Optional[CheckpointPolicyModel] = None
+    quiet_time_events: Optional[QuietTimeEventsModel] = None
     archive: Optional[ArchiveFootprintModel] = None
     # 本进程有没有在推这个世界。`null` 的意思是**从来没为它起过驱动**，
     # 跟"起过、现在停着"不是一回事 —— 后者还带着上一次 tick 的错误。
@@ -486,6 +503,21 @@ def set_character_activity(
         return ActivityUpdateModel.model_validate(
             plane.set_activity(world_id, payload.character_id, payload.activity)
         )
+
+
+@router.post("/{world_id}/quiet-time-events", response_model=WorldStatusModel)
+def set_quiet_time_events(
+    world_id: str,
+    payload: QuietTimeEventsRequest,
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """拨「记录安静的分钟」。只影响之后，已经写下的时间事件一条都不动。
+
+    拨动本身作为一条策略记录进运维账本（随存档走，重启不会拨回去），并立即
+    checkpoint。值与当前相同时什么都不记。
+    """
+    with _translated(plane, "quiet_time_events", world_id):
+        return _status(plane.set_quiet_time_events(world_id, payload.record))
 
 
 @router.post("/{world_id}/autonomy/start", response_model=WorldStatusModel)
