@@ -298,6 +298,21 @@ docker run --rm --entrypoint sh starlight-pns:local -c 'ls -A /app/data'      # 
 >
 > 生产模式下世界时间必须与现实 1:1；配置了别的倍率（`PNS_CLOCK_RATE`）进程会拒绝启动。
 
+**正式世界「夜明け前」（`yoake-mae`）的开局。** 它不从场景建，只有一个入口：「持久世界」页的
+「建立「夜明け前」」按钮，或者
+
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $PNS_ADMIN_TOKEN" \
+  http://127.0.0.1:7860/api/persistent-worlds/yoake-mae/bootstrap
+```
+
+开局时刻是**按下时东京时间当天的 19:00**；瑞希、绘名按各自作息表在 19:00 所在的那一段放好，不写任何
+开场事件。谁在什么时候、用哪一版内容开的局记在世界的开局来源里。已经有存档时这个入口返回 409，不会覆盖。
+
+之后内容包里某人的作息表若换了新版本，世界下次打开时只会记一条"待决"冲突、继续用已采用的那一版（这个人
+暂时不受作息驱动），要由项目所有者明确采用才生效。这一步目前没有界面，只能在服务器侧调用
+`WorldControlPlane.decide_content_conflict()`。
+
 ## 8. 账户与角色（AUTH-1）
 
 浏览器登录用的是**账户**（用户名 + 密码），不是 `PNS_ADMIN_TOKEN`。那把 token 仍然有效，

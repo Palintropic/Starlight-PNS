@@ -313,3 +313,52 @@ describe('认知开关与世界时钟', () => {
     await screen.findByText('已开始认知：从下一个完整模拟分钟起，角色开始自己做决定');
   });
 });
+
+describe('正式世界开局', () => {
+  it('还没有「夜明け前」时给出开局按钮，确认之后只发一次请求', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({ worlds: [world('alpha')] });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const pending = deferred<PersistentWorldStatus>();
+    const bootstrap = vi.spyOn(api, 'bootstrapFormalWorld').mockReturnValue(pending.promise);
+
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const button = await screen.findByRole('button', { name: '建立「夜明け前」' });
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledWith('yoake-mae');
+    await act(async () => {
+      pending.resolve(
+        world('yoake-mae', { revision: 1, clock: '2026-09-27T19:00:00' }),
+      );
+      await pending.promise;
+    });
+    await screen.findByText('已建立「夜明け前」，开局于 2026-09-27 19:00，存档第 1 版');
+  });
+
+  it('取消确认就什么都不发', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({ worlds: [] });
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const bootstrap = vi.spyOn(api, 'bootstrapFormalWorld');
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const button = await screen.findByRole('button', { name: '建立「夜明け前」' });
+    await act(async () => {
+      button.click();
+    });
+    expect(bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('已经有「夜明け前」就不再给开局按钮', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('yoake-mae')],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    await screen.findByText('yoake-mae');
+    expect(screen.queryByRole('button', { name: '建立「夜明け前」' })).toBeNull();
+  });
+});

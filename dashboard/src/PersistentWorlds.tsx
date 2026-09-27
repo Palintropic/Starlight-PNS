@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
+  bootstrapFormalWorld,
   checkpointPersistentWorld,
   closePersistentWorld,
   createPersistentWorld,
@@ -40,7 +41,7 @@ import {
 import { useCan } from './principal';
 import './worlds.css';
 
-type Action = 'create' | 'restore' | 'checkpoint' | 'close' | 'autonomy-start' | 'autonomy-stop';
+type Action = 'create' | 'bootstrap' | 'restore' | 'checkpoint' | 'close' | 'autonomy-start' | 'autonomy-stop';
 
 interface Feedback {
   worldId: string;
@@ -56,6 +57,10 @@ interface SceneOption {
 // 建世界那一格的 pending key。用空格开头，跟任何合法 world_id 都撞不上
 // （world_id 只允许小写字母、数字和 . _ -，且必须以字母或数字开头）。
 const CREATE_KEY = ' create';
+
+// 正式世界（WORLD-1）。身份、时区、开局时刻都在服务器侧定义，这里只认 ID。
+const FORMAL_WORLD_ID = 'yoake-mae';
+const FORMAL_WORLD_NAME = '夜明け前';
 
 const describe = (e: unknown, fallback: string): string =>
   e instanceof ApiError ? e.message : e instanceof Error ? e.message : fallback;
@@ -269,6 +274,24 @@ export default function PersistentWorlds() {
     );
   };
 
+  const onBootstrap = () => {
+    // 开局之后这个世界的时间就一直跟着现实走，而且它只能开局一次。
+    const confirmed = window.confirm(
+      `建立「${FORMAL_WORLD_NAME}」（${FORMAL_WORLD_ID}）？\n\n` +
+        '世界从东京时间当天 19:00 开局，时间从此跟着现实走；角色要等你按「开始认知」' +
+        '才会自己做决定。这个世界只能开局一次。',
+    );
+    if (!confirmed) return;
+    run(
+      CREATE_KEY,
+      'bootstrap',
+      FORMAL_WORLD_ID,
+      () => bootstrapFormalWorld(FORMAL_WORLD_ID),
+      (status) =>
+        `已建立「${FORMAL_WORLD_NAME}」，开局于 ${clockText(status.clock)}，存档第 ${status.revision} 版`,
+    );
+  };
+
   const onRestore = (worldId: string) =>
     run(
       `${worldId}:restore`,
@@ -356,6 +379,21 @@ export default function PersistentWorlds() {
       </div>
 
       {loadError ? <div className="worlds-error">{loadError}</div> : null}
+
+      {canOperate &&
+      worlds !== null &&
+      !worlds.some((world) => world.world_id === FORMAL_WORLD_ID) ? (
+        <div className="worlds-create">
+          <h3>正式世界</h3>
+          <div className="worlds-create-actions">
+            <button className="btn btn-accent" disabled={creating} onClick={onBootstrap}>
+              {pending[CREATE_KEY] === 'bootstrap'
+                ? '开局中…'
+                : `建立「${FORMAL_WORLD_NAME}」`}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {canOperate ? (
       <form className="worlds-create" onSubmit={onCreate}>

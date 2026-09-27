@@ -17,7 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,6 +47,7 @@ from pns.runtime.formal_world import (  # noqa: E402
     rhythm_fingerprint,
     rhythm_subject,
 )
+from pns.runtime.persistence.lifecycle import _fingerprint  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.world.context import render_world_context  # noqa: E402
 from pns.world.rhythm import DailyRhythm  # noqa: E402
@@ -124,6 +125,13 @@ class InitialStateTests(unittest.TestCase):
         self.assertEqual(world.location_of("ena"), "kamiyama_high")
         self.assertEqual(world.channels_for("mizuki"), [])
         self.assertEqual(world.channels_for("ena"), [])
+
+    def test_a_launch_inside_a_channel_segment_starts_in_the_channel(self):
+        # 开局那一段若声明了频道，开局就在频道里（例如在 25 時里开局）。
+        spec = dataclasses.replace(YOAKE_MAE, start=time(1, 30))
+        state = formal_session_state(spec, BOUNDARY.active(), session_id="s", wall=WALL)
+        world = state.world_state
+        self.assertEqual(set(world.channel_participants("nightcord")), {"mizuki", "ena"})
 
     def test_nothing_happened_before_19(self):
         state = _state()
@@ -233,6 +241,23 @@ class ContentLedgerTests(unittest.TestCase):
                 mutate(payload)
                 with self.assertRaises(ContentLedgerError):
                     ContentLedger.from_dict(payload)
+
+    def test_the_ledger_rolls_back_and_counts_as_a_change(self):
+        state = _state()
+        before = state.content
+        with self.assertRaises(RuntimeError):
+            with state.atomic_commit():
+                state.set_content(
+                    before.offered("rhythm:mizuki", self.B, registry_revision=9, wall="w")
+                )
+                raise RuntimeError("组装失败")
+        self.assertIs(state.content, before)
+        fingerprint = _fingerprint(state)
+        with state.atomic_commit():
+            state.set_content(
+                before.offered("rhythm:mizuki", self.B, registry_revision=9, wall="w")
+            )
+        self.assertNotEqual(_fingerprint(state), fingerprint, "只记了一条冲突，世界也算变过")
 
     def test_the_session_refuses_to_forget_a_record(self):
         state = _state()

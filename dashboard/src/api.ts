@@ -499,6 +499,10 @@ export const createPersistentWorld = (
     body: JSON.stringify({ world_id: worldId, scene, characters }),
   }).then((res) => json(res));
 
+/** 按正式世界的规则开局（WORLD-1「夜明け前」）。请求体为空：身份、时区、开局时刻都在服务器侧。 */
+export const bootstrapFormalWorld = (worldId: string): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/bootstrap`, { method: 'POST' }).then((res) => json(res));
+
 export const restorePersistentWorld = (worldId: string): Promise<PersistentWorldStatus> =>
   fetch(`${worldPath(worldId)}/restore`, { method: 'POST' }).then((res) => json(res));
 
