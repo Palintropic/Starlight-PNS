@@ -28,7 +28,11 @@ from pns.runtime.autonomy.audit import ScriptedAuditor
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.autonomy.generation import AuthoredLinePolicy, ScriptedLineGenerator
 from pns.runtime.content_registry import ConfigValidationError, _build_character
-from pns.runtime.event_commit import EventCommitError, commit_session_event
+from pns.runtime.event_commit import (
+    EventCommitError,
+    _commit_rhythm_event,
+    commit_session_event,
+)
 from pns.runtime.memory.recall import MemoryRecall
 from pns.runtime.rhythm import RhythmDirector, RhythmDirectorError
 from pns.runtime.scheduler import PersistentScheduler
@@ -467,7 +471,7 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
         self.assertTrue(
             all(event.event_id.startswith("rhythm:mizuki:") for event in plan)
         )
-        commit_session_event(state, plan[0])
+        _commit_rhythm_event(state, plan[0])
         with self.assertRaises(Exception) as caught:
             # 同一条事件再来一次：世界历史按 id 拒绝。
             state.events._check_can_append(plan[0])
@@ -804,7 +808,7 @@ class RhythmApplicationIsAtomicAndSelfHealingTests(unittest.TestCase):
         restore = self._refuse_joins(state)
         with self.assertRaises(EventCommitError):
             for event in plan:  # 逐条提交
-                commit_session_event(state, event)
+                _commit_rhythm_event(state, event)
         restore()
         # 逐条提交确实留下了半截世界 —— 这正是时钟步不允许的那种。
         self.assertIs(world.activity_of("mizuki").kind, ActivityKind.STUDYING)

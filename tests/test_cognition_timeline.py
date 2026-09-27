@@ -116,6 +116,26 @@ class UnionJudgementTests(unittest.TestCase):
             {C.WORLD_ACTION_CAP, C.FAULT},
         )
 
+    def test_wall_clock_behind_and_world_cap_interleave_keep_both(self):
+        # R4 §7 第 2 条点名的交错：现实时钟落后期间到了世界上限，再追上。
+        timeline = _start(_open(), log_length=0, now=t(9))
+        timeline = timeline.wall_clock_behind(log_length=2, sim=t(10), wall=WALL)
+        timeline = timeline.world_action_cap(log_length=3, sim=t(10, 30), wall=WALL)
+        timeline = timeline.wall_clock_caught_up(log_length=3, sim=t(11), wall=WALL)
+        self.assertEqual(timeline.current.causes, {C.WORLD_ACTION_CAP})
+        self.assertEqual(
+            unavailable_causes(timeline.current, t(10, 15)),
+            {C.WALL_CLOCK_BEHIND, C.WORLD_ACTION_CAP},
+        )
+        self.assertEqual(
+            unavailable_causes(timeline.current, t(11)),
+            {C.WALL_CLOCK_BEHIND, C.WORLD_ACTION_CAP},
+        )
+        self.assertEqual(
+            unavailable_causes(timeline.current, t(11, 1)), {C.WORLD_ACTION_CAP}
+        )
+        self.assertEqual(CognitionTimeline.from_dict(timeline.to_dict()), timeline)
+
     def test_the_cutoff_minute_itself_still_carries_the_cause(self):
         # 故障在 12:00:00 解除 → cutoff 12:01；fired_at == 12:00 仍带 fault。
         timeline = _start(_open(), log_length=0, now=t(9))

@@ -260,6 +260,13 @@ class PersistentScheduler:
         state = self._state
         world = state.world_state
         from_clock = world.clock
+        if state.autonomy is not None and state.activation_outbox.pending():
+            # 挂了自主运行时的会话：到期问的是它触发那一刻的世界。它还没有结局，
+            # 时钟就不能往前走——不管推进是从哪个入口来的（WORLD-1 设计 §5.2）。
+            raise SchedulerError(
+                "还有到期资格没有结局，时钟不能往前走："
+                + ", ".join(due.due_id for due in state.activation_outbox.pending())
+            )
 
         plan = self._plan_due(target)
         event = self._time_advanced_event(minutes, target, plan)

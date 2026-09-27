@@ -297,7 +297,23 @@ class SessionState:
         with self._commit_gate:
             if self._phase == "fenced":
                 raise SessionFencedError(f"会话 '{self.session_id}' 已经关上，不能发布")
+            if self._phase == "building":
+                self._validate_assembled()
             self._phase = "live"
+
+    def _validate_assembled(self) -> None:
+        """发布前把各分区之间的约束整体再查一遍。
+
+        三组 restore 各自只对照调用那一刻的其它分区；换个顺序调用（先恢复 Agency、
+        再恢复投递箱），每一步都通过，拼出来的却是一份加载时会被拒绝的状态。发布
+        是进入 live 的唯一入口，所以在这里按加载的同一套校验兜底。
+        """
+        clock = self.world_state.clock if self.world_state is not None else None
+        _validate_history_against_clock(self, clock)
+        _validate_schedule_against_clock(self.activations, self.activation_outbox, clock)
+        _validate_agency_against_session(self, self.agency, clock)
+        _validate_memories_against_session(self, self.memories, clock)
+        _validate_cognition(self)
 
     def fence(self, reason: str) -> None:
         """不可逆地关上这份状态。等在跑的事务结束；事务内部调用直接拒绝。"""
@@ -504,7 +520,11 @@ class SessionState:
         return self.characters[self.current_character_index]
 
     def history_for(self, character: str) -> List[Dict]:
-        return self.histories[character]
+        """这个角色的提示历史的副本。
+
+        交出内部列表的话，拿着它的人在 fence 之后、只读快照块里照样能写会话。
+        """
+        return deepcopy(self.histories[character])
 
     def correction_for(self, character: str) -> Optional[str]:
         return self.pending_corrections[character]

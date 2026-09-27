@@ -120,6 +120,15 @@ class FenceTests(unittest.TestCase):
                     write()
         self.assertEqual(state.to_dict(), before)
 
+    def test_a_history_read_is_not_a_write_handle(self):
+        # R2-F3：history_for() 交出的若是内部列表，fence 之后照样能写会话。
+        state, _scheduler = _state()
+        state.initialize_runtime("开场")
+        state.fence("closed: test")
+        before = state.to_dict()
+        state.history_for("mizuki").append({"role": "assistant", "content": "late"})
+        self.assertEqual(state.to_dict(), before)
+
     def test_reads_still_work_after_the_fence(self):
         state, _scheduler = _state()
         state.fence("closed: test")
@@ -218,6 +227,28 @@ class BuildingOnlyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "已经挂在会话上"):
                     action()
         self.assertEqual(state.to_dict(), before)
+
+    def test_restores_in_any_order_cannot_publish_a_bare_acknowledgement(self):
+        # R2-F2：先恢复（空的）Agency、再恢复带裸确认的投递箱，两步各自都过；
+        # 拼出来的状态加载时会被拒绝，所以也不许发布成 live。
+        source, scheduler = _state()
+        (due,) = scheduler.advance_by(10).due
+        scheduler.acknowledge(due.due_id)
+        archive = source.to_dict()
+
+        state = SessionState(session_id="s1", scene="gate", characters=["mizuki", "ena"])
+        state.attach_world_state(WorldState.from_dict(archive["world_state"]))
+        state.restore_agency_archive(state.agency_archive())
+        state.restore_scheduler_archive(archive["scheduler"])
+        with self.assertRaisesRegex(SessionStateError, "没有任何 Agency 记录"):
+            state.publish()
+        self.assertEqual(state.phase, "building")
+
+    def test_a_consistent_assembly_still_publishes(self):
+        state, scheduler = _state()
+        scheduler.advance_by(5)
+        state.publish()
+        self.assertEqual(state.phase, "live")
 
     def test_a_world_state_belongs_to_one_session(self):
         state, _scheduler = _state()

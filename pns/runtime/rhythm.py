@@ -35,6 +35,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore
 from pns.models.world_state import ActivityKind, WorldState
+from pns.runtime.event_commit import RHYTHM_PROVENANCE_KIND
 from pns.world.rhythm import MINUTES_PER_DAY, DailyRhythm, format_day_minute
 from pns.world.routing import plan_route
 
@@ -444,21 +445,6 @@ class _CharacterState:
     next_start: datetime
     departure: Optional[datetime]
     channels: frozenset
-
-
-RHYTHM_PROVENANCE_KIND = "daily_rhythm"
-
-# 作息认领自己事件的字段。别的写入口不许带它们：带上当前段的 key，一条外部
-# 决定就会被当成作息自己做的，外部决定压过作息的契约随之失效。
-RHYTHM_RESERVED_PROVENANCE = frozenset({"segment_key", "trip_leg"})
-
-
-def claims_rhythm(provenance) -> bool:
-    """这份 provenance 是否冒用了作息的身份（种类或保留字段）。"""
-    provenance = provenance or {}
-    return provenance.get("kind") == RHYTHM_PROVENANCE_KIND or any(
-        key in provenance for key in RHYTHM_RESERVED_PROVENANCE
-    )
 
 
 def _rhythm_key(event) -> Optional[str]:

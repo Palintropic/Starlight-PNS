@@ -59,8 +59,8 @@ from pns.runtime.autonomy.outcome import (
 )
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.memory.recall import MemoryRecall
-from pns.runtime.event_commit import commit_session_event
-from pns.runtime.rhythm import RhythmDirector, claims_rhythm
+from pns.runtime.event_commit import _commit_rhythm_event, commit_session_event
+from pns.runtime.rhythm import RhythmDirector
 from pns.runtime.scheduler import PersistentScheduler
 
 # 状态投影里默认回看多少条。
@@ -313,10 +313,6 @@ class AutonomousRuntime:
                 "外部提交目前只允许 character.activity_changed；台词必须经过 "
                 "Agency 与 Router 审计路径"
             )
-        if claims_rhythm(event.provenance):
-            # 作息凭 provenance 认领"本段自己的决定"。外部事件冒用它，作息就会
-            # 把一个外部决定当成自己的行程继续走下去。
-            raise AutonomyError("外部事件不能带作息的 provenance（kind/segment_key/trip_leg）")
         with self._gate:
             self._require_running("提交外部事件")
             return commit_session_event(self._state, event)
@@ -557,7 +553,7 @@ class AutonomousRuntime:
             correlation_id=state.session_id,
             dispositions=state.rhythm_dispositions,
         )
-        committed = tuple(commit_session_event(state, event) for event in step.events)
+        committed = tuple(_commit_rhythm_event(state, event) for event in step.events)
         if step.unreachable:
             state.add_rhythm_dispositions(step.unreachable)
         return committed

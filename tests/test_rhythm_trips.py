@@ -19,8 +19,14 @@ from pns.models.event import Event, EventScope, EventType
 from pns.models.session import SessionState
 from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.autonomy.audit import ScriptedAuditor
-from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
-from pns.runtime.event_commit import commit_session_event
+from pns.runtime.autonomy.coordinator import AutonomousRuntime
+from pns.runtime.event_commit import (
+    EventCommitError,
+    _commit_rhythm_event,
+    _commit_session_event,
+    commit_event,
+    commit_session_event,
+)
 from pns.runtime.rhythm import RhythmDirector
 from pns.world.channels import build_default_channel_registry
 from pns.world.grants import (
@@ -286,30 +292,51 @@ class TripRuntimeTests(unittest.TestCase):
             provenance=provenance,
         )
 
-    def test_an_operator_event_cannot_borrow_the_rhythm_identity(self):
-        # 审查 F6：外部事件带上本段的 segment_key，作息就会把它当成自己的决定、
-        # 把行程继续走下去。受支持的外部入口直接拒绝作息的 provenance。
+    def test_no_public_commit_can_borrow_the_rhythm_identity(self):
+        # 审查 F6 / R2-F5：外部事件带上作息身份，作息就会把它当成自己的决定、
+        # 把行程继续走下去。身份只由作息自己的提交入口签发，所有公开提交入口
+        # （操作者入口、会话提交、底层提交）都拒绝它。
         state, runtime = _runtime(t(11, 30))
         runtime.advance(14)  # 11:44 出门
         key = self._commuting_key(state)
         before = len(state.events)
-        for label, provenance in {
+        entries = {
+            "commit_external_event": runtime.commit_external_event,
+            "commit_session_event": lambda event: commit_session_event(state, event),
+            "commit_event": lambda event: commit_event(
+                state.world_state, state.events, event
+            ),
+        }
+        identities = {
             "segment_key": {"segment_key": key},
             "kind": {"kind": "daily_rhythm"},
             "trip_leg": {"trip_leg": 0},
-        }.items():
-            with self.subTest(label):
-                with self.assertRaises(AutonomyError):
-                    runtime.commit_external_event(self._idle(state, provenance))
+            "full identity": {"kind": "daily_rhythm", "segment_key": key},
+        }
+        for entry, commit in entries.items():
+            for label, provenance in identities.items():
+                with self.subTest(entry=entry, identity=label):
+                    with self.assertRaises(EventCommitError):
+                        commit(self._idle(state, provenance))
+        self.assertEqual(len(state.events), before)
+        runtime.advance(1)  # 行程照常：11:45 到 mizuki_home
+        self.assertEqual(state.world_state.location_of("mizuki"), "mizuki_home")
+
+    def test_the_rhythm_entry_only_takes_rhythm_events(self):
+        # 作息的内部提交入口不是一条能提交任意事件的后门。
+        state, _unused = _runtime(t(11, 30))
+        before = len(state.events)
+        with self.assertRaises(EventCommitError):
+            _commit_rhythm_event(state, self._idle(state, {}))
         self.assertEqual(len(state.events), before)
 
     def test_only_rhythm_events_carry_a_segment_key(self):
-        # 入口之外（直接提交）带了 key、却不是作息事件的，仍然是外部决定：
-        # 行程停下，角色留在原地。
+        # 第二道闸：即使一条带 key、却不是作息种类的事件进了历史（比如来自旧存档，
+        # 这里走内部提交模拟），作息也把它当外部决定——行程停下，角色留在原地。
         state, runtime = _runtime(t(11, 30))
         runtime.advance(14)  # 11:44 出门，还在 mizuki_home_room
         key = self._commuting_key(state)
-        commit_session_event(state, self._idle(state, {"segment_key": key}))
+        _commit_session_event(state, self._idle(state, {"segment_key": key}))
         runtime.advance(1)  # 11:45：作息自己的话这一刻走到 mizuki_home
         self.assertEqual(state.world_state.location_of("mizuki"), "mizuki_home_room")
         self.assertIs(state.world_state.activity_of("mizuki").kind, ActivityKind.IDLE)
