@@ -502,7 +502,10 @@ class PersistentWorld:
                         # 那一份就是最新的，而它不是。
                         raise
 
-            # 3./4. 标记关闭，归还所有权。
+            # 3./4. 关上内存状态，标记关闭，归还所有权。fence 必须在归还所有权
+            # 之前：此后任何还握着旧引用的线程（醒得太晚的 worker）走受支持的
+            # 写方法都会失败，不会跟接手这个世界的下一个进程并行写。
+            self._state.fence(f"closed: {reason}")
             self._closed = True
             self._clean = clean
             self._ownership.release()
@@ -524,6 +527,7 @@ class PersistentWorld:
             if self._closed:
                 return self._status_locked()
             self._runtime.stop(reason)
+            self._state.fence(f"released: {reason}")
             self._closed = True
             self._clean = False
             self._last_reason = reason
@@ -690,6 +694,8 @@ class WorldLifecycleService:
                 snapshot_timeout=snapshot_timeout,
             )
             world._first_save()
+            # 组装完成：从这里起不能再整段换存档或重绑服务。
+            state.publish()
             if start:
                 runtime.start()
         except BaseException:
@@ -746,6 +752,7 @@ class WorldLifecycleService:
                 service=self,
                 snapshot_timeout=snapshot_timeout,
             )
+            state.publish()
             if start:
                 runtime.start()
         except BaseException:

@@ -147,7 +147,17 @@ class WorldState:
             character_id: set(grants)
             for character_id, grants in self.channel_grants.items()
         }
+        # 挂在 SessionState 上之后，由它装一个写守卫：会话关上（fence）之后、
+        # 或处在只读快照块里时，这里的每个写方法都会失败。它不是世界状态的一部分，
+        # 不进存档、不参与相等性比较；没挂到会话上的 WorldState（建世界、测试）
+        # 没有守卫。
+        self._write_guard = None
         self.validate()
+
+    def _check_writable(self) -> None:
+        guard = self._write_guard
+        if guard is not None:
+            guard()
 
     def validate(self) -> None:
         """Reject state that bypassed the public mutation methods."""
@@ -243,6 +253,7 @@ class WorldState:
 
     def advance_time(self, minutes: int = 10) -> datetime:
         """推进模拟时间，跨零点时日期一并进位。"""
+        self._check_writable()
         if minutes < 0:
             raise WorldStateError("模拟时间不能倒退")
         self.clock = self.clock + timedelta(minutes=minutes)
@@ -250,6 +261,7 @@ class WorldState:
 
     # ── 物理位置 ────────────────────────────────────────────────────────
     def place_character(self, character_id: str, location_id: str) -> None:
+        self._check_writable()
         self._require_character_id(character_id)
         if not self.locations.has(location_id):
             raise WorldStateError(f"未知的 location_id: {location_id}")
@@ -260,6 +272,7 @@ class WorldState:
         self.character_locations[character_id] = location_id
 
     def remove_character(self, character_id: str) -> None:
+        self._check_writable()
         self.character_locations.pop(character_id, None)
         self.character_availability.pop(character_id, None)
         self.character_activities.pop(character_id, None)
@@ -307,6 +320,7 @@ class WorldState:
 
     def _grant_location(self, character_id: str, location_id: str, role: str) -> None:
         """建世界时装入一条进入授予。**只给建世界的代码用**，运行期没有调用方。"""
+        self._check_writable()
         self._require_character_id(character_id)
         if not self.locations.has(location_id):
             raise WorldStateError(f"未知的 location_id: {location_id}")
@@ -316,6 +330,7 @@ class WorldState:
 
     def _grant_channel(self, character_id: str, channel_id: str) -> None:
         """建世界时装入一条频道成员资格。**只给建世界的代码用**。"""
+        self._check_writable()
         self._require_character_id(character_id)
         if not self.channels.has(channel_id):
             raise WorldStateError(f"未知的 channel_id: {channel_id}")
@@ -323,6 +338,7 @@ class WorldState:
 
     # ── 线上频道 ────────────────────────────────────────────────────────
     def join_channel(self, character_id: str, channel_id: str) -> None:
+        self._check_writable()
         self._require_character_id(character_id)
         if not self.channels.has(channel_id):
             raise WorldStateError(f"未知的 channel_id: {channel_id}")
@@ -333,6 +349,7 @@ class WorldState:
         self.channel_members.setdefault(channel_id, set()).add(character_id)
 
     def leave_channel(self, character_id: str, channel_id: str) -> None:
+        self._check_writable()
         if channel_id in self.channel_members:
             self.channel_members[channel_id].discard(character_id)
 
@@ -353,6 +370,7 @@ class WorldState:
 
     # ── 可用性 ──────────────────────────────────────────────────────────
     def set_availability(self, character_id: str, availability) -> None:
+        self._check_writable()
         self._require_character_id(character_id)
         availability = Availability(availability)
         if availability is Availability.AVAILABLE:
@@ -365,6 +383,7 @@ class WorldState:
 
     # ── 当前活动 ────────────────────────────────────────────────────────
     def set_activity(self, character_id: str, activity) -> CharacterActivity:
+        self._check_writable()
         self._require_character_id(character_id)
         if character_id not in self.known_characters():
             raise WorldStateError(f"世界里不存在角色 '{character_id}'")
@@ -400,6 +419,7 @@ class WorldState:
 
     # ── 地点环境状态 ────────────────────────────────────────────────────
     def set_environment(self, location_id: str, facts: Dict) -> None:
+        self._check_writable()
         if not self.locations.has(location_id):
             raise WorldStateError(f"未知的 location_id: {location_id}")
         self.location_state.setdefault(location_id, {}).update(deepcopy(facts))

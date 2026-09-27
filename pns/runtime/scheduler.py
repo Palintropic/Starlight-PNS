@@ -147,6 +147,7 @@ class PersistentScheduler:
         那套事务；但它仍然在 atomic_commit() 的回滚范围内，所以放在一次提交
         块里确认、提交失败时确认也会一并撤销。
         """
+        self._state.require_writable()
         try:
             return self.outbox._acknowledge(due_id)
         except ActivationOutboxError as e:
@@ -170,6 +171,7 @@ class PersistentScheduler:
         全部校验都在任何状态变更之前完成：类型、是否排到了过去、角色在不在
         这个世界里、ID 有没有撞车。任何一条不过，队列一个字节都不动。
         """
+        self._state.require_writable()
         if not isinstance(activation, ScheduledActivation):
             raise SchedulerError("只能排入 ScheduledActivation")
         self._require_future(activation)
@@ -189,6 +191,7 @@ class PersistentScheduler:
         取消只对还没触发的激活有意义 —— 已经产出的到期记录和已经提交的事件
         不会被取消操作追溯掉。
         """
+        self._state.require_writable()
         if not isinstance(activation_id, str) or not activation_id:
             raise SchedulerError("activation_id 必须是非空字符串")
         if not self.queue.has(activation_id):

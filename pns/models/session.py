@@ -35,6 +35,15 @@ class SessionStateError(ValueError):
     """会话存档不自洽（各部分来自不同时刻、引用对不上、形状损坏等）。"""
 
 
+class SessionFencedError(RuntimeError):
+    """这份状态已经被关上了（世界关闭/放弃之后），或者此刻在只读快照块里。
+
+    它存在的理由是：世界关闭并归还所有权之后，任何还握着旧引用的线程（例如
+    一个醒得太晚的 worker）都不能再改这份内存状态。检查放在 SessionState 最底层
+    的每一个受支持的写方法里，调用方拿不拿协调器闸门都绕不过去。
+    """
+
+
 class TransactionBoundaryError(RuntimeError):
     """拿不到这份状态的独占边界，因此现在取不到一致快照。
 
@@ -258,6 +267,57 @@ class SessionState:
         # 会畅通无阻地拿到一份半截世界。
         self._commit_thread: Optional[int] = None
         self._commit_depth = 0
+        # 生命周期阶段，只能前进：building → live → fenced。
+        #   building  组装期：可以恢复存档、绑定服务。
+        #   live      已发布：只能通过受支持的写方法改；不能再整段换存档。
+        #   fenced    已关上：任何受支持的写方法都失败。
+        self._phase = "building"
+        self._fence_reason: Optional[str] = None
+        # 只读快照块的嵌套深度（本线程）。块内任何写方法都失败。
+        self._read_only_thread: Optional[int] = None
+        self._read_only_depth = 0
+
+    # ── 生命周期阶段与写栅栏 ────────────────────────────────────────────
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    @property
+    def fenced(self) -> bool:
+        return self._phase == "fenced"
+
+    def publish(self) -> None:
+        """组装完成：从此不能再整段恢复存档或重新绑定服务。"""
+        with self._commit_gate:
+            if self._phase == "fenced":
+                raise SessionFencedError(f"会话 '{self.session_id}' 已经关上，不能发布")
+            self._phase = "live"
+
+    def fence(self, reason: str) -> None:
+        """不可逆地关上这份状态。等在跑的事务结束；事务内部调用直接拒绝。"""
+        if not isinstance(reason, str) or not reason:
+            raise SessionStateError("fence 的理由必须是非空字符串")
+        if self.transaction_is_mine:
+            raise TransactionBoundaryError("不能在自己的提交事务内部关上这份状态")
+        with self._commit_gate:
+            if self._phase != "fenced":
+                self._phase = "fenced"
+                self._fence_reason = reason
+
+    def require_writable(self) -> None:
+        """每个受支持的写方法的第一行。"""
+        if self._phase == "fenced":
+            raise SessionFencedError(
+                f"会话 '{self.session_id}' 已经关上（{self._fence_reason}），不能再写"
+            )
+        if self._read_only_depth and self._read_only_thread == threading.get_ident():
+            raise SessionFencedError("快照块内是只读的：不能在取快照的同时改状态")
+
+    def _require_building(self, what: str) -> None:
+        if self._phase != "building":
+            raise SessionStateError(
+                f"{what} 只能在会话组装期做；会话 '{self.session_id}' 已经是 {self._phase}"
+            )
 
     @property
     def in_transaction(self) -> bool:
@@ -311,7 +371,20 @@ class SessionState:
                 "一直占着它。这一刻取不到一致快照，什么都没写。"
             )
         try:
-            yield self
+            if self._phase == "fenced":
+                raise SessionFencedError(
+                    f"会话 '{self.session_id}' 已经关上（{self._fence_reason}），不再取快照"
+                )
+            # 块内只读：它持着跟事务同一把锁，所以若不设这道标记，块里的写入
+            # 能绕过 atomic_commit() 的一切检查。
+            self._read_only_thread = threading.get_ident()
+            self._read_only_depth += 1
+            try:
+                yield self
+            finally:
+                self._read_only_depth -= 1
+                if not self._read_only_depth:
+                    self._read_only_thread = None
         finally:
             self._commit_gate.release()
 
@@ -320,10 +393,15 @@ class SessionState:
 
         运行时和 SessionState 拿到的必须是同一个对象，不允许各存一份副本。
         """
+        self._require_building("绑定世界状态")
         if not isinstance(world_state, WorldState):
             raise TypeError("world_state 必须是 WorldState 实例")
         if self.world_state is not None:
             raise RuntimeError("SessionState 已经绑定过 WorldState")
+        if world_state._write_guard is not None:
+            raise RuntimeError("这份 WorldState 已经挂在另一个会话上")
+        # 世界状态的每个写方法都先问这份会话还能不能写（fence / 只读快照块）。
+        world_state._write_guard = self.require_writable
         self.world_state = world_state
 
     def attach_scheduler(self, scheduler) -> None:
@@ -334,6 +412,7 @@ class SessionState:
         另一份仍然认为它还没触发。恢复存档也走同一个实例（就地替换它管理的
         队列与投递箱），不产生第二个并列实例。
         """
+        self._require_building("绑定调度器")
         if self.scheduler is not None:
             raise RuntimeError("SessionState 已经绑定过调度器")
         for required in ("schedule", "advance_by", "acknowledge"):
@@ -348,6 +427,7 @@ class SessionState:
         结论，而先落地的那个已经把到期记录确认掉了 —— 于是"这条到期是怎么
         处理的"有两个都自称权威的答案。
         """
+        self._require_building("绑定 Agency 引擎")
         if self.agency_engine is not None:
             raise RuntimeError("SessionState 已经绑定过 Agency 引擎")
         for required in ("propose", "commit", "evaluate"):
@@ -362,6 +442,7 @@ class SessionState:
         写，于是"这条观察记过没有""这个会话还能记多少条"都有两个互相看不见的
         答案，而先落地的那个已经把记忆写进去了。
         """
+        self._require_building("绑定记忆编码器")
         if self.memory_encoder is not None:
             raise RuntimeError("SessionState 已经绑定过记忆编码器")
         if not callable(getattr(encoder, "encode", None)):
@@ -376,6 +457,7 @@ class SessionState:
         处理的""现在到底在不在跑"都有两个都自称权威的答案 —— 跟绑第二个
         调度器 / 引擎 / 编码器是同一种错。
         """
+        self._require_building("绑定自主运行时")
         if self.autonomy is not None:
             raise RuntimeError("SessionState 已经绑定过自主运行时协调器")
         for required in ("start", "stop", "status", "process_due"):
@@ -385,6 +467,7 @@ class SessionState:
 
     def initialize_runtime(self, scene_trigger: str) -> None:
         """Initialize per-character runtime state exactly once."""
+        self.require_writable()
         if self.histories or self.pending_corrections:
             raise RuntimeError("SessionState runtime state has already been initialized")
         self.histories = {
@@ -400,6 +483,7 @@ class SessionState:
         self.pending_corrections = {cid: None for cid in self.characters}
 
     def start(self) -> None:
+        self.require_writable()
         if self.status != "created":
             raise RuntimeError("SessionRuntime.run() 只能调用一次")
         self.status = "active"
@@ -424,6 +508,7 @@ class SessionState:
         只应该由提交边界调用：观察必须和它所投影的那条事件同生共死，绕开
         atomic_commit() 单独写进来的观察回滚不掉。
         """
+        self.require_writable()
         for decision in decisions:
             self.exposures._append(decision)
         for observation in observations:
@@ -435,6 +520,7 @@ class SessionState:
         只应该由编码事务调用：记忆必须和它所依据的那条观察同生共死，绕开
         atomic_commit() 单独写进来的记忆回滚不掉。
         """
+        self.require_writable()
         for record in records:
             self.memories._append(record)
 
@@ -447,6 +533,7 @@ class SessionState:
         历史；给 None 是**遗留兼容路径**（把这句话抄进每个角色的历史），
         只保留给不经过世界模型的纯记录调用方。运行时不走那条路。
         """
+        self.require_writable()
         if turn.character not in self.characters:
             raise ValueError(f"Turn character is not part of session: {turn.character}")
         if bool(self.histories) != bool(self.pending_corrections):
@@ -498,6 +585,7 @@ class SessionState:
 
     def add_turn(self, turn: Turn) -> None:
         """Backward-compatible alias for the pre-Phase-3 public API."""
+        self.require_writable()
         self.record_turn(turn)
 
     @contextmanager
@@ -521,6 +609,9 @@ class SessionState:
           快照、再互相覆盖对方的回滚 —— 那不是竞态，是两份都不成立的事务。
         """
         with self._commit_gate:
+            # 取锁之后、建回滚快照之前检查：fence 也拿这把锁，所以这里看到的
+            # 阶段不会在事务中途变。
+            self.require_writable()
             self._commit_depth += 1
             self._commit_thread = threading.get_ident()
             try:
@@ -589,6 +680,7 @@ class SessionState:
         超过 Agency 日志此刻的长度。放在事务里，是为了让转换与 Agency 记录的
         追加共用同一把锁（全序），并随事务一起回滚。
         """
+        self.require_writable()
         if not self.transaction_is_mine:
             raise SessionStateError("认知时间线只能在本线程的提交事务里修改")
         if not isinstance(timeline, CognitionTimeline):
@@ -603,17 +695,21 @@ class SessionState:
         self.cognition = timeline
 
     def advance_character(self) -> None:
+        self.require_writable()
         self.current_character_index = (
             self.current_character_index + 1
         ) % len(self.characters)
 
     def record_error(self, message: str) -> None:
+        self.require_writable()
         self.last_error = message
 
     def complete(self) -> None:
+        self.require_writable()
         self.status = "completed"
 
     def cancel(self) -> None:
+        self.require_writable()
         if self.status == "active":
             self.status = "cancelled"
 
@@ -663,6 +759,7 @@ class SessionState:
         三类不自洽一律拒绝：会话对不上、时钟对不上、队列/投递箱与那一刻的
         时钟对不上（排期不在未来、到期记录发生在未来）。
         """
+        self._require_building("恢复调度存档")
         if not isinstance(payload, Mapping):
             raise SessionStateError("调度存档必须是字典")
         if payload.get("session_id") != self.session_id:
@@ -724,6 +821,7 @@ class SessionState:
         少了任何一条都能拼出一份"每一部分单独看都合法、合起来自相矛盾"的
         存档：审计说某个角色在某一刻做了某件事，而世界历史里没有这件事。
         """
+        self._require_building("恢复 Agency 存档")
         if not isinstance(payload, Mapping):
             raise SessionStateError("Agency 存档必须是字典")
         if payload.get("session_id") != self.session_id:
@@ -782,6 +880,7 @@ class SessionState:
         少了任何一条都能拼出一份"每一部分单独看都合法、合起来自相矛盾"的存档：
         角色记得一件它从没感知过的事。
         """
+        self._require_building("恢复记忆存档")
         if not isinstance(payload, Mapping):
             raise SessionStateError("记忆存档必须是字典")
         if payload.get("session_id") != self.session_id:

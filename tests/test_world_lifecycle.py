@@ -39,7 +39,7 @@ from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.activation_outbox import ActivationOutbox
 from pns.models.activation_queue import ActivationQueue
 from pns.models.event import EventType
-from pns.models.session import SessionState, TransactionBoundaryError
+from pns.models.session import SessionFencedError, SessionState, TransactionBoundaryError
 from pns.models.world_state import WorldState
 from pns.runtime.autonomy.audit import ScriptedAuditor
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
@@ -1323,12 +1323,16 @@ class ShutdownOrderTests(WorldTestCase):
 
     def test_a_closed_world_refuses_further_work(self):
         world = self.created()
+        due = _due(world.runtime.scheduler)
         world.close()
         with self.assertRaises(LifecycleError):
             world.checkpoint()
         self.assertFalse(world.runtime.running)
-        result = world.runtime.process_due(_due(world.runtime.scheduler))
+        result = world.runtime.process_due(due)
         self.assertEqual(result.outcome.value, "stopped")
+        # 关上之后，连排期、推进时间这种绕开协调器的写入也被内存栅栏拒绝。
+        with self.assertRaises(SessionFencedError):
+            _due(world.runtime.scheduler, activation_id="late")
 
     def test_closing_frees_the_world_for_a_new_owner(self):
         world = self.created()
@@ -1737,12 +1741,12 @@ class LifecycleServiceTests(WorldTestCase):
         # 所有权还回去了，运行时却还在接写入 —— 那些写入既不会落盘，又可能
         # 跟接手这个世界的下一个进程并行发生。
         world = self.created()
+        due = _due(world.runtime.scheduler)
         world.release()
         self.assertFalse(world.runtime.running)
-        self.assertEqual(
-            world.runtime.process_due(_due(world.runtime.scheduler)).outcome.value,
-            "stopped",
-        )
+        self.assertEqual(world.runtime.process_due(due).outcome.value, "stopped")
+        with self.assertRaises(SessionFencedError):
+            _due(world.runtime.scheduler, activation_id="late")
 
     def test_releasing_from_inside_a_transaction_is_refused_not_deadlocked(self):
         world = self.created()
