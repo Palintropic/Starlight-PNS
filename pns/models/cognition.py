@@ -6,8 +6,10 @@
 #
 # 这些原因属于 Operational History（Article XIII）：它们解释的是"这一刻为什么
 # 没有做决定"，不是任何 resident 的经历，也不会进入观察、记忆或提示词。
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Iterable, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
 
 class CognitionCause(str, Enum):
@@ -41,4 +43,479 @@ def normalize_causes(causes: Iterable) -> Tuple[CognitionCause, ...]:
     return tuple(sorted(items, key=lambda cause: cause.value))
 
 
-__all__ = ["CognitionCause", "CognitionCauseError", "normalize_causes"]
+# ── 认知时间线 ──────────────────────────────────────────────────────────
+#
+# 时间线回答："Agency 日志第 p 条记录提交的那一刻，认知可不可用、为什么不可用。"
+#
+# 索引是 **Agency 日志位置**（也就是提交顺序），不是 outbox 的落箱位置，也不是
+# 模拟分钟：转换与 Agency 记录的追加都在 SessionState 的同一把事务锁下发生，
+# 所以"一条记录落在哪个区间"是一个全序事实，与到期记录按什么顺序、以什么
+# 并发度被处理无关。
+#
+# 三条硬约束：
+#
+#   1. **不可变。** 每次转换返回一条新时间线；SessionState 在事务里整体替换
+#      引用，于是它跟 Agency 日志一起回滚。
+#   2. **判定是并集。** 一条到期资格不可用的原因 = 当前区间的原因 ∪ 所有仍覆盖
+#      它的 backlog 条目的原因。运行时与存档加载只调用 `unavailable_causes()`。
+#   3. **backlog 是规范形。** 按 until_sim 严格递增；同一 cutoff 的两次追加合并
+#      成一条（原因取并集）；条目原因非空。加载时拒绝任何非规范形。
+
+# Start 能清掉的原因：它们都是操作者或本次运行层面的状态。物理条件（故障、
+# 现实时钟落后）和世界一生的动作上限不归 Start 管。
+OPERATOR_CLEARABLE = frozenset(
+    {
+        CognitionCause.NOT_STARTED,
+        CognitionCause.OPERATOR_PAUSED,
+        CognitionCause.RUN_BUDGET_EXHAUSTED,
+    }
+)
+
+
+class CognitionTimelineError(ValueError):
+    """认知时间线本身不合法，或一次转换不成立。"""
+
+
+class TransitionKind(str, Enum):
+    """区间是怎么开始的。闭集。"""
+
+    OPENED = "opened"  # 世界创建
+    RESTORED = "restored"  # 从存档恢复
+    STARTED = "started"  # 操作员 Start
+    STOPPED = "stopped"  # 操作员 Stop
+    RUN_BUDGET_EXHAUSTED = "run_budget_exhausted"
+    WORLD_ACTION_CAP = "world_action_cap"
+    FAULT_BEGAN = "fault_began"
+    FAULT_CLEARED = "fault_cleared"
+    WALL_CLOCK_BEHIND = "wall_clock_behind"
+    WALL_CLOCK_CAUGHT_UP = "wall_clock_caught_up"
+
+
+def _causes(values, *, allow_empty: bool) -> FrozenSet[CognitionCause]:
+    if isinstance(values, (str, bytes)):
+        raise CognitionTimelineError("原因必须是一组值，不是单个字符串")
+    try:
+        items = frozenset(CognitionCause(value) for value in values)
+    except (TypeError, ValueError):
+        raise CognitionTimelineError(f"未知的认知不可用原因: {values!r}") from None
+    if not items and not allow_empty:
+        raise CognitionTimelineError("这里的原因集合不能为空")
+    return items
+
+
+def _sim_time(value, label: str) -> datetime:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            raise CognitionTimelineError(f"{label} 不是合法时间: {value!r}") from None
+    if not isinstance(value, datetime):
+        raise CognitionTimelineError(f"{label} 必须是 datetime")
+    if value.tzinfo is not None:
+        raise CognitionTimelineError(f"{label} 必须是 timezone-naive 的模拟时间")
+    if value.second or value.microsecond:
+        raise CognitionTimelineError(f"{label} 必须落在整分钟上")
+    return value
+
+
+def _sorted_values(causes) -> List[str]:
+    return sorted(cause.value for cause in causes)
+
+
+@dataclass(frozen=True)
+class BacklogItem:
+    """在 until_sim 之前触发的到期资格，额外带着这些原因。"""
+
+    until_sim: datetime
+    causes: FrozenSet[CognitionCause]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "until_sim", _sim_time(self.until_sim, "until_sim"))
+        object.__setattr__(self, "causes", _causes(self.causes, allow_empty=False))
+
+    def to_dict(self) -> Dict:
+        return {
+            "until_sim": self.until_sim.isoformat(),
+            "causes": _sorted_values(self.causes),
+        }
+
+
+def _append_backlog(
+    backlog: Tuple[BacklogItem, ...], item: Optional[BacklogItem]
+) -> Tuple[BacklogItem, ...]:
+    """追加一条并保持规范形：同一 cutoff 合并，更早的 cutoff 拒绝。"""
+    if item is None:
+        return backlog
+    if backlog:
+        last = backlog[-1]
+        if item.until_sim == last.until_sim:
+            return backlog[:-1] + (
+                BacklogItem(last.until_sim, last.causes | item.causes),
+            )
+        if item.until_sim < last.until_sim:
+            raise CognitionTimelineError(
+                f"backlog 的 cutoff 不能倒退：{item.until_sim.isoformat()} 早于 "
+                f"{last.until_sim.isoformat()}"
+            )
+    return backlog + (item,)
+
+
+@dataclass(frozen=True)
+class CognitionInterval:
+    """时间线上的一段：从 Agency 日志位置 from_log 起生效，直到下一段开始。"""
+
+    index: int
+    from_log: int
+    causes: FrozenSet[CognitionCause]
+    backlog: Tuple[BacklogItem, ...]
+    run_allowance: Optional[int]
+    opened_by: TransitionKind
+    opened_at_sim: datetime
+    opened_at_wall: str
+
+    def __post_init__(self) -> None:
+        set_ = object.__setattr__
+        for label in ("index", "from_log"):
+            value = getattr(self, label)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise CognitionTimelineError(f"{label} 必须是非负整数")
+        set_(self, "causes", _causes(self.causes, allow_empty=True))
+        backlog: Tuple[BacklogItem, ...] = ()
+        for item in self.backlog:
+            if not isinstance(item, BacklogItem):
+                raise CognitionTimelineError("backlog 里只能放 BacklogItem")
+            if backlog and item.until_sim <= backlog[-1].until_sim:
+                raise CognitionTimelineError(
+                    "backlog 必须按 until_sim 严格递增（同一 cutoff 应当合并）"
+                )
+            backlog += (item,)
+        set_(self, "backlog", backlog)
+        allowance = self.run_allowance
+        if allowance is not None and (
+            isinstance(allowance, bool) or not isinstance(allowance, int) or allowance < 0
+        ):
+            raise CognitionTimelineError("run_allowance 必须是非负整数或 None")
+        try:
+            set_(self, "opened_by", TransitionKind(self.opened_by))
+        except ValueError:
+            raise CognitionTimelineError(f"未知的转换: {self.opened_by!r}") from None
+        set_(self, "opened_at_sim", _sim_time(self.opened_at_sim, "opened_at_sim"))
+        if not isinstance(self.opened_at_wall, str) or not self.opened_at_wall:
+            raise CognitionTimelineError("opened_at_wall 必须是非空字符串")
+
+    @property
+    def available(self) -> bool:
+        return not self.causes
+
+    def to_dict(self) -> Dict:
+        return {
+            "index": self.index,
+            "from_log": self.from_log,
+            "causes": _sorted_values(self.causes),
+            "backlog": [item.to_dict() for item in self.backlog],
+            "run_allowance": self.run_allowance,
+            "opened_by": self.opened_by.value,
+            "opened_at_sim": self.opened_at_sim.isoformat(),
+            "opened_at_wall": self.opened_at_wall,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "CognitionInterval":
+        if not isinstance(payload, Mapping):
+            raise CognitionTimelineError("区间必须是字典")
+        try:
+            return cls(
+                index=payload["index"],
+                from_log=payload["from_log"],
+                causes=payload["causes"],
+                backlog=tuple(
+                    BacklogItem(item["until_sim"], item["causes"])
+                    for item in payload["backlog"]
+                ),
+                run_allowance=payload["run_allowance"],
+                opened_by=payload["opened_by"],
+                opened_at_sim=payload["opened_at_sim"],
+                opened_at_wall=payload["opened_at_wall"],
+            )
+        except (KeyError, TypeError) as e:
+            raise CognitionTimelineError(f"区间缺字段或形状不对: {e}") from None
+
+
+def unavailable_causes(
+    interval: CognitionInterval, fired_at: datetime
+) -> FrozenSet[CognitionCause]:
+    """一条在 fired_at 触发的到期资格，此刻在 interval 里不可用的全部原因。
+
+    空集表示可用。这是运行时与存档加载**共用**的唯一判定。
+    """
+    fired_at = _sim_time(fired_at, "fired_at")
+    causes = set(interval.causes)
+    for item in interval.backlog:
+        if item.until_sim > fired_at:
+            causes |= item.causes
+    return frozenset(causes)
+
+
+@dataclass(frozen=True)
+class CognitionTimeline:
+    """一个世界的认知时间线。不可变；每次转换返回新的一条。"""
+
+    intervals: Tuple[CognitionInterval, ...]
+
+    def __post_init__(self) -> None:
+        intervals = tuple(self.intervals)
+        if not intervals:
+            raise CognitionTimelineError("认知时间线至少有一个区间")
+        for position, interval in enumerate(intervals):
+            if not isinstance(interval, CognitionInterval):
+                raise CognitionTimelineError("时间线里只能放 CognitionInterval")
+            if interval.index != position:
+                raise CognitionTimelineError("区间 index 必须从 0 连续编号")
+            if position:
+                previous = intervals[position - 1]
+                if interval.from_log < previous.from_log:
+                    raise CognitionTimelineError("区间的 from_log 不能倒退")
+                if interval.opened_at_sim < previous.opened_at_sim:
+                    raise CognitionTimelineError("区间的开始模拟时刻不能倒退")
+                if interval.backlog[: len(previous.backlog)] != previous.backlog and not (
+                    _is_merged_extension(previous.backlog, interval.backlog)
+                ):
+                    raise CognitionTimelineError("backlog 只能追加（或合并末项），不能删改")
+        object.__setattr__(self, "intervals", intervals)
+
+    # ── 构造 ────────────────────────────────────────────────────────────
+    @classmethod
+    def open(cls, *, log_length: int, sim: datetime, wall: str) -> "CognitionTimeline":
+        """新世界：认知从"还没 Start"开始。"""
+        return cls(
+            (
+                CognitionInterval(
+                    index=0,
+                    from_log=log_length,
+                    causes=frozenset({CognitionCause.NOT_STARTED}),
+                    backlog=(),
+                    run_allowance=None,
+                    opened_by=TransitionKind.OPENED,
+                    opened_at_sim=sim,
+                    opened_at_wall=wall,
+                ),
+            )
+        )
+
+    # ── 查询 ────────────────────────────────────────────────────────────
+    @property
+    def current(self) -> CognitionInterval:
+        return self.intervals[-1]
+
+    def locate(self, log_position: int) -> Optional[CognitionInterval]:
+        """日志位置 p 属于 from_log ≤ p 的**最后一个**区间；早于时间线则 None。
+
+        连续转换之间没有记录时会产生零宽区间（相同 from_log），它们只是历史，
+        不覆盖任何记录。
+        """
+        if isinstance(log_position, bool) or not isinstance(log_position, int):
+            raise CognitionTimelineError("日志位置必须是整数")
+        found = None
+        for interval in self.intervals:
+            if interval.from_log <= log_position:
+                found = interval
+            else:
+                break
+        return found
+
+    # ── 转换 ────────────────────────────────────────────────────────────
+    def transition(
+        self,
+        kind,
+        *,
+        log_length: int,
+        sim: datetime,
+        wall: str,
+        add: Iterable = (),
+        remove: Iterable = (),
+        backlog_until: Optional[datetime] = None,
+        backlog_extra: Iterable = (),
+        run_allowance: Optional[int] = None,
+        keep_allowance: bool = True,
+    ) -> "CognitionTimeline":
+        """开启一个新区间。
+
+        `backlog_until` 给了，就把"上一区间的原因 ∪ backlog_extra"作为一条 backlog
+        追加：在 backlog_until 之前触发的到期资格，是在那些原因生效时到期的。
+        """
+        current = self.current
+        if isinstance(log_length, bool) or not isinstance(log_length, int):
+            raise CognitionTimelineError("log_length 必须是整数")
+        if log_length < current.from_log:
+            raise CognitionTimelineError("转换的日志位置不能早于当前区间")
+        causes = (current.causes - _causes(remove, allow_empty=True)) | _causes(
+            add, allow_empty=True
+        )
+        backlog = current.backlog
+        if backlog_until is not None:
+            carried = current.causes | _causes(backlog_extra, allow_empty=True)
+            if carried:
+                backlog = _append_backlog(backlog, BacklogItem(backlog_until, carried))
+        allowance = current.run_allowance if keep_allowance else run_allowance
+        return CognitionTimeline(
+            self.intervals
+            + (
+                CognitionInterval(
+                    index=len(self.intervals),
+                    from_log=log_length,
+                    causes=causes,
+                    backlog=backlog,
+                    run_allowance=allowance,
+                    opened_by=kind,
+                    opened_at_sim=sim,
+                    opened_at_wall=wall,
+                ),
+            )
+        )
+
+    # 各种转换的规则写在这里，调用方不自己拼 add/remove。
+    def restored(self, *, log_length, sim, wall, backlog_until) -> "CognitionTimeline":
+        """恢复：停机期间（与恢复后的第一个完整分钟之前）触发的，一律 process_stopped。
+
+        世界一生的动作上限跨重启仍然成立；故障与现实时钟落后随旧进程结束，由新进程
+        重新判定。
+        """
+        keep = self.current.causes & {CognitionCause.WORLD_ACTION_CAP}
+        return self.transition(
+            TransitionKind.RESTORED,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            add={CognitionCause.NOT_STARTED} | keep,
+            remove=set(CognitionCause) - keep,
+            backlog_until=backlog_until,
+            backlog_extra={CognitionCause.PROCESS_STOPPED},
+            keep_allowance=False,
+            run_allowance=None,
+        )
+
+    def started(self, *, log_length, sim, wall, backlog_until, run_allowance) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.STARTED,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            remove=OPERATOR_CLEARABLE,
+            backlog_until=backlog_until,
+            keep_allowance=False,
+            run_allowance=run_allowance,
+        )
+
+    def stopped(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.STOPPED,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            add={CognitionCause.OPERATOR_PAUSED},
+        )
+
+    def run_budget_exhausted(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.RUN_BUDGET_EXHAUSTED,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            add={CognitionCause.RUN_BUDGET_EXHAUSTED},
+        )
+
+    def world_action_cap(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.WORLD_ACTION_CAP,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            add={CognitionCause.WORLD_ACTION_CAP},
+        )
+
+    def fault_began(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.FAULT_BEGAN,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            add={CognitionCause.FAULT},
+        )
+
+    def fault_cleared(self, *, log_length, sim, wall, backlog_until) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.FAULT_CLEARED,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            remove={CognitionCause.FAULT},
+            backlog_until=backlog_until,
+        )
+
+    def wall_clock_behind(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.WALL_CLOCK_BEHIND,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            add={CognitionCause.WALL_CLOCK_BEHIND},
+        )
+
+    def wall_clock_caught_up(
+        self, *, log_length, sim, wall, backlog_until
+    ) -> "CognitionTimeline":
+        return self.transition(
+            TransitionKind.WALL_CLOCK_CAUGHT_UP,
+            log_length=log_length,
+            sim=sim,
+            wall=wall,
+            remove={CognitionCause.WALL_CLOCK_BEHIND},
+            backlog_until=backlog_until,
+        )
+
+    # ── 序列化 ──────────────────────────────────────────────────────────
+    def to_dict(self) -> Dict:
+        return {"intervals": [interval.to_dict() for interval in self.intervals]}
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "CognitionTimeline":
+        if not isinstance(payload, Mapping) or "intervals" not in payload:
+            raise CognitionTimelineError("认知时间线必须是带 intervals 的字典")
+        intervals = payload["intervals"]
+        if not isinstance(intervals, list):
+            raise CognitionTimelineError("intervals 必须是列表")
+        return cls(tuple(CognitionInterval.from_dict(item) for item in intervals))
+
+
+def _is_merged_extension(previous, current) -> bool:
+    """current 是否是 previous 在末项合并一次之后再追加的结果。"""
+    if not previous:
+        return True
+    if len(current) < len(previous):
+        return False
+    if current[: len(previous) - 1] != previous[:-1]:
+        return False
+    last, merged = previous[-1], current[len(previous) - 1]
+    return merged.until_sim == last.until_sim and last.causes <= merged.causes
+
+
+def next_minute_after(moment: datetime) -> datetime:
+    """严格晚于 moment 的第一个完整分钟（backlog 的 cutoff 都用它算）。"""
+    if not isinstance(moment, datetime):
+        raise CognitionTimelineError("需要一个 datetime")
+    return moment.replace(second=0, microsecond=0) + timedelta(minutes=1)
+
+
+__all__ = [
+    "BacklogItem",
+    "CognitionCause",
+    "CognitionCauseError",
+    "CognitionInterval",
+    "CognitionTimeline",
+    "CognitionTimelineError",
+    "OPERATOR_CLEARABLE",
+    "TransitionKind",
+    "next_minute_after",
+    "normalize_causes",
+    "unavailable_causes",
+]

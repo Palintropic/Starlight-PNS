@@ -16,7 +16,7 @@ from unittest.mock import patch
 from grants_support import grant_everything
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.agency import AgencyError, AgencyOutcome, AgencyRecord
-from pns.models.cognition import CognitionCause
+from pns.models.cognition import CognitionCause, CognitionTimeline
 from pns.models.session import SessionState, SessionStateError
 from pns.models.world_state import WorldState
 from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError
@@ -172,18 +172,31 @@ class RecordShapeTests(unittest.TestCase):
                     self._record(detail=detail)
 
 
+def _with_timeline(state):
+    """给会话装一条刚打开的认知时间线：区间 0，原因 not_started。"""
+    with state.atomic_commit():
+        state.set_cognition(
+            CognitionTimeline.open(
+                log_length=len(state.agency), sim=state.world_state.clock, wall="w"
+            )
+        )
+
+
 class ArchiveTests(unittest.TestCase):
     def test_it_survives_a_round_trip(self):
         state, engine, due = _rig()
-        engine._close_unavailable(due, ["process_stopped"], interval=1)
+        _with_timeline(state)
+        engine._close_unavailable(due, ["not_started"], interval=0)
         restored = SessionState.from_dict(state.to_dict())
         record = restored.agency.records()[-1]
         self.assertIs(record.outcome, AgencyOutcome.REJECTED_UNAVAILABLE)
-        self.assertEqual(list(record.detail["causes"]), ["process_stopped"])
+        self.assertEqual(list(record.detail["causes"]), ["not_started"])
+        self.assertEqual(restored.cognition, state.cognition)
 
     def test_a_tampered_record_is_refused_on_load(self):
         state, engine, due = _rig()
-        engine._close_unavailable(due, ["process_stopped"], interval=1)
+        _with_timeline(state)
+        engine._close_unavailable(due, ["not_started"], interval=0)
         payload = state.to_dict()
         payload["agency"]["log"]["records"][-1]["policy"] = "first_legal"
         with self.assertRaises(SessionStateError):
@@ -192,6 +205,62 @@ class ArchiveTests(unittest.TestCase):
         payload["agency"]["log"]["records"][-1]["detail"]["causes"] = ["bored"]
         with self.assertRaises(SessionStateError):
             SessionState.from_dict(payload)
+
+
+class TimelineCrossCheckTests(unittest.TestCase):
+    """每条记录的判定都必须能从存档本身重新推出来（设计 §13.2 / §14.1）。"""
+
+    def test_an_unavailable_record_needs_a_timeline(self):
+        state, engine, due = _rig()
+        engine._close_unavailable(due, ["fault"], interval=0)
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(state.to_dict())
+
+    def test_causes_that_disagree_with_the_timeline_are_refused(self):
+        state, engine, due = _rig()
+        _with_timeline(state)
+        engine._close_unavailable(due, ["fault"], interval=0)  # 时间线说的是 not_started
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(state.to_dict())
+
+    def test_a_wrong_interval_is_refused(self):
+        state, engine, due = _rig()
+        _with_timeline(state)
+        engine._close_unavailable(due, ["not_started"], interval=7)
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(state.to_dict())
+
+    def test_a_timeline_that_skips_ahead_of_the_log_is_refused(self):
+        state, engine, due = _rig()
+        _with_timeline(state)
+        payload = state.to_dict()
+        payload["cognition"]["intervals"][0]["from_log"] = 5
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(payload)
+
+    def test_the_timeline_rolls_back_with_its_transaction(self):
+        state, _engine, _due = _rig()
+        with self.assertRaises(RuntimeError):
+            with state.atomic_commit():
+                state.set_cognition(
+                    CognitionTimeline.open(log_length=0, sim=CLOCK, wall="w")
+                )
+                raise RuntimeError("boom")
+        self.assertIsNone(state.cognition)
+
+    def test_the_timeline_only_changes_inside_a_transaction(self):
+        state, _engine, _due = _rig()
+        with self.assertRaises(SessionStateError):
+            state.set_cognition(CognitionTimeline.open(log_length=0, sim=CLOCK, wall="w"))
+
+    def test_the_timeline_can_only_grow(self):
+        state, _engine, _due = _rig()
+        _with_timeline(state)
+        with self.assertRaises(SessionStateError):
+            with state.atomic_commit():
+                state.set_cognition(
+                    CognitionTimeline.open(log_length=0, sim=CLOCK, wall="other")
+                )
 
 
 if __name__ == "__main__":

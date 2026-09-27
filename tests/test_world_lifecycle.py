@@ -299,6 +299,15 @@ class ArchiveEnvelopeTests(WorldTestCase):
             WorldArchive.from_dict(payload)
         self.assertIn(str(WORLD_ARCHIVE_VERSION + 99), str(caught.exception))
 
+    def test_a_pre_world_1_archive_is_refused_as_retired(self):
+        # WORLD-1 之前的 v1 存档属于已退役的世界：明确拒绝，不迁移、不猜。
+        state = _cold_state()
+        payload = WorldArchive.capture("nightcord", state, revision=1).to_dict()
+        payload["version"] = 1
+        with self.assertRaises(ArchiveError) as caught:
+            WorldArchive.from_dict(payload)
+        self.assertIn("退役", str(caught.exception))
+
     def test_an_envelope_whose_session_disagrees_with_its_state_is_refused(self):
         state = _cold_state()
         payload = WorldArchive.capture("nightcord", state, revision=1).to_dict()

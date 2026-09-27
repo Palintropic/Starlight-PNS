@@ -32,7 +32,10 @@ from pns.runtime.persistence.naming import validate_world_id
 
 # 存档格式版本。改变形状就 +1，并且在这里写清楚旧版怎么升级 —— 不认识的版本
 # 一律响亮拒绝，绝不"尽量读读看"。
-WORLD_ARCHIVE_VERSION = 1
+WORLD_ARCHIVE_VERSION = 2
+# 版本 1 是 WORLD-1 之前的存档（旧 nightcord / deploy-smoke 世界）。2026-09-26 这些
+# 世界已退役：存档保留、不改写、不迁移，本进程明确拒绝加载它们。
+RETIRED_ARCHIVE_VERSIONS = frozenset({1})
 
 _ENVELOPE_FIELDS = ("version", "world_id", "session_id", "revision", "clock", "state")
 
@@ -218,6 +221,11 @@ class WorldArchive:
         version = payload["version"]
         if isinstance(version, bool) or not isinstance(version, int):
             raise ArchiveError("version 必须是整数")
+        if version in RETIRED_ARCHIVE_VERSIONS:
+            raise ArchiveError(
+                f"世界存档格式版本 {version} 属于已退役的世界（WORLD-1 之前）。"
+                "存档保留在磁盘上未被改动；本进程不再加载它"
+            )
         if version != WORLD_ARCHIVE_VERSION:
             raise ArchiveError(
                 f"不支持的世界存档格式版本 {version}（本进程只认 "

@@ -9,7 +9,12 @@ from pns.models.activation import ActivationError
 from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
-from pns.models.agency import AgencyError, AgencyLog
+from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
+from pns.models.cognition import (
+    CognitionTimeline,
+    CognitionTimelineError,
+    unavailable_causes,
+)
 from pns.models.authored import AuthoredTextError, GenerationAudit
 from pns.models.event import EventType
 from pns.models.event_store import EventStore
@@ -212,6 +217,10 @@ class SessionState:
     # 什么"。同一种归属 —— 存储归会话所有，编码器只是它上面的服务。世界真相
     # 仍然只有 events，记忆改不动它，也改不动观察。
     memories: MemoryStore = field(default_factory=MemoryStore)
+    # 认知时间线（WORLD-1）：Agency 日志第 p 条提交时，认知可不可用、为什么。
+    # None 表示这个会话不区分"认知可用"——研究模式的场景会话就是这样。它是
+    # 运维记录（Article XIII），不是世界真相，也不进任何角色的上下文。
+    cognition: Optional[CognitionTimeline] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -544,9 +553,12 @@ class SessionState:
         activations_snapshot = activations._snapshot()
         outbox = self.activation_outbox
         outbox_snapshot = outbox._snapshot()
+        # 时间线是不可变值，记引用就够了：块内的转换只会换引用，不会改旧值。
+        cognition = self.cognition
         try:
             yield self
         except BaseException:
+            self.cognition = cognition
             if world_snapshot is not None:
                 world.restore_mutable_state(world_snapshot)
             self.events._rollback_to(events_length)
@@ -569,6 +581,26 @@ class SessionState:
             self.pending_corrections.clear()
             self.pending_corrections.update(corrections)
             raise
+
+    def set_cognition(self, timeline: CognitionTimeline) -> None:
+        """在**当前事务内**把认知时间线换成它的下一个版本。
+
+        只能向后追加区间：新时间线必须以旧时间线为前缀，而且新区间的起点不能
+        超过 Agency 日志此刻的长度。放在事务里，是为了让转换与 Agency 记录的
+        追加共用同一把锁（全序），并随事务一起回滚。
+        """
+        if not self.transaction_is_mine:
+            raise SessionStateError("认知时间线只能在本线程的提交事务里修改")
+        if not isinstance(timeline, CognitionTimeline):
+            raise SessionStateError("只能设置 CognitionTimeline")
+        previous = self.cognition
+        if previous is not None and (
+            timeline.intervals[: len(previous.intervals)] != previous.intervals
+        ):
+            raise SessionStateError("认知时间线只能追加区间，不能改写已有区间")
+        if timeline.current.from_log > len(self.agency):
+            raise SessionStateError("认知区间不能从一条还不存在的 Agency 记录开始")
+        self.cognition = timeline
 
     def advance_character(self) -> None:
         self.current_character_index = (
@@ -892,6 +924,15 @@ class SessionState:
         state.restore_agency_archive(payload["agency"])
         # 记忆放在最后：它的校验要看得见观察日志和事件历史。
         state.restore_memory_archive(payload["memory"])
+        # 认知时间线要看得见 Agency 日志与投递箱：每条记录的判定都要能从存档本身
+        # 重新推出来。
+        cognition = payload.get("cognition")
+        if cognition is not None:
+            try:
+                state.cognition = CognitionTimeline.from_dict(cognition)
+            except CognitionTimelineError as e:
+                raise SessionStateError(f"认知时间线不合法：{e}") from e
+        _validate_cognition(state)
 
         created_at = payload.get("created_at")
         if created_at is not None:
@@ -921,6 +962,7 @@ class SessionState:
             "scheduler": self.scheduler_archive(),
             "agency": self.agency_archive(),
             "memory": self.memory_archive(),
+            "cognition": self.cognition.to_dict() if self.cognition else None,
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
@@ -929,6 +971,48 @@ class SessionState:
 
 
 # ── 存档校验辅助 ────────────────────────────────────────────────────────
+def _validate_cognition(state: "SessionState") -> None:
+    """每条 Agency 记录的认知判定，都必须能从这份存档本身重新推出来。
+
+    时间线开始之前的记录不受约束（那时世界还不区分认知可用）；之后的每一条：
+    按日志位置找到区间（最右边界），用与运行时同一个函数算出不可用原因；
+    非空 ⇔ 记录是 REJECTED_UNAVAILABLE 且原因、区间序号一致。
+    """
+    timeline = state.cognition
+    records = state.agency.records()
+    if timeline is None:
+        for record in records:
+            if record.outcome is AgencyOutcome.REJECTED_UNAVAILABLE:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 声称认知不可用，但这个会话没有认知时间线"
+                )
+        return
+    if timeline.current.from_log > len(records):
+        raise SessionStateError("认知时间线的区间起点超过了 Agency 日志长度")
+    outbox = state.activation_outbox
+    for position, record in enumerate(records):
+        interval = timeline.locate(position)
+        if interval is None:
+            if record.outcome is AgencyOutcome.REJECTED_UNAVAILABLE:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 早于认知时间线，却声称认知不可用"
+                )
+            continue
+        due = outbox.get(record.due_id)
+        causes = unavailable_causes(interval, due.fired_at)
+        unavailable = record.outcome is AgencyOutcome.REJECTED_UNAVAILABLE
+        if bool(causes) != unavailable:
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}'（位置 {position}）与认知时间线区间 "
+                f"{interval.index} 的判定不一致"
+            )
+        if unavailable and (
+            list(record.detail["causes"]) != sorted(cause.value for cause in causes)
+            or record.detail["interval"] != interval.index
+        ):
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 的不可用原因或区间序号与时间线不一致"
+            )
 def _parse_clock(value, label: str) -> Optional[datetime]:
     if value is None:
         return None
