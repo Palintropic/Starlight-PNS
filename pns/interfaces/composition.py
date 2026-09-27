@@ -52,6 +52,7 @@ from pns.models.session import SessionState
 from pns.models.world_state import ActivityKind
 from pns.runtime.autonomy.audit import AuditRequest, RouterAuditor
 from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorkerError
+from pns.runtime.autonomy.coordinator import AutonomyError
 from pns.runtime.autonomy.generation import AuthoredLinePolicy, GenerationError
 from pns.runtime.autonomy.prompt import PromptedLineGenerator
 from pns.runtime.autonomy.seeding import (
@@ -739,7 +740,11 @@ class WorldControlPlane:
     def set_quiet_time_events(self, world_id: str, record: bool) -> Dict:
         """拨「记录安静的分钟」，并立即存盘：运维决定不等自动 checkpoint 的节拍。"""
         world = self._require_open(world_id)
-        result = world.runtime.set_quiet_time_events(record)
+        try:
+            result = world.runtime.set_quiet_time_events(record)
+        except AutonomyError as e:
+            # 运行时已经不接受写入（正在关闭、已停）：这是"此刻不许拨"，不是服务坏了。
+            raise LifecycleError(f"世界 '{world_id}' 此刻不接受拨动: {e}") from e
         if result["changed"] or world.status()["dirty"]:
             # 上一次可能拨成功了、只在 checkpoint 处失败；原样重试要把它补存下来。
             return self._with_driver(world.checkpoint("quiet_time_events"))

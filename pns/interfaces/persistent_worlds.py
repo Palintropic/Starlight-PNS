@@ -370,6 +370,7 @@ def _translate(
                     "close",
                     "autonomy_start",
                     "autonomy_stop",
+                    "quiet_time_events",
                 ) and (
                     plane.service.opened(world_id) is None
                 ):

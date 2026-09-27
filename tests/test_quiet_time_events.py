@@ -385,6 +385,20 @@ class FormalWorldTests(PlaneTestCase):
             "/api/persistent-worlds/yoake-mae/quiet-time-events", json={"record": False}
         )
         self.assertEqual(closed.status_code, 409, closed.text)
+        self.assertEqual(closed.json()["detail"]["category"], "world_not_open")
+
+    def test_a_world_whose_runtime_stopped_refuses_with_409_not_500(self):
+        self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        world = self.world()
+        with patch.object(
+            type(world.runtime), "set_quiet_time_events",
+            side_effect=coordinator_mod.AutonomyError("自主运行时已经停止"),
+        ):
+            refused = self.client.post(
+                "/api/persistent-worlds/yoake-mae/quiet-time-events", json={"record": False}
+            )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["detail"]["category"], "lifecycle_refused")
 
 
 if __name__ == "__main__":
