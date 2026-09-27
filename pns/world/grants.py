@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import FrozenSet, Mapping, Optional, Sequence, Tuple
 
 from pns.models.location import access_admits, accepted_roles
+from pns.world.rhythm import MINUTES_PER_DAY
+from pns.world.routing import plan_route
 
 
 class GrantError(ValueError):
@@ -140,6 +142,68 @@ def require_rhythm_is_enterable(rhythm, grants, locations) -> None:
             )
 
 
+def require_rhythm_channels_joinable(rhythm, grants) -> None:
+    """作息表里每一段声明的频道，这个角色都必须是成员（R2-11）。
+
+    否则 01:00 那一刻的加入会被提交边界拒绝，整个时钟步回滚、反复失败，
+    一条内容错误就能把世界时钟卡死。
+    """
+    if rhythm is None:
+        return
+    members = grants.channels if grants is not None else frozenset()
+    for segment in rhythm.segments:
+        if segment.channel_id is not None and segment.channel_id not in members:
+            raise GrantError(
+                f"角色 '{rhythm.character_id}' 的作息表 {segment.label} 那一段在频道 "
+                f"'{segment.channel_id}' 里，但不是它的成员"
+            )
+
+
+def require_rhythm_trips_fit(rhythm, grants, locations) -> None:
+    """一整天（含最后一段接回次日第一段）的每一次换地方，路都走得通、时间也排得下。
+
+    没写地点的段沿用上一段的地点。相邻两段地点不同，就必须有一条只经过可进入
+    地点的路线，而且路上的时间不超过两段起点之差：否则按时出发的行程会跟上一
+    个行程重叠（R2-9）。按时运行的作息因此不会出现两个同时进行的行程。
+    """
+    if rhythm is None:
+        return
+    segments = rhythm.segments
+    located = [segment for segment in segments if segment.location_id is not None]
+    if not located:
+        return
+    # 每一段"实际所在的地点"：没写的沿用前一段；第一段没写就沿用跨零点的最后一个。
+    where = []
+    last = located[-1].location_id
+    for segment in segments:
+        if segment.location_id is not None:
+            last = segment.location_id
+        where.append(last)
+    count = len(segments)
+    for index in range(count):
+        here, there = where[index], where[(index + 1) % count]
+        if here == there:
+            continue
+        current, following = segments[index], segments[(index + 1) % count]
+        gap = (following.at - current.at) % MINUTES_PER_DAY or MINUTES_PER_DAY
+        route = plan_route(
+            locations,
+            lambda location_id: may_enter(grants, locations.get(location_id)),
+            here,
+            there,
+        )
+        if route is None:
+            raise GrantError(
+                f"角色 '{rhythm.character_id}' 的作息表从 {current.label} 的 '{here}' 到 "
+                f"{following.label} 的 '{there}' 没有它走得通的路"
+            )
+        if route.total_minutes > gap:
+            raise GrantError(
+                f"角色 '{rhythm.character_id}' 的作息表从 {current.label} 到 {following.label} "
+                f"只有 {gap} 分钟，路上却要 {route.total_minutes} 分钟"
+            )
+
+
 def install_grants(world, grants: CharacterGrants) -> None:
     """建世界时把一个角色的授予装进 WorldState。"""
     for location_id, role in grants.locations:
@@ -154,5 +218,7 @@ __all__ = [
     "install_grants",
     "may_enter",
     "parse_access_grants",
+    "require_rhythm_channels_joinable",
     "require_rhythm_is_enterable",
+    "require_rhythm_trips_fit",
 ]

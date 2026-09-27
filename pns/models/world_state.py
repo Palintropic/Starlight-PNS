@@ -56,6 +56,8 @@ class ActivityKind(str, Enum):
     COMPOSING = "composing"
     EDITING_VIDEO = "editing_video"
     ONLINE_CHATTING = "online_chatting"
+    # 在路上：作息行程从出发到到达之间的活动（WORLD-1）。
+    COMMUTING = "commuting"
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ daily_rhythm:
   - at: "01:00"        # 25時上线是官方的；此刻人在哪个房间是推断，所以整段标 inferred
     activity: online_chatting
     location_id: ena_home_studio
+    channel_id: nightcord
     source: inferred
   - at: "04:00"        # 结束时间随进度变化；取主线第 2 话凌晨 4 时仍在线的一例。之后继续画
     activity: drawing

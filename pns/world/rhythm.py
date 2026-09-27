@@ -103,6 +103,9 @@ class RhythmSegment:
     at: int
     activity: ActivityKind
     location_id: Optional[str] = None
+    # 这一段挂在哪个线上频道里（例如 25 時的 nightcord）。没写就是不在任何由作息
+    # 管理的频道里：进入这一段时，作息会让角色离开它之前进入的频道。
+    channel_id: Optional[str] = None
     # 代码里直接构造时缺省为 inferred：缺省值绝不能替作者声称"这是官方的"。
     # YAML 路径不走这个缺省，必须显式写（见 parse_daily_rhythm）。
     source: RhythmSource = RhythmSource.INFERRED
@@ -134,6 +137,12 @@ class RhythmSegment:
         if self.location_id is not None:
             if not isinstance(self.location_id, str) or not self.location_id:
                 raise RhythmError("location_id 必须是非空字符串，或者干脆不写")
+        if self.channel_id is not None:
+            if not isinstance(self.channel_id, str) or not self.channel_id:
+                raise RhythmError("channel_id 必须是非空字符串，或者干脆不写")
+        if self.activity is ActivityKind.COMMUTING:
+            # 在路上是行程的产物，不是一段可以写进作息表的安排。
+            raise RhythmError("作息表里的活动不能是 commuting —— 路上的时间由行程算出来")
 
     @property
     def label(self) -> str:
@@ -144,6 +153,7 @@ class RhythmSegment:
             "at": format_day_minute(self.at),
             "activity": self.activity.value,
             "location_id": self.location_id,
+            "channel_id": self.channel_id,
             "source": self.source.value,
         }
 
@@ -189,9 +199,10 @@ class DailyRhythm:
                     f"角色 '{self.character_id}' 的作息表里 "
                     f"{format_day_minute(current.at)} 有两段互相冲突的安排"
                 )
-            if (previous.activity, previous.location_id) == (
+            if (previous.activity, previous.location_id, previous.channel_id) == (
                 current.activity,
                 current.location_id,
+                current.channel_id,
             ):
                 # 相邻两段完全一样，中间那道边界什么都不会发生。它不是错误的
                 # 世界，但它是一条写错了的内容（多半是想改却漏改了一项），
@@ -250,7 +261,7 @@ class DailyRhythm:
 
 # 作息表条目里允许出现的键。白名单 —— 多写一个键就是拒绝，因为多出来的那个
 # 键最可能是一句散文，而这张表的每一项都要变成世界事实。
-_SEGMENT_KEYS = frozenset({"at", "activity", "location_id", "source"})
+_SEGMENT_KEYS = frozenset({"at", "activity", "location_id", "channel_id", "source"})
 
 
 def parse_daily_rhythm(
@@ -258,6 +269,7 @@ def parse_daily_rhythm(
     *,
     character_id: str,
     locations=None,
+    channels=None,
 ) -> Optional[DailyRhythm]:
     """把角色包 YAML 里的 `daily_rhythm` 解析成一份被校验过的作息表。
 
@@ -294,6 +306,12 @@ def parse_daily_rhythm(
                 f"角色 '{character_id}' 的 daily_rhythm 第 {index + 1} 项缺少 "
                 f"{'、'.join(missing)}"
             )
+        channel_id = entry.get("channel_id")
+        if channel_id is not None and channels is not None:
+            if not isinstance(channel_id, str) or not channels.has(channel_id):
+                raise RhythmError(
+                    f"角色 '{character_id}' 的作息表引用了未知的 channel_id: {channel_id!r}"
+                )
         location_id = entry.get("location_id")
         if location_id is not None and locations is not None:
             if not isinstance(location_id, str) or not locations.has(location_id):
@@ -308,6 +326,7 @@ def parse_daily_rhythm(
                 ),
                 activity=entry["activity"],
                 location_id=location_id,
+                channel_id=channel_id,
                 source=entry["source"],
             )
         )

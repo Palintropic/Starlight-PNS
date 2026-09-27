@@ -42,7 +42,9 @@ from pns.world.grants import (
     CharacterGrants,
     GrantError,
     parse_access_grants,
+    require_rhythm_channels_joinable,
     require_rhythm_is_enterable,
+    require_rhythm_trips_fit,
 )
 from pns.world.rhythm import DailyRhythm, RhythmError, parse_daily_rhythm
 from pns.world.scene_compat import (
@@ -286,7 +288,10 @@ def _build_character(
         # 而它自己是可重载内容，两者对不上必须在切换之前暴露，而不是等到某天
         # 凌晨那一段作息真的到点、提交事件时才炸。
         rhythm = parse_daily_rhythm(
-            info.get("daily_rhythm"), character_id=character_id, locations=locations
+            info.get("daily_rhythm"),
+            character_id=character_id,
+            locations=locations,
+            channels=channels,
         )
     except RhythmError as e:
         raise ConfigValidationError(
@@ -303,6 +308,8 @@ def _build_character(
             channels=channels,
         )
         require_rhythm_is_enterable(rhythm, grants, locations)
+        require_rhythm_channels_joinable(rhythm, grants)
+        require_rhythm_trips_fit(rhythm, grants, locations)
     except GrantError as e:
         raise ConfigValidationError(
             f"角色 {character_id} 的 access_grants 不合法：{e}"
