@@ -183,12 +183,27 @@ class TransitionRuleTests(unittest.TestCase):
         with self.assertRaises(CognitionTimelineError):
             timeline.stopped(log_length=4, sim=t(9, 5), wall=WALL)
 
-    def test_a_backlog_cutoff_cannot_move_backwards(self):
-        # cutoff 由转换时刻决定；转换时刻不能倒退，cutoff 也就不能。
-        timeline = _restore(_open(), log_length=0, now=t(12))
-        timeline = timeline.fault_began(log_length=0, sim=t(12), wall=WALL)
-        with self.assertRaises(CognitionTimelineError):
-            timeline.fault_cleared(log_length=0, sim=t(11), wall=WALL)
+    def test_an_earlier_cutoff_is_inserted_in_order(self):
+        # 恢复时现实时钟若被往回拨过，这一次的切点可以早于上一个进程留下的。
+        # 按序插入，并集判定照旧（R2-F6：opened_at_sim 不要求单调）。
+        timeline = _start(_open(), log_length=0, now=t(12))  # cutoff 12:01
+        timeline = _restore(timeline, log_length=0, now=t(10, 30))  # cutoff 10:31
+        self.assertEqual(
+            [item.until_sim for item in timeline.current.backlog], [t(10, 31), t(12, 1)]
+        )
+        self.assertEqual(
+            unavailable_causes(timeline.current, t(10)),
+            {C.NOT_STARTED, C.PROCESS_STOPPED},
+        )
+        self.assertEqual(unavailable_causes(timeline.current, t(11)), {C.NOT_STARTED})
+        self.assertEqual(CognitionTimeline.from_dict(timeline.to_dict()), timeline)
+
+    def test_a_clock_driven_transition_may_stamp_an_earlier_minute(self):
+        # 补跑期间：Start 记锚点分钟 12:00，额度在时钟 10:30 用完。
+        timeline = _start(_open(), log_length=0, now=t(12), allowance=1)
+        timeline = timeline.run_budget_exhausted(log_length=1, sim=t(10, 30), wall=WALL)
+        self.assertEqual(timeline.current.opened_at_sim, t(10, 30))
+        self.assertEqual(CognitionTimeline.from_dict(timeline.to_dict()), timeline)
 
     def test_timelines_are_immutable_values(self):
         timeline = _open()
@@ -287,9 +302,6 @@ class ArchiveTests(unittest.TestCase):
         cases = {
             "index gap": lambda p: p["intervals"][1].update(index=5),
             "log goes back": lambda p: p["intervals"][4].update(from_log=2),
-            "sim goes back": lambda p: p["intervals"][3].update(
-                opened_at_sim="2026-09-27T08:00:00"
-            ),
             "unknown cause": lambda p: p["intervals"][0].update(causes=["bored"]),
             "unknown transition": lambda p: p["intervals"][0].update(opened_by="magic"),
             "empty backlog causes": lambda p: p["intervals"][-1]["backlog"][0].update(

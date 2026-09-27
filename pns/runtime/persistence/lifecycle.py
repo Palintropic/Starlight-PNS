@@ -262,6 +262,11 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
         len(state.activations),
         len(state.activation_outbox),
         sum(len(items) for items in state.histories.values()),
+        # 运维账本：只按了一次 Start、只记了一段处置，世界也是"变过了"——
+        # 否则 checkpoint 策略会当它干净，一次崩溃就把这些操作悄悄丢掉。
+        len(state.cognition.intervals) if state.cognition is not None else None,
+        len(state.rhythm_dispositions),
+        state.anchor.to_dict() if state.anchor is not None else None,
         digest,
     )
 

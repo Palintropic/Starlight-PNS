@@ -143,20 +143,22 @@ class BacklogItem:
 def _append_backlog(
     backlog: Tuple[BacklogItem, ...], item: Optional[BacklogItem]
 ) -> Tuple[BacklogItem, ...]:
-    """追加一条并保持规范形：同一 cutoff 合并，更早的 cutoff 拒绝。"""
+    """加入一条并保持规范形：按 cutoff 严格递增，同一 cutoff 合并（原因取并集）。
+
+    通常新 cutoff 晚于所有旧的，落在末尾。更早的 cutoff 也合法：恢复时现实时钟
+    若被往回拨过，这一次的切点可以早于上一个进程留下的切点。按序插入不改变
+    任何一条到期资格的判定——并集只看 until_sim 是否晚于 fired_at。
+    """
     if item is None:
         return backlog
-    if backlog:
-        last = backlog[-1]
-        if item.until_sim == last.until_sim:
-            return backlog[:-1] + (
-                BacklogItem(last.until_sim, last.causes | item.causes),
-            )
-        if item.until_sim < last.until_sim:
-            raise CognitionTimelineError(
-                f"backlog 的 cutoff 不能倒退：{item.until_sim.isoformat()} 早于 "
-                f"{last.until_sim.isoformat()}"
-            )
+    items = list(backlog)
+    for position, existing in enumerate(items):
+        if existing.until_sim == item.until_sim:
+            items[position] = BacklogItem(existing.until_sim, existing.causes | item.causes)
+            return tuple(items)
+        if existing.until_sim > item.until_sim:
+            items.insert(position, item)
+            return tuple(items)
     return backlog + (item,)
 
 
@@ -173,6 +175,10 @@ class CognitionInterval:
     # 消耗也必须从这里起算：否则中途插一次故障转换，额度就被悄悄装满了。
     allowance_since_log: Optional[int]
     opened_by: TransitionKind
+    # 转换发生的模拟分钟。按时钟生效的转换（Stop、额度、上限、故障开始、现实时钟
+    # 落后）记当时已提交的时钟；按现实时间生效的转换（恢复、Start、故障解除、
+    # 追上）记锚点换算出的分钟，backlog 的 cutoff 由它派生。补跑期间两者不同，
+    # 所以它**不要求单调**：区间按日志位置切，这个字段只供审计和派生 cutoff。
     opened_at_sim: datetime
     opened_at_wall: str
 
@@ -486,8 +492,6 @@ def _next_interval(
         raise CognitionTimelineError("log_length 必须是整数")
     if log_length < current.from_log:
         raise CognitionTimelineError("转换的日志位置不能早于当前区间")
-    if sim < current.opened_at_sim:
-        raise CognitionTimelineError("转换的模拟时刻不能早于当前区间的开始")
     if kind is not TransitionKind.STARTED and run_allowance is not None:
         raise CognitionTimelineError("只有 Start 设置单次额度")
 

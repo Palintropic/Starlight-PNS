@@ -10,6 +10,7 @@ from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
+from pns.models.clock_anchor import ClockAnchor, ClockAnchorError
 from pns.models.cognition import (
     CognitionCause,
     CognitionTimeline,
@@ -236,6 +237,9 @@ class SessionState:
     # 作息段的耐久处置（WORLD-1 设计 §12.5）：记下"走不到"的段（segment_key），
     # 之后不再规划、也不再重复记。运维记录，不是世界事件。
     rhythm_dispositions: FrozenSet[str] = field(default_factory=frozenset)
+    # 模拟时间与现实时间的锚点（WORLD-1 设计 §2）。只有持久世界有它；运维记录，
+    # 不进 WorldState、不进任何角色的上下文。它总是跟认知时间线一起出现。
+    anchor: Optional[ClockAnchor] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -678,11 +682,13 @@ class SessionState:
         # 时间线是不可变值，记引用就够了：块内的转换只会换引用，不会改旧值。
         cognition = self.cognition
         dispositions = self.rhythm_dispositions
+        anchor = self.anchor
         try:
             yield self
         except BaseException:
             self.cognition = cognition
             self.rhythm_dispositions = dispositions
+            self.anchor = anchor
             if world_snapshot is not None:
                 world._restore_mutable_state(world_snapshot)
             self.events._rollback_to(events_length)
@@ -726,6 +732,17 @@ class SessionState:
         if timeline.current.from_log > len(self.agency):
             raise SessionStateError("认知区间不能从一条还不存在的 Agency 记录开始")
         self.cognition = timeline
+
+    def set_anchor(self, anchor: ClockAnchor) -> None:
+        """在当前事务内换锚点（开世界、换倍率）。随事务回滚。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("锚点只能在本线程的提交事务里修改")
+        if not isinstance(anchor, ClockAnchor):
+            raise SessionStateError("只能设置 ClockAnchor")
+        if self.cognition is None:
+            raise SessionStateError("没有认知时间线的会话不走锚点时间")
+        self.anchor = anchor
 
     def add_rhythm_dispositions(self, keys) -> None:
         """在当前事务内记下新的"走不到"的作息段。只增不减。"""
@@ -1075,6 +1092,14 @@ class SessionState:
             except CognitionTimelineError as e:
                 raise SessionStateError(f"认知时间线不合法：{e}") from e
         _validate_cognition(state)
+        anchor = payload.get("anchor")
+        if anchor is not None:
+            try:
+                state.anchor = ClockAnchor.from_dict(anchor)
+            except ClockAnchorError as e:
+                raise SessionStateError(f"时钟锚点不合法：{e}") from e
+            if state.cognition is None:
+                raise SessionStateError("有时钟锚点的存档必须带认知时间线")
         dispositions = payload.get("rhythm_dispositions", [])
         if not isinstance(dispositions, list) or not all(
             isinstance(key, str) and key for key in dispositions
@@ -1112,6 +1137,7 @@ class SessionState:
             "memory": self.memory_archive(),
             "cognition": self.cognition.to_dict() if self.cognition else None,
             "rhythm_dispositions": sorted(self.rhythm_dispositions),
+            "anchor": self.anchor.to_dict() if self.anchor else None,
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
