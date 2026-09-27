@@ -717,6 +717,12 @@ class AutonomousRuntime:
             )
         )
 
+    def rebase_anchor(self, rate, *, wall: Optional[datetime] = None) -> None:
+        """换倍率：新锚点从此刻的精确模拟时刻起算，时间不跳、不丢秒（设计 §2）。"""
+        anchor = self._require_anchor()
+        wall = wall if wall is not None else utc_now()
+        self._ledger(lambda state: state.set_anchor(anchor.rebased(wall, rate)))
+
     def cognition_status(self, wall: Optional[datetime] = None) -> Optional[Dict]:
         """认知此刻可不可用、为什么，额度还剩多少；锚点换算出的此刻与时钟差多少。"""
         state = self._state
@@ -807,6 +813,7 @@ class AutonomousRuntime:
         *,
         max_results: Optional[int] = None,
         max_steps: Optional[int] = None,
+        keep_going=None,
     ) -> Dict:
         """一个时钟步接一个时钟步，推进到 target。每步之后处理本步可用的到期资格。
 
@@ -850,6 +857,7 @@ class AutonomousRuntime:
                     or self.world.clock >= target
                     or self._agency.pending_due()
                     or (max_steps is not None and steps >= max_steps)
+                    or (keep_going is not None and not keep_going())
                 ):
                     break
                 tick, transitions = self._clock_step_locked(target)
@@ -868,12 +876,17 @@ class AutonomousRuntime:
         }
 
     def advance_to_anchor(
-        self, wall: Optional[datetime] = None, *, max_steps: Optional[int] = None
+        self,
+        wall: Optional[datetime] = None,
+        *,
+        max_steps: Optional[int] = None,
+        keep_going=None,
     ) -> Dict:
         """把世界往锚点换算出的此刻推（时钟 worker 的一轮）。
 
         先处理遗留的到期，再一步一步走向 `floor(anchor_now)`；`max_steps` 让
-        调用方把一次长补跑切成几段，段与段之间可以停下来。锚点落后于时钟
+        调用方把一次长补跑切成几段；`keep_going` 在每一步之前问一次，返回假就
+        停在当前边界。锚点落后于时钟
         （现实时钟被往回拨）时不倒退、不前进。
         """
         anchor = self._require_anchor()
@@ -883,7 +896,7 @@ class AutonomousRuntime:
         if target <= self.world.clock:
             # 不走，但遗留的到期照样要处理：它们不需要时间前进。
             target = self.world.clock
-        return self._advance_until(target, max_steps=max_steps)
+        return self._advance_until(target, max_steps=max_steps, keep_going=keep_going)
 
     def _clock_step_locked(self, target: datetime):
         """一个时钟步。调用方持着闸门。

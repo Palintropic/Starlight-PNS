@@ -51,7 +51,7 @@ from pns.models.event import Event, EventScope, EventType, new_event_id
 from pns.models.session import SessionState
 from pns.models.world_state import ActivityKind
 from pns.runtime.autonomy.audit import AuditRequest, RouterAuditor
-from pns.runtime.autonomy.driver import DriverConfig, DriverError, DriverRegistry
+from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorkerError
 from pns.runtime.autonomy.generation import AuthoredLinePolicy, GenerationError
 from pns.runtime.autonomy.prompt import PromptedLineGenerator
 from pns.runtime.autonomy.seeding import (
@@ -83,7 +83,7 @@ DEFAULT_WORLD_ROOT = DATA_DIR / "worlds"
 
 # 自主运行的节律与生成参数。全部是**服务器侧**配置：环境变量在调用时才读，
 # 浏览器一个字节都传不进来（见 AutonomySettings.from_env）。
-TICK_MINUTES_ENV = "PNS_AUTONOMY_TICK_MINUTES"
+CLOCK_RATE_ENV = "PNS_CLOCK_RATE"
 INTERVAL_SECONDS_ENV = "PNS_AUTONOMY_INTERVAL_SECONDS"
 STOP_TIMEOUT_ENV = "PNS_AUTONOMY_STOP_TIMEOUT"
 ACTIVATION_INTERVAL_ENV = "PNS_AUTONOMY_ACTIVATION_INTERVAL_MINUTES"
@@ -145,13 +145,13 @@ def _env_number(name: str, default, cast):
 
 @dataclass(frozen=True)
 class AutonomySettings:
-    """自主运行的服务器侧设定：节拍、开局排期节律、生成参数。
+    """自主运行的服务器侧设定：时钟节拍、开局排期节律、生成参数。
 
     它整份是**冷配置**：一个世界在打开的那一刻把它锁进自己的适配器闭包，
     之后改环境变量影响不到已经在跑的世界（跟内容快照同一条规矩）。
     """
 
-    driver: DriverConfig
+    clock: ClockConfig
     cadence: ActivationCadence
     max_tokens: int = 1024
     temperature: float = 0.85
@@ -165,18 +165,18 @@ class AutonomySettings:
     # 安全网，那是定时哑火。
     #
     # 所以这里给的是一个**世界一生**尺度的数字，而"一次 Start 花多少"由
-    # `driver.max_activations_per_run` 单独管、并且按 Start 重置。这个数字
-    # 到顶时驱动会响亮停机并说明怎么解开（调高它，然后重新打开这个世界），
-    # 不会让世界在没人看得出原因的情况下永远失声。
+    # `clock.max_activations_per_run` 单独管、并且按 Start 重置。这个数字
+    # 到顶时认知以 world_action_cap 关闭、状态里写明原因（调高它，然后重新
+    # 打开这个世界），不会让世界在没人看得出原因的情况下永远失声。
     world_action_cap: int = 100_000
-    # 进程收尾时最多等每个驱动多少秒。比 driver.stop_timeout_seconds 短：
+    # 进程收尾时最多等每个时钟 worker 多少秒。比 clock.stop_timeout_seconds 短：
     # 停机不该被一次慢模型调用无限期拖住，而真正挡住"晚到的提交"的是 P11
     # 的终局 stop()，不是这次等待。
     shutdown_timeout_seconds: float = 3.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.driver, DriverConfig):
-            raise CompositionError("driver 必须是 DriverConfig")
+        if not isinstance(self.clock, ClockConfig):
+            raise CompositionError("clock 必须是 ClockConfig")
         if not isinstance(self.cadence, ActivationCadence):
             raise CompositionError("cadence 必须是 ActivationCadence")
         if isinstance(self.max_tokens, bool) or not isinstance(self.max_tokens, int):
@@ -216,12 +216,16 @@ class AutonomySettings:
             raise CompositionError(f"世界一生的动作上限不合法：{e}") from e
 
     @classmethod
-    def from_env(cls) -> "AutonomySettings":
-        """从环境变量读一份设定。校验全部由被构造的那几个对象自己做。"""
+    def from_env(cls, *, production: bool = False) -> "AutonomySettings":
+        """从环境变量读一份设定。校验全部由被构造的那几个对象自己做。
+
+        生产环境的世界时间必须与现实 1:1：配了别的倍率就起不来（fail-closed）。
+        """
         try:
-            driver = DriverConfig(
-                tick_minutes=_env_number(TICK_MINUTES_ENV, 5, int),
-                interval_seconds=_env_number(INTERVAL_SECONDS_ENV, 30.0, float),
+            clock = ClockConfig(
+                interval_seconds=_env_number(INTERVAL_SECONDS_ENV, 5.0, float),
+                rate=_env_number(CLOCK_RATE_ENV, 1.0, float),
+                require_real_time=production,
                 stop_timeout_seconds=_env_number(STOP_TIMEOUT_ENV, 10.0, float),
                 max_activations_per_run=_env_number(
                     ACTIVATIONS_PER_RUN_ENV, 200, int
@@ -232,10 +236,10 @@ class AutonomySettings:
                 first_delay_minutes=_env_number(FIRST_DELAY_ENV, 5, int),
                 stagger_minutes=_env_number(STAGGER_ENV, 5, int),
             )
-        except (DriverError, SeedingError) as e:
+        except (ClockWorkerError, SeedingError) as e:
             raise CompositionError(f"自主运行配置不合法：{e}") from e
         return cls(
-            driver=driver,
+            clock=clock,
             cadence=cadence,
             max_tokens=_env_number(MAX_TOKENS_ENV, 1024, int),
             temperature=_env_number(TEMPERATURE_ENV, 0.85, float),
@@ -253,7 +257,7 @@ class AutonomySettings:
 
     def to_dict(self) -> Dict:
         return {
-            **self.driver.to_dict(),
+            **self.clock.to_dict(),
             "activation": self.cadence.to_dict(),
             "max_tokens": self.max_tokens,
             "temperature": float(self.temperature),
@@ -298,18 +302,14 @@ class WorldControlPlane:
         if not isinstance(self._autonomy, AutonomySettings):
             raise CompositionError("autonomy 必须是 AutonomySettings")
         # 自动 checkpoint 需要一个驱动方在**已经完成的权威边界**上来问一句
-        # （`checkpoint_if_due`）。WEB-1 没有那个驱动方，所以那时开自动策略
-        # 等于承诺一件没人兑现的事；MVP-1 有了（见 pns/runtime/autonomy/
-        # driver.py），所以这里才敢默认开着：每个边界问一次，最快一分钟落
-        # 一次盘。合并规则由 P12 的 CheckpointPolicy 自己管，这里不另写一份。
+        # （`checkpoint_if_due`）。时钟 worker 每一轮都问（见 pns/runtime/
+        # autonomy/clock_worker.py），所以这里默认开着：每个边界问一次，最快
+        # 一分钟落一次盘。合并规则由 P12 的 CheckpointPolicy 自己管。
         self._policy = (
             checkpoint_policy
             if checkpoint_policy is not None
             else CheckpointPolicy(every_boundaries=1, min_interval_seconds=60.0)
         )
-        # 进程内"哪个世界有人在推"的账本。它跟生命周期服务是两本账，而且
-        # 刻意不合并：恢复一个世界不该顺手把它的模型调用也接着跑起来。
-        self._drivers = DriverRegistry(self._autonomy.driver)
         self._shutdown_lock = threading.Lock()
 
     # ── 读 ──────────────────────────────────────────────────────────────
@@ -333,10 +333,6 @@ class WorldControlPlane:
     @property
     def autonomy(self) -> AutonomySettings:
         return self._autonomy
-
-    @property
-    def drivers(self) -> DriverRegistry:
-        return self._drivers
 
     def registry(self) -> ContentRegistry:
         return self._registry_provider()
@@ -575,8 +571,10 @@ class WorldControlPlane:
             state,
             adapters=adapters,
             checkpoint_policy=self._policy,
+            clock=self._autonomy.clock,
         )
-        # 新世界的驱动是**停着**的。自动模型调用必须由操作者显式开启。
+        # 新世界的时间从此刻开始走，认知却是"还没 Start"：自动模型调用必须
+        # 由操作者显式开启。
         return self._with_driver(world.status())
 
     def restore(self, world_id: str) -> Dict:
@@ -587,10 +585,11 @@ class WorldControlPlane:
             name,
             adapters=adapters,
             checkpoint_policy=self._policy,
+            clock=self._autonomy.clock,
         )
-        # 这个世界上一次可能是"在跑着"被关掉/被杀掉的，但恢复之后驱动仍然
-        # 是停着的：一次进程重启不该自己接着烧 API 额度。
-        self._drivers.discard(name)
+        # 这个世界上一次可能是"Start 着"被关掉/被杀掉的，但恢复之后认知仍然
+        # 是"还没 Start"：一次进程重启不该自己接着烧 API 额度。时间照走——
+        # 离线那段由时钟 worker 逐边界补跑。
         return self._with_driver(world.status())
 
     def checkpoint(self, world_id: str) -> Dict:
@@ -646,21 +645,10 @@ class WorldControlPlane:
         # 刻意不透出 force：`close(force=True)` 会在最后一次 checkpoint 失败时
         # 照样归还所有权，代价是丢掉上一次成功 checkpoint 之后的全部工作。
         # 那是一次明确的人为放弃决定，不该做成一个后台按钮。
-        name = validate_world_id(world_id)
-        # 先请驱动停下并有界地等它落定。等不到也照样往下走：真正挡住"晚到的
-        # 提交"的不是这次等待，而是 close() 里 P11 的终局 stop() —— 它返回
-        # 之后没有任何提交能落地。这次等待只是为了让常见情况干净一点。
-        self._drivers.stop(name, "world closing")
-        status = self._service.close(name, "closed")
-        # 世界已经终局关闭，晚到的 worker 已经不可能提交任何东西了。再有界地
-        # 收一次尾，只为不留下一个空转的线程 —— 这次等待很短：运行时已经停了，
-        # worker 下一轮就自己收摊，而 stop() 会把它从节拍等待里叫醒。
-        self._drivers.stop(
-            name, "world closed", self._autonomy.shutdown_timeout_seconds
-        )
-        # 关成功了才丢掉驱动。没关成功的世界还开着，操作者可能重试。
-        self._drivers.discard(name)
-        return self._with_driver(status)
+        #
+        # 时钟 worker 由关闭本身先停：等不到它退出（多半卡在一次模型调用上）时
+        # 关闭会被拒绝，世界仍开着，操作者稍后重试。
+        return self._with_driver(self._service.close(validate_world_id(world_id), "closed"))
 
     def status(self, world_id: str) -> Dict:
         return self._with_driver(self._service.status(world_id))
@@ -668,29 +656,35 @@ class WorldControlPlane:
     def list_worlds(self) -> Tuple[Dict, ...]:
         return tuple(self._with_driver(item) for item in self._service.list_worlds())
 
-    # ── 自主驱动（MVP-1）────────────────────────────────────────────────
+    # ── 认知开关（WORLD-1）──────────────────────────────────────────────
     #
-    # 这两个操作跟生命周期是**两件事**，而且必须看得出来是两件事：P12 的
-    # `running` 说的是"这个世界的运行时还接不接受写入"，驱动的 `state` 说的
-    # 是"这台服务器此刻在不在推它"。一个世界完全可以 running=True 而驱动
-    # 停着 —— 那正是"开着但没人推"，也是新建/恢复之后的默认状态。
+    # Start/Stop 跟生命周期是**两件事**：P12 的 `running` 说的是"这个世界的
+    # 运行时还接不接受写入"，`autonomy.state` 说的是"服务器会不会替这些角色
+    # 花模型调用"。时间不归它们管——世界开着，时钟 worker 就一直在推。
     def start_autonomy(self, world_id: str) -> Dict:
-        """开始自动推这个世界。这是**唯一**会让服务器自己花 API 额度的入口。"""
+        """认知从下一个完整模拟分钟起可用。这是**唯一**会让服务器花 API 额度的入口。"""
         world = self._require_open(world_id)
-        self._drivers.for_world(world).start()
+        self._worker(world).start_cognition()
         return self._with_driver(world.status())
 
     def stop_autonomy(self, world_id: str, reason: str = "operator") -> Dict:
-        """请驱动暂停。它是可重启的暂停，不动 P11 的终局停机。"""
+        """认知从此刻起不可用。时间、作息照走；到期以 operator_paused 收尾。"""
         world = self._require_open(world_id)
-        driver = self._drivers.get(world.world_id)
-        if driver is not None:
-            driver.stop(reason)
+        self._worker(world).stop_cognition()
         return self._with_driver(world.status())
 
     def autonomy_status(self, world_id: str) -> Optional[Dict]:
-        driver = self._drivers.get(validate_world_id(world_id))
-        return driver.status() if driver is not None else None
+        world = self._service.opened(validate_world_id(world_id))
+        if world is None or world.clock_worker is None:
+            return None
+        return world.clock_worker.status()
+
+    @staticmethod
+    def _worker(world):
+        worker = world.clock_worker
+        if worker is None:
+            raise LifecycleError(f"世界 '{world.world_id}' 没有时钟 worker（不按现实时间走）")
+        return worker
 
     def _require_open(self, world_id: str):
         name = validate_world_id(world_id)
@@ -702,11 +696,10 @@ class WorldControlPlane:
         return world
 
     def _with_driver(self, status: Dict) -> Dict:
-        """把驱动状态挂到一份世界状态上。没有驱动就是 null，不是"停着"。
+        """把时钟 worker 与认知的状态挂到一份世界状态上。
 
-        `null` 的意思很具体：**这台服务器从来没为这个世界起过驱动**。它跟
-        "起过、现在停着"不是一回事，而后者要能被看见 —— 一个刚被停下来的
-        驱动还带着上一次 tick 的错误，那正是操作者要看的东西。
+        `null` 的意思很具体：**这个世界没有在本进程里开着**。开着的世界一定有
+        时钟 worker，它是停着还是在走、认知为什么不可用，都在这份状态里。
         """
         status["autonomy"] = self.autonomy_status(status["world_id"])
         return status
@@ -723,12 +716,15 @@ class WorldControlPlane:
         这里不额外承诺什么：进程被强杀时能恢复到的仍然只有最后一次成功的
         checkpoint（P12 的恢复边界，WEB-1 不加 WAL）。
 
-        顺序是刻意的：**先请所有驱动停下**，再逐个关世界。等待是有界的
+        顺序是刻意的：**先请所有时钟 worker 停下**，再逐个关世界。等待是有界的
         （`shutdown_timeout_seconds`），因为一次慢模型调用不该把整个停机拖住；
-        真正挡住"晚到的提交"的仍然是 close() 里 P11 的终局 stop()。
+        停不下来的那个世界关闭会失败，如实报告，不 release。
         """
         with self._shutdown_lock:
-            self._drivers.stop_all(reason, self._autonomy.shutdown_timeout_seconds)
+            for summary in self._service.list_worlds():
+                world = self._service.opened(summary["world_id"])
+                if world is not None and world.clock_worker is not None:
+                    world.clock_worker.stop(self._autonomy.shutdown_timeout_seconds)
             reports: List[Dict] = []
             for summary in self._service.list_worlds():
                 name = summary["world_id"]
@@ -747,7 +743,6 @@ class WorldControlPlane:
                         }
                     )
                     continue
-                self._drivers.discard(name)
                 reports.append(
                     {
                         "world_id": name,
@@ -772,7 +767,7 @@ __all__ = [
     "STAGGER_ENV",
     "STOP_TIMEOUT_ENV",
     "TEMPERATURE_ENV",
-    "TICK_MINUTES_ENV",
+    "CLOCK_RATE_ENV",
     "WORLD_ACTION_CAP_ENV",
     "WORLD_ROOT_ENV",
     "AdaptersUnavailable",

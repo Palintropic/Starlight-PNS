@@ -173,6 +173,20 @@ class NewWorldTests(unittest.TestCase):
         runtime.advance_to_anchor(wall(60))
         self.assertEqual(state.world_state.clock, sim(60))
 
+    def test_keep_going_stops_between_steps(self):
+        calls = _Calls()
+        state, scheduler, runtime = _new_world(calls)
+        for index in range(4):
+            _schedule(scheduler, f"w{index}", sim(10 * (index + 1)))
+        asked = []
+
+        def keep_going():
+            asked.append(state.world_state.clock)
+            return len(asked) <= 2
+
+        runtime.advance_to_anchor(wall(60), keep_going=keep_going)
+        self.assertEqual(state.world_state.clock, sim(20), "问到第三次说不，停在第二步")
+
     def test_a_session_without_an_anchor_cannot_follow_wall_time(self):
         state = SessionState(session_id="s1", scene="gate", characters=["mizuki", "ena"])
         state.attach_world_state(_world())

@@ -16,11 +16,11 @@
 //      序号的话，先回来的那次操作触发的刷新会把后回来的那次操作的成功/失败
 //      直接吞掉 —— 一次 close 失败就这么从屏幕上消失了。
 //   3. **关闭要确认。** 它会停掉一个正在跑的世界。
-//   4. **自动推进是显式开关，而且它跟"世界开着"是两件事。**（MVP-1）
-//      `running` 是 P12 的"运行时还接不接受写入"，`autonomy.state` 是"服务器
-//      此刻在不在推它"。开始自动推进 = 服务器开始自己花 API 额度，所以它只
-//      能由操作者按下，而且 `stopping` 绝不显示成"已停止"——那一轮还可能落地
-//      一次提交。
+//   4. **认知是显式开关，而且它跟"世界开着"、"时间在走"都是两件事。**（WORLD-1）
+//      `running` 是 P12 的"运行时还接不接受写入"；时间从世界打开起就跟着现实
+//      走（`clock_state`）；`autonomy.state` 是"服务器会不会替角色花模型调用"。
+//      开始认知 = 服务器开始自己花 API 额度，所以它只能由操作者按下；认知不可用
+//      时要把**全部**原因摆出来，而不是一句"已停"。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -71,13 +71,15 @@ function summarize(world: PersistentWorldStatus): { label: string; tone: string 
   return { label: '已归档', tone: 'dim' };
 }
 
-/** 驱动那一格给人看的一句话。只由服务器字段推出来。 */
+/** 认知那一格给人看的一句话。只由服务器字段推出来。 */
 function describeDriver(driver: WorldDriverStatus | null): { label: string; tone: string } {
-  // `null` = 从来没起过驱动。它跟"起过、现在停着"要分开说：后者还带着上一次
-  // tick 的结果，操作者要看得见。
-  if (driver === null) return { label: '未启动', tone: 'dim' };
-  if (driver.state === 'running') return { label: '自动推进中', tone: 'ok' };
-  if (driver.state === 'stopping') return { label: '正在停止…', tone: 'warn' };
+  if (driver === null) return { label: '未打开', tone: 'dim' };
+  if (driver.state === 'running') {
+    // 操作者开着，但此刻可能因为故障、现实时钟落后而用不了：如实说。
+    return driver.cognition_available
+      ? { label: '认知运行中', tone: 'ok' }
+      : { label: '认知暂不可用', tone: 'warn' };
+  }
   // 两种"花完了"必须分开说：一种再按一次 Start 就好，另一种按多少次都没用。
   if (driver.exit_reason === 'run_budget_exhausted') {
     return { label: '本轮额度用完', tone: 'warn' };
@@ -85,9 +87,27 @@ function describeDriver(driver: WorldDriverStatus | null): { label: string; tone
   if (driver.exit_reason === 'world_action_cap') {
     return { label: '已达世界动作上限', tone: 'ooc' };
   }
-  if (driver.last_error) return { label: '已停（上次 tick 失败）', tone: 'ooc' };
-  return { label: '已停', tone: 'dim' };
+  return { label: '认知未开启', tone: 'dim' };
 }
+
+const CAUSE_TEXT: Record<string, string> = {
+  not_started: '还没 Start',
+  operator_paused: '操作者已停止',
+  run_budget_exhausted: '本轮额度用完',
+  world_action_cap: '世界动作上限',
+  process_stopped: '停机期间',
+  fault: '时钟故障',
+  wall_clock_behind: '现实时钟落后于存档',
+};
+
+const CLOCK_STATE_TEXT: Record<string, string> = {
+  catching_up: '补跑中',
+  healthy: '与现实同步',
+  faulted: '故障（退避重试中）',
+};
+
+const causesText = (causes: string[]): string =>
+  causes.map((cause) => CAUSE_TEXT[cause] ?? cause).join('、');
 
 const clockText = (iso: string | null): string =>
   iso === null ? '—' : iso.replace('T', ' ').slice(0, 16);
@@ -274,10 +294,11 @@ export default function PersistentWorlds() {
       worldId,
       () => startWorldAutonomy(worldId),
       (status) => {
-        const cadence = status.autonomy?.cadence;
-        return cadence
-          ? `已开始自动推进：每 ${cadence.interval_seconds} 秒推 ${cadence.tick_minutes} 模拟分钟`
-          : '已开始自动推进';
+        const autonomy = status.autonomy;
+        if (autonomy && !autonomy.cognition_available && autonomy.cognition_causes.length) {
+          return `已 Start，但认知此刻仍不可用：${causesText(autonomy.cognition_causes)}`;
+        }
+        return '已开始认知：从下一个完整模拟分钟起，角色开始自己做决定';
       },
     );
 
@@ -287,19 +308,16 @@ export default function PersistentWorlds() {
       'autonomy-stop',
       worldId,
       () => stopWorldAutonomy(worldId),
-      (status) =>
-        // `stopping` 绝不显示成"已停止"：那一轮还在跑（多半卡在一次模型调用
-        // 上），它仍然可能落地一次提交。说成停了就是一句会被事实拆穿的话。
-        status.autonomy?.state === 'stopping'
-          ? '停止请求已发出，但当前这一轮还没结束——它仍然可能落地一次提交'
-          : '已停止自动推进（世界仍然开着，可以再启动）',
+      () =>
+        // 正在飞的那次调用回来之后，提交时按新区间判为不可用：不会再落地。
+        '已停止认知（时间与作息照走，可以再启动）',
     );
 
   const onClose = (worldId: string) => {
     // 关闭会停掉一个正在跑的世界，所以先确认。
     const confirmed = window.confirm(
       `关闭世界「${worldId}」？\n\n` +
-        '会先请自动推进停下、停止接受新的行动、等在跑的事务落定、写下最后一份存档，' +
+        '会先停下世界时钟、停止接受新的行动、等在跑的事务落定、写下最后一份存档，' +
         '然后归还所有权。存不下去时不会假装关干净了，世界会继续开着。',
     );
     if (!confirmed) return;
@@ -412,9 +430,7 @@ export default function PersistentWorlds() {
             const busy = (action: Action) => pending[`${world.world_id}:${action}`] !== undefined;
             const driver = world.autonomy;
             const driverState = describeDriver(driver);
-            // 「在推」= running 或者 stopping。stopping 也算，因为那时该给的
-            // 按钮仍然是"停止"——再按一次 Start 只会拿到 409。
-            const driving = driver !== null && !driver.stopped;
+            const driving = driver !== null && driver.running;
             return (
               <li key={world.world_id} className="worlds-item">
                 <div className="worlds-item-head">
@@ -447,7 +463,7 @@ export default function PersistentWorlds() {
                             disabled={busy('autonomy-stop')}
                             onClick={() => onStopAutonomy(world.world_id)}
                           >
-                            {busy('autonomy-stop') ? '停止中…' : '停止自动推进'}
+                            {busy('autonomy-stop') ? '停止中…' : '停止认知'}
                           </button>
                         ) : (
                           <button
@@ -455,7 +471,7 @@ export default function PersistentWorlds() {
                             disabled={busy('autonomy-start')}
                             onClick={() => onStartAutonomy(world.world_id)}
                           >
-                            {busy('autonomy-start') ? '启动中…' : '开始自动推进'}
+                            {busy('autonomy-start') ? '启动中…' : '开始认知'}
                           </button>
                         )}
                         <button
@@ -569,24 +585,42 @@ export default function PersistentWorlds() {
                       </dd>
                     </div>
                     <div>
-                      <dt>自动推进</dt>
-                      <dd>
-                        {driver === null
-                          ? '未启动（这台服务器还没为它起过驱动）'
-                          : `${driverState.label}` +
-                            `　已跑 ${driver.ticks} 轮` +
-                            (driver.failures ? `，失败 ${driver.failures} 次` : '') +
-                            (driver.stop_reason ? `　停止理由：${driver.stop_reason}` : '') +
-                            (driver.exit_reason ? `　自行收摊：${driver.exit_reason}` : '')}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>推进节拍</dt>
+                      <dt>世界时钟</dt>
                       <dd>
                         {driver === null
                           ? '—'
-                          : `每 ${driver.cadence.interval_seconds} 秒推 ` +
-                            `${driver.cadence.tick_minutes} 模拟分钟`}
+                          : (driver.worker_alive
+                              ? (CLOCK_STATE_TEXT[driver.clock_state ?? ''] ??
+                                driver.clock_state ??
+                                '—')
+                              : `已停（${driver.worker_exit_reason ?? '—'}）`) +
+                            (driver.clock_lag_minutes !== null && driver.clock_lag_minutes !== 0
+                              ? driver.clock_lag_minutes > 0
+                                ? `，落后现实 ${driver.clock_lag_minutes} 分钟`
+                                : `，现实时钟落后 ${-driver.clock_lag_minutes} 分钟`
+                              : '') +
+                            (driver.fault_since ? `　故障始于 ${driver.fault_since}` : '') +
+                            `　已跑 ${driver.ticks} 轮` +
+                            (driver.failures ? `，失败 ${driver.failures} 次` : '')}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>认知</dt>
+                      <dd>
+                        {driver === null
+                          ? '—'
+                          : driver.cognition_available
+                            ? '可用'
+                            : `不可用：${causesText(driver.cognition_causes)}`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>时钟节拍</dt>
+                      <dd>
+                        {driver === null
+                          ? '—'
+                          : `每 ${driver.cadence.interval_seconds} 秒追一次现实时间` +
+                            (driver.cadence.rate !== 1 ? `（开发倍率 ×${driver.cadence.rate}）` : '')}
                       </dd>
                     </div>
                     <div>
@@ -596,7 +630,7 @@ export default function PersistentWorlds() {
                           ? '—'
                           : `${driver.run_budget.used} / ${driver.run_budget.limit} 条激活` +
                             (driver.exit_reason === 'run_budget_exhausted'
-                              ? '（已用完；再按一次「开始自动推进」就是新的一轮）'
+                              ? '（已用完；再按一次「开始认知」就是新的一轮）'
                               : '')}
                       </dd>
                     </div>
@@ -634,8 +668,8 @@ export default function PersistentWorlds() {
                       </dd>
                     </div>
                     <div>
-                      <dt>上次 tick 错误</dt>
-                      <dd>{driver?.last_error ?? '无'}</dd>
+                      <dt>上次时钟错误</dt>
+                      <dd>{driver?.last_clock_error ?? '无'}</dd>
                     </div>
                     <div>
                       <dt>上次操作错误</dt>

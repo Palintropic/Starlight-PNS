@@ -365,15 +365,18 @@ export interface WorldCheckpointPolicy {
   on_close: boolean;
 }
 
-/** 驱动的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。 */
+/** 时钟 worker 的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。 */
 export interface WorldDriverCadence {
-  tick_minutes: number;
   interval_seconds: number;
+  /** 模拟时间相对现实时间的倍率。生产恒为 1。 */
+  rate: number;
+  max_steps_per_iteration: number;
+  fault_threshold: number;
   stop_timeout_seconds: number;
   max_activations_per_run: number;
 }
 
-/** **这一轮** Start 的额度。用完了驱动自己停下，再按一次 Start 就重置。 */
+/** **这一轮** Start 的额度。用完了认知以 run_budget_exhausted 关闭，再按一次 Start 就重置。 */
 export interface WorldRunBudget {
   limit: number;
   used: number;
@@ -403,14 +406,14 @@ export interface WorldDriverTick {
   checkpoint_revision: number | null;
 }
 
-/** 自主驱动此刻的样子（MVP-1）。
+/** 时钟 worker 与认知此刻的样子（WORLD-1）。
  *
  * 它跟 P12 的 `running` 是两件事：`running` 说的是"这个世界的运行时还接不接受
- * 写入"，`state` 说的是"服务器此刻在不在推它"。running=true 而 state='stopped'
- * 就是"开着但没人推"——新建和恢复之后的默认状态，因为自动模型调用是 opt-in。
+ * 写入"，`state` 说的是"服务器会不会替角色花模型调用"。running=true 而
+ * state='stopped' 就是"时间在走、没人做决定"——新建和恢复之后的默认状态，因为
+ * 自动模型调用是 opt-in。时间本身走没走看 `clock_state`。
  *
- * `state === 'stopping'` 的意思很具体：**还没停干净**，当前那一轮仍然可能落地
- * 一次提交。UI 不许把它显示成"已停止"。
+ * Stop 是一次认知时间线转换，不等任何线程，所以 `stopping` 恒为 false。
  */
 export interface WorldDriverStatus {
   world_id: string;
@@ -432,6 +435,18 @@ export interface WorldDriverStatus {
   run_budget: WorldRunBudget;
   /** 跟着世界一辈子的那道边界。 */
   world_actions: WorldActionUsage;
+  worker_alive: boolean;
+  worker_exit_reason: string | null;
+  /** catching_up / healthy / faulted */
+  clock_state: string | null;
+  /** 现实时间换算出的此刻比世界时钟超前多少模拟分钟（负数：现实时钟落后）。 */
+  clock_lag_minutes: number | null;
+  last_clock_progress: string | null;
+  fault_since: string | null;
+  last_clock_error: string | null;
+  cognition_available: boolean;
+  /** 认知不可用的全部原因（not_started / operator_paused / fault …）。 */
+  cognition_causes: string[];
 }
 
 export interface PersistentWorldStatus {
@@ -460,7 +475,7 @@ export interface PersistentWorldStatus {
   archive_path: string | null;
   boundaries_since_checkpoint: number | null;
   policy: WorldCheckpointPolicy | null;
-  /** `null` = 这台服务器从来没为这个世界起过驱动；跟"起过、现在停着"不是一回事。 */
+  /** `null` = 这个世界没有在本进程里开着。开着的世界一定有时钟 worker。 */
   autonomy: WorldDriverStatus | null;
 }
 

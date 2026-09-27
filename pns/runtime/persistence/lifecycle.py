@@ -60,8 +60,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Optional, Tuple
 
+from pns.models.clock_anchor import ClockAnchor, utc_now
 from pns.models.session import SessionState, TransactionBoundaryError
 from pns.runtime.agency.engine import AgencyEngine
+from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.persistence.archive import ArchiveError, WorldArchive
@@ -320,6 +322,9 @@ class PersistentWorld:
         # 因为文件此刻读得出来就把过去一次未经目录同步的保存重新说成耐久。
         self._durable = durable
         self._directory_synced = directory_synced
+        # 世界时钟 worker（WORLD-1 设计 §7）。按现实时间走的世界才有；由生命周期
+        # 服务在句柄登记之后启动，关闭时第一个停。
+        self._clock_worker: Optional[ClockWorker] = None
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -342,6 +347,10 @@ class PersistentWorld:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def clock_worker(self) -> Optional[ClockWorker]:
+        return self._clock_worker
 
     # ── checkpoint ──────────────────────────────────────────────────────
     def checkpoint(self, reason: str = "manual") -> Dict:
@@ -477,6 +486,17 @@ class PersistentWorld:
         `clean=False`、`durable_revision` 写着真正能恢复到的那一版。
         """
         self._refuse_inside_transaction("关闭世界")
+        # 0. 先停时钟 worker，而且在世界锁**之外**：它自己的 checkpoint 要拿这把锁，
+        #    持锁等它只会等到超时。等不到它退出（多半卡在一次模型调用上）时，
+        #    非 force 的关闭拒绝——不存、不标记、不还所有权，调用方稍后重试；
+        #    force 则往下走：终局停机之后它晚到的提交会被运行时拒绝。
+        worker = self._clock_worker
+        if worker is not None and not self._closed:
+            if not worker.stop() and not force:
+                raise LifecycleError(
+                    f"世界 '{self._world_id}' 的时钟 worker 还没停下（多半在等一次"
+                    "模型调用），暂不能关闭；稍后重试"
+                )
         with self._lock:
             if self._closed:
                 return self._status_locked()
@@ -528,6 +548,10 @@ class PersistentWorld:
         那些写入既不会落盘，又可能跟接手这个世界的下一个进程并行发生。
         """
         self._refuse_inside_transaction("释放世界")
+        worker = self._clock_worker
+        if worker is not None:
+            # 不等它：release 本来就是放手。终局停机之后它什么都写不进去。
+            worker.stop(timeout=0)
         with self._lock:
             if self._closed:
                 return self._status_locked()
@@ -652,8 +676,13 @@ class WorldLifecycleService:
         checkpoint_policy: Optional[CheckpointPolicy] = None,
         snapshot_timeout: Optional[float] = None,
         start: bool = True,
+        clock: Optional[ClockConfig] = None,
+        wall_clock: Optional[Callable[[], datetime]] = None,
     ) -> PersistentWorld:
         """建一个新世界，并且当场写下第 1 版存档。
+
+        带 `clock` 的世界按现实时间走：锚点从此刻、从世界的开局时钟开始，认知
+        从"还没 Start"开始；句柄登记之后起时钟 worker。
 
         已经存在的世界不许被创建覆盖：那会把一整个世界的历史一次性抹掉，
         而抹掉它的理由只是调用方传错了一个字符串。
@@ -686,6 +715,11 @@ class WorldLifecycleService:
                     "就用 restore()"
                 )
             runtime = adapters.bind(state)
+            if clock is not None:
+                now = wall_clock() if wall_clock is not None else utc_now()
+                runtime.open_clock(
+                    ClockAnchor(state.world_state.clock, now, clock.rate), wall=now
+                )
             world = PersistentWorld(
                 world_id=name,
                 store=self._store,
@@ -706,7 +740,11 @@ class WorldLifecycleService:
         except BaseException:
             handle.release()
             raise
-        return self._remember(name, world, handle)
+        self._remember(name, world, handle)
+        if clock is not None:
+            # 首存档留在磁盘上：它是一份合法的开局存档（设计 §12.7）。
+            self._spawn_clock(world, clock, wall_clock)
+        return world
 
     def restore(
         self,
@@ -716,8 +754,14 @@ class WorldLifecycleService:
         checkpoint_policy: Optional[CheckpointPolicy] = None,
         snapshot_timeout: Optional[float] = None,
         start: bool = True,
+        clock: Optional[ClockConfig] = None,
+        wall_clock: Optional[Callable[[], datetime]] = None,
     ) -> PersistentWorld:
         """把最后一次成功 checkpoint 的那个世界拿回来，并且重新跑起来。
+
+        带 `clock` 时：停机期间触发的到期一律 process_stopped（恢复转换），现实
+        时钟若落后于存档时钟就记 wall_clock_behind；配置的倍率与存档不同时在此刻
+        重新锚定。句柄登记之后起时钟 worker，由它把离线的那段补跑完。
 
         顺序是刻意的：**先**拿所有权，**再**读存档。反过来的话，两个进程会
         双双读到同一份存档、双双恢复出一个"权威"世界，然后互相覆盖。
@@ -745,6 +789,15 @@ class WorldLifecycleService:
             state = archive.restore_state()
             # 服务在后：调用方的冷适配器显式绑定，存档里一个活对象都没有。
             runtime = adapters.bind(state)
+            if clock is not None:
+                if state.anchor is None:
+                    raise LifecycleError(
+                        f"世界 '{name}' 的存档没有时钟锚点，不能按现实时间恢复"
+                    )
+                now = wall_clock() if wall_clock is not None else utc_now()
+                runtime.restore_clock(wall=now)
+                if state.anchor.rate != float(clock.rate):
+                    runtime.rebase_anchor(clock.rate, wall=now)
             world = PersistentWorld(
                 world_id=name,
                 store=self._store,
@@ -763,7 +816,23 @@ class WorldLifecycleService:
         except BaseException:
             handle.release()
             raise
-        return self._remember(name, world, handle)
+        self._remember(name, world, handle)
+        if clock is not None:
+            self._spawn_clock(world, clock, wall_clock)
+        return world
+
+    def _spawn_clock(self, world: PersistentWorld, clock: ClockConfig, wall_clock) -> None:
+        """起时钟 worker。起不来就整个退回去：从登记表移除、终局停机、还所有权。
+
+        登记与起 worker 是一个启动阶段：不存在"登记了、却没人推时间"的世界。
+        """
+        try:
+            worker = ClockWorker(world, clock, wall_clock=wall_clock)
+            world._clock_worker = worker
+            worker.start()
+        except BaseException:
+            world.release("clock worker failed to start")
+            raise
 
     # ── 服务面 ──────────────────────────────────────────────────────────
     def opened(self, world_id: str) -> Optional[PersistentWorld]:
