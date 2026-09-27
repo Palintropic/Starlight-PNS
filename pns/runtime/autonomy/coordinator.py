@@ -45,6 +45,12 @@ from typing import Dict, List, Mapping, Optional, Set, Tuple
 from pns.models.activation import ActivationDue
 from pns.models.agency import AgencyBudget, AgencyOutcome
 from pns.models.authored import GenerationAudit
+from pns.models.clock_anchor import ClockAnchor, utc_now
+from pns.models.cognition import (
+    OPERATOR_CLEARABLE,
+    CognitionTimeline,
+    consumes_allowance,
+)
 from pns.models.event import Event, EventType
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
@@ -432,6 +438,25 @@ class AutonomousRuntime:
     def _process(self, due: ActivationDue, attempt: int) -> ActivationResult:
         """一条到期资格的实际处理。慢调用都在这里，而且都在闸门之外。"""
 
+        # ── 认知不可用：不问策略、不调模型，当场收尾（设计 §5.2） ────────
+        # 判定与提交在同一次持锁里：时间线的转换也走这把闸门，查完到写入之间
+        # 它变不了。
+        with self._gate:
+            if self._running and self._agency.unavailable_causes_for(due):
+                return self._record(
+                    self._commit_admitted(
+                        due,
+                        ProposalPlan(
+                            due=due,
+                            character_id=self._agency._require_character(due),
+                            policy="",
+                            proposed_at=self.clock,
+                            verdict=AgencyOutcome.REJECTED_UNAVAILABLE,
+                        ),
+                        attempt,
+                    )
+                )
+
         # ── 提案（含生成，纯的） ───────────────────────────────────────
         plan = self._agency.propose(due)
         if not self._running:
@@ -558,6 +583,199 @@ class AutonomousRuntime:
             state.add_rhythm_dispositions(step.unreachable)
         return committed
 
+    # ── 认知时间线与锚点（WORLD-1 设计 §2、§5、§13–§14） ────────────────
+    #
+    # 每次转换都在闸门内、在一个事务里完成：它与 Agency 记录的追加、时钟步
+    # 共用同一个全序。转换的模拟分钟有两种来源（见 CognitionInterval）：
+    # 按时钟生效的记当时的时钟；按现实时间生效的记锚点分钟，但不早于时钟——
+    # 已经触发的到期都发生在它之前。
+    def open_clock(self, anchor: ClockAnchor, *, wall: Optional[datetime] = None) -> None:
+        """新世界：时间从锚点开始走，认知从"还没 Start"开始。只在建世界时调用。"""
+        if not isinstance(anchor, ClockAnchor):
+            raise AutonomyError("open_clock 需要一个 ClockAnchor")
+        stamp = self._wall(wall)
+
+        def change(state: SessionState) -> None:
+            if state.cognition is not None:
+                raise AutonomyError("这个世界已经有认知时间线了")
+            state.set_cognition(
+                CognitionTimeline.open(
+                    log_length=len(state.agency), sim=self.clock, wall=stamp
+                )
+            )
+            state.set_anchor(anchor)
+
+        self._ledger(change)
+
+    def restore_clock(self, *, wall: Optional[datetime] = None) -> Dict:
+        """从存档恢复：停机期间的一律 process_stopped；现实时钟若落后于存档时钟，
+        另开 wall_clock_behind，时间不倒退、也不重锚（设计 §2）。"""
+        anchor = self._require_anchor()
+        wall = wall if wall is not None else utc_now()
+        stamp = self._wall(wall)
+        target = anchor.minute_at(wall)
+
+        def change(state: SessionState) -> None:
+            timeline = state.cognition.restored(
+                log_length=len(state.agency), sim=max(target, self.clock), wall=stamp
+            )
+            if target < self.clock:
+                timeline = timeline.wall_clock_behind(
+                    log_length=len(state.agency), sim=self.clock, wall=stamp
+                )
+            state.set_cognition(timeline)
+
+        self._ledger(change)
+        return self.cognition_status(wall)
+
+    def start_cognition(
+        self, run_allowance: Optional[int], *, wall: Optional[datetime] = None
+    ) -> Dict:
+        """操作员 Start：清掉操作员层面的原因，装满单次额度。
+
+        从下一个完整模拟分钟起生效：补跑途中按下 Start，停机期间触发的到期
+        仍然不可用（设计 §5.1）。故障、现实时钟落后、世界上限不归它管——
+        它们还在时，Start 成功返回，但如实报告认知仍不可用。
+        """
+        wall = wall if wall is not None else utc_now()
+        with self._gate:
+            self._require_running("Start")
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).started(
+                    log_length=len(state.agency),
+                    sim=self._anchor_minute(wall),
+                    wall=self._wall(wall),
+                    run_allowance=run_allowance,
+                )
+            )
+        )
+        return self.cognition_status(wall)
+
+    def stop_cognition(self, *, wall: Optional[datetime] = None) -> Dict:
+        """操作员 Stop：从此刻起认知不可用。时间照走、作息照走。
+
+        已经处于操作员层面的不可用（还没 Start、已经 Stop、额度已用完）时
+        什么都不写。
+        """
+        wall = wall if wall is not None else utc_now()
+
+        def change(state: SessionState) -> None:
+            timeline = self._timeline(state)
+            if timeline.current.causes & OPERATOR_CLEARABLE:
+                return
+            state.set_cognition(
+                timeline.stopped(
+                    log_length=len(state.agency), sim=self.clock, wall=self._wall(wall)
+                )
+            )
+
+        self._ledger(change)
+        return self.cognition_status(wall)
+
+    def begin_fault(self, *, wall: Optional[datetime] = None) -> None:
+        """时钟 worker 进入故障（设计 §7.2）。按时钟生效。"""
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).fault_began(
+                    log_length=len(state.agency), sim=self.clock, wall=self._wall(wall)
+                )
+            )
+        )
+
+    def clear_fault(self, *, wall: Optional[datetime] = None) -> None:
+        """故障解除。补跑经过的故障时段触发的到期仍带 fault（backlog）。"""
+        wall = wall if wall is not None else utc_now()
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).fault_cleared(
+                    log_length=len(state.agency),
+                    sim=self._anchor_minute(wall),
+                    wall=self._wall(wall),
+                )
+            )
+        )
+
+    def mark_wall_clock_behind(self, *, wall: Optional[datetime] = None) -> None:
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).wall_clock_behind(
+                    log_length=len(state.agency), sim=self.clock, wall=self._wall(wall)
+                )
+            )
+        )
+
+    def mark_wall_clock_caught_up(self, *, wall: Optional[datetime] = None) -> None:
+        wall = wall if wall is not None else utc_now()
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).wall_clock_caught_up(
+                    log_length=len(state.agency),
+                    sim=self._anchor_minute(wall),
+                    wall=self._wall(wall),
+                )
+            )
+        )
+
+    def cognition_status(self, wall: Optional[datetime] = None) -> Optional[Dict]:
+        """认知此刻可不可用、为什么，额度还剩多少；锚点换算出的此刻与时钟差多少。"""
+        state = self._state
+        timeline = state.cognition
+        if timeline is None:
+            return None
+        current = timeline.current
+        remaining = None
+        if current.run_allowance is not None:
+            used = sum(
+                1
+                for record in state.agency.records()[current.allowance_since_log :]
+                if consumes_allowance(record.outcome)
+            )
+            remaining = max(0, current.run_allowance - used)
+        report = {
+            "available": current.available,
+            "causes": sorted(cause.value for cause in current.causes),
+            "interval": current.index,
+            "run_allowance": current.run_allowance,
+            "run_remaining": remaining,
+            "anchor": state.anchor.to_dict() if state.anchor is not None else None,
+            "anchor_minute": None,
+            "lag_minutes": None,
+        }
+        if state.anchor is not None:
+            minute = state.anchor.minute_at(wall if wall is not None else utc_now())
+            report["anchor_minute"] = minute.isoformat()
+            report["lag_minutes"] = int((minute - self.clock).total_seconds() // 60)
+        return report
+
+    def _ledger(self, change) -> None:
+        with self._gate:
+            with self._committing():
+                with self._state.atomic_commit():
+                    change(self._state)
+
+    def _timeline(self, state: SessionState) -> CognitionTimeline:
+        if state.cognition is None:
+            raise AutonomyError("这个世界没有认知时间线（不是持久世界）")
+        return state.cognition
+
+    def _require_anchor(self) -> ClockAnchor:
+        anchor = self._state.anchor
+        if anchor is None or self._state.cognition is None:
+            raise AutonomyError("这个世界没有时钟锚点（不是按现实时间走的持久世界）")
+        return anchor
+
+    def _anchor_minute(self, wall: datetime) -> datetime:
+        """按现实时间生效的转换的模拟分钟：锚点分钟，但不早于时钟。"""
+        anchor = self._state.anchor
+        if anchor is None:
+            return self.clock
+        return max(anchor.minute_at(wall), self.clock)
+
+    @staticmethod
+    def _wall(wall: Optional[datetime]) -> str:
+        return (wall if wall is not None else utc_now()).isoformat()
+
     # ── 推进模拟时钟 ────────────────────────────────────────────────────
     def advance(self, minutes: int, *, max_results: Optional[int] = None) -> Dict:
         """把模拟时间往前推 minutes 分钟，**逐边界**推进并处理途中到期的一切。
@@ -583,7 +801,13 @@ class AutonomousRuntime:
             target = _ceil_minute(due_at)
         return self._advance_until(target)
 
-    def _advance_until(self, target: datetime, *, max_results: Optional[int] = None) -> Dict:
+    def _advance_until(
+        self,
+        target: datetime,
+        *,
+        max_results: Optional[int] = None,
+        max_steps: Optional[int] = None,
+    ) -> Dict:
         """一个时钟步接一个时钟步，推进到 target。每步之后处理本步可用的到期资格。
 
         时钟步本身是原子的（见 `_clock_step_locked`）；步与步之间 checkpoint、
@@ -600,6 +824,7 @@ class AutonomousRuntime:
         rhythm_events: List[str] = []
         results: List[Dict] = []
         remaining = max_results
+        steps = 0
 
         def process(tick=None) -> None:
             nonlocal remaining
@@ -624,9 +849,11 @@ class AutonomousRuntime:
                     not self._running
                     or self.world.clock >= target
                     or self._agency.pending_due()
+                    or (max_steps is not None and steps >= max_steps)
                 ):
                     break
                 tick, transitions = self._clock_step_locked(target)
+                steps += 1
             due_ids.extend(tick.due_ids)
             rhythm_events.extend(record["event_id"] for record in transitions)
             process(tick)
@@ -639,6 +866,24 @@ class AutonomousRuntime:
             "rhythm_events": rhythm_events,
             "results": results,
         }
+
+    def advance_to_anchor(
+        self, wall: Optional[datetime] = None, *, max_steps: Optional[int] = None
+    ) -> Dict:
+        """把世界往锚点换算出的此刻推（时钟 worker 的一轮）。
+
+        先处理遗留的到期，再一步一步走向 `floor(anchor_now)`；`max_steps` 让
+        调用方把一次长补跑切成几段，段与段之间可以停下来。锚点落后于时钟
+        （现实时钟被往回拨）时不倒退、不前进。
+        """
+        anchor = self._require_anchor()
+        target = anchor.minute_at(wall if wall is not None else utc_now())
+        with self._gate:
+            self._require_running("推进模拟时钟")
+        if target <= self.world.clock:
+            # 不走，但遗留的到期照样要处理：它们不需要时间前进。
+            target = self.world.clock
+        return self._advance_until(target, max_steps=max_steps)
 
     def _clock_step_locked(self, target: datetime):
         """一个时钟步。调用方持着闸门。
