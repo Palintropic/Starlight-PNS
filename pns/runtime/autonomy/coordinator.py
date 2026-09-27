@@ -723,6 +723,20 @@ class AutonomousRuntime:
         wall = wall if wall is not None else utc_now()
         self._ledger(lambda state: state.set_anchor(anchor.rebased(wall, rate)))
 
+    def decide_content(self, conflict_id: str, decision: str, *, wall: Optional[datetime] = None) -> None:
+        """记一次项目所有者对内容冲突的决定（见 pns/models/content_ledger.py）。"""
+        stamp = self._wall(wall)
+
+        def change(state: SessionState) -> None:
+            if state.content is None:
+                raise AutonomyError("这个世界没有内容账本（不是正式世界）")
+            try:
+                state.set_content(state.content.decided(conflict_id, decision, wall=stamp))
+            except ValueError as e:
+                raise AutonomyError(str(e)) from e
+
+        self._ledger(change)
+
     def cognition_status(self, wall: Optional[datetime] = None) -> Optional[Dict]:
         """认知此刻可不可用、为什么，额度还剩多少；锚点换算出的此刻与时钟差多少。"""
         state = self._state

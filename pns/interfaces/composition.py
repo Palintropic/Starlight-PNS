@@ -60,7 +60,13 @@ from pns.runtime.autonomy.seeding import (
     seed_character_activations,
 )
 from pns.runtime.content_registry import ContentRegistry
+from pns.models.clock_anchor import utc_now
 from pns.runtime.event_commit import EventCommitError
+from pns.runtime.formal_world import (
+    FormalWorldError,
+    formal_session_state,
+    formal_world,
+)
 from pns.runtime.memory.recall import MemoryRecall
 from pns.runtime.persistence import (
     CheckpointPolicy,
@@ -533,6 +539,7 @@ class WorldControlPlane:
             # 日常作息表来自**这一份**冻结的内容快照，跟提示词、显示名同一条
             # 规矩：世界打开的那一刻锁定，之后重载内容动不了已经打开的世界。
             rhythm=RhythmDirector(registry.rhythms()),
+            content_revision=registry.revision,
             seed=seed,
         )
 
@@ -545,6 +552,10 @@ class WorldControlPlane:
     ) -> Dict:
         # 先过 ID：不合法的 ID 不该先把一份初始世界造出来再被拒。
         name = validate_world_id(world_id)
+        if formal_world(name) is not None:
+            raise ContentUnavailable(
+                f"'{name}' 是正式世界，只能走正式开局（bootstrap），不能从遗留场景建"
+            )
         registry = self.registry()
 
         def seed(bound: SessionState) -> None:
@@ -576,6 +587,58 @@ class WorldControlPlane:
         # 新世界的时间从此刻开始走，认知却是"还没 Start"：自动模型调用必须
         # 由操作者显式开启。
         return self._with_driver(world.status())
+
+    def create_formal(self, world_id: str, *, operator: Optional[str] = None) -> Dict:
+        """按正式世界的规则开局（WORLD-1「夜明け前」）。
+
+        开局时刻、时区、resident 都来自代码里的正式世界定义；位置、活动、频道
+        在场取自作息表在开局那一刻所在的那一段；来源写进世界的 origin。
+        跟普通创建一样走 P12：拿所有权、写第 1 版存档、起时钟 worker；认知是
+        "还没 Start"。
+        """
+        name = validate_world_id(world_id)
+        spec = formal_world(name)
+        if spec is None:
+            raise ContentUnavailable(f"'{name}' 不是已定义的正式世界")
+        registry = self.registry()
+
+        def seed(bound: SessionState) -> None:
+            try:
+                seed_character_activations(
+                    bound.scheduler, bound.characters, self._autonomy.cadence
+                )
+            except SeedingError as e:
+                raise ContentUnavailable(f"这个世界的开局排期播不下去：{e}") from e
+
+        adapters = self.build_adapters(registry, seed=seed)
+        try:
+            state = formal_session_state(
+                spec,
+                registry,
+                session_id=_new_session_id(name),
+                wall=utc_now(),
+                operator=operator,
+            )
+        except FormalWorldError as e:
+            raise ContentUnavailable(str(e)) from e
+        world = self._service.create(
+            name,
+            state,
+            adapters=adapters,
+            checkpoint_policy=self._policy,
+            clock=self._autonomy.clock,
+        )
+        return self._with_driver(world.status())
+
+    def decide_content_conflict(self, world_id: str, conflict_id: str, decision: str) -> Dict:
+        """项目所有者对一条内容冲突的决定：adopted / declined / deferred。
+
+        写进这个世界的内容账本并立即存盘；采用在下一次打开世界时生效。刻意
+        没有 HTTP 入口与界面（WORLD-1 非目标），只给服务器侧的维护脚本用。
+        """
+        world = self._require_open(world_id)
+        world.runtime.decide_content(conflict_id, decision)
+        return self._with_driver(world.checkpoint("content_decision"))
 
     def restore(self, world_id: str) -> Dict:
         name = validate_world_id(world_id)

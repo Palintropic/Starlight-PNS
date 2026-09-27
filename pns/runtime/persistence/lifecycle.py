@@ -65,6 +65,7 @@ from pns.models.session import SessionState, TransactionBoundaryError
 from pns.runtime.agency.engine import AgencyEngine
 from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
+from pns.runtime.formal_world import gated_rhythms
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.persistence.archive import ArchiveError, WorldArchive
 from pns.runtime.persistence.naming import validate_world_id
@@ -122,6 +123,8 @@ class RuntimeAdapters:
     # 播种，而是它每一次推进时间都要对照的那张表。恢复之后不交，世界就会停在
     # 最后一次记下来的活动上，永远不再跟着时间走。
     rhythm: Optional[RhythmDirector] = None
+    # 作息表来自哪一版内容快照。正式世界据此记冲突待决记录（见 formal_world）。
+    content_revision: int = 0
     name: str = "autonomy"
 
     def __post_init__(self) -> None:
@@ -160,12 +163,24 @@ class RuntimeAdapters:
             )
         if state.memory_encoder is None:
             MemoryEncoder(state, self.memory_budget)
+        rhythm = self.rhythm
+        if rhythm is not None and state.content is not None:
+            # 正式世界：只有这个世界明确采用过的那一版作息才生效。内容包里出现
+            # 新的一版，记一条待决、不生效，等项目所有者决定（WORLD-1 §4.3）。
+            with state.atomic_commit():
+                accepted = gated_rhythms(
+                    state,
+                    {cid: rhythm.rhythm_for(cid) for cid in rhythm.characters()},
+                    registry_revision=self.content_revision,
+                    wall=utc_now().isoformat(),
+                )
+            rhythm = RhythmDirector(accepted)
         return AutonomousRuntime(
             state,
             auditor=self.auditor,
             retry=self.retry,
             recall_budget=self.recall_budget,
-            rhythm=self.rhythm,
+            rhythm=rhythm,
             name=self.name,
         )
 
@@ -269,6 +284,7 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
         len(state.cognition.intervals) if state.cognition is not None else None,
         len(state.rhythm_dispositions),
         state.anchor.to_dict() if state.anchor is not None else None,
+        state.content.to_dict() if state.content is not None else None,
         digest,
     )
 

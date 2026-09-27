@@ -11,6 +11,7 @@ from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
 from pns.models.clock_anchor import ClockAnchor, ClockAnchorError
+from pns.models.content_ledger import ContentLedger, ContentLedgerError
 from pns.models.cognition import (
     CognitionCause,
     CognitionTimeline,
@@ -240,6 +241,9 @@ class SessionState:
     # 模拟时间与现实时间的锚点（WORLD-1 设计 §2）。只有持久世界有它；运维记录，
     # 不进 WorldState、不进任何角色的上下文。它总是跟认知时间线一起出现。
     anchor: Optional[ClockAnchor] = None
+    # 正式世界采用了哪一版内容、以及冲突待决记录（WORLD-1 计划 §4.3）。只有
+    # 正式世界有它；运维记录，不进任何角色的上下文。
+    content: Optional[ContentLedger] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -683,9 +687,11 @@ class SessionState:
         cognition = self.cognition
         dispositions = self.rhythm_dispositions
         anchor = self.anchor
+        content = self.content
         try:
             yield self
         except BaseException:
+            self.content = content
             self.cognition = cognition
             self.rhythm_dispositions = dispositions
             self.anchor = anchor
@@ -743,6 +749,21 @@ class SessionState:
         if self.cognition is None:
             raise SessionStateError("没有认知时间线的会话不走锚点时间")
         self.anchor = anchor
+
+    def set_content(self, ledger: ContentLedger) -> None:
+        """在当前事务内换内容账本（开局、记冲突、记决定）。随事务回滚。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("内容账本只能在本线程的提交事务里修改")
+        if not isinstance(ledger, ContentLedger):
+            raise SessionStateError("只能设置 ContentLedger")
+        previous = self.content
+        if previous is not None and (
+            ledger.conflicts[: len(previous.conflicts)] != previous.conflicts
+            and not _only_decided(previous.conflicts, ledger.conflicts)
+        ):
+            raise SessionStateError("冲突记录只能追加或被决定，不能删改")
+        self.content = ledger
 
     def add_rhythm_dispositions(self, keys) -> None:
         """在当前事务内记下新的"走不到"的作息段。只增不减。"""
@@ -1100,6 +1121,12 @@ class SessionState:
                 raise SessionStateError(f"时钟锚点不合法：{e}") from e
             if state.cognition is None:
                 raise SessionStateError("有时钟锚点的存档必须带认知时间线")
+        content = payload.get("content")
+        if content is not None:
+            try:
+                state.content = ContentLedger.from_dict(content)
+            except ContentLedgerError as e:
+                raise SessionStateError(f"内容账本不合法：{e}") from e
         dispositions = payload.get("rhythm_dispositions", [])
         if not isinstance(dispositions, list) or not all(
             isinstance(key, str) and key for key in dispositions
@@ -1138,6 +1165,7 @@ class SessionState:
             "cognition": self.cognition.to_dict() if self.cognition else None,
             "rhythm_dispositions": sorted(self.rhythm_dispositions),
             "anchor": self.anchor.to_dict() if self.anchor else None,
+            "content": self.content.to_dict() if self.content else None,
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
@@ -1225,6 +1253,24 @@ def _validate_cognition(state: "SessionState") -> None:
                 f"认知区间 {interval.index} 声称额度耗尽，但 Agency 日志在那里并没有"
                 f"恰好用完额度 {previous.run_allowance}"
             )
+
+
+def _only_decided(previous, current) -> bool:
+    """current 是否只是把 previous 里的待决记录改成了已决、再追加了新的。"""
+    if len(current) < len(previous):
+        return False
+    for before, after in zip(previous, current):
+        if before == after:
+            continue
+        if before.status.value != "pending" or after.status.value == "pending":
+            return False
+        if (before.subject, before.offered_fingerprint, before.recorded_at_wall) != (
+            after.subject,
+            after.offered_fingerprint,
+            after.recorded_at_wall,
+        ):
+            return False
+    return True
 
 
 def _opens_exhaustion(timeline, interval, log_position: int) -> bool:

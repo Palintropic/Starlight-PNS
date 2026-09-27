@@ -55,6 +55,7 @@ from pns.runtime.persistence import (
     WorldIdError,
 )
 
+from .authz import principal_of
 from .composition import AdaptersUnavailable, ContentUnavailable, WorldControlPlane
 
 router = APIRouter(prefix="/api/persistent-worlds", tags=["persistent-worlds"])
@@ -332,7 +333,7 @@ def _translate(
         # store / service，不是这一层自己记的账。
         if world_id is not None:
             try:
-                if op == "create" and plane.store.exists(world_id):
+                if op in ("create", "bootstrap") and plane.store.exists(world_id):
                     return _error(409, "archive_already_exists", e)
                 if op in (
                     "checkpoint",
@@ -411,6 +412,29 @@ def create_persistent_world(
                 world_id=payload.world_id,
                 scene_id=payload.scene,
                 character_ids=payload.characters,
+            )
+        )
+
+
+@router.post(
+    "/{world_id}/bootstrap", response_model=WorldStatusModel, status_code=201
+)
+def bootstrap_formal_world(
+    world_id: str,
+    request: Request,
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """按正式世界的规则开局（WORLD-1「夜明け前」）。
+
+    请求体里什么都不收：世界身份、时区、开局时刻、resident 全部来自服务器侧的
+    正式世界定义，初始状态由已校验的内容推出。操作者身份记进世界的开局来源。
+    已经有存档的世界不会被覆盖（409 `archive_already_exists`）。
+    """
+    principal = principal_of(request)
+    with _translated(plane, "bootstrap", world_id):
+        return _status(
+            plane.create_formal(
+                world_id, operator=principal.username if principal is not None else None
             )
         )
 
