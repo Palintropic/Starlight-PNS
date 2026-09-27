@@ -67,7 +67,7 @@ from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.formal_world import gated_rhythms
 from pns.runtime.memory.encoder import MemoryEncoder
-from pns.runtime.persistence.archive import ArchiveError, WorldArchive
+from pns.runtime.persistence.archive import ArchiveError, EventSegment, WorldArchive
 from pns.runtime.persistence.naming import validate_world_id
 from pns.runtime.persistence.ownership import (
     OwnershipError,
@@ -289,6 +289,21 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
     )
 
 
+def _footprint(
+    world_bytes: Optional[int], segments: Tuple[EventSegment, ...], *, active: int
+) -> Dict:
+    """存档在磁盘上占了多少、分成了几卷（WORLD-1 存档增长设计 §2.5）。"""
+    sealed_bytes = sum(segment.bytes for segment in segments)
+    return {
+        "total_bytes": (world_bytes or 0) + sealed_bytes,
+        "world_bytes": world_bytes,
+        "segments": len(segments),
+        "sealed_events": segments[-1].last_sequence + 1 if segments else 0,
+        "sealed_bytes": sealed_bytes,
+        "active_events": active,
+    }
+
+
 class PersistentWorld:
     """一个已经拿下所有权、正在跑、并且能被完整存下来的世界。
 
@@ -313,6 +328,7 @@ class PersistentWorld:
         snapshot_timeout: Optional[float] = None,
         durable: Optional[bool] = None,
         directory_synced: Optional[bool] = None,
+        segments: Tuple[EventSegment, ...] = (),
     ) -> None:
         self._world_id = world_id
         self._store = store
@@ -341,6 +357,9 @@ class PersistentWorld:
         # 世界时钟 worker（WORLD-1 设计 §7）。按现实时间走的世界才有；由生命周期
         # 服务在句柄登记之后启动，关闭时第一个停。
         self._clock_worker: Optional[ClockWorker] = None
+        # 磁盘上那一版的分卷清单（存档版本 3）。只随成功写下去的一版改变；
+        # checkpoint 的快照只序列化清单之后的事件。
+        self._segments: Tuple[EventSegment, ...] = tuple(segments)
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -411,8 +430,10 @@ class PersistentWorld:
         archive = None
         try:
             archive = WorldArchive.from_state_payload(
-                self._world_id, payload, revision=revision
+                self._world_id, payload, revision=revision, segments=self._segments
             )
+            # 先封存已满的整段（分卷先耐久），再写 world.json 让清单生效。
+            archive = self._store.seal(archive)
             result = self._store.save(archive)
         except ArchiveNotDurable as e:
             # 特殊的一档，而且方向跟下面那档相反：这一版**已经在磁盘上**、
@@ -455,7 +476,8 @@ class PersistentWorld:
         """
         try:
             with self._runtime.lifecycle_boundary(self._snapshot_timeout):
-                payload = self._state.to_dict()
+                sealed = self._segments[-1].last_sequence + 1 if self._segments else 0
+                payload = self._state.to_dict(events_from=sealed)
                 fingerprint = _fingerprint(self._state)
                 if fingerprint is None:
                     # 边界攥着的时候不该发生。真发生了就说明有代码绕过
@@ -491,6 +513,7 @@ class PersistentWorld:
         self._last_reason = reason
         self._durable = durable
         self._directory_synced = synced
+        self._segments = archive.segments
 
     # ── 关闭 ────────────────────────────────────────────────────────────
     def close(self, reason: str = "closed", *, force: bool = False) -> Dict:
@@ -619,13 +642,19 @@ class PersistentWorld:
             "directory_synced": self._directory_synced,
             "last_error": self._last_error,
             "error": None,
-            "residue": list(self._store.residue(self._world_id)),
+            "residue": list(self._store.residue(self._world_id, self._segments)),
             "running": self._runtime.running,
             "stop_reason": self._runtime.stop_reason,
             "clock": self._state.world_state.clock.isoformat(),
             "archive_path": str(self._store.archive_path(self._world_id)),
             "boundaries_since_checkpoint": self._boundaries,
             "policy": self._policy.to_dict(),
+            "archive": _footprint(
+                self._store.archive_bytes(self._world_id),
+                self._segments,
+                active=len(self._state.events)
+                - (self._segments[-1].last_sequence + 1 if self._segments else 0),
+            ),
         }
 
     # ── 内部 ────────────────────────────────────────────────────────────
@@ -648,8 +677,9 @@ class PersistentWorld:
             self._ownership.verify()
             payload, fingerprint = self._snapshot_locked()
             archive = WorldArchive.from_state_payload(
-                self._world_id, payload, revision=self._revision
+                self._world_id, payload, revision=self._revision, segments=self._segments
             )
+            archive = self._store.seal(archive)
             result = self._store.save(archive)
             self._adopt(
                 archive,
@@ -825,6 +855,7 @@ class WorldLifecycleService:
                 checkpoint_policy=policy,
                 service=self,
                 snapshot_timeout=snapshot_timeout,
+                segments=archive.segments,
             )
             state.publish()
             if start:
@@ -898,6 +929,7 @@ class WorldLifecycleService:
             "archive_path": None,
             "boundaries_since_checkpoint": None,
             "policy": None,
+            "archive": None,
         }
         try:
             report["archive_path"] = str(self._store.archive_path(name))
@@ -906,7 +938,15 @@ class WorldLifecycleService:
             report["error"] = f"{type(e).__name__}: {e}"
             return report
         try:
-            archive = self._store.load(name)
+            # 状态面不把整段历史读进来：分卷只核对在不在、大小对不对。
+            # 逐卷哈希核对在真正恢复时做（见 restore）。
+            archive = self._store.load(name, history=False)
+            report["residue"] = list(self._store.residue(name, archive.segments))
+            report["archive"] = _footprint(
+                self._store.archive_bytes(name),
+                archive.segments,
+                active=archive.active_count,
+            )
         except ArchiveNotFound:
             report["error"] = f"世界 '{name}' 还没有存档"
             return report

@@ -180,6 +180,18 @@ class DriverStatusModel(BaseModel):
     cognition_causes: List[str] = Field(default_factory=list)
 
 
+class ArchiveFootprintModel(BaseModel):
+    """存档在磁盘上占了多少、分成了几卷（WORLD-1 存档增长设计 §2.5）。"""
+
+    total_bytes: int
+    # world.json 的字节数；还没有存档时是 null。
+    world_bytes: Optional[int] = None
+    segments: int
+    sealed_events: int
+    sealed_bytes: int
+    active_events: int
+
+
 class WorldStatusModel(BaseModel):
     """一个世界此刻的样子。字段含义与 P12 `PersistentWorld.status()` 一致。
 
@@ -217,6 +229,7 @@ class WorldStatusModel(BaseModel):
     archive_path: Optional[str] = None
     boundaries_since_checkpoint: Optional[int] = None
     policy: Optional[CheckpointPolicyModel] = None
+    archive: Optional[ArchiveFootprintModel] = None
     # 本进程有没有在推这个世界。`null` 的意思是**从来没为它起过驱动**，
     # 跟"起过、现在停着"不是一回事 —— 后者还带着上一次 tick 的错误。
     autonomy: Optional[DriverStatusModel] = None

@@ -1142,7 +1142,8 @@ class SessionState:
         state.metadata = deepcopy(dict(payload.get("metadata", {})))
         return state
 
-    def to_dict(self) -> Dict:
+    def to_dict(self, *, events_from: int = 0) -> Dict:
+        """`events_from` 见 EventStore.to_dict：只给分卷存档的 checkpoint 用。"""
         return {
             "session_id": self.session_id,
             "scene": self.scene,
@@ -1156,7 +1157,7 @@ class SessionState:
             "pending_corrections": dict(self.pending_corrections),
             "stats": self.final_stats(),
             "world_state": self.world_state.to_dict() if self.world_state else {},
-            "events": self.events.to_dict(),
+            "events": self.events.to_dict(events_from),
             "observations": self.observations.to_dict(),
             "exposures": self.exposures.to_dict(),
             "scheduler": self.scheduler_archive(),
