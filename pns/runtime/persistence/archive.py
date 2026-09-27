@@ -377,7 +377,30 @@ def _check_active(segments: Sequence[EventSegment], state: Mapping) -> None:
 
 
 def _legacy_time_events(payload: Dict, clock: datetime) -> None:
-    """版本 2 没记时间事件链的起点：按旧规矩补一个（见 time_events.legacy_epoch）。"""
+    """版本 2 没记时间事件链的起点，补一个。
+
+    优先用不随事件列表消失的独立记录：正式世界的开局时刻、认知时间线开张的
+    那一刻（之后加载时它们还会被交叉核对）。两者都没有时才退回旧规矩——从现存
+    第一条时间事件起算；那样的 v2 世界，删掉**任意开头一段**时间事件都发现不了
+    （复审 R2-F4），这是它们的兼容上限。
+    """
+    world = payload.get("world_state") if isinstance(payload.get("world_state"), Mapping) else {}
+    metadata = world.get("metadata") if isinstance(world.get("metadata"), Mapping) else {}
+    origin = metadata.get("origin") if isinstance(metadata.get("origin"), Mapping) else {}
+    cognition = payload.get("cognition") if isinstance(payload.get("cognition"), Mapping) else {}
+    intervals = cognition.get("intervals") if isinstance(cognition.get("intervals"), list) else []
+    anchored = None
+    if origin.get("start") is not None:
+        anchored = origin["start"]
+    elif intervals and isinstance(intervals[0], Mapping) and intervals[0].get("opened_by") == "opened":
+        anchored = intervals[0].get("opened_at_sim")
+    if anchored is not None:
+        try:
+            epoch = datetime.fromisoformat(anchored)
+        except (TypeError, ValueError):
+            raise ArchiveError("版本 2 存档里的开局时刻读不懂") from None
+        payload["time_events"] = TimeEventPolicy(epoch).to_dict()
+        return
     steps = []
     for entry in payload.get("events", {}).get("events", []):
         if isinstance(entry, Mapping) and entry.get("type") == "world.time_advanced":

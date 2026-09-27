@@ -291,6 +291,16 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
     )
 
 
+def _abandon(state: Optional[SessionState]) -> None:
+    """一次失败的创建 / 恢复：关上那份状态，不让它作为一个半成品继续可写。"""
+    if state is None:
+        return
+    try:
+        state.fence("lifecycle assembly failed")
+    except Exception:  # pragma: no cover - 收尾不该盖住原始错误
+        pass
+
+
 def _footprint(
     world_bytes: Optional[int], segments: Tuple[EventSegment, ...], *, active: int
 ) -> Dict:
@@ -785,12 +795,14 @@ class WorldLifecycleService:
                 service=self,
                 snapshot_timeout=snapshot_timeout,
             )
-            world._first_save()
-            # 组装完成：从这里起不能再整段换存档或重绑服务。
+            # 组装完成：从这里起不能再整段换存档或重绑服务。发布先于第一次写盘：
+            # 发布时的整体校验没过的状态，一个字节都不许落到磁盘上。
             state.publish()
+            world._first_save()
             if start:
                 runtime.start()
         except BaseException:
+            _abandon(state)
             handle.release()
             raise
         self._remember(name, world, handle)
@@ -836,6 +848,7 @@ class WorldLifecycleService:
 
         self._refuse_if_open(name)
         handle = self._store.acquire(name)
+        state = None
         try:
             archive = self._store.load(name)
             # 数据在前：恢复出一份冷状态，跨段校验全部走既有构造函数。
@@ -868,15 +881,18 @@ class WorldLifecycleService:
                 segments=archive.segments,
                 baseline=baseline,
             )
+            # 先发布（整体校验），再写任何东西：绑定期间通过公开接口形成的不一致
+            # 必须在落盘之前被拒绝，失败的恢复不许把原本合法的存档写坏。
+            state.publish()
             if state.content is not content_on_disk:
                 # 恢复时识别出了新的内容冲突：它声称"已经记下"，就要在恢复成功之前
                 # 真的落盘。存不下去就是恢复失败（下面的 except 归还所有权）。
                 with world._lock:
                     world._checkpoint_locked("restore_content_conflict")
-            state.publish()
             if start:
                 runtime.start()
         except BaseException:
+            _abandon(state)
             handle.release()
             raise
         self._remember(name, world, handle)

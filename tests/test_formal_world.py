@@ -566,7 +566,7 @@ class AdoptionChainTests(unittest.TestCase):
         self.assertIn("开局时刻", str(caught.exception))
 
     def test_a_dangling_adoption_beside_a_real_chain_is_refused(self):
-        # 真实的链：开局 → B；另塞一条接不上任何版本的"采用"（C → D），放在前面，
+        # 真实的链：开局 → B；另塞一条也针对开局版本的"采用"（开局 → D），放在前面，
         # 于是"最后一次采用 = 此刻版本"仍然成立，只有逐条接链才能发现它。
         state = _state()
         genesis = state.content.adopted_fingerprint("rhythm:mizuki")
@@ -586,7 +586,7 @@ class AdoptionChainTests(unittest.TestCase):
             }
 
         payload["content"]["conflicts"] = [
-            record(self.C, D, "declined"),
+            record(genesis, D, "declined"),
             record(genesis, self.B, "adopted"),
         ]
         SessionState.from_dict(payload)  # 驳回的记录不在链上，没问题
@@ -610,6 +610,41 @@ class AdoptionChainTests(unittest.TestCase):
             with self.assertRaises(SessionStateError):
                 state.set_content(forged)
             state.set_content(ContentLedger(tuple(genuine["adopted"].items())))
+
+    def test_a_tampered_base_of_a_non_adopted_record_is_refused(self):
+        # 复审 R2-F3：只改一条待决 / 驳回 / 暂缓记录的"针对版本"。
+        for status in ("pending", "declined", "deferred"):
+            with self.subTest(status=status):
+                state = _state()
+                with state.atomic_commit():
+                    state.set_content(
+                        state.content.offered(
+                            "rhythm:mizuki", self.B, registry_revision=2, wall="w"
+                        )
+                    )
+                if status != "pending":
+                    with state.atomic_commit():
+                        state.set_content(
+                            state.content.decided(
+                                state.content.pending()[0].conflict_id, status, wall="d"
+                            )
+                        )
+                payload = state.to_dict()
+                SessionState.from_dict(payload)  # 原样没问题
+                payload["content"]["conflicts"][0]["adopted_fingerprint"] = self.C
+                with self.assertRaises(SessionStateError) as caught:
+                    SessionState.from_dict(payload)
+                self.assertIn("从来没有被采用过", str(caught.exception))
+
+    def test_publish_refuses_a_clock_moved_without_a_time_event(self):
+        # 发布与加载查同一套：组装期经由公开 WorldState.advance_time() 推了时钟，
+        # 这份状态不许进入 live（否则它会被写盘，而加载时才被拒绝）。
+        state = _state()
+        with state.atomic_commit():
+            state.world_state.advance_time(5)
+        with self.assertRaises(SessionStateError) as caught:
+            state.publish()
+        self.assertIn("存档缺了事件", str(caught.exception))
 
     def test_the_genesis_must_match_the_origin(self):
         state = _state()
@@ -654,6 +689,37 @@ class RestoreConflictDurabilityTests(PlaneTestCase):
         self.assertIsNone(plane.service.opened("yoake-mae"), "恢复失败要归还所有权")
         on_disk = plane.store.load("yoake-mae", history=False).state["content"]
         self.assertEqual(on_disk["conflicts"], [])
+
+    def test_a_restore_that_fails_assembly_writes_nothing(self):
+        # 复审 R2-F1：冲突的立即存盘必须晚于发布时的整体校验。
+        self.plane.create_formal("yoake-mae")
+        self.plane.close("yoake-mae")
+        path = self.root / "yoake-mae" / "world.json"
+        before = path.read_bytes()
+        changed = _with_rhythm(self.registry, "mizuki", ActivityKind.DRAWING)
+        plane = self.make_plane(registry_provider=lambda: changed)
+        self.addCleanup(plane.service.release_all)
+        with patch.object(
+            SessionState, "_validate_assembled",
+            side_effect=SessionStateError("绑定期间形成的跨分区不一致"),
+        ):
+            with self.assertRaises(SessionStateError):
+                plane.restore("yoake-mae")
+        self.assertEqual(path.read_bytes(), before, "失败的恢复不许写盘")
+        self.assertIsNone(plane.service.opened("yoake-mae"))
+        # 原来的存档仍然能正常恢复。
+        plane.restore("yoake-mae")
+        self.assertEqual(len(plane.service.opened("yoake-mae").state.content.pending()), 1)
+
+    def test_a_create_that_fails_assembly_leaves_no_archive(self):
+        with patch.object(
+            SessionState, "_validate_assembled",
+            side_effect=SessionStateError("组装不一致"),
+        ):
+            with self.assertRaises(SessionStateError):
+                self.plane.create_formal("yoake-mae")
+        self.assertFalse((self.root / "yoake-mae" / "world.json").exists())
+        self.assertIsNone(self.plane.service.opened("yoake-mae"))
 
     def test_restore_time_changes_count_as_unsaved(self):
         # 恢复时的认知转换（停机期间）也是还没落盘的运维记录：dirty 不许说谎。

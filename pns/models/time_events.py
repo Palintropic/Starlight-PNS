@@ -212,10 +212,12 @@ def time_gaps(steps: Iterable[Tuple[datetime, int]], clock: datetime, epoch: dat
 
 
 def legacy_epoch(steps: Iterable[Tuple[datetime, int]], clock: datetime) -> datetime:
-    """版本 2 存档没有 epoch：按旧规矩从第一条时间事件起算，一条都没有就是此刻。
+    """版本 2 存档没有 epoch、也没有独立的开局记录时：从第一条时间事件起算，一条
+    都没有就是此刻。
 
-    这是旧存档的已知上限：它们本来就没记起点，所以"整条时间事件被删掉"在
-    版本 2 上无法被发现。版本 3 起 epoch 必填。
+    这是这类旧存档的已知上限：它们本来就没记起点，所以删掉任意开头一段时间事件
+    （包括整条）都无法被发现。有开局来源或认知时间线的 v2 存档不走这里；版本 3
+    起 epoch 必填。
     """
     for occurred_at, _ in steps:
         return occurred_at

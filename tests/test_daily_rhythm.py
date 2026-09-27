@@ -856,7 +856,9 @@ class GenerationSeesThePostTransitionActivityTests(unittest.TestCase):
                 character_id="ena",
             )
         )
-        due = scheduler.advance_by(5).due[0]
+        # 作息驱动的世界只能经由运行时推时钟；先不处理，取出这条到期记录。
+        runtime.advance(5, max_results=0)
+        (due,) = state.activation_outbox.pending()
         context = build_agency_context(
             state.world_state,
             "ena",

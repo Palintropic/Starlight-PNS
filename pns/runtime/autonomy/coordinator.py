@@ -169,6 +169,8 @@ class AutonomousRuntime:
         # 谁正在事务里、嵌了几层。提交全程持锁，所以同一时刻至多一个线程。
         self._committing_thread: Optional[int] = None
         self._committing_depth = 0
+        # 正在走时钟步的线程。挂着作息的世界只让这里推时钟（见 _owns_clock_step）。
+        self._clock_step_thread: Optional[int] = None
         # 正在处理中的到期资格。同一条被两个线程同时处理不会重复提交（交接
         # 是一次性的，提案身份也是推导出来的），但会白跑两次生成和两次判分，
         # 而且第二个线程会在提交那一刻拿到一个含义不明的交接错误。响亮拒绝
@@ -941,7 +943,22 @@ class AutonomousRuntime:
         policy = self._state.time_events
         return policy is not None and policy.current is QuietTime.SKIP
 
+    def _owns_clock_step(self) -> bool:
+        """本线程此刻是不是正在走协调器的时钟步。
+
+        调度器凭它判断一次推进是不是来自同一份"到期 + 作息边界"的计划：挂着作息
+        的世界，时间从别处往前推会跳过作息、行程、频道的确定性后果（全量审查 R2-F2）。
+        """
+        return self._clock_step_thread == threading.get_ident()
+
     def _clock_step_once(self, target: datetime, *, quiet: bool):
+        self._clock_step_thread = threading.get_ident()
+        try:
+            return self._clock_step_body(target, quiet=quiet)
+        finally:
+            self._clock_step_thread = None
+
+    def _clock_step_body(self, target: datetime, *, quiet: bool):
         state = self._state
         with self._committing():
             with state.atomic_commit():

@@ -269,6 +269,23 @@ class PersistentScheduler:
         return self._tick(self.clock + timedelta(minutes=minutes), minutes)
 
     # ── 事务本体 ────────────────────────────────────────────────────────
+    def _require_clock_owner(self) -> None:
+        """挂着作息的自主运行时在场时，时间只能由它的时钟步推进。
+
+        调度器看不见作息、行程和频道：从这里直接推，时间事件照写，作息的后果却
+        被整段跳过，而那份状态能存能读（全量审查 R2-F2）。没有作息的会话不受影响。
+        """
+        autonomy = self._state.autonomy
+        if (
+            autonomy is not None
+            and autonomy.rhythm is not None
+            and not autonomy._owns_clock_step()
+        ):
+            raise SchedulerError(
+                "这个世界由作息驱动：时间只能经由运行时推进（runtime.advance() 或时钟 "
+                "worker），直接推调度器会跳过作息、行程与频道的后果"
+            )
+
     def _tick(self, target: datetime, minutes: int, *, record: bool = True) -> TickResult:
         """一次推进 = 一条 world.time_advanced 事件 + 队列变更，同生共死。
 
@@ -282,6 +299,7 @@ class PersistentScheduler:
         state = self._state
         world = state.world_state
         from_clock = world.clock
+        self._require_clock_owner()
         if state.autonomy is not None and state.activation_outbox.pending():
             # 挂了自主运行时的会话：到期问的是它触发那一刻的世界。它还没有结局，
             # 时钟就不能往前走——不管推进是从哪个入口来的（WORLD-1 设计 §5.2）。

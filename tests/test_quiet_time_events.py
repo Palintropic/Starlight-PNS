@@ -310,6 +310,41 @@ class GapValidationTests(QuietTimeTestCase):
             self.service.restore("nightcord", adapters=_adapters())
         self.assertIn("认知时间线", str(caught.exception))
 
+    def test_a_version_2_clock_world_takes_its_epoch_from_the_cognition_timeline(self):
+        # 复审 R2-F4：有独立开局记录的 v2 存档，删掉开头一段时间事件也会被发现。
+        from pns.runtime.autonomy.clock_worker import ClockConfig
+
+        world = self.created(clock=ClockConfig(rate=1.0, interval_seconds=60.0))
+        _step(world, 3)
+        world.close()
+
+        def downgrade_and_drop_first(p):
+            p["version"] = 2
+            del p["segments"]
+            p["state"]["time_events"] = None
+            self.drop_time_event(p, 0)
+
+        self.rewrite_archive(downgrade_and_drop_first)
+        with self.assertRaises(ArchiveError) as caught:
+            self.service.restore("nightcord", adapters=_adapters())
+        self.assertIn("存档缺了事件", str(caught.exception))
+
+    def test_a_version_2_world_without_a_launch_record_cannot_see_a_dropped_prefix(self):
+        # 兼容上限，写明而不是假装：既没有开局来源、也没有认知时间线的 v2 世界，
+        # 删掉开头一段时间事件发现不了。
+        self.recorded_world()
+
+        def downgrade_and_drop_first(p):
+            p["version"] = 2
+            del p["segments"]
+            p["state"]["time_events"] = None
+            self.drop_time_event(p, 0)
+
+        self.rewrite_archive(downgrade_and_drop_first)
+        restored = self.service.restore("nightcord", adapters=_adapters())
+        self.assertEqual(restored.state.time_events.epoch, T0 + timedelta(minutes=1))
+        restored.close()
+
     def test_a_version_2_archive_uses_the_legacy_epoch(self):
         self.recorded_world()
 
@@ -487,6 +522,19 @@ class FormalWorldTests(PlaneTestCase):
         with self.assertRaises(TypeError):
             world.runtime.scheduler.advance_to(start + timedelta(hours=2), record=False)
         self.assertEqual(world.state.world_state.clock, start)
+        # 复审 R2-F2：记事件的公开推进同样会跳过作息，挂着作息的世界一律拒绝。
+        for push in (
+            lambda: world.runtime.scheduler.advance_to(start + timedelta(hours=2)),
+            lambda: world.runtime.scheduler.advance_by(120),
+            lambda: world.runtime.scheduler.advance_to_next_due(),
+            lambda: world.runtime.scheduler._advance_quietly(start + timedelta(hours=2)),
+        ):
+            with self.assertRaises(SchedulerError):
+                push()
+        self.assertEqual(world.state.world_state.clock, start)
+        self.assertEqual(
+            world.state.world_state.activity_of("mizuki").kind.value, "idle"
+        )
         # 正规推进过 21:00：作息照走、边界那一步照写。
         for _ in range(2 * 60 + 1):
             world.runtime.advance(1)

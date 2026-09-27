@@ -326,6 +326,14 @@ class SessionState:
         _validate_agency_against_session(self, self.agency, clock)
         _validate_memories_against_session(self, self.memories, clock)
         _validate_cognition(self)
+        _validate_time_gaps(self)
+        if self.content is not None:
+            try:
+                self.content.check_genesis(
+                    genesis_from_origin(self.world_state.metadata.get("origin"))
+                )
+            except ContentLedgerError as e:
+                raise SessionStateError(f"内容账本不合法：{e}") from e
 
     def fence(self, reason: str) -> None:
         """不可逆地关上这份状态。等在跑的事务结束；事务内部调用直接拒绝。"""

@@ -280,6 +280,7 @@ class ContentLedger:
                 if c.subject == subject and c.status is ConflictStatus.ADOPTED
             ]
             head = start
+            versions = {start}
             while links:
                 candidates = [c for c in links if c.adopted_fingerprint == head]
                 if not candidates:
@@ -289,10 +290,19 @@ class ContentLedger:
                 step = min(candidates, key=lambda c: c.decided_at_wall or "")
                 links.remove(step)
                 head = step.offered_fingerprint
+                versions.add(head)
             if head != adopted[subject]:
                 raise ContentLedgerError(
                     f"'{subject}' 的已采用版本不是从开局版本经采用记录走到的"
                 )
+            # 其余记录（待决、驳回、暂缓）记的"针对哪一版"，必须是这一项真的采用过
+            # 的某一版：凭空的基线既不是真相，也会让这条记录再也决定不了（复审
+            # R2-F3）。没有操作序号，记录"在哪一刻"针对它仍无法重放 —— 已写明的边。
+            for conflict in self.conflicts:
+                if conflict.subject == subject and conflict.adopted_fingerprint not in versions:
+                    raise ContentLedgerError(
+                        f"冲突 '{conflict.conflict_id}' 针对的版本从来没有被采用过"
+                    )
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
