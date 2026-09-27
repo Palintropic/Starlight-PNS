@@ -19,6 +19,16 @@
 #   * 崩溃恢复读到的是**最后一次成功 replace 的那一份**。残留的临时文件被
 #     报告，但绝不会被当成存档读回来。
 #
+# 事件分卷（存档版本 3）走同一套写法，而且顺序是契约的一部分：
+#
+#   * 先写分卷：临时文件 → fsync → 改名 → fsync history/ 目录；
+#   * 再写 world.json，它的清单里才出现这一卷。
+#
+# 两步之间崩溃，磁盘上多一个清单外的分卷，world.json 仍是上一版、仍含这些事件；
+# 恢复用的是上一版，那个文件只是残留，下次封存同一序号时被覆盖。反过来的顺序会
+# 让 world.json 指着一卷掉电后不存在的文件 —— 所以分卷的目录同步失败就是这次
+# checkpoint 失败，不降级。清单里已有的分卷永远不会被重写或删除。
+#
 # 明确不做的事：没有 WAL、没有事件重放、没有多版本历史、没有数据库、没有云。
 # "最后一次成功 checkpoint 之后的内存工作会丢"是这一层的**真实**保证边界，
 # 不许对外说成别的。
@@ -29,13 +39,21 @@
 import errno
 import json
 import os
+import stat
 import tempfile
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Tuple
+from typing import List, Optional, Sequence, Tuple
 
-from pns.runtime.persistence.archive import ArchiveCorrupt, ArchiveError, WorldArchive
+from pns.runtime.persistence.archive import (
+    ArchiveCorrupt,
+    ArchiveError,
+    EventSegment,
+    WorldArchive,
+    describe_segment,
+    encode_segment,
+)
 from pns.runtime.persistence.naming import WorldIdError, validate_world_id
 from pns.runtime.persistence.ownership import OwnershipHandle, acquire_world
 
@@ -139,16 +157,36 @@ class WorldStore(ABC):
         """这个世界有没有一份完整存档。"""
 
     @abstractmethod
-    def load(self, world_id: str) -> WorldArchive:
-        """读回最后一次成功保存的那一份。"""
+    def load(self, world_id: str, *, history: bool = True) -> WorldArchive:
+        """读回最后一次成功保存的那一份。
+
+        `history=False` 只读信封与活动段，分卷只核对在不在、大小对不对 ——
+        给状态面用；这样的存档恢复不出世界（restore_state 会拒绝）。
+        """
+
+    @abstractmethod
+    def seal(self, archive: WorldArchive) -> WorldArchive:
+        """把活动段里已满的整段写成新分卷，返回清单已更新的信封。
+
+        返回的信封还没写下去：调用方接着 save() 它，清单才算生效。
+        """
 
     @abstractmethod
     def save(self, archive: WorldArchive) -> SaveResult:
         """原子地写下一份完整存档。"""
 
     @abstractmethod
-    def residue(self, world_id: str) -> Tuple[str, ...]:
-        """留在磁盘上的、不完整的临时文件。"""
+    def residue(
+        self, world_id: str, segments: Optional[Sequence[EventSegment]] = None
+    ) -> Tuple[str, ...]:
+        """留在磁盘上的、不完整的临时文件。
+
+        给了清单时，history/ 里清单之外的文件也算残留。
+        """
+
+    @abstractmethod
+    def archive_bytes(self, world_id: str) -> Optional[int]:
+        """world.json 此刻的字节数；还没有存档时是 None。分卷的大小看清单。"""
 
     @abstractmethod
     def acquire(self, world_id: str) -> OwnershipHandle:
@@ -163,6 +201,8 @@ class FileWorldStore(WorldStore):
         <root>/<world_id>/world.json          最后一次成功保存的完整存档
         <root>/<world_id>/OWNER.lock          所有权（flock + 一条给人看的记录）
         <root>/<world_id>/world.json.*.tmp    写到一半的残留，永远不会被读回来
+        <root>/<world_id>/history/events-000001.jsonl
+                                              已封存的事件分卷（清单在 world.json 里）
 
     构造这个对象**不碰磁盘**：根目录在第一次真正要写的时候才建。
     """
@@ -170,6 +210,7 @@ class FileWorldStore(WorldStore):
     ARCHIVE_NAME = "world.json"
     LOCK_NAME = "OWNER.lock"
     TMP_SUFFIX = ".tmp"
+    HISTORY_DIR = "history"
 
     def __init__(self, root) -> None:
         self._root = Path(root)
@@ -215,6 +256,24 @@ class FileWorldStore(WorldStore):
     def lock_path(self, world_id: str) -> Path:
         return self._world_dir(world_id) / self.LOCK_NAME
 
+    def history_dir(self, world_id: str) -> Path:
+        """分卷目录。它必须是世界目录里的一个真目录，软链一律拒绝。"""
+        directory = self._world_dir(world_id) / self.HISTORY_DIR
+        if directory.is_symlink():
+            raise StorageError(
+                f"世界 '{world_id}' 的分卷目录是一个软链（{directory}）——"
+                "分卷必须是存档根之下的普通文件"
+            )
+        return directory
+
+    def _segment_file(self, world_id: str, name: str) -> Path:
+        path = self.history_dir(world_id) / name
+        if path.is_symlink():
+            raise StorageError(
+                f"世界 '{world_id}' 的分卷 {name} 是一个软链 —— 分卷必须是普通文件"
+            )
+        return path
+
     # ── 读 ──────────────────────────────────────────────────────────────
     def list_worlds(self) -> Tuple[str, ...]:
         if not self._root.is_dir():
@@ -234,7 +293,7 @@ class FileWorldStore(WorldStore):
     def exists(self, world_id: str) -> bool:
         return self._archive_file(world_id).is_file()
 
-    def load(self, world_id: str) -> WorldArchive:
+    def load(self, world_id: str, *, history: bool = True) -> WorldArchive:
         name = validate_world_id(world_id)
         path = self._archive_file(name)
         try:
@@ -255,19 +314,79 @@ class FileWorldStore(WorldStore):
                 f"这份存档自称属于世界 '{archive.world_id}'，却躺在 '{name}' 的"
                 "位置上 —— 身份对不上的存档不许恢复"
             )
-        return archive
+        if not archive.segments:
+            return archive
+        if not history:
+            for segment in archive.segments:
+                self._stat_segment(name, segment)
+            return archive
+        blobs: List[bytes] = []
+        for segment in archive.segments:
+            self._stat_segment(name, segment)
+            path = self._segment_file(name, segment.file)
+            try:
+                blobs.append(path.read_bytes())
+            except OSError as e:
+                raise StorageError(
+                    f"世界 '{name}' 的分卷 {segment.file} 读不出来: {e}"
+                ) from e
+        return archive.attach_history(blobs)
 
-    def residue(self, world_id: str) -> Tuple[str, ...]:
+    def _stat_segment(self, world_id: str, segment: EventSegment) -> None:
+        """便宜的一道：清单上的这一卷在不在、是不是普通文件、大小对不对。"""
+        path = self._segment_file(world_id, segment.file)
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            raise ArchiveCorrupt(
+                f"世界 '{world_id}' 的分卷 {segment.file} 不见了（清单里有，磁盘上没有）"
+            ) from None
+        except OSError as e:
+            raise StorageError(
+                f"世界 '{world_id}' 的分卷 {segment.file} 读不出来: {e}"
+            ) from e
+        if not stat.S_ISREG(info.st_mode):
+            raise ArchiveCorrupt(
+                f"世界 '{world_id}' 的分卷 {segment.file} 不是普通文件"
+            )
+        if info.st_size != segment.bytes:
+            raise ArchiveCorrupt(
+                f"世界 '{world_id}' 的分卷 {segment.file} 有 {info.st_size} 字节，"
+                f"清单记的是 {segment.bytes}（截断或被改过）"
+            )
+
+    def archive_bytes(self, world_id: str) -> Optional[int]:
+        try:
+            return self._archive_file(world_id).stat().st_size
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise StorageError(f"世界 '{world_id}' 的存档读不出来: {e}") from e
+
+    def residue(
+        self, world_id: str, segments: Optional[Sequence[EventSegment]] = None
+    ) -> Tuple[str, ...]:
         directory = self._world_dir(world_id)
         if not directory.is_dir():
             return ()
-        return tuple(
-            sorted(
-                str(child)
-                for child in directory.iterdir()
-                if child.name.endswith(self.TMP_SUFFIX)
+        found = [
+            str(child)
+            for child in directory.iterdir()
+            if child.name.endswith(self.TMP_SUFFIX)
+        ]
+        history = self.history_dir(world_id)
+        if history.is_dir():
+            known = (
+                {segment.file for segment in segments} if segments is not None else None
             )
-        )
+            for child in history.iterdir():
+                if child.name.endswith(self.TMP_SUFFIX):
+                    found.append(str(child))
+                elif known is not None and child.name not in known:
+                    # 清单外的分卷：一次没写成 world.json 的封存留下的，
+                    # 或者是别人放进来的。它不参与加载。
+                    found.append(str(child))
+        return tuple(sorted(found))
 
     # ── 写 ──────────────────────────────────────────────────────────────
     def save(self, archive: WorldArchive) -> SaveResult:
@@ -313,8 +432,20 @@ class FileWorldStore(WorldStore):
                 residue=residue,
             ) from e
         # 走到这里新存档已经可见了。剩下的只有"那次改名耐不耐得住掉电"，
-        # 而它有可能失败 —— 失败就必须说出来，见 ArchiveNotDurable。
-        supported = self._sync_dir(directory, archive)
+        # 而它有可能失败 —— 失败就必须说出来，见 ArchiveNotDurable。这之后抛出
+        # 的**任何**错误都只能是这一档：新版已经在盘上，调用方必须按"已经发生"
+        # 记账，否则内存会落后磁盘一版，下一次拿同一个修订号写不同的内容。
+        try:
+            supported = self._sync_dir(directory, archive)
+        except ArchiveNotDurable:
+            raise
+        except Exception as e:
+            raise ArchiveNotDurable(
+                f"世界 '{archive.world_id}' 的第 {archive.revision} 版已经写在磁盘上，"
+                f"但之后的目录同步出了意外错误，耐久性无法证实: {type(e).__name__}: {e}",
+                revision=archive.revision,
+                path=str(target),
+            ) from e
         return SaveResult(
             world_id=archive.world_id,
             path=str(target),
@@ -323,6 +454,98 @@ class FileWorldStore(WorldStore):
             directory_synced=supported,
             directory_sync_supported=supported,
         )
+
+    def seal(self, archive: WorldArchive) -> WorldArchive:
+        """把已满的整段写成新分卷（每卷：临时文件 → fsync → 改名），最后同步一次
+        history/ 目录。任何一步失败都抛 StorageError，world.json 一个字节不动。
+        """
+        if not isinstance(archive, WorldArchive):
+            raise StorageError("只能封存 WorldArchive")
+        try:
+            chunks = archive.seal_plan()
+        except (ArchiveError, KeyError, TypeError, ValueError) as e:
+            raise StorageError(f"世界 '{archive.world_id}' 的活动段切不开: {e}") from e
+        if not chunks:
+            return archive
+        world_dir = self._world_dir(archive.world_id)
+        history = self.history_dir(archive.world_id)
+        self._ensure_dir(world_dir, archive.world_id)
+        created = not history.is_dir()
+        self._ensure_dir(history, archive.world_id)
+        new_segments: List[EventSegment] = []
+        index = len(archive.segments)
+        for chunk in chunks:
+            index += 1
+            try:
+                blob = encode_segment(chunk)
+            except (TypeError, ValueError) as e:
+                raise StorageError(f"分卷序列化失败: {e}") from e
+            segment = describe_segment(index, chunk, blob)
+            self._write_segment(archive.world_id, history, segment, blob)
+            new_segments.append(segment)
+        # 分卷的改名必须先耐久，world.json 才能指着它们。平台说"不支持"时照常
+        # 往下走，但这份信封要如实带着"分卷目录没同步过"，不许被报成已同步。
+        synced = self._sync_history(history, archive.world_id)
+        if created:
+            synced = self._sync_history(world_dir, archive.world_id) and synced
+        return replace(archive.sealed(new_segments), history_synced=synced)
+
+    def _write_segment(
+        self, world_id: str, history: Path, segment: EventSegment, blob: bytes
+    ) -> None:
+        target = self._segment_file(world_id, segment.file)
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(history), prefix=segment.file + ".", suffix=self.TMP_SUFFIX
+            )
+        except OSError as e:
+            raise StorageError(
+                f"世界 '{world_id}' 的分卷临时文件建不出来: {e}"
+            ) from e
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(blob)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # 同序号的清单外残留（上一次没写成的封存）在这里被覆盖。
+            os.replace(tmp_name, target)
+        except BaseException as e:
+            residue = self._discard(tmp_name)
+            raise StorageError(
+                f"世界 '{world_id}' 的分卷 {segment.file} 写入失败，world.json 未动: "
+                f"{type(e).__name__}: {e}"
+                + (f"（残留待处理: {', '.join(residue)}）" if residue else ""),
+                residue=residue,
+            ) from e
+
+    @classmethod
+    def _sync_history(cls, directory: Path, world_id: str) -> bool:
+        """分卷所在目录的同步，返回"这里支不支持"。真失败就是这次封存失败。"""
+        try:
+            dir_fd = os.open(str(directory), os.O_RDONLY)
+        except OSError as e:
+            if cls._is_unsupported(e):
+                return False
+            raise StorageError(
+                f"世界 '{world_id}' 的分卷目录打不开，新分卷的耐久性无法证实: {e}"
+            ) from e
+        supported = True
+        try:
+            os.fsync(dir_fd)
+        except OSError as e:
+            if not cls._is_unsupported(e):
+                raise StorageError(
+                    f"世界 '{world_id}' 的分卷目录同步失败，新分卷的耐久性无法证实: {e}"
+                ) from e
+            supported = False
+        finally:
+            try:
+                os.close(dir_fd)
+            except OSError as e:
+                raise StorageError(
+                    f"世界 '{world_id}' 关闭分卷目录时出错，新分卷的耐久性无法证实: {e}"
+                ) from e
+        return supported
 
     def acquire(self, world_id: str) -> OwnershipHandle:
         name = validate_world_id(world_id)
@@ -396,7 +619,16 @@ class FileWorldStore(WorldStore):
                 path=str(directory / cls.ARCHIVE_NAME),
             ) from e
         finally:
-            os.close(dir_fd)
+            try:
+                os.close(dir_fd)
+            except OSError as e:
+                # 关闭目录句柄报错（EIO）同样说明这次同步不可信。
+                raise ArchiveNotDurable(
+                    f"世界 '{archive.world_id}' 的第 {archive.revision} 版已经写在"
+                    f"磁盘上，但关闭存档目录时出错，耐久性无法证实: {e}",
+                    revision=archive.revision,
+                    path=str(directory / cls.ARCHIVE_NAME),
+                ) from e
         return True
 
     @staticmethod

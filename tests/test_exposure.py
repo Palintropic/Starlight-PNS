@@ -7,6 +7,7 @@
 import unittest
 from datetime import datetime
 
+from grants_support import grant_everything
 from pns.models.channel import Channel, ChannelKind, ChannelRegistry
 from pns.models.event import Event, EventScope, EventType
 from pns.models.exposure import (
@@ -36,6 +37,7 @@ def _world(**placements) -> WorldState:
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     placements = placements or {
         "mizuki": "kamiyama_high_gate",
         "ena": "kamiyama_high_gate",
@@ -147,6 +149,7 @@ class LocationScopeTests(unittest.TestCase):
             )
         )
         world = WorldState(clock=CLOCK, locations=graph, channels=ChannelRegistry())
+        grant_everything(world)
         world.place_character("mizuki", "stage")
         world.place_character("ena", "hall")
         reasons = _reasons(world, _event(location_id="stage"))

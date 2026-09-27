@@ -1259,11 +1259,15 @@ class ExistingSurfaceTests(WorldApiTestCase):
         for expected in (
             "/api/persistent-worlds/{world_id}/autonomy/start",
             "/api/persistent-worlds/{world_id}/autonomy/stop",
+            # WORLD-1：正式世界开局。
+            "/api/persistent-worlds/{world_id}/bootstrap",
+            # WORLD-1 存档增长：「记录安静的分钟」开关。
+            "/api/persistent-worlds/{world_id}/quiet-time-events",
         ):
             self.assertIn(expected, paths)
-        # 这个前缀下只有这八条，一条不多。
+        # 这个前缀下只有这十条，一条不多。
         self.assertEqual(
-            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 8
+            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 10
         )
 
 

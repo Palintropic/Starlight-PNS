@@ -64,6 +64,21 @@ def validate_against_world(world: WorldState, event: Event) -> None:
             f"与当前世界时钟 {world.clock.isoformat()} 不一致"
         )
 
+    # 授权在事实判断之前：一个无权进入/加入的角色，不管此刻在不在那里，都不能
+    # 靠一条事件把自己放进去。授予来自世界的静态结构（见 WorldState.may_enter /
+    # may_join），调用方是谁、为什么想去都不影响答案（Articles VIII–IX）。
+    if event.type is EventType.PRESENCE_JOINED_CHANNEL and not world.may_join(
+        event.actor_id, event.channel_id
+    ):
+        raise EventCommitError(
+            f"角色 '{event.actor_id}' 不是频道 '{event.channel_id}' 的成员，不能加入"
+        )
+    if event.type is EventType.CHARACTER_LOCATION_CHANGED and not world.may_enter(
+        event.actor_id, event.location_id
+    ):
+        raise EventCommitError(
+            f"角色 '{event.actor_id}' 没有进入 '{event.location_id}' 的授予"
+        )
     if event.type is EventType.PRESENCE_JOINED_CHANNEL and world.is_in_channel(
         event.actor_id, event.channel_id
     ):
@@ -149,6 +164,30 @@ def apply_event(world: WorldState, event: Event) -> None:
     handler(world, event)
 
 
+# ── 作息的身份 ──────────────────────────────────────────────────────────
+#
+# 作息凭 provenance 认领"本段自己做的决定"（见 pns/runtime/rhythm.py）。这份
+# 身份只能由作息自己的提交入口签发：别的事件带上它，一个外部决定就会被当成
+# 作息自己的，行程接着往下走，外部决定压过作息的契约随之失效。
+RHYTHM_PROVENANCE_KIND = "daily_rhythm"
+RHYTHM_RESERVED_PROVENANCE = frozenset({"segment_key", "trip_leg"})
+
+
+def claims_rhythm(provenance) -> bool:
+    """这份 provenance 是否带着作息的身份（种类或保留字段）。"""
+    provenance = provenance or {}
+    return provenance.get("kind") == RHYTHM_PROVENANCE_KIND or any(
+        key in provenance for key in RHYTHM_RESERVED_PROVENANCE
+    )
+
+
+def _refuse_rhythm_identity(event: Event) -> None:
+    if isinstance(event, Event) and claims_rhythm(event.provenance):
+        raise EventCommitError(
+            "只有作息自己能提交带作息 provenance（kind/segment_key/trip_leg）的事件"
+        )
+
+
 # ── 提交 ────────────────────────────────────────────────────────────────
 def commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
     """接受一个事件：应用状态效果并追加到世界历史，两者同生共死。
@@ -156,6 +195,11 @@ def commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
     返回一份稳定投影（事件的完整公开形状 + 它在世界历史里的序号），供下游
     使用；下游拿到的是新的可变结构，改它影响不到已提交的事件。
     """
+    _refuse_rhythm_identity(event)
+    return _commit_event(world, store, event)
+
+
+def _commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
     if not isinstance(store, EventStore):
         raise EventCommitError("世界历史必须是 EventStore")
 
@@ -168,7 +212,7 @@ def commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
         apply_event(world, event)
         sequence = store._append(event)
     except BaseException:
-        world.restore_mutable_state(snapshot)
+        world._restore_mutable_state(snapshot)
         store._rollback_to(length)
         raise
 
@@ -198,8 +242,20 @@ def _record_exposure(state: SessionState, event: Event) -> Tuple[Observation, ..
 
 def commit_session_event(state: SessionState, event: Event) -> Dict:
     """在一个会话里提交事件，失败时连会话状态一起回滚。"""
+    _refuse_rhythm_identity(event)
+    return _commit_session_event(state, event)
+
+
+def _commit_rhythm_event(state: SessionState, event: Event) -> Dict:
+    """作息自己的提交入口：只收带作息身份的事件。只给作息的时钟步用。"""
+    if not isinstance(event, Event) or event.provenance.get("kind") != RHYTHM_PROVENANCE_KIND:
+        raise EventCommitError("作息的提交入口只收作息事件")
+    return _commit_session_event(state, event)
+
+
+def _commit_session_event(state: SessionState, event: Event) -> Dict:
     with state.atomic_commit():
-        projection = commit_event(state.world_state, state.events, event)
+        projection = _commit_event(state.world_state, state.events, event)
         _record_exposure(state, event)
     return projection
 

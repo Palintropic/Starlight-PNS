@@ -93,6 +93,32 @@ class Location:
         )
 
 
+def access_admits(access: Dict, role: Optional[str]) -> bool:
+    """一个地点的 access 规则，是否放行持有 `role` 授予的角色（None 表示没有授予）。
+
+    这是进入规则的唯一实现：世界状态（提交边界、Agency 前置条件）和内容快照
+    （作息表校验）都调它。只有 `public is True` 对所有人开放；没写 access 的
+    地点不算公开。地点声明了 role 时，授予的身份必须是它接受的之一 —— role 可以
+    是一个身份，也可以是一组（例如家接受 household 或 guest）。
+    """
+    if access.get("public") is True:
+        return True
+    if role is None:
+        return False
+    accepted = accepted_roles(access)
+    return accepted is None or role in accepted
+
+
+def accepted_roles(access: Dict) -> Optional[Tuple[str, ...]]:
+    """地点接受的身份；None 表示不限身份（任何一条针对它的授予都行）。"""
+    required = access.get("role")
+    if required is None:
+        return None
+    if isinstance(required, str):
+        return (required,)
+    return tuple(required)
+
+
 class LocationGraphError(ValueError):
     """位置图自身不自洽（重复 ID、悬空 parent/connection、父级成环等）。"""
 
@@ -105,11 +131,18 @@ class LocationGraph:
 
     def __init__(self, locations: Iterable[Location] = ()):
         self._locations: Dict[str, Location] = {}
+        self._frozen = False
         for location in locations:
             self.add(location)
         self.validate()
 
+    def _freeze(self) -> None:
+        """挂到会话上之后，位置图不再接受新地点。"""
+        self._frozen = True
+
     def add(self, location: Location) -> None:
+        if self._frozen:
+            raise LocationGraphError("位置图已经挂在会话上，不能再添加地点")
         if not location.location_id:
             raise LocationGraphError("location_id 不能为空")
         if location.location_id in self._locations:

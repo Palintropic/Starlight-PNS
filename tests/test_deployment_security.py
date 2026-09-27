@@ -33,7 +33,12 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from pns.interfaces.app import create_app  # noqa: E402
-from pns.interfaces.composition import WorldControlPlane  # noqa: E402
+from pns.interfaces.composition import (  # noqa: E402
+    AutonomySettings,
+    WorldControlPlane,
+)
+from pns.runtime.autonomy.clock_worker import ClockConfig  # noqa: E402
+from pns.runtime.autonomy.seeding import ActivationCadence  # noqa: E402
 from pns.interfaces.paths import DASHBOARD_DIST  # noqa: E402
 from pns.interfaces.security import (  # noqa: E402
     ENV_ADMIN_TOKEN,
@@ -333,12 +338,12 @@ class RejectionChangesNothingTests(AuthTestCase):
                 self.assertEqual(response.status_code, 401, response.text)
         self.assertEqual(fingerprint(self.root), before, "被拒绝的请求改动了磁盘")
         self.assertEqual(BOUNDARY.active().revision, revision_before)
-        # 世界仍然是本进程开着的那一个，驱动仍然没被起过。
+        # 世界仍然是本进程开着的那一个，认知仍然没被 Start 过。
         status = self.client.get(
             "/api/persistent-worlds/nightcord", headers=self.bearer
         ).json()
         self.assertTrue(status["owned"])
-        self.assertIsNone(status["autonomy"])
+        self.assertEqual(status["autonomy"]["cognition_causes"], ["not_started"])
 
     def test_a_rejected_request_never_reaches_body_validation(self):
         """没凭据 + 畸形请求体 = 401，不是 422。
@@ -548,6 +553,29 @@ class ProductionFailsClosedTests(unittest.TestCase):
                     registry_provider=lambda: self.registry(key=""),
                 )
             self.assertIn("MIMO_API_KEY", str(caught.exception))
+
+    def test_a_fast_world_clock_refuses_to_start_in_production(self):
+        # WORLD-1 设计 §2：生产世界时间与现实 1:1。注入进来的控制面也要查。
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "dist"
+            dist.mkdir()
+            plane = WorldControlPlane(
+                root=Path(tmp) / "worlds",
+                autonomy=AutonomySettings(
+                    clock=ClockConfig(rate=60.0), cadence=ActivationCadence()
+                ),
+            )
+            with self.assertRaises(DeploymentConfigError) as caught:
+                create_app(
+                    plane,
+                    settings=DeploymentSettings(
+                        mode="production", admin_token=ADMIN_TOKEN
+                    ),
+                    dashboard_dist=dist,
+                    registry_provider=self.registry,
+                )
+            self.assertIn("1:1", str(caught.exception))
+            self.assertFalse((Path(tmp) / "worlds").exists())
 
     def test_unbuildable_configuration_refuses_to_start_in_production(self):
         def broken():

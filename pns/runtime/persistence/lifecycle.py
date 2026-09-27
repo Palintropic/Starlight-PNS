@@ -60,11 +60,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Optional, Tuple
 
+from pns.models.clock_anchor import ClockAnchor, utc_now
 from pns.models.session import SessionState, TransactionBoundaryError
 from pns.runtime.agency.engine import AgencyEngine
+from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
+from pns.runtime.formal_world import gated_rhythms
 from pns.runtime.memory.encoder import MemoryEncoder
-from pns.runtime.persistence.archive import ArchiveError, WorldArchive
+from pns.models.time_events import TimeEventPolicy, TimeEventPolicyError, quiet_time_report
+from pns.runtime.persistence.archive import ArchiveError, EventSegment, WorldArchive
 from pns.runtime.persistence.naming import validate_world_id
 from pns.runtime.persistence.ownership import (
     OwnershipError,
@@ -120,6 +124,8 @@ class RuntimeAdapters:
     # 播种，而是它每一次推进时间都要对照的那张表。恢复之后不交，世界就会停在
     # 最后一次记下来的活动上，永远不再跟着时间走。
     rhythm: Optional[RhythmDirector] = None
+    # 作息表来自哪一版内容快照。正式世界据此记冲突待决记录（见 formal_world）。
+    content_revision: int = 0
     name: str = "autonomy"
 
     def __post_init__(self) -> None:
@@ -142,8 +148,14 @@ class RuntimeAdapters:
         """
         if not isinstance(state, SessionState):
             raise LifecycleError("只能把服务绑在 SessionState 上")
+        # 持久世界的时钟只归调度器推：在任何回调拿到这份状态之前声明。
+        state.claim_clock()
         if state.scheduler is None:
             PersistentScheduler(state)
+        if self.rhythm is not None:
+            # 作息世界的时钟只归协调器的时钟步推。在把调度器交给 seed /
+            # policy_factory 之前就声明，绑定期间也没有旁路（复审 R3-F1）。
+            state.scheduler.claim_clock_for_rhythm()
         if self.seed is not None:
             # 新世界的初始排期。它在第一份存档之前落进队列，所以要么这个世界
             # 带着排期诞生，要么它根本没诞生 —— 没有第三种结果。
@@ -158,12 +170,24 @@ class RuntimeAdapters:
             )
         if state.memory_encoder is None:
             MemoryEncoder(state, self.memory_budget)
+        rhythm = self.rhythm
+        if rhythm is not None and state.content is not None:
+            # 正式世界：只有这个世界明确采用过的那一版作息才生效。内容包里出现
+            # 新的一版，记一条待决、不生效，等项目所有者决定（WORLD-1 §4.3）。
+            with state.atomic_commit():
+                accepted = gated_rhythms(
+                    state,
+                    {cid: rhythm.rhythm_for(cid) for cid in rhythm.characters()},
+                    registry_revision=self.content_revision,
+                    wall=utc_now().isoformat(),
+                )
+            rhythm = RhythmDirector(accepted)
         return AutonomousRuntime(
             state,
             auditor=self.auditor,
             retry=self.retry,
             recall_budget=self.recall_budget,
-            rhythm=self.rhythm,
+            rhythm=rhythm,
             name=self.name,
         )
 
@@ -262,8 +286,40 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
         len(state.activations),
         len(state.activation_outbox),
         sum(len(items) for items in state.histories.values()),
+        # 运维账本：只按了一次 Start、只记了一段处置，世界也是"变过了"——
+        # 否则 checkpoint 策略会当它干净，一次崩溃就把这些操作悄悄丢掉。
+        len(state.cognition.intervals) if state.cognition is not None else None,
+        len(state.rhythm_dispositions),
+        state.anchor.to_dict() if state.anchor is not None else None,
+        state.content.to_dict() if state.content is not None else None,
+        state.time_events.to_dict() if state.time_events is not None else None,
         digest,
     )
+
+
+def _abandon(state: Optional[SessionState]) -> None:
+    """一次失败的创建 / 恢复：关上那份状态，不让它作为一个半成品继续可写。"""
+    if state is None:
+        return
+    try:
+        state.fence("lifecycle assembly failed")
+    except Exception:  # pragma: no cover - 收尾不该盖住原始错误
+        pass
+
+
+def _footprint(
+    world_bytes: Optional[int], segments: Tuple[EventSegment, ...], *, active: int
+) -> Dict:
+    """存档在磁盘上占了多少、分成了几卷（WORLD-1 存档增长设计 §2.5）。"""
+    sealed_bytes = sum(segment.bytes for segment in segments)
+    return {
+        "total_bytes": (world_bytes or 0) + sealed_bytes,
+        "world_bytes": world_bytes,
+        "segments": len(segments),
+        "sealed_events": segments[-1].last_sequence + 1 if segments else 0,
+        "sealed_bytes": sealed_bytes,
+        "active_events": active,
+    }
 
 
 class PersistentWorld:
@@ -290,6 +346,8 @@ class PersistentWorld:
         snapshot_timeout: Optional[float] = None,
         durable: Optional[bool] = None,
         directory_synced: Optional[bool] = None,
+        segments: Tuple[EventSegment, ...] = (),
+        baseline: Optional[Tuple] = None,
     ) -> None:
         self._world_id = world_id
         self._store = store
@@ -309,12 +367,21 @@ class PersistentWorld:
         self._last_reason: Optional[str] = None
         self._boundaries = 0
         self._last_checkpoint_at: Optional[datetime] = None
-        self._fingerprint = _fingerprint(state)
+        # 磁盘上那一版的指纹。恢复路径必须交进来**读档那一刻**的指纹：绑定适配器
+        # 时可能已经改了状态（记下内容冲突、认知转换），那些改动还没落盘，不能被
+        # 当成"干净"（全量审查 F4）。
+        self._fingerprint = baseline if baseline is not None else _fingerprint(state)
         # 最后一次保存的耐久性证据。True/False 只由本进程亲自完成的保存得出；
         # 从存档恢复时没有携带这份文件系统证据，因此必须是 None（未知），不能
         # 因为文件此刻读得出来就把过去一次未经目录同步的保存重新说成耐久。
         self._durable = durable
         self._directory_synced = directory_synced
+        # 世界时钟 worker（WORLD-1 设计 §7）。按现实时间走的世界才有；由生命周期
+        # 服务在句柄登记之后启动，关闭时第一个停。
+        self._clock_worker: Optional[ClockWorker] = None
+        # 磁盘上那一版的分卷清单（存档版本 3）。只随成功写下去的一版改变；
+        # checkpoint 的快照只序列化清单之后的事件。
+        self._segments: Tuple[EventSegment, ...] = tuple(segments)
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -337,6 +404,10 @@ class PersistentWorld:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def clock_worker(self) -> Optional[ClockWorker]:
+        return self._clock_worker
 
     # ── checkpoint ──────────────────────────────────────────────────────
     def checkpoint(self, reason: str = "manual") -> Dict:
@@ -381,8 +452,10 @@ class PersistentWorld:
         archive = None
         try:
             archive = WorldArchive.from_state_payload(
-                self._world_id, payload, revision=revision
+                self._world_id, payload, revision=revision, segments=self._segments
             )
+            # 先封存已满的整段（分卷先耐久），再写 world.json 让清单生效。
+            archive = self._store.seal(archive)
             result = self._store.save(archive)
         except ArchiveNotDurable as e:
             # 特殊的一档，而且方向跟下面那档相反：这一版**已经在磁盘上**、
@@ -404,14 +477,29 @@ class PersistentWorld:
                 f"世界 '{self._world_id}' 的 checkpoint 失败，磁盘上仍然是第 "
                 f"{self._revision} 版: {e}"
             ) from e
+        except BaseException as e:
+            # 意料之外的中断（KeyboardInterrupt 之类）可能落在 replace 之后：先对一下
+            # 磁盘，写上去了就按"已经发生、保证不到"记账，再原样抛出。
+            if archive is not None and self._disk_holds(archive):
+                self._adopt(archive, fingerprint, reason, durable=False, synced=False)
+            self._last_error = f"{type(e).__name__}: {e}"
+            raise
         self._adopt(
             archive,
             fingerprint,
             reason,
             durable=True,
-            synced=result.directory_synced,
+            synced=result.directory_synced and archive.history_synced,
         )
         return self._status_locked()
+
+    def _disk_holds(self, archive: WorldArchive) -> bool:
+        """磁盘上此刻是不是正好这一版（修订号与保存时刻都对得上）。"""
+        try:
+            on_disk = self._store.load(self._world_id, history=False)
+        except Exception:
+            return False
+        return on_disk.revision == archive.revision and on_disk.saved_at == archive.saved_at
 
     def _snapshot_locked(self) -> Tuple[Dict, Tuple]:
         """在独占边界之内取一份一致快照。调用方持着世界锁。
@@ -425,7 +513,8 @@ class PersistentWorld:
         """
         try:
             with self._runtime.lifecycle_boundary(self._snapshot_timeout):
-                payload = self._state.to_dict()
+                sealed = self._segments[-1].last_sequence + 1 if self._segments else 0
+                payload = self._state.to_dict(events_from=sealed)
                 fingerprint = _fingerprint(self._state)
                 if fingerprint is None:
                     # 边界攥着的时候不该发生。真发生了就说明有代码绕过
@@ -461,6 +550,7 @@ class PersistentWorld:
         self._last_reason = reason
         self._durable = durable
         self._directory_synced = synced
+        self._segments = archive.segments
 
     # ── 关闭 ────────────────────────────────────────────────────────────
     def close(self, reason: str = "closed", *, force: bool = False) -> Dict:
@@ -472,6 +562,17 @@ class PersistentWorld:
         `clean=False`、`durable_revision` 写着真正能恢复到的那一版。
         """
         self._refuse_inside_transaction("关闭世界")
+        # 0. 先停时钟 worker，而且在世界锁**之外**：它自己的 checkpoint 要拿这把锁，
+        #    持锁等它只会等到超时。等不到它退出（多半卡在一次模型调用上）时，
+        #    非 force 的关闭拒绝——不存、不标记、不还所有权，调用方稍后重试；
+        #    force 则往下走：终局停机之后它晚到的提交会被运行时拒绝。
+        worker = self._clock_worker
+        if worker is not None and not self._closed:
+            if not worker.stop() and not force:
+                raise LifecycleError(
+                    f"世界 '{self._world_id}' 的时钟 worker 还没停下（多半在等一次"
+                    "模型调用），暂不能关闭；稍后重试"
+                )
         with self._lock:
             if self._closed:
                 return self._status_locked()
@@ -502,7 +603,10 @@ class PersistentWorld:
                         # 那一份就是最新的，而它不是。
                         raise
 
-            # 3./4. 标记关闭，归还所有权。
+            # 3./4. 关上内存状态，标记关闭，归还所有权。fence 必须在归还所有权
+            # 之前：此后任何还握着旧引用的线程（醒得太晚的 worker）走受支持的
+            # 写方法都会失败，不会跟接手这个世界的下一个进程并行写。
+            self._state.fence(f"closed: {reason}")
             self._closed = True
             self._clean = clean
             self._ownership.release()
@@ -520,10 +624,15 @@ class PersistentWorld:
         那些写入既不会落盘，又可能跟接手这个世界的下一个进程并行发生。
         """
         self._refuse_inside_transaction("释放世界")
+        worker = self._clock_worker
+        if worker is not None:
+            # 不等它：release 本来就是放手。终局停机之后它什么都写不进去。
+            worker.stop(timeout=0)
         with self._lock:
             if self._closed:
                 return self._status_locked()
             self._runtime.stop(reason)
+            self._state.fence(f"released: {reason}")
             self._closed = True
             self._clean = False
             self._last_reason = reason
@@ -570,13 +679,20 @@ class PersistentWorld:
             "directory_synced": self._directory_synced,
             "last_error": self._last_error,
             "error": None,
-            "residue": list(self._store.residue(self._world_id)),
+            "residue": list(self._store.residue(self._world_id, self._segments)),
             "running": self._runtime.running,
             "stop_reason": self._runtime.stop_reason,
             "clock": self._state.world_state.clock.isoformat(),
             "archive_path": str(self._store.archive_path(self._world_id)),
             "boundaries_since_checkpoint": self._boundaries,
             "policy": self._policy.to_dict(),
+            "quiet_time_events": quiet_time_report(self._state.time_events),
+            "archive": _footprint(
+                self._store.archive_bytes(self._world_id),
+                self._segments,
+                active=len(self._state.events)
+                - (self._segments[-1].last_sequence + 1 if self._segments else 0),
+            ),
         }
 
     # ── 内部 ────────────────────────────────────────────────────────────
@@ -599,15 +715,16 @@ class PersistentWorld:
             self._ownership.verify()
             payload, fingerprint = self._snapshot_locked()
             archive = WorldArchive.from_state_payload(
-                self._world_id, payload, revision=self._revision
+                self._world_id, payload, revision=self._revision, segments=self._segments
             )
+            archive = self._store.seal(archive)
             result = self._store.save(archive)
             self._adopt(
                 archive,
                 fingerprint,
                 "created",
                 durable=True,
-                synced=result.directory_synced,
+                synced=result.directory_synced and archive.history_synced,
             )
 
 
@@ -643,8 +760,13 @@ class WorldLifecycleService:
         checkpoint_policy: Optional[CheckpointPolicy] = None,
         snapshot_timeout: Optional[float] = None,
         start: bool = True,
+        clock: Optional[ClockConfig] = None,
+        wall_clock: Optional[Callable[[], datetime]] = None,
     ) -> PersistentWorld:
         """建一个新世界，并且当场写下第 1 版存档。
+
+        带 `clock` 的世界按现实时间走：锚点从此刻、从世界的开局时钟开始，认知
+        从"还没 Start"开始；句柄登记之后起时钟 worker。
 
         已经存在的世界不许被创建覆盖：那会把一整个世界的历史一次性抹掉，
         而抹掉它的理由只是调用方传错了一个字符串。
@@ -677,6 +799,11 @@ class WorldLifecycleService:
                     "就用 restore()"
                 )
             runtime = adapters.bind(state)
+            if clock is not None:
+                now = wall_clock() if wall_clock is not None else utc_now()
+                runtime.open_clock(
+                    ClockAnchor(state.world_state.clock, now, clock.rate), wall=now
+                )
             world = PersistentWorld(
                 world_id=name,
                 store=self._store,
@@ -689,13 +816,21 @@ class WorldLifecycleService:
                 service=self,
                 snapshot_timeout=snapshot_timeout,
             )
+            # 组装完成：从这里起不能再整段换存档或重绑服务。发布先于第一次写盘：
+            # 发布时的整体校验没过的状态，一个字节都不许落到磁盘上。
+            state.publish()
             world._first_save()
             if start:
                 runtime.start()
         except BaseException:
+            _abandon(state)
             handle.release()
             raise
-        return self._remember(name, world, handle)
+        self._remember(name, world, handle)
+        if clock is not None:
+            # 首存档留在磁盘上：它是一份合法的开局存档（设计 §12.7）。
+            self._spawn_clock(world, clock, wall_clock)
+        return world
 
     def restore(
         self,
@@ -705,8 +840,14 @@ class WorldLifecycleService:
         checkpoint_policy: Optional[CheckpointPolicy] = None,
         snapshot_timeout: Optional[float] = None,
         start: bool = True,
+        clock: Optional[ClockConfig] = None,
+        wall_clock: Optional[Callable[[], datetime]] = None,
     ) -> PersistentWorld:
         """把最后一次成功 checkpoint 的那个世界拿回来，并且重新跑起来。
+
+        带 `clock` 时：停机期间触发的到期一律 process_stopped（恢复转换），现实
+        时钟若落后于存档时钟就记 wall_clock_behind；配置的倍率与存档不同时在此刻
+        重新锚定。句柄登记之后起时钟 worker，由它把离线的那段补跑完。
 
         顺序是刻意的：**先**拿所有权，**再**读存档。反过来的话，两个进程会
         双双读到同一份存档、双双恢复出一个"权威"世界，然后互相覆盖。
@@ -728,12 +869,25 @@ class WorldLifecycleService:
 
         self._refuse_if_open(name)
         handle = self._store.acquire(name)
+        state = None
         try:
             archive = self._store.load(name)
             # 数据在前：恢复出一份冷状态，跨段校验全部走既有构造函数。
             state = archive.restore_state()
+            # 磁盘那一版的样子，在任何绑定改动它之前记下。
+            baseline = _fingerprint(state)
+            content_on_disk = state.content
             # 服务在后：调用方的冷适配器显式绑定，存档里一个活对象都没有。
             runtime = adapters.bind(state)
+            if clock is not None:
+                if state.anchor is None:
+                    raise LifecycleError(
+                        f"世界 '{name}' 的存档没有时钟锚点，不能按现实时间恢复"
+                    )
+                now = wall_clock() if wall_clock is not None else utc_now()
+                runtime.restore_clock(wall=now)
+                if state.anchor.rate != float(clock.rate):
+                    runtime.rebase_anchor(clock.rate, wall=now)
             world = PersistentWorld(
                 world_id=name,
                 store=self._store,
@@ -745,13 +899,40 @@ class WorldLifecycleService:
                 checkpoint_policy=policy,
                 service=self,
                 snapshot_timeout=snapshot_timeout,
+                segments=archive.segments,
+                baseline=baseline,
             )
+            # 先发布（整体校验），再写任何东西：绑定期间通过公开接口形成的不一致
+            # 必须在落盘之前被拒绝，失败的恢复不许把原本合法的存档写坏。
+            state.publish()
+            if state.content is not content_on_disk:
+                # 恢复时识别出了新的内容冲突：它声称"已经记下"，就要在恢复成功之前
+                # 真的落盘。存不下去就是恢复失败（下面的 except 归还所有权）。
+                with world._lock:
+                    world._checkpoint_locked("restore_content_conflict")
             if start:
                 runtime.start()
         except BaseException:
+            _abandon(state)
             handle.release()
             raise
-        return self._remember(name, world, handle)
+        self._remember(name, world, handle)
+        if clock is not None:
+            self._spawn_clock(world, clock, wall_clock)
+        return world
+
+    def _spawn_clock(self, world: PersistentWorld, clock: ClockConfig, wall_clock) -> None:
+        """起时钟 worker。起不来就整个退回去：从登记表移除、终局停机、还所有权。
+
+        登记与起 worker 是一个启动阶段：不存在"登记了、却没人推时间"的世界。
+        """
+        try:
+            worker = ClockWorker(world, clock, wall_clock=wall_clock)
+            world._clock_worker = worker
+            worker.start()
+        except BaseException:
+            world.release("clock worker failed to start")
+            raise
 
     # ── 服务面 ──────────────────────────────────────────────────────────
     def opened(self, world_id: str) -> Optional[PersistentWorld]:
@@ -801,6 +982,8 @@ class WorldLifecycleService:
             "archive_path": None,
             "boundaries_since_checkpoint": None,
             "policy": None,
+            "quiet_time_events": None,
+            "archive": None,
         }
         try:
             report["archive_path"] = str(self._store.archive_path(name))
@@ -809,7 +992,15 @@ class WorldLifecycleService:
             report["error"] = f"{type(e).__name__}: {e}"
             return report
         try:
-            archive = self._store.load(name)
+            # 状态面不把整段历史读进来：分卷只核对在不在、大小对不对。
+            # 逐卷哈希核对在真正恢复时做（见 restore）。
+            archive = self._store.load(name, history=False)
+            report["residue"] = list(self._store.residue(name, archive.segments))
+            report["archive"] = _footprint(
+                self._store.archive_bytes(name),
+                archive.segments,
+                active=archive.active_count,
+            )
         except ArchiveNotFound:
             report["error"] = f"世界 '{name}' 还没有存档"
             return report
@@ -821,6 +1012,13 @@ class WorldLifecycleService:
         report["durable_revision"] = archive.revision
         report["last_saved_at"] = archive.saved_at
         report["clock"] = archive.clock.isoformat()
+        try:
+            raw = archive.state.get("time_events")
+            report["quiet_time_events"] = quiet_time_report(
+                TimeEventPolicy.from_dict(raw) if raw is not None else None
+            )
+        except TimeEventPolicyError as e:
+            report["error"] = f"{type(e).__name__}: {e}"
         return report
 
     def list_worlds(self) -> Tuple[Dict, ...]:

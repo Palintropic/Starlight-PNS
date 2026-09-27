@@ -82,6 +82,7 @@ _FROM_AGENCY = {
     AgencyOutcome.REJECTED_STALE: ActivationOutcome.REJECTED,
     AgencyOutcome.REJECTED_BUDGET: ActivationOutcome.REJECTED,
     AgencyOutcome.REJECTED_POLICY_ERROR: ActivationOutcome.REJECTED,
+    AgencyOutcome.REJECTED_UNAVAILABLE: ActivationOutcome.REJECTED,
 }
 
 

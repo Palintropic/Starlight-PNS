@@ -2,14 +2,25 @@ import threading
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, Iterator, List, Mapping, Optional, Sequence
+from datetime import datetime, timedelta
+from typing import Dict, FrozenSet, Iterator, List, Mapping, Optional, Sequence
 
 from pns.models.activation import ActivationError
 from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
-from pns.models.agency import AgencyError, AgencyLog
+from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
+from pns.models.clock_anchor import ClockAnchor, ClockAnchorError
+from pns.models.content_ledger import ContentLedger, ContentLedgerError, genesis_from_origin
+from pns.models.time_events import TimeEventPolicy, TimeEventPolicyError, time_gaps
+from pns.models.cognition import (
+    CognitionCause,
+    CognitionTimeline,
+    CognitionTimelineError,
+    TransitionKind,
+    consumes_allowance,
+    unavailable_causes,
+)
 from pns.models.authored import AuthoredTextError, GenerationAudit
 from pns.models.event import EventType
 from pns.models.event_store import EventStore
@@ -28,6 +39,15 @@ from pns.models.world_state import ActivityKind, WorldState
 
 class SessionStateError(ValueError):
     """会话存档不自洽（各部分来自不同时刻、引用对不上、形状损坏等）。"""
+
+
+class SessionFencedError(RuntimeError):
+    """这份状态已经被关上了（世界关闭/放弃之后），或者此刻在只读快照块里。
+
+    它存在的理由是：世界关闭并归还所有权之后，任何还握着旧引用的线程（例如
+    一个醒得太晚的 worker）都不能再改这份内存状态。检查放在 SessionState 最底层
+    的每一个受支持的写方法里，调用方拿不拿协调器闸门都绕不过去。
+    """
 
 
 class TransactionBoundaryError(RuntimeError):
@@ -212,6 +232,22 @@ class SessionState:
     # 什么"。同一种归属 —— 存储归会话所有，编码器只是它上面的服务。世界真相
     # 仍然只有 events，记忆改不动它，也改不动观察。
     memories: MemoryStore = field(default_factory=MemoryStore)
+    # 认知时间线（WORLD-1）：Agency 日志第 p 条提交时，认知可不可用、为什么。
+    # None 表示这个会话不区分"认知可用"——研究模式的场景会话就是这样。它是
+    # 运维记录（Article XIII），不是世界真相，也不进任何角色的上下文。
+    cognition: Optional[CognitionTimeline] = None
+    # 作息段的耐久处置（WORLD-1 设计 §12.5）：记下"走不到"的段（segment_key），
+    # 之后不再规划、也不再重复记。运维记录，不是世界事件。
+    rhythm_dispositions: FrozenSet[str] = field(default_factory=frozenset)
+    # 模拟时间与现实时间的锚点（WORLD-1 设计 §2）。只有持久世界有它；运维记录，
+    # 不进 WorldState、不进任何角色的上下文。它总是跟认知时间线一起出现。
+    anchor: Optional[ClockAnchor] = None
+    # 正式世界采用了哪一版内容、以及冲突待决记录（WORLD-1 计划 §4.3）。只有
+    # 正式世界有它；运维记录，不进任何角色的上下文。
+    content: Optional[ContentLedger] = None
+    # 安静的分钟记不记成世界事件（WORLD-1 存档增长设计 §3）。None 等于从没拨过
+    # （record）。运维记录，不进任何角色的上下文。
+    time_events: Optional[TimeEventPolicy] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -249,6 +285,116 @@ class SessionState:
         # 会畅通无阻地拿到一份半截世界。
         self._commit_thread: Optional[int] = None
         self._commit_depth = 0
+        # 生命周期阶段，只能前进：building → live → fenced。
+        #   building  组装期：可以恢复存档、绑定服务。
+        #   live      已发布：只能通过受支持的写方法改；不能再整段换存档。
+        #   fenced    已关上：任何受支持的写方法都失败。
+        self._phase = "building"
+        self._fence_reason: Optional[str] = None
+        # 只读快照块的嵌套深度（本线程）。块内任何写方法都失败。
+        self._read_only_thread: Optional[int] = None
+        self._read_only_depth = 0
+        # 时钟有主（持久世界）：只有调度器的推进事务能改世界时钟。
+        self._clock_claimed = False
+        self._clock_mover: Optional[int] = None
+
+    # ── 生命周期阶段与写栅栏 ────────────────────────────────────────────
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    @property
+    def fenced(self) -> bool:
+        return self._phase == "fenced"
+
+    def publish(self) -> None:
+        """组装完成：从此不能再整段恢复存档或重新绑定服务。"""
+        with self._commit_gate:
+            if self._phase == "fenced":
+                raise SessionFencedError(f"会话 '{self.session_id}' 已经关上，不能发布")
+            if self._phase == "building":
+                self._validate_assembled()
+            self._phase = "live"
+
+    def _validate_assembled(self) -> None:
+        """发布前把各分区之间的约束整体再查一遍。
+
+        三组 restore 各自只对照调用那一刻的其它分区；换个顺序调用（先恢复 Agency、
+        再恢复投递箱），每一步都通过，拼出来的却是一份加载时会被拒绝的状态。发布
+        是进入 live 的唯一入口，所以在这里按加载的同一套校验兜底。
+        """
+        clock = self.world_state.clock if self.world_state is not None else None
+        _validate_history_against_clock(self, clock)
+        _validate_schedule_against_clock(self.activations, self.activation_outbox, clock)
+        _validate_agency_against_session(self, self.agency, clock)
+        _validate_memories_against_session(self, self.memories, clock)
+        _validate_cognition(self)
+        _validate_time_gaps(self)
+        if self.content is not None:
+            try:
+                self.content.check_genesis(
+                    genesis_from_origin(self.world_state.metadata.get("origin"))
+                )
+            except ContentLedgerError as e:
+                raise SessionStateError(f"内容账本不合法：{e}") from e
+
+    def fence(self, reason: str) -> None:
+        """不可逆地关上这份状态。等在跑的事务结束；事务内部调用直接拒绝。"""
+        if not isinstance(reason, str) or not reason:
+            raise SessionStateError("fence 的理由必须是非空字符串")
+        if self.transaction_is_mine:
+            raise TransactionBoundaryError("不能在自己的提交事务内部关上这份状态")
+        with self._commit_gate:
+            if self._phase != "fenced":
+                self._phase = "fenced"
+                self._fence_reason = reason
+
+    # ── 时钟归属 ────────────────────────────────────────────────────────
+    def claim_clock(self) -> None:
+        """声明这份会话的世界时钟有主：此后只有调度器的推进事务能改它。
+
+        持久世界在绑定服务的第一步就声明（见 RuntimeAdapters.bind）。之后直接调
+        WorldState.advance_time()、从外部提交一条 world.time_advanced，都会在状态
+        效果那一步被拒绝、整个事务回滚 —— 时钟不会绕过调度器（到期）、协调器
+        （作息）与时间事件链往前走（第三方反向测试 B）。只能打开，不能关回。
+        """
+        self._clock_claimed = True
+
+    @property
+    def clock_claimed(self) -> bool:
+        return self._clock_claimed
+
+    @contextmanager
+    def _moving_clock(self):
+        """调度器推进事务内部：本线程此刻被允许改时钟。"""
+        previous = self._clock_mover
+        self._clock_mover = threading.get_ident()
+        try:
+            yield
+        finally:
+            self._clock_mover = previous
+
+    def _check_clock_move(self) -> None:
+        if self._clock_claimed and self._clock_mover != threading.get_ident():
+            raise SessionStateError(
+                "这个世界的时钟只能由调度器推进（runtime.advance / 时钟 worker），"
+                "不能直接改 WorldState，也不能从外部提交时间事件"
+            )
+
+    def require_writable(self) -> None:
+        """每个受支持的写方法的第一行。"""
+        if self._phase == "fenced":
+            raise SessionFencedError(
+                f"会话 '{self.session_id}' 已经关上（{self._fence_reason}），不能再写"
+            )
+        if self._read_only_depth and self._read_only_thread == threading.get_ident():
+            raise SessionFencedError("快照块内是只读的：不能在取快照的同时改状态")
+
+    def _require_building(self, what: str) -> None:
+        if self._phase != "building":
+            raise SessionStateError(
+                f"{what} 只能在会话组装期做；会话 '{self.session_id}' 已经是 {self._phase}"
+            )
 
     @property
     def in_transaction(self) -> bool:
@@ -302,7 +448,20 @@ class SessionState:
                 "一直占着它。这一刻取不到一致快照，什么都没写。"
             )
         try:
-            yield self
+            if self._phase == "fenced":
+                raise SessionFencedError(
+                    f"会话 '{self.session_id}' 已经关上（{self._fence_reason}），不再取快照"
+                )
+            # 块内只读：它持着跟事务同一把锁，所以若不设这道标记，块里的写入
+            # 能绕过 atomic_commit() 的一切检查。
+            self._read_only_thread = threading.get_ident()
+            self._read_only_depth += 1
+            try:
+                yield self
+            finally:
+                self._read_only_depth -= 1
+                if not self._read_only_depth:
+                    self._read_only_thread = None
         finally:
             self._commit_gate.release()
 
@@ -311,11 +470,24 @@ class SessionState:
 
         运行时和 SessionState 拿到的必须是同一个对象，不允许各存一份副本。
         """
+        self._require_building("绑定世界状态")
         if not isinstance(world_state, WorldState):
             raise TypeError("world_state 必须是 WorldState 实例")
         if self.world_state is not None:
             raise RuntimeError("SessionState 已经绑定过 WorldState")
+        if world_state._write_guard is not None:
+            raise RuntimeError("这份 WorldState 已经挂在另一个会话上")
+        # 世界状态的每个写方法都先问这份会话还能不能写（fence / 只读快照块）。
+        world_state._write_guard = self.require_writable
+        # 位置图与频道表是随存档走的静态结构，会话期间不变（运行期没有任何
+        # 入口改它们，回滚快照也不覆盖它们）。挂上会话就冻结，让它们各自的
+        # add() 也不再是一条绕过栅栏的写入口。
+        world_state.locations._freeze()
+        world_state.channels._freeze()
         self.world_state = world_state
+        # 时间事件链从这一刻起算（WORLD-1 存档增长 / 全量审查 F3）。
+        self.time_events = TimeEventPolicy(world_state.clock)
+        world_state._clock_guard = self._check_clock_move
 
     def attach_scheduler(self, scheduler) -> None:
         """绑定本会话唯一一份调度器（只允许一次）。
@@ -325,6 +497,7 @@ class SessionState:
         另一份仍然认为它还没触发。恢复存档也走同一个实例（就地替换它管理的
         队列与投递箱），不产生第二个并列实例。
         """
+        self._require_building("绑定调度器")
         if self.scheduler is not None:
             raise RuntimeError("SessionState 已经绑定过调度器")
         for required in ("schedule", "advance_by", "acknowledge"):
@@ -339,6 +512,7 @@ class SessionState:
         结论，而先落地的那个已经把到期记录确认掉了 —— 于是"这条到期是怎么
         处理的"有两个都自称权威的答案。
         """
+        self._require_building("绑定 Agency 引擎")
         if self.agency_engine is not None:
             raise RuntimeError("SessionState 已经绑定过 Agency 引擎")
         for required in ("propose", "commit", "evaluate"):
@@ -353,6 +527,7 @@ class SessionState:
         写，于是"这条观察记过没有""这个会话还能记多少条"都有两个互相看不见的
         答案，而先落地的那个已经把记忆写进去了。
         """
+        self._require_building("绑定记忆编码器")
         if self.memory_encoder is not None:
             raise RuntimeError("SessionState 已经绑定过记忆编码器")
         if not callable(getattr(encoder, "encode", None)):
@@ -367,6 +542,7 @@ class SessionState:
         处理的""现在到底在不在跑"都有两个都自称权威的答案 —— 跟绑第二个
         调度器 / 引擎 / 编码器是同一种错。
         """
+        self._require_building("绑定自主运行时")
         if self.autonomy is not None:
             raise RuntimeError("SessionState 已经绑定过自主运行时协调器")
         for required in ("start", "stop", "status", "process_due"):
@@ -376,6 +552,7 @@ class SessionState:
 
     def initialize_runtime(self, scene_trigger: str) -> None:
         """Initialize per-character runtime state exactly once."""
+        self.require_writable()
         if self.histories or self.pending_corrections:
             raise RuntimeError("SessionState runtime state has already been initialized")
         self.histories = {
@@ -391,6 +568,7 @@ class SessionState:
         self.pending_corrections = {cid: None for cid in self.characters}
 
     def start(self) -> None:
+        self.require_writable()
         if self.status != "created":
             raise RuntimeError("SessionRuntime.run() 只能调用一次")
         self.status = "active"
@@ -400,7 +578,11 @@ class SessionState:
         return self.characters[self.current_character_index]
 
     def history_for(self, character: str) -> List[Dict]:
-        return self.histories[character]
+        """这个角色的提示历史的副本。
+
+        交出内部列表的话，拿着它的人在 fence 之后、只读快照块里照样能写会话。
+        """
+        return deepcopy(self.histories[character])
 
     def correction_for(self, character: str) -> Optional[str]:
         return self.pending_corrections[character]
@@ -415,6 +597,7 @@ class SessionState:
         只应该由提交边界调用：观察必须和它所投影的那条事件同生共死，绕开
         atomic_commit() 单独写进来的观察回滚不掉。
         """
+        self.require_writable()
         for decision in decisions:
             self.exposures._append(decision)
         for observation in observations:
@@ -426,6 +609,7 @@ class SessionState:
         只应该由编码事务调用：记忆必须和它所依据的那条观察同生共死，绕开
         atomic_commit() 单独写进来的记忆回滚不掉。
         """
+        self.require_writable()
         for record in records:
             self.memories._append(record)
 
@@ -438,6 +622,7 @@ class SessionState:
         历史；给 None 是**遗留兼容路径**（把这句话抄进每个角色的历史），
         只保留给不经过世界模型的纯记录调用方。运行时不走那条路。
         """
+        self.require_writable()
         if turn.character not in self.characters:
             raise ValueError(f"Turn character is not part of session: {turn.character}")
         if bool(self.histories) != bool(self.pending_corrections):
@@ -489,6 +674,7 @@ class SessionState:
 
     def add_turn(self, turn: Turn) -> None:
         """Backward-compatible alias for the pre-Phase-3 public API."""
+        self.require_writable()
         self.record_turn(turn)
 
     @contextmanager
@@ -512,6 +698,9 @@ class SessionState:
           快照、再互相覆盖对方的回滚 —— 那不是竞态，是两份都不成立的事务。
         """
         with self._commit_gate:
+            # 取锁之后、建回滚快照之前检查：fence 也拿这把锁，所以这里看到的
+            # 阶段不会在事务中途变。
+            self.require_writable()
             self._commit_depth += 1
             self._commit_thread = threading.get_ident()
             try:
@@ -544,11 +733,22 @@ class SessionState:
         activations_snapshot = activations._snapshot()
         outbox = self.activation_outbox
         outbox_snapshot = outbox._snapshot()
+        # 时间线是不可变值，记引用就够了：块内的转换只会换引用，不会改旧值。
+        cognition = self.cognition
+        dispositions = self.rhythm_dispositions
+        anchor = self.anchor
+        content = self.content
+        time_events = self.time_events
         try:
             yield self
         except BaseException:
+            self.content = content
+            self.time_events = time_events
+            self.cognition = cognition
+            self.rhythm_dispositions = dispositions
+            self.anchor = anchor
             if world_snapshot is not None:
-                world.restore_mutable_state(world_snapshot)
+                world._restore_mutable_state(world_snapshot)
             self.events._rollback_to(events_length)
             self.observations._rollback_to(observations_length)
             self.exposures._rollback_to(exposures_length)
@@ -570,18 +770,113 @@ class SessionState:
             self.pending_corrections.update(corrections)
             raise
 
+    def set_cognition(self, timeline: CognitionTimeline) -> None:
+        """在**当前事务内**把认知时间线换成它的下一个版本。
+
+        只能向后追加区间：新时间线必须以旧时间线为前缀，而且新区间的起点不能
+        超过 Agency 日志此刻的长度。放在事务里，是为了让转换与 Agency 记录的
+        追加共用同一把锁（全序），并随事务一起回滚。
+        """
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("认知时间线只能在本线程的提交事务里修改")
+        if not isinstance(timeline, CognitionTimeline):
+            raise SessionStateError("只能设置 CognitionTimeline")
+        previous = self.cognition
+        if previous is not None and (
+            timeline.intervals[: len(previous.intervals)] != previous.intervals
+        ):
+            raise SessionStateError("认知时间线只能追加区间，不能改写已有区间")
+        if timeline.current.from_log > len(self.agency):
+            raise SessionStateError("认知区间不能从一条还不存在的 Agency 记录开始")
+        self.cognition = timeline
+
+    def set_anchor(self, anchor: ClockAnchor) -> None:
+        """在当前事务内换锚点（开世界、换倍率）。随事务回滚。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("锚点只能在本线程的提交事务里修改")
+        if not isinstance(anchor, ClockAnchor):
+            raise SessionStateError("只能设置 ClockAnchor")
+        if self.cognition is None:
+            raise SessionStateError("没有认知时间线的会话不走锚点时间")
+        self.anchor = anchor
+
+    def set_content(self, ledger: ContentLedger) -> None:
+        """在当前事务内换内容账本（开局、记冲突、记决定）。随事务回滚。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("内容账本只能在本线程的提交事务里修改")
+        if not isinstance(ledger, ContentLedger):
+            raise SessionStateError("只能设置 ContentLedger")
+        previous = self.content
+        try:
+            if previous is None:
+                # 开局那一版：只能在组装期、没有任何冲突记录，而且必须正是开局
+                # 来源里记下的那几份作息。
+                self._require_building("设置开局内容账本")
+                if ledger.conflicts:
+                    raise ContentLedgerError("开局内容账本不能带冲突记录")
+                if self.world_state is None:
+                    raise ContentLedgerError("先绑定世界状态，再设内容账本")
+                ledger.check_genesis(
+                    genesis_from_origin(self.world_state.metadata.get("origin"))
+                )
+            else:
+                ledger.check_successor_of(previous)
+                ledger.check_genesis(
+                    genesis_from_origin(self.world_state.metadata.get("origin"))
+                )
+        except ContentLedgerError as e:
+            raise SessionStateError(str(e)) from e
+        self.content = ledger
+
+    def set_time_events(self, policy: TimeEventPolicy) -> None:
+        """在当前事务内换安静分钟策略（一次拨动）。只追加，随事务回滚。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("时间事件策略只能在本线程的提交事务里修改")
+        if not isinstance(policy, TimeEventPolicy):
+            raise SessionStateError("只能设置 TimeEventPolicy")
+        if self.time_events is None:
+            raise SessionStateError("没有世界状态的会话没有时间事件策略")
+        previous = self.time_events.records
+        if policy.epoch != self.time_events.epoch:
+            raise SessionStateError("时间事件链的起点不能改")
+        if policy.records[: len(previous)] != previous or len(policy.records) != len(
+            previous
+        ) + 1:
+            raise SessionStateError("时间事件策略一次只能追加一条拨动记录")
+        if self.world_state is None or policy.records[-1].from_sim != self.world_state.clock:
+            raise SessionStateError("拨动记录的 from_sim 必须是此刻的世界时钟")
+        self.time_events = policy
+
+    def add_rhythm_dispositions(self, keys) -> None:
+        """在当前事务内记下新的"走不到"的作息段。只增不减。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("作息处置只能在本线程的提交事务里记")
+        keys = frozenset(keys)
+        if not all(isinstance(key, str) and key for key in keys):
+            raise SessionStateError("作息处置的键必须是非空字符串")
+        self.rhythm_dispositions = self.rhythm_dispositions | keys
+
     def advance_character(self) -> None:
+        self.require_writable()
         self.current_character_index = (
             self.current_character_index + 1
         ) % len(self.characters)
 
     def record_error(self, message: str) -> None:
+        self.require_writable()
         self.last_error = message
 
     def complete(self) -> None:
+        self.require_writable()
         self.status = "completed"
 
     def cancel(self) -> None:
+        self.require_writable()
         if self.status == "active":
             self.status = "cancelled"
 
@@ -631,6 +926,7 @@ class SessionState:
         三类不自洽一律拒绝：会话对不上、时钟对不上、队列/投递箱与那一刻的
         时钟对不上（排期不在未来、到期记录发生在未来）。
         """
+        self._require_building("恢复调度存档")
         if not isinstance(payload, Mapping):
             raise SessionStateError("调度存档必须是字典")
         if payload.get("session_id") != self.session_id:
@@ -692,6 +988,7 @@ class SessionState:
         少了任何一条都能拼出一份"每一部分单独看都合法、合起来自相矛盾"的
         存档：审计说某个角色在某一刻做了某件事，而世界历史里没有这件事。
         """
+        self._require_building("恢复 Agency 存档")
         if not isinstance(payload, Mapping):
             raise SessionStateError("Agency 存档必须是字典")
         if payload.get("session_id") != self.session_id:
@@ -750,6 +1047,7 @@ class SessionState:
         少了任何一条都能拼出一份"每一部分单独看都合法、合起来自相矛盾"的存档：
         角色记得一件它从没感知过的事。
         """
+        self._require_building("恢复记忆存档")
         if not isinstance(payload, Mapping):
             raise SessionStateError("记忆存档必须是字典")
         if payload.get("session_id") != self.session_id:
@@ -892,6 +1190,54 @@ class SessionState:
         state.restore_agency_archive(payload["agency"])
         # 记忆放在最后：它的校验要看得见观察日志和事件历史。
         state.restore_memory_archive(payload["memory"])
+        # 认知时间线要看得见 Agency 日志与投递箱：每条记录的判定都要能从存档本身
+        # 重新推出来。
+        cognition = payload.get("cognition")
+        if cognition is not None:
+            try:
+                state.cognition = CognitionTimeline.from_dict(cognition)
+            except CognitionTimelineError as e:
+                raise SessionStateError(f"认知时间线不合法：{e}") from e
+        _validate_cognition(state)
+        anchor = payload.get("anchor")
+        if anchor is not None:
+            try:
+                state.anchor = ClockAnchor.from_dict(anchor)
+            except ClockAnchorError as e:
+                raise SessionStateError(f"时钟锚点不合法：{e}") from e
+            if state.cognition is None:
+                raise SessionStateError("有时钟锚点的存档必须带认知时间线")
+        content = payload.get("content")
+        if content is not None:
+            try:
+                state.content = ContentLedger.from_dict(content)
+                state.content.check_genesis(
+                    genesis_from_origin(
+                        state.world_state.metadata.get("origin")
+                        if state.world_state is not None
+                        else None
+                    )
+                )
+            except ContentLedgerError as e:
+                raise SessionStateError(f"内容账本不合法：{e}") from e
+        time_events = payload.get("time_events")
+        if state.world_state is not None:
+            # 有世界就必须有时间事件链的起点；缺了它，删光时间事件就无从发现。
+            if time_events is None:
+                raise SessionStateError("有世界状态的会话缺少 time_events（时间事件链的起点）")
+            try:
+                state.time_events = TimeEventPolicy.from_dict(time_events)
+            except TimeEventPolicyError as e:
+                raise SessionStateError(f"时间事件策略不合法：{e}") from e
+        elif time_events is not None:
+            raise SessionStateError("没有世界状态的会话不该有 time_events")
+        _validate_time_gaps(state)
+        dispositions = payload.get("rhythm_dispositions", [])
+        if not isinstance(dispositions, list) or not all(
+            isinstance(key, str) and key for key in dispositions
+        ):
+            raise SessionStateError("rhythm_dispositions 必须是非空字符串数组")
+        state.rhythm_dispositions = frozenset(dispositions)
 
         created_at = payload.get("created_at")
         if created_at is not None:
@@ -901,7 +1247,8 @@ class SessionState:
         state.metadata = deepcopy(dict(payload.get("metadata", {})))
         return state
 
-    def to_dict(self) -> Dict:
+    def to_dict(self, *, events_from: int = 0) -> Dict:
+        """`events_from` 见 EventStore.to_dict：只给分卷存档的 checkpoint 用。"""
         return {
             "session_id": self.session_id,
             "scene": self.scene,
@@ -915,12 +1262,17 @@ class SessionState:
             "pending_corrections": dict(self.pending_corrections),
             "stats": self.final_stats(),
             "world_state": self.world_state.to_dict() if self.world_state else {},
-            "events": self.events.to_dict(),
+            "events": self.events.to_dict(events_from),
             "observations": self.observations.to_dict(),
             "exposures": self.exposures.to_dict(),
             "scheduler": self.scheduler_archive(),
             "agency": self.agency_archive(),
             "memory": self.memory_archive(),
+            "cognition": self.cognition.to_dict() if self.cognition else None,
+            "rhythm_dispositions": sorted(self.rhythm_dispositions),
+            "anchor": self.anchor.to_dict() if self.anchor else None,
+            "content": self.content.to_dict() if self.content else None,
+            "time_events": self.time_events.to_dict() if self.time_events else None,
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
@@ -929,6 +1281,154 @@ class SessionState:
 
 
 # ── 存档校验辅助 ────────────────────────────────────────────────────────
+def _validate_time_gaps(state: "SessionState") -> None:
+    """时间事件之间的每一段空档，都必须整个落在 skip 生效的范围里。
+
+    这是"没记"与"丢了"的分界（WORLD-1 存档增长设计 §3.3）：record 生效时每个
+    时钟步都写一条时间事件，所以那里出现空档只能是存档缺了事件。
+    """
+    world = state.world_state
+    if world is None:
+        return
+    policy = state.time_events
+    if policy.records and policy.records[-1].from_sim > world.clock:
+        raise SessionStateError("时间事件策略的拨动时刻晚于世界时钟")
+    # 起点跟着存档走，所以能拿到别的独立记录就交叉核对：正式世界的开局时刻、
+    # 认知时间线开张的那一刻，都是绑定世界时的时钟。
+    origin = world.metadata.get("origin") if isinstance(world.metadata, dict) else None
+    if isinstance(origin, dict) and origin.get("start") is not None:
+        try:
+            start = datetime.fromisoformat(origin["start"])
+        except (TypeError, ValueError):
+            raise SessionStateError("开局来源的 start 不是 ISO 时间") from None
+        if start != policy.epoch:
+            raise SessionStateError("时间事件链的起点与正式世界的开局时刻不一致")
+    timeline = state.cognition
+    if timeline is not None:
+        first = timeline.intervals[0]
+        if first.opened_by is TransitionKind.OPENED and first.opened_at_sim != policy.epoch:
+            raise SessionStateError("时间事件链的起点与认知时间线开张的时刻不一致")
+    steps = (
+        (event.occurred_at, int(event.payload["minutes"]))
+        for event in state.events.by_type(EventType.WORLD_TIME_ADVANCED)
+    )
+    try:
+        gaps = time_gaps(steps, world.clock, policy.epoch)
+    except TimeEventPolicyError as e:
+        raise SessionStateError(str(e)) from e
+    # 到期只会在一次**记下来**的推进里触发，而那条时间事件带着它：每条到期记录
+    # 的触发时刻都必须有一条时间事件正好推到那里、并列出它。于是在 skip 生效的
+    # 范围里删掉一条不安静的时间事件，也不会被当成"没记"（第三方反向测试 B）。
+    reached = {}
+    for event in state.events.by_type(EventType.WORLD_TIME_ADVANCED):
+        moment = event.occurred_at + timedelta(minutes=int(event.payload["minutes"]))
+        reached.setdefault(moment, set()).update(
+            event.provenance.get("due_activations", ()) if event.provenance else ()
+        )
+    for due in state.activation_outbox.records():
+        if due.fired_at > policy.epoch and due.activation_id not in reached.get(due.fired_at, ()):
+            raise SessionStateError(
+                f"到期记录 '{due.due_id}' 在 {due.fired_at.isoformat()} 触发，却没有时间事件"
+                "推到那一刻 —— 存档缺了事件"
+            )
+    for start, end in gaps:
+        if not policy.covers(start, end):
+            raise SessionStateError(
+                f"世界历史在 {start.isoformat()} 到 {end.isoformat()} 之间没有时间事件，"
+                "而这段时间里安静的分钟是要记录的 —— 存档缺了事件"
+            )
+
+
+def _validate_cognition(state: "SessionState") -> None:
+    """每条 Agency 记录的认知判定，都必须能从这份存档本身重新推出来。
+
+    时间线开始之前的记录不受约束（那时世界还不区分认知可用）；之后的每一条：
+    按日志位置找到区间（最右边界），用与运行时同一个函数算出不可用原因；
+    非空 ⇔ 记录是 REJECTED_UNAVAILABLE 且原因、区间序号一致。
+    """
+    timeline = state.cognition
+    records = state.agency.records()
+    if timeline is None:
+        for record in records:
+            if record.outcome is AgencyOutcome.REJECTED_UNAVAILABLE:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 声称认知不可用，但这个会话没有认知时间线"
+                )
+        return
+    if timeline.current.from_log > len(records):
+        raise SessionStateError("认知时间线的区间起点超过了 Agency 日志长度")
+    outbox = state.activation_outbox
+    for position, record in enumerate(records):
+        interval = timeline.locate(position)
+        if interval is None:
+            if record.outcome is AgencyOutcome.REJECTED_UNAVAILABLE:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 早于认知时间线，却声称认知不可用"
+                )
+            continue
+        due = outbox.get(record.due_id)
+        causes = unavailable_causes(interval, due.fired_at)
+        unavailable = record.outcome is AgencyOutcome.REJECTED_UNAVAILABLE
+        if bool(causes) != unavailable:
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}'（位置 {position}）与认知时间线区间 "
+                f"{interval.index} 的判定不一致"
+            )
+        if unavailable and (
+            list(record.detail["causes"]) != sorted(cause.value for cause in causes)
+            or record.detail["interval"] != interval.index
+        ):
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 的不可用原因或区间序号与时间线不一致"
+            )
+        if not unavailable and record.detail.get("cognition_interval") != interval.index:
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 没有写明它所在的认知区间 {interval.index}"
+            )
+        if interval.run_allowance is not None and consumes_allowance(record.outcome):
+            used = sum(
+                1
+                for earlier in records[interval.allowance_since_log : position + 1]
+                if consumes_allowance(earlier.outcome)
+            )
+            if used > interval.run_allowance:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 超出了单次额度 {interval.run_allowance}"
+                )
+            if (
+                used == interval.run_allowance
+                and CognitionCause.RUN_BUDGET_EXHAUSTED not in interval.causes
+                and not _opens_exhaustion(timeline, interval, position + 1)
+            ):
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 用完了单次额度，紧随其后却没有"
+                    f"额度耗尽的区间"
+                )
+    # 额度耗尽区间只能开在"用完最后一次额度的那条记录"之后，不能挪早也不能挪晚。
+    for interval in timeline.intervals[1:]:
+        if interval.opened_by is not TransitionKind.RUN_BUDGET_EXHAUSTED:
+            continue
+        previous = timeline.intervals[interval.index - 1]
+        spent = [
+            consumes_allowance(record.outcome)
+            for record in records[previous.allowance_since_log : interval.from_log]
+        ]
+        if sum(spent) != previous.run_allowance or not spent or not spent[-1]:
+            raise SessionStateError(
+                f"认知区间 {interval.index} 声称额度耗尽，但 Agency 日志在那里并没有"
+                f"恰好用完额度 {previous.run_allowance}"
+            )
+
+
+def _opens_exhaustion(timeline, interval, log_position: int) -> bool:
+    """interval 之后紧接着的是不是一个从 log_position 开始的额度耗尽区间。"""
+    following = timeline.intervals[interval.index + 1 : interval.index + 2]
+    return bool(following) and (
+        following[0].opened_by is TransitionKind.RUN_BUDGET_EXHAUSTED
+        and following[0].from_log == log_position
+    )
+
+
 def _parse_clock(value, label: str) -> Optional[datetime]:
     if value is None:
         return None
@@ -1034,6 +1534,14 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
             raise SessionStateError("没有世界状态的会话不能持有 Agency 记录")
         return
     outbox = state.activation_outbox
+    # 反过来也必须成立：确认过的到期资格一定有一条 Agency 记录说明它的结局
+    # （ack ⇔ record，设计 §13.5）。否则存档可以声称"这条处理过了"却说不出
+    # 结果是什么——恢复后它既不待处理、也不会重试，静默丢失。
+    for due_id in outbox.acknowledged_ids():
+        if not log.has(due_id):
+            raise SessionStateError(
+                f"到期资格 '{due_id}' 已被确认，却没有任何 Agency 记录说明它的结局"
+            )
     for record in log.records():
         if record.decided_at > clock:
             raise SessionStateError(

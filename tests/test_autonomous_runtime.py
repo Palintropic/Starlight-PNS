@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from grants_support import grant_everything
 from pns.models.action import (
     ActionEventMismatch,
     ActionId,
@@ -64,7 +65,7 @@ from pns.runtime.autonomy.generation import (
 from pns.runtime.autonomy.outcome import ActivationOutcome, RetryPolicy
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.memory.recall import MemoryRecall
-from pns.runtime.scheduler import PersistentScheduler
+from pns.runtime.scheduler import PersistentScheduler, SchedulerError
 from pns.runtime import session_runtime as session_runtime_mod
 from pns.runtime.reload import SessionSupervisor
 from pns.runtime.session_runtime import SessionRuntime
@@ -82,6 +83,7 @@ def _world(clock=CLOCK, *, join_nightcord=("mizuki", "ena")):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     world.place_character("mizuki", "mizuki_home_room")
     world.place_character("ena", "ena_home_studio")
     for character_id in join_nightcord:
@@ -144,6 +146,26 @@ def _due(
         )
     )
     return scheduler.advance_by(minutes).due[0]
+
+
+def _dues_together(scheduler, *specs, minutes=5):
+    """几条激活排在同一刻，一次推进一起触发。
+
+    挂了自主运行时的会话，投递箱里还有没结局的到期时时钟不许再走（WORLD-1
+    设计 §5.2），所以要同时持有几条待处理的到期，只能让它们同一步触发。
+    specs 是 (activation_id, character_id)。
+    """
+    for activation_id, character_id in specs:
+        scheduler.schedule(
+            ScheduledActivation(
+                activation_id=activation_id,
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=scheduler.clock + timedelta(minutes=minutes),
+                character_id=character_id,
+            )
+        )
+    fired = {due.activation_id: due for due in scheduler.advance_by(minutes).due}
+    return [fired[activation_id] for activation_id, _ in specs]
 
 
 def _proposal(character_id="mizuki", text="在的哦", proposal_id="p1"):
@@ -936,8 +958,7 @@ class FullLoopTests(unittest.TestCase):
 class TerminalOutcomeTests(unittest.TestCase):
     def test_every_due_reaches_a_terminal_outcome_or_stays_pending(self):
         state, scheduler, runtime = _rig()
-        for index in range(3):
-            _due(scheduler, f"a{index}", minutes=5)
+        _dues_together(scheduler, *((f"a{index}", "mizuki") for index in range(3)))
         results = runtime.process_pending()
         self.assertEqual(len(results), 3)
         for result in results:
@@ -1631,14 +1652,13 @@ class StopCommitLinearizationTests(unittest.TestCase):
     def test_a_crashed_transaction_does_not_wedge_the_gate(self):
         # 事务里抛异常之后闸门必须已经释放，否则下一条到期会永远卡住。
         state, scheduler, runtime = _rig()
-        first = _due(scheduler, "x1", minutes=2)
+        first, second = _dues_together(scheduler, ("x1", "mizuki"), ("x2", "ena"), minutes=2)
         state.events._append = lambda event: (_ for _ in ()).throw(RuntimeError("炸"))
         self.assertIs(
             runtime.process_due(first).outcome, ActivationOutcome.FAILED_RETRYABLE
         )
         del state.events._append
 
-        second = _due(scheduler, "x2", minutes=2)
         worker, box = self._run_in_thread(lambda: runtime.process_due(second))
         result = self._join(worker, box, "闸门崩溃之后的下一条")
         self.assertIs(result.outcome, ActivationOutcome.ACTED)
@@ -1773,11 +1793,11 @@ class LifecycleLinearizationTests(unittest.TestCase):
 
     def test_status_is_a_consistent_snapshot_under_concurrent_lifecycle_changes(self):
         state, scheduler, runtime = _rig()
-        dues = [
-            _due(scheduler, f"s{index}", character_id=("mizuki", "ena")[index % 2],
-                 minutes=2)
-            for index in range(6)
-        ]
+        dues = _dues_together(
+            scheduler,
+            *((f"s{index}", ("mizuki", "ena")[index % 2]) for index in range(6)),
+            minutes=2,
+        )
         torn = []
         done = threading.Event()
 
@@ -1875,8 +1895,7 @@ class ConcurrentProcessingTests(unittest.TestCase):
 
     def test_different_dues_commit_concurrently_without_corruption(self):
         state, scheduler, runtime = _rig()
-        first = _due(scheduler, "a0", character_id="mizuki", minutes=5)
-        second = _due(scheduler, "a1", character_id="ena", minutes=5)
+        first, second = _dues_together(scheduler, ("a0", "mizuki"), ("a1", "ena"))
         results = {}
         ready = threading.Barrier(2, timeout=self.TIMEOUT)
 
@@ -1900,7 +1919,7 @@ class ConcurrentProcessingTests(unittest.TestCase):
         self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 2)
         self.assertEqual(len(state.agency), 2)
         self.assertEqual(state.activation_outbox.pending(), ())
-        # 世界历史仍然自洽：事件 ID 全局唯一（含两条时钟推进），序号连续，
+        # 世界历史仍然自洽：事件 ID 全局唯一（含时钟推进），序号连续，
         # 没有被并发写坏。
         events = state.events.events()
         self.assertEqual(len(set(e.event_id for e in events)), len(events))
@@ -1955,6 +1974,91 @@ class ConcurrentProcessingTests(unittest.TestCase):
         )
         self.assertIs(runtime.process_due(due).outcome, ActivationOutcome.ACTED)
         self.assertEqual(len(state.events.by_type(EventType.MESSAGE_SENT)), 1)
+
+
+class ClockWaitsForItsDuesTests(unittest.TestCase):
+    """审查 F1 / 设计 §5.2：本步的可用到期没处理完，下一个时钟步不开始。"""
+
+    def _schedule(self, scheduler, activation_id, minutes, character_id="mizuki"):
+        scheduler.schedule(
+            ScheduledActivation(
+                activation_id=activation_id,
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=CLOCK + timedelta(minutes=minutes),
+                character_id=character_id,
+            )
+        )
+
+    def test_a_zero_allowance_holds_the_clock_at_the_due(self):
+        # 23:50 排一条 23:55 的到期，额度 0 推进 10 分钟：时钟不许越过 23:55。
+        state, scheduler, runtime = _rig()
+        self._schedule(scheduler, "wake", 5)
+        report = runtime.advance(10, max_results=0)
+        self.assertEqual(report["results"], [])
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+        self.assertEqual(len(state.activation_outbox.pending()), 1)
+
+        # 下一次推进先处理它——在它自己那一刻——然后时钟才继续走。
+        report = runtime.advance(10)
+        (result,) = report["results"]
+        self.assertEqual(result["outcome"], ActivationOutcome.ACTED.value)
+        (record,) = state.agency.records()
+        self.assertEqual(record.decided_at, CLOCK + timedelta(minutes=5))
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=15))
+
+    def test_an_allowance_running_out_mid_advance_stops_at_the_next_due(self):
+        state, scheduler, runtime = _rig()
+        self._schedule(scheduler, "first", 2)
+        self._schedule(scheduler, "second", 5, character_id="ena")
+        report = runtime.advance(10, max_results=1)
+        self.assertEqual(len(report["results"]), 1)
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+        self.assertEqual(
+            [due.activation_id for due in state.activation_outbox.pending()], ["second"]
+        )
+
+    def test_the_scheduler_cannot_step_past_a_pending_due_either(self):
+        # R2-F1：栅栏不能只在 coordinator 里。runtime.scheduler 是公开的；
+        # 它的推进入口同样不许越过一条没结局的到期（包括正被别的线程处理的）。
+        state, scheduler, runtime = _rig()
+        self._schedule(scheduler, "wake", 5)
+        runtime.advance(10, max_results=0)  # 停在 23:55，到期待处理
+        for name, step in {
+            "advance_by": lambda: runtime.scheduler.advance_by(5),
+            "advance_to": lambda: runtime.scheduler.advance_to(
+                CLOCK + timedelta(minutes=10)
+            ),
+            "advance_to_next_due": runtime.scheduler.advance_to_next_due,
+        }.items():
+            with self.subTest(name):
+                self._schedule(scheduler, f"later-{name}", 30)
+                before = state.to_dict()
+                with self.assertRaises(SchedulerError):
+                    step()
+                self.assertEqual(state.to_dict(), before)
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+
+    def test_a_retryable_failure_holds_the_clock_until_it_is_settled(self):
+        calls = {"n": 0}
+
+        def flaky(context):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise GenerationError("模型暂时不可用", retryable=True)
+            return "在的哦"
+
+        state, scheduler, runtime = _rig(lines={"mizuki": flaky})
+        self._schedule(scheduler, "wake", 5)
+        report = runtime.advance(10)
+        (result,) = report["results"]
+        self.assertEqual(result["outcome"], ActivationOutcome.FAILED_RETRYABLE.value)
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=5))
+
+        runtime.advance(10)
+        (record,) = state.agency.records()
+        self.assertIs(record.outcome, AgencyOutcome.ACTED)
+        self.assertEqual(record.decided_at, CLOCK + timedelta(minutes=5))
+        self.assertEqual(state.world_state.clock, CLOCK + timedelta(minutes=15))
 
 
 class ServiceApiTests(unittest.TestCase):

@@ -39,14 +39,21 @@
 # 什么都不会到期，而且 session_runtime.py 不 import 这个包（有 AST 测试盯着）。
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Mapping, Optional, Set, Tuple
 
 from pns.models.activation import ActivationDue
 from pns.models.agency import AgencyBudget, AgencyOutcome
 from pns.models.authored import GenerationAudit
+from pns.models.clock_anchor import ClockAnchor, utc_now
+from pns.models.cognition import (
+    OPERATOR_CLEARABLE,
+    CognitionTimeline,
+    consumes_allowance,
+)
 from pns.models.event import Event, EventType
 from pns.models.session import SessionState
+from pns.models.time_events import QuietTime, quiet_time_report
 from pns.models.world_state import WorldState
 from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
 from pns.runtime.autonomy.audit import AuditError, AuditRequest
@@ -59,7 +66,7 @@ from pns.runtime.autonomy.outcome import (
 )
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.memory.recall import MemoryRecall
-from pns.runtime.event_commit import commit_session_event
+from pns.runtime.event_commit import _commit_rhythm_event, commit_session_event
 from pns.runtime.rhythm import RhythmDirector
 from pns.runtime.scheduler import PersistentScheduler
 
@@ -74,6 +81,10 @@ class AutonomyError(ValueError):
     它跟 ActivationOutcome 里的失败码是两类东西：失败码是"处理过，结论是
     没成"，会留下可查的结果；AutonomyError 是"这次调用的前提就不成立"。
     """
+
+
+class _NotQuiet(Exception):
+    """按安静的一步走，作息却在这一刻交出了事件：整步回滚，改记录模式重走。"""
 
 
 class AutonomousRuntime:
@@ -158,6 +169,8 @@ class AutonomousRuntime:
         # 谁正在事务里、嵌了几层。提交全程持锁，所以同一时刻至多一个线程。
         self._committing_thread: Optional[int] = None
         self._committing_depth = 0
+        # 正在走时钟步的线程。挂着作息的世界只让这里推时钟（见 _owns_clock_step）。
+        self._clock_step_thread: Optional[int] = None
         # 正在处理中的到期资格。同一条被两个线程同时处理不会重复提交（交接
         # 是一次性的，提案身份也是推导出来的），但会白跑两次生成和两次判分，
         # 而且第二个线程会在提交那一刻拿到一个含义不明的交接错误。响亮拒绝
@@ -432,6 +445,25 @@ class AutonomousRuntime:
     def _process(self, due: ActivationDue, attempt: int) -> ActivationResult:
         """一条到期资格的实际处理。慢调用都在这里，而且都在闸门之外。"""
 
+        # ── 认知不可用：不问策略、不调模型，当场收尾（设计 §5.2） ────────
+        # 判定与提交在同一次持锁里：时间线的转换也走这把闸门，查完到写入之间
+        # 它变不了。
+        with self._gate:
+            if self._running and self._agency.unavailable_causes_for(due):
+                return self._record(
+                    self._commit_admitted(
+                        due,
+                        ProposalPlan(
+                            due=due,
+                            character_id=self._agency._require_character(due),
+                            policy="",
+                            proposed_at=self.clock,
+                            verdict=AgencyOutcome.REJECTED_UNAVAILABLE,
+                        ),
+                        attempt,
+                    )
+                )
+
         # ── 提案（含生成，纯的） ───────────────────────────────────────
         plan = self._agency.propose(due)
         if not self._running:
@@ -526,77 +558,490 @@ class AutonomousRuntime:
 
     # ── 日常作息 ────────────────────────────────────────────────────────
     def apply_rhythm(self) -> Tuple[Dict, ...]:
-        """把世界对齐到内容作者写下的作息表，返回这次提交的事件投影。
+        """把世界对齐到此刻的作息，返回这次提交的事件投影。
 
-        产品路径上只有一处调用它：模拟时间刚刚往前走过之后（见 `_tick_report`）。
-        它本身是幂等的、只依赖当前时钟，所以多调一次不会多提交一条 —— 但时钟
-        不动的世界不会因此产生作息变更：作息表是时间的函数，不是后台循环。
-
-        整批变更共用**一个**事务：一个"人到了店里、却还在家里画画"的中间态
-        比晚一拍对齐糟糕得多。任何一条提交失败，这一批一起回滚，而且下一次
-        推进会重新算出同样的一批 —— 判据是世界历史（当前时段里这个角色有没有
-        提交过状态变更），不是内存里的标记。
-
-        它跟 `commit_external_event()` 走同一条闸门与停机语义：停机之后不提交。
+        产品路径上它发生在每一个时钟步里（见 `_clock_step_locked`）；这个公开
+        入口只在当前时刻单独对齐一次，给操作面和测试用。它是幂等的：判据是世界
+        历史，不是内存里的标记。整批变更共用**一个**事务，并跟
+        `commit_external_event()` 走同一条闸门与停机语义：停机之后不提交。
         """
         if self._rhythm is None:
             return ()
         with self._gate:
             if not self._running:
-                # 还没启动，或者已经停了。什么都不碰 —— 下一次启动后的推进会
-                # 重新算出该补的那几条。
                 return ()
-            plan = self._rhythm.plan(
-                self.world,
-                self._state.events,
-                correlation_id=self._state.session_id,
-            )
-            if not plan:
-                return ()
-            committed: List[Dict] = []
             with self._committing():
                 with self._state.atomic_commit():
-                    for event in plan:
-                        committed.append(commit_session_event(self._state, event))
-            return tuple(committed)
+                    return self._apply_rhythm_locked()
+
+    def _apply_rhythm_locked(self) -> Tuple[Dict, ...]:
+        """调用方持着闸门和事务。提交作息事件，记下新发现"走不到"的段。"""
+        if self._rhythm is None:
+            return ()
+        state = self._state
+        step = self._rhythm.plan_step(
+            self.world,
+            state.events,
+            correlation_id=state.session_id,
+            dispositions=state.rhythm_dispositions,
+        )
+        committed = tuple(_commit_rhythm_event(state, event) for event in step.events)
+        if step.unreachable:
+            state.add_rhythm_dispositions(step.unreachable)
+        return committed
+
+    # ── 认知时间线与锚点（WORLD-1 设计 §2、§5、§13–§14） ────────────────
+    #
+    # 每次转换都在闸门内、在一个事务里完成：它与 Agency 记录的追加、时钟步
+    # 共用同一个全序。转换的模拟分钟有两种来源（见 CognitionInterval）：
+    # 按时钟生效的记当时的时钟；按现实时间生效的记锚点分钟，但不早于时钟——
+    # 已经触发的到期都发生在它之前。
+    def open_clock(self, anchor: ClockAnchor, *, wall: Optional[datetime] = None) -> None:
+        """新世界：时间从锚点开始走，认知从"还没 Start"开始。只在建世界时调用。"""
+        if not isinstance(anchor, ClockAnchor):
+            raise AutonomyError("open_clock 需要一个 ClockAnchor")
+        stamp = self._wall(wall)
+
+        def change(state: SessionState) -> None:
+            if state.cognition is not None:
+                raise AutonomyError("这个世界已经有认知时间线了")
+            state.set_cognition(
+                CognitionTimeline.open(
+                    log_length=len(state.agency), sim=self.clock, wall=stamp
+                )
+            )
+            state.set_anchor(anchor)
+
+        self._ledger(change)
+
+    def restore_clock(self, *, wall: Optional[datetime] = None) -> Dict:
+        """从存档恢复：停机期间的一律 process_stopped；现实时钟若落后于存档时钟，
+        另开 wall_clock_behind，时间不倒退、也不重锚（设计 §2）。"""
+        anchor = self._require_anchor()
+        wall = wall if wall is not None else utc_now()
+        stamp = self._wall(wall)
+        target = anchor.minute_at(wall)
+
+        def change(state: SessionState) -> None:
+            timeline = state.cognition.restored(
+                log_length=len(state.agency), sim=max(target, self.clock), wall=stamp
+            )
+            if target < self.clock:
+                timeline = timeline.wall_clock_behind(
+                    log_length=len(state.agency), sim=self.clock, wall=stamp
+                )
+            state.set_cognition(timeline)
+
+        self._ledger(change)
+        return self.cognition_status(wall)
+
+    def start_cognition(
+        self, run_allowance: Optional[int], *, wall: Optional[datetime] = None
+    ) -> Dict:
+        """操作员 Start：清掉操作员层面的原因，装满单次额度。
+
+        从下一个完整模拟分钟起生效：补跑途中按下 Start，停机期间触发的到期
+        仍然不可用（设计 §5.1）。故障、现实时钟落后、世界上限不归它管——
+        它们还在时，Start 成功返回，但如实报告认知仍不可用。
+        """
+        wall = wall if wall is not None else utc_now()
+        with self._gate:
+            self._require_running("Start")
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).started(
+                    log_length=len(state.agency),
+                    sim=self._anchor_minute(wall),
+                    wall=self._wall(wall),
+                    run_allowance=run_allowance,
+                )
+            )
+        )
+        return self.cognition_status(wall)
+
+    def stop_cognition(self, *, wall: Optional[datetime] = None) -> Dict:
+        """操作员 Stop：从此刻起认知不可用。时间照走、作息照走。
+
+        已经处于操作员层面的不可用（还没 Start、已经 Stop、额度已用完）时
+        什么都不写。
+        """
+        wall = wall if wall is not None else utc_now()
+
+        def change(state: SessionState) -> None:
+            timeline = self._timeline(state)
+            if timeline.current.causes & OPERATOR_CLEARABLE:
+                return
+            state.set_cognition(
+                timeline.stopped(
+                    log_length=len(state.agency), sim=self.clock, wall=self._wall(wall)
+                )
+            )
+
+        self._ledger(change)
+        return self.cognition_status(wall)
+
+    def begin_fault(self, *, wall: Optional[datetime] = None) -> None:
+        """时钟 worker 进入故障（设计 §7.2）。按时钟生效。"""
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).fault_began(
+                    log_length=len(state.agency), sim=self.clock, wall=self._wall(wall)
+                )
+            )
+        )
+
+    def clear_fault(self, *, wall: Optional[datetime] = None) -> None:
+        """故障解除。补跑经过的故障时段触发的到期仍带 fault（backlog）。"""
+        wall = wall if wall is not None else utc_now()
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).fault_cleared(
+                    log_length=len(state.agency),
+                    sim=self._anchor_minute(wall),
+                    wall=self._wall(wall),
+                )
+            )
+        )
+
+    def mark_wall_clock_behind(self, *, wall: Optional[datetime] = None) -> None:
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).wall_clock_behind(
+                    log_length=len(state.agency), sim=self.clock, wall=self._wall(wall)
+                )
+            )
+        )
+
+    def mark_wall_clock_caught_up(self, *, wall: Optional[datetime] = None) -> None:
+        wall = wall if wall is not None else utc_now()
+        self._ledger(
+            lambda state: state.set_cognition(
+                self._timeline(state).wall_clock_caught_up(
+                    log_length=len(state.agency),
+                    sim=self._anchor_minute(wall),
+                    wall=self._wall(wall),
+                )
+            )
+        )
+
+    def rebase_anchor(self, rate, *, wall: Optional[datetime] = None) -> None:
+        """换倍率：新锚点从此刻的精确模拟时刻起算，时间不跳、不丢秒（设计 §2）。"""
+        anchor = self._require_anchor()
+        wall = wall if wall is not None else utc_now()
+        self._ledger(lambda state: state.set_anchor(anchor.rebased(wall, rate)))
+
+    def decide_content(self, conflict_id: str, decision: str, *, wall: Optional[datetime] = None) -> None:
+        """记一次项目所有者对内容冲突的决定（见 pns/models/content_ledger.py）。"""
+        stamp = self._wall(wall)
+
+        def change(state: SessionState) -> None:
+            if state.content is None:
+                raise AutonomyError("这个世界没有内容账本（不是正式世界）")
+            try:
+                state.set_content(state.content.decided(conflict_id, decision, wall=stamp))
+            except ValueError as e:
+                raise AutonomyError(str(e)) from e
+
+        self._ledger(change)
+
+    def cognition_status(self, wall: Optional[datetime] = None) -> Optional[Dict]:
+        """认知此刻可不可用、为什么，额度还剩多少；锚点换算出的此刻与时钟差多少。"""
+        state = self._state
+        timeline = state.cognition
+        if timeline is None:
+            return None
+        current = timeline.current
+        remaining = None
+        if current.run_allowance is not None:
+            used = sum(
+                1
+                for record in state.agency.records()[current.allowance_since_log :]
+                if consumes_allowance(record.outcome)
+            )
+            remaining = max(0, current.run_allowance - used)
+        report = {
+            "available": current.available,
+            "causes": sorted(cause.value for cause in current.causes),
+            "interval": current.index,
+            "run_allowance": current.run_allowance,
+            "run_remaining": remaining,
+            "anchor": state.anchor.to_dict() if state.anchor is not None else None,
+            "anchor_minute": None,
+            "lag_minutes": None,
+        }
+        if state.anchor is not None:
+            minute = state.anchor.minute_at(wall if wall is not None else utc_now())
+            report["anchor_minute"] = minute.isoformat()
+            report["lag_minutes"] = int((minute - self.clock).total_seconds() // 60)
+        return report
+
+    def _ledger(self, change) -> None:
+        with self._gate:
+            with self._committing():
+                with self._state.atomic_commit():
+                    change(self._state)
+
+    def _timeline(self, state: SessionState) -> CognitionTimeline:
+        if state.cognition is None:
+            raise AutonomyError("这个世界没有认知时间线（不是持久世界）")
+        return state.cognition
+
+    def _require_anchor(self) -> ClockAnchor:
+        anchor = self._state.anchor
+        if anchor is None or self._state.cognition is None:
+            raise AutonomyError("这个世界没有时钟锚点（不是按现实时间走的持久世界）")
+        return anchor
+
+    def _anchor_minute(self, wall: datetime) -> datetime:
+        """按现实时间生效的转换的模拟分钟：锚点分钟，但不早于时钟。"""
+        anchor = self._state.anchor
+        if anchor is None:
+            return self.clock
+        return max(anchor.minute_at(wall), self.clock)
+
+    @staticmethod
+    def _wall(wall: Optional[datetime]) -> str:
+        return (wall if wall is not None else utc_now()).isoformat()
 
     # ── 推进模拟时钟 ────────────────────────────────────────────────────
     def advance(self, minutes: int, *, max_results: Optional[int] = None) -> Dict:
-        """把模拟时间往前推，并处理这段时间里到期的一切。
+        """把模拟时间往前推 minutes 分钟，**逐边界**推进并处理途中到期的一切。
 
-        时间推进本身是调度器的事务（时钟 + 世界历史 + 队列 + 投递箱同生
-        共死），这里不重复它，也不绕过它。
+        不会一步跳过去：作息边界、行程的每一跳、每一条到期激活都是一个时钟步，
+        各自以自己的时刻提交（WORLD-1 设计 §3–§4）。一步跨过几段作息会把中间的
+        上学、回家压成终点时刻，那是瞬移。
         """
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+            raise AutonomyError(f"minutes 必须是正整数，收到 {minutes!r}")
         with self._gate:
             self._require_running("推进模拟时钟")
-            tick = self._scheduler.advance_by(minutes)
-        # 保留既有的 `_tick_report(tick)` 调用形状：生命周期并发测试会替换这条
-        # 内部缝来精确停在“推进后、处理前”。只有驱动真的交了额度时才扩展参数。
-        if max_results is None:
-            return self._tick_report(tick)
-        return self._tick_report(tick, max_results=max_results)
+            target = self.world.clock + timedelta(minutes=minutes)
+        return self._advance_until(target, max_results=max_results)
 
     def advance_to_next_due(self) -> Optional[Dict]:
         """推进到下一条排期到期的那一刻；队列为空就返回 None，不动时钟。"""
         with self._gate:
             self._require_running("推进模拟时钟")
-            tick = self._scheduler.advance_to_next_due()
-            if tick is None:
+            due_at = self._scheduler.next_due_at()
+            if due_at is None:
                 return None
-        return self._tick_report(tick)
+            target = _ceil_minute(due_at)
+        return self._advance_until(target)
+
+    def _advance_until(
+        self,
+        target: datetime,
+        *,
+        max_results: Optional[int] = None,
+        max_steps: Optional[int] = None,
+        keep_going=None,
+    ) -> Dict:
+        """一个时钟步接一个时钟步，推进到 target。每步之后处理本步可用的到期资格。
+
+        时钟步本身是原子的（见 `_clock_step_locked`）；步与步之间 checkpoint、
+        close、stop 都可以插进来，插进来之后看到的是一个完整的边界。停机之后不再
+        开新的一步。
+
+        投递箱里还有待处理的到期资格时，**不开下一步**（设计 §5.2）：到期问的是
+        它触发那一刻的世界，时钟、作息、位置先走过去，它再被处理就是在回答一个
+        更晚的世界。额度（`max_results`）用完、可重试失败、别的线程正拿着——
+        无论哪种原因没处理完，时钟都停在这一刻，等下一次调用先把它们处理掉。
+        """
+        from_clock = self.world.clock
+        due_ids: List[str] = []
+        rhythm_events: List[str] = []
+        results: List[Dict] = []
+        remaining = max_results
+        steps = 0
+
+        def process(tick=None) -> None:
+            nonlocal remaining
+            if tick is None:
+                batch = [r.to_dict() for r in self.process_pending(max_results=remaining)]
+            elif remaining is None:
+                # 保留既有的 `_tick_report(tick)` 调用形状：生命周期并发测试会替换
+                # 这条内部缝来精确停在"推进后、处理前"。
+                batch = self._tick_report(tick)["results"]
+            else:
+                batch = self._tick_report(tick, max_results=remaining)["results"]
+            if remaining is not None:
+                remaining = max(0, remaining - len(batch))
+            results.extend(batch)
+
+        # 上一次调用留下的（额度用完、可重试失败、恢复前就待处理的）先处理。
+        if self._agency.pending_due():
+            process()
+        while True:
+            with self._gate:
+                if (
+                    not self._running
+                    or self.world.clock >= target
+                    or self._agency.pending_due()
+                    or (max_steps is not None and steps >= max_steps)
+                    or (keep_going is not None and not keep_going())
+                ):
+                    break
+                tick, transitions = self._clock_step_locked(target)
+                steps += 1
+            due_ids.extend(tick.due_ids)
+            rhythm_events.extend(record["event_id"] for record in transitions)
+            process(tick)
+        to_clock = self.world.clock
+        return {
+            "from_clock": from_clock.isoformat(),
+            "to_clock": to_clock.isoformat(),
+            "minutes": int((to_clock - from_clock).total_seconds() // 60),
+            "due_ids": due_ids,
+            "rhythm_events": rhythm_events,
+            "results": results,
+        }
+
+    def advance_to_anchor(
+        self,
+        wall: Optional[datetime] = None,
+        *,
+        max_steps: Optional[int] = None,
+        keep_going=None,
+    ) -> Dict:
+        """把世界往锚点换算出的此刻推（时钟 worker 的一轮）。
+
+        先处理遗留的到期，再一步一步走向 `floor(anchor_now)`；`max_steps` 让
+        调用方把一次长补跑切成几段；`keep_going` 在每一步之前问一次，返回假就
+        停在当前边界。锚点落后于时钟
+        （现实时钟被往回拨）时不倒退、不前进。
+        """
+        anchor = self._require_anchor()
+        target = anchor.minute_at(wall if wall is not None else utc_now())
+        with self._gate:
+            self._require_running("推进模拟时钟")
+        if target <= self.world.clock:
+            # 不走，但遗留的到期照样要处理：它们不需要时间前进。
+            target = self.world.clock
+        return self._advance_until(target, max_steps=max_steps, keep_going=keep_going)
+
+    def _clock_step_locked(self, target: datetime):
+        """一个时钟步。调用方持着闸门。
+
+        推进到 min(下一个作息/行程边界, 下一条到期, target)，并在**同一个事务**里
+        完成这一刻的全部确定性后果：时钟与时间事件、作息与行程、频道进出、以及
+        此刻认知不可用的到期资格的收尾。任何一步失败整步回滚；checkpoint 与
+        close 走同一把闸门和会话边界，只可能看到步前或步后（设计 §3.1）。
+
+        世界拨到"安静的分钟不记"时（存档增长设计 §3），落点既不是到期也不是
+        作息边界的一步先按安静的一步走：只推时钟、不写时间事件。作息若仍在这
+        一刻交出了事件（它本该在 next_boundary_after 里声明），这一步不算安静：
+        整步回滚，按记录模式重走一遍。宁可多记一条，也不让时钟卡住。
+        """
+        if self._quiet_time_skipped():
+            try:
+                return self._clock_step_once(target, quiet=True)
+            except _NotQuiet:
+                pass
+        return self._clock_step_once(target, quiet=False)
+
+    def _quiet_time_skipped(self) -> bool:
+        policy = self._state.time_events
+        return policy is not None and policy.current is QuietTime.SKIP
+
+    def _owns_clock_step(self) -> bool:
+        """本线程此刻是不是正在走协调器的时钟步。
+
+        调度器凭它判断一次推进是不是来自同一份"到期 + 作息边界"的计划：挂着作息
+        的世界，时间从别处往前推会跳过作息、行程、频道的确定性后果（全量审查 R2-F2）。
+        """
+        return self._clock_step_thread == threading.get_ident()
+
+    def _clock_step_once(self, target: datetime, *, quiet: bool):
+        self._clock_step_thread = threading.get_ident()
+        try:
+            return self._clock_step_body(target, quiet=quiet)
+        finally:
+            self._clock_step_thread = None
+
+    def _clock_step_body(self, target: datetime, *, quiet: bool):
+        state = self._state
+        with self._committing():
+            with state.atomic_commit():
+                clock = self.world.clock
+                candidates = [target]
+                due_at = self._scheduler.next_due_at()
+                boundaries = set()
+                if due_at is not None:
+                    candidates.append(_ceil_minute(due_at))
+                    boundaries.add(_ceil_minute(due_at))
+                if self._rhythm is not None:
+                    boundary = self._rhythm.next_boundary_after(
+                        self.world,
+                        state.events,
+                        dispositions=state.rhythm_dispositions,
+                    )
+                    if boundary is not None:
+                        candidates.append(boundary)
+                        boundaries.add(boundary)
+                step_to = min(moment for moment in candidates if moment > clock)
+                silent = quiet and step_to not in boundaries
+                tick = (
+                    self._scheduler._advance_quietly(step_to)
+                    if silent
+                    else self._scheduler.advance_to(step_to)
+                )
+                transitions = self._apply_rhythm_locked()
+                if silent and transitions:
+                    raise _NotQuiet()
+                self._close_unavailable_dues(tick.due)
+        return tick, transitions
+
+    # ── 安静的分钟（存档增长设计 §3）───────────────────────────────────
+    def set_quiet_time_events(
+        self, record: bool, *, wall: Optional[datetime] = None
+    ) -> Dict:
+        """拨"记录安静的分钟"。只影响之后：已经写下的时间事件一条都不动。
+
+        拨动与策略记录在同一个事务里，from_sim 是此刻的世界时钟（闸门内，
+        与时钟步全序）。值与当前相同不是拨动，不记，changed=False。
+        """
+        if not isinstance(record, bool):
+            raise AutonomyError("record 必须是布尔值")
+        value = QuietTime.RECORD if record else QuietTime.SKIP
+        stamp = self._wall(wall)
+        changed = []
+
+        def change(state: SessionState) -> None:
+            # 在闸门里再问一次：检查和拨动之间可能有人停了运行时。
+            self._require_running("拨安静分钟的开关")
+            policy = state.time_events
+            if policy is None:
+                raise AutonomyError("这个会话没有时间事件策略（没有世界状态）")
+            if policy.current is value:
+                return
+            state.set_time_events(policy.flipped(value, sim=self.clock, wall=stamp))
+            changed.append(True)
+
+        with self._gate:
+            self._require_running("拨安静分钟的开关")
+        self._ledger(change)
+        return dict(self.quiet_time_status(), changed=bool(changed))
+
+    def quiet_time_status(self) -> Dict:
+        return quiet_time_report(self._state.time_events)
+
+    def _close_unavailable_dues(self, dues) -> None:
+        """本步触发、此刻认知不可用的到期资格，当场以 REJECTED_UNAVAILABLE 收尾。"""
+        if self._state.cognition is None:
+            return
+        for due in dues:
+            if self._agency.unavailable_causes_for(due):
+                self._agency._close_unavailable(due)
 
     def _tick_report(self, tick, *, max_results: Optional[int] = None) -> Dict:
-        # 作息表先对齐，再处理到期资格：顺序是刻意的。生成与判分读的是"这个
-        # 角色此刻在做什么"，所以时间走过一道作息边界之后，那个答案必须在这一
-        # 轮生成之前就已经是新的 —— 反过来的话，角色会按上一段的活动说这一句话。
-        transitions = self.apply_rhythm()
+        # 作息已经在时钟步里对齐过了：生成与判分读的是"这个角色此刻在做什么"，
+        # 时间走过一道作息边界之后，那个答案在这一轮生成之前就已经是新的。
         results = self.process_pending(max_results=max_results)
         return {
             "from_clock": tick.from_clock.isoformat(),
             "to_clock": tick.to_clock.isoformat(),
             "minutes": tick.minutes,
             "due_ids": list(tick.due_ids),
-            "rhythm_events": [record["event_id"] for record in transitions],
             "results": [result.to_dict() for result in results],
         }
 
@@ -997,3 +1442,9 @@ def _plain(value):
 
 
 __all__ = ["AutonomousRuntime", "AutonomyError"]
+
+
+def _ceil_minute(moment: datetime) -> datetime:
+    """不早于 moment 的第一个整分钟。调度器只接受整分钟推进。"""
+    floored = moment.replace(second=0, microsecond=0)
+    return floored if floored == moment else floored + timedelta(minutes=1)

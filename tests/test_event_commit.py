@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
+from grants_support import grant_everything
 from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore, EventStoreError
 from pns.models.exposure import ExposureReason
@@ -36,6 +37,7 @@ def _world(clock=CLOCK, *, channel=False):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     if channel:
         world.place_character("mizuki", "mizuki_home_room")
         world.place_character("ena", "ena_home_studio")
@@ -536,6 +538,7 @@ class DialogueEventDerivationTests(unittest.TestCase):
                 [Channel(channel_id="dm", name="DM", kind=ChannelKind.TEXT)]
             ),
         )
+        grant_everything(world)
         world.place_character("mizuki", "mizuki_home_room")
         world.join_channel("mizuki", "dm")
         event = dialogue_event_for_turn(world, EventStore(), "s1", _turn())

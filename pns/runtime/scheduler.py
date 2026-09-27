@@ -9,9 +9,15 @@
 #
 # 三条硬约束：
 #
-#   1. 时间只能通过 world.time_advanced 事件推进。这里从不调用
+#   1. 时间只能通过 world.time_advanced 事件推进。这里从不直接调用
 #      WorldState.advance_time() —— 那会是一次没有记录在世界历史里的状态变更，
 #      而世界历史必须能解释时钟为什么是现在这个值。
+#      唯一的明示例外（WORLD-1 存档增长设计 §3）：持久世界拨到"安静的分钟不
+#      记"之后，自主运行时可以用内部原语 `_advance_quietly()` 只推时钟。安不
+#      安静要连作息边界一起判断，而调度器看不见作息，所以这不是公开入口：只有
+#      协调器的时钟步（它的计划里有到期和作息边界）调用它。那时解释时钟的是
+#      时间事件加上 SessionState.time_events 这份策略账本：空档必须落在 skip
+#      生效的范围里，存档加载时逐段核对。
 #   2. 一次推进是一个事务。时钟、事件历史、曝光判定、激活队列、产出的到期
 #      记录，要么全部成立，要么一起回到推进之前的样子。中途失败留下"时间走了
 #      但队列没动"或者"队列动了但事件没记下"都是不可接受的。
@@ -32,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Mapping, Optional, Tuple
 
+from pns.models.time_events import QuietTime
 from pns.models.activation import (
     ActivationDue,
     ActivationError,
@@ -92,6 +99,9 @@ class PersistentScheduler:
         if not isinstance(state.world_state, WorldState):
             raise SchedulerError("调度器绑定的会话还没有权威 WorldState")
         self._state = state
+        # 时钟归作息所有：由生命周期在交出这个调度器给任何回调之前打上（见
+        # RuntimeAdapters.bind 与 claim_clock_for_rhythm）。一经打上不再撤销。
+        self._rhythm_owned = False
         # 绑定只允许一次。第二个调度器会带来第二份队列，两份都在推同一个时钟，
         # 于是"这条一次性激活触发过没有"会有两个互相看不见的答案。
         try:
@@ -147,6 +157,7 @@ class PersistentScheduler:
         那套事务；但它仍然在 atomic_commit() 的回滚范围内，所以放在一次提交
         块里确认、提交失败时确认也会一并撤销。
         """
+        self._state.require_writable()
         try:
             return self.outbox._acknowledge(due_id)
         except ActivationOutboxError as e:
@@ -170,6 +181,7 @@ class PersistentScheduler:
         全部校验都在任何状态变更之前完成：类型、是否排到了过去、角色在不在
         这个世界里、ID 有没有撞车。任何一条不过，队列一个字节都不动。
         """
+        self._state.require_writable()
         if not isinstance(activation, ScheduledActivation):
             raise SchedulerError("只能排入 ScheduledActivation")
         self._require_future(activation)
@@ -189,6 +201,7 @@ class PersistentScheduler:
         取消只对还没触发的激活有意义 —— 已经产出的到期记录和已经提交的事件
         不会被取消操作追溯掉。
         """
+        self._state.require_writable()
         if not isinstance(activation_id, str) or not activation_id:
             raise SchedulerError("activation_id 必须是非空字符串")
         if not self.queue.has(activation_id):
@@ -230,8 +243,22 @@ class PersistentScheduler:
             )
         return self._tick(target, delta // _MINUTE)
 
+    def _advance_quietly(self, target: datetime) -> TickResult:
+        """安静的一步：推到 target，不写时间事件。只给协调器的时钟步用。
+
+        调用方负责判断这一步确实安静（没有到期、不是作息边界）；这里仍然拒绝
+        有到期的一步，并且要求账本当前是 skip。
+        """
+        target = self._require_simulation_time(target, "target")
+        delta = target - self.clock
+        if delta <= timedelta(0) or delta % _MINUTE:
+            raise SchedulerError(f"安静的一步必须严格向前、按整分钟推进：{target.isoformat()}")
+        return self._tick(target, delta // _MINUTE, record=False)
+
     def advance_to_next_due(self) -> Optional[TickResult]:
         """推进到下一条激活到期的那一刻；队列为空就返回 None，不动时钟。"""
+        # 守卫在入口：作息驱动的会话里这个调用本身就不被允许，不看队列空不空。
+        self._require_clock_owner()
         activation = self.queue.next_due()
         if activation is None:
             return None
@@ -247,8 +274,37 @@ class PersistentScheduler:
         return self._tick(self.clock + timedelta(minutes=minutes), minutes)
 
     # ── 事务本体 ────────────────────────────────────────────────────────
-    def _tick(self, target: datetime, minutes: int) -> TickResult:
+    def claim_clock_for_rhythm(self) -> None:
+        """声明这个会话的时间由作息驱动：此后只有协调器的时钟步能推它。
+
+        必须在调度器被交给任何外部回调之前调用（复审 R3-F1）：守卫若等到自主
+        运行时挂上才生效，绑定期间的回调就能先把时钟推过作息边界。只能打开，
+        不能关回去。
+        """
+        self._rhythm_owned = True
+
+    def _require_clock_owner(self) -> None:
+        """挂着作息的自主运行时在场时，时间只能由它的时钟步推进。
+
+        调度器看不见作息、行程和频道：从这里直接推，时间事件照写，作息的后果却
+        被整段跳过，而那份状态能存能读（全量审查 R2-F2）。没有作息的会话不受影响。
+        """
+        autonomy = self._state.autonomy
+        rhythm_driven = self._rhythm_owned or (
+            autonomy is not None and autonomy.rhythm is not None
+        )
+        # 默认拒绝：作息驱动的会话里，协调器还没挂上时谁都不能推时钟。
+        if rhythm_driven and not (autonomy is not None and autonomy._owns_clock_step()):
+            raise SchedulerError(
+                "这个世界由作息驱动：时间只能经由运行时推进（runtime.advance() 或时钟 "
+                "worker），直接推调度器会跳过作息、行程与频道的后果"
+            )
+
+    def _tick(self, target: datetime, minutes: int, *, record: bool = True) -> TickResult:
         """一次推进 = 一条 world.time_advanced 事件 + 队列变更，同生共死。
+
+        `record=False` 是安静的一步：这段时间里什么都不能到期（到期了就不安静，
+        响亮拒绝），时钟前进，但不写事件，返回的 event 为空。
 
         顺序是刻意的：先在不改任何状态的前提下算出"这次会触发什么"，再进事务。
         事务里出任何岔子 —— 事件校验失败、追加失败、队列变更失败 —— 世界时钟、
@@ -257,13 +313,40 @@ class PersistentScheduler:
         state = self._state
         world = state.world_state
         from_clock = world.clock
+        self._require_clock_owner()
+        if state.autonomy is not None and state.activation_outbox.pending():
+            # 挂了自主运行时的会话：到期问的是它触发那一刻的世界。它还没有结局，
+            # 时钟就不能往前走——不管推进是从哪个入口来的（WORLD-1 设计 §5.2）。
+            raise SchedulerError(
+                "还有到期资格没有结局，时钟不能往前走："
+                + ", ".join(due.due_id for due in state.activation_outbox.pending())
+            )
 
         plan = self._plan_due(target)
+        if not record:
+            policy = state.time_events
+            if policy is None or policy.current is not QuietTime.SKIP:
+                # 不记的一步只能由账本授权：record 生效时出现的空档，加载时就是
+                # "存档缺了事件"。在这里拒绝，而不是存下一份读不回来的世界。
+                raise SchedulerError(
+                    "这个世界记录安静的分钟（time_events 不是 skip），不能不记事件地推进时钟"
+                )
+            if plan:
+                raise SchedulerError(
+                    "这一步有到期，不是安静的一步，必须记成时间事件："
+                    + ", ".join(activation.activation_id for _, activation, _, _ in plan)
+                )
+            with state.atomic_commit(), state._moving_clock():
+                state.require_writable()
+                world.advance_time(minutes)
+            return TickResult(
+                from_clock=from_clock, to_clock=world.clock, minutes=minutes
+            )
         event = self._time_advanced_event(minutes, target, plan)
 
         # 队列和投递箱都在 SessionState.atomic_commit() 的回滚范围内，所以这里
         # 不需要（也不应该）另建一套快照：一次推进的全部后果由同一个事务兜底。
-        with state.atomic_commit():
+        with state.atomic_commit(), state._moving_clock():
             committed = commit_session_event(state, event)
             if world.clock != target:
                 # 事件的状态效果没把时钟落在预期的位置上：宁可整体作废，
@@ -352,8 +435,10 @@ class PersistentScheduler:
         store = self._state.events
         latest = store.latest()
         return Event(
-            event_id=f"{self.session_id}:clock:"
-            f"{len(store.by_type(EventType.WORLD_TIME_ADVANCED))}",
+            # 用这条事件将来在世界历史里的序号：严格递增、唯一，不依赖"已经有几条
+            # 时间事件"（那样一旦少了一条，下一条就会撞上已有的 id），也不用每步
+            # 扫一遍整段历史。
+            event_id=f"{self.session_id}:clock:{len(store)}",
             type=EventType.WORLD_TIME_ADVANCED,
             occurred_at=self.clock,
             scope=EventScope.PUBLIC,

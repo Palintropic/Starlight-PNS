@@ -57,10 +57,17 @@ class ChannelRegistry:
 
     def __init__(self, channels: Iterable[Channel] = ()):
         self._channels: Dict[str, Channel] = {}
+        self._frozen = False
         for channel in channels:
             self.add(channel)
 
+    def _freeze(self) -> None:
+        """挂到会话上之后，频道表不再接受新频道。"""
+        self._frozen = True
+
     def add(self, channel: Channel) -> None:
+        if self._frozen:
+            raise ChannelRegistryError("频道表已经挂在会话上，不能再添加频道")
         if not channel.channel_id:
             raise ChannelRegistryError("channel_id 不能为空")
         if channel.channel_id in self._channels:

@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime
 
+from grants_support import grant_everything
 from pns.models.event import Event, EventScope, EventType
 from pns.models.session import SessionState, SessionStateError, Turn
 from pns.models.world_state import WorldState
@@ -187,6 +188,7 @@ class ActivityHistoryRestoreTests(unittest.TestCase):
             clock=datetime(2026, 8, 21, 2, 0),
             locations=build_default_location_graph(),
         )
+        grant_everything(world)
         world.place_character("mizuki", "mizuki_home_room")
         state = SessionState(
             session_id="s1", scene="nightcord", characters=["mizuki"]
@@ -208,7 +210,17 @@ class ActivityHistoryRestoreTests(unittest.TestCase):
         state, world = self._state()
         commit_session_event(state, self._activity_event(world, "a1", "drawing"))
         commit_session_event(state, self._activity_event(world, "a2", "unspecified"))
-        world.advance_time(30)
+        # 时间只能经由时间事件前进：存档要能解释时钟为什么是现在这个值。
+        commit_session_event(
+            state,
+            Event(
+                event_id="t1",
+                type=EventType.WORLD_TIME_ADVANCED,
+                occurred_at=world.clock,
+                scope=EventScope.PUBLIC,
+                payload={"minutes": 30},
+            ),
+        )
 
         restored = SessionState.from_dict(state.to_dict())
         self.assertEqual(restored.world_state.character_activities, {})

@@ -21,20 +21,49 @@
 #   4. **存档里只有数据。** 调度器、Agency 引擎、记忆编码器、协调器、模型
 #      客户端、API Key、锁、回调 —— 一个都不进去。捕获那一刻就检查，而不是
 #      等到 json.dumps 抛类型错误：metadata 是个自由字典，谁都能往里塞活对象。
+#
+# 版本 3 起事件历史分两处放（WORLD-1 存档增长设计 §2）：
+#
+#   * **分卷**：已经封存的一段段历史，每卷一个 JSONL 文件，封存后不再改动。
+#     信封里的清单（segments）是分卷的唯一权威：文件名、序号区间、条数、
+#     字节数、sha256。
+#   * **活动段**：最后一卷之后的事件，仍在 state.events 里，序号接着清单往下数。
+#
+# 信封只校验清单与活动段互相接得上；分卷字节的读取归 store，逐卷核对归这里的
+# attach_history()。恢复时把分卷与活动段接成完整历史，再走同一个
+# SessionState.from_dict()。缺一卷、改一字节、序号断开，都是加载失败。
+import hashlib
+import json
+import re
 from copy import deepcopy
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from math import isfinite
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pns.models.session import SessionState
+from pns.models.time_events import TimeEventPolicy, legacy_epoch
 from pns.runtime.persistence.naming import validate_world_id
 
 # 存档格式版本。改变形状就 +1，并且在这里写清楚旧版怎么升级 —— 不认识的版本
 # 一律响亮拒绝，绝不"尽量读读看"。
-WORLD_ARCHIVE_VERSION = 1
+#
+# 版本 3：事件历史分卷（见文件头）。版本 2 就是"没有分卷的存档"，原样可读；
+# 它被读回来之后的下一次保存写成版本 3。
+WORLD_ARCHIVE_VERSION = 3
+READABLE_ARCHIVE_VERSIONS = frozenset({2, 3})
+# 版本 1 是 WORLD-1 之前的存档（旧 nightcord / deploy-smoke 世界）。2026-09-26 这些
+# 世界已退役：存档保留、不改写、不迁移，本进程明确拒绝加载它们。
+RETIRED_ARCHIVE_VERSIONS = frozenset({1})
 
 _ENVELOPE_FIELDS = ("version", "world_id", "session_id", "revision", "clock", "state")
+
+# 封存阈值：活动段里最早的一整段跨满一个模拟日、或攒满这么多条，先到者为准。
+SEGMENT_SPAN = timedelta(days=1)
+SEGMENT_MAX_EVENTS = 20_000
+
+_SEGMENT_NAME = re.compile(r"events-(\d{6})\.jsonl")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class ArchiveError(ValueError):
@@ -123,6 +152,265 @@ def _cross_check(world_id: str, session_id: str, clock: datetime, state: Mapping
         )
 
 
+def segment_file_name(index: int) -> str:
+    """第 index 卷（从 1 数）的文件名。清单里的名字必须恰好是这个。"""
+    return f"events-{index:06d}.jsonl"
+
+
+def _require_count(value, label: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ArchiveError(f"{label} 必须是 ≥ {minimum} 的整数，收到 {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class EventSegment:
+    """清单里的一卷：一段已经封存、不再改动的事件历史。"""
+
+    file: str
+    first_sequence: int
+    last_sequence: int
+    count: int
+    bytes: int
+    sha256: str
+    first_at: str
+    last_at: str
+
+    def to_dict(self) -> Dict:
+        return {
+            "file": self.file,
+            "first_sequence": self.first_sequence,
+            "last_sequence": self.last_sequence,
+            "count": self.count,
+            "bytes": self.bytes,
+            "sha256": self.sha256,
+            "first_at": self.first_at,
+            "last_at": self.last_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload, position: int) -> "EventSegment":
+        """position 是它在清单里的下标（从 0 数），文件名必须与之对应。"""
+        label = f"分卷清单第 {position + 1} 项"
+        if not isinstance(payload, Mapping):
+            raise ArchiveError(f"{label}必须是字典")
+        missing = [
+            key
+            for key in (
+                "file",
+                "first_sequence",
+                "last_sequence",
+                "count",
+                "bytes",
+                "sha256",
+                "first_at",
+                "last_at",
+            )
+            if key not in payload
+        ]
+        if missing:
+            raise ArchiveError(f"{label}缺少字段: {', '.join(missing)}")
+        name = payload["file"]
+        if name != segment_file_name(position + 1):
+            raise ArchiveError(
+                f"{label}的文件名应当是 {segment_file_name(position + 1)}，"
+                f"收到 {name!r} —— 清单外的名字一律不认"
+            )
+        first = _require_count(payload["first_sequence"], f"{label}的 first_sequence")
+        last = _require_count(payload["last_sequence"], f"{label}的 last_sequence")
+        count = _require_count(payload["count"], f"{label}的 count", minimum=1)
+        size = _require_count(payload["bytes"], f"{label}的 bytes", minimum=1)
+        if last - first + 1 != count:
+            raise ArchiveError(
+                f"{label}（{name}）的序号区间 {first}..{last} 跟条数 {count} 对不上"
+            )
+        digest = payload["sha256"]
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise ArchiveError(f"{label}（{name}）的 sha256 不是 64 位小写十六进制")
+        first_at = _parse_clock(payload["first_at"], f"{label}的 first_at")
+        last_at = _parse_clock(payload["last_at"], f"{label}的 last_at")
+        if last_at < first_at:
+            raise ArchiveError(f"{label}（{name}）的时间区间倒流")
+        return cls(
+            file=name,
+            first_sequence=first,
+            last_sequence=last,
+            count=count,
+            bytes=size,
+            sha256=digest,
+            first_at=first_at.isoformat(),
+            last_at=last_at.isoformat(),
+        )
+
+
+def encode_segment(entries: Sequence[Mapping]) -> bytes:
+    """一卷的磁盘字节：每行一条事件（带全历史序号），键排序，UTF-8。"""
+    return b"".join(
+        json.dumps(
+            entry, ensure_ascii=False, sort_keys=True, allow_nan=False
+        ).encode("utf-8")
+        + b"\n"
+        for entry in entries
+    )
+
+
+def describe_segment(index: int, entries: Sequence[Mapping], blob: bytes) -> EventSegment:
+    """给刚写好的一卷生成清单项。entries 必须是 blob 的来源。"""
+    return EventSegment(
+        file=segment_file_name(index),
+        first_sequence=entries[0]["sequence"],
+        last_sequence=entries[-1]["sequence"],
+        count=len(entries),
+        bytes=len(blob),
+        sha256=hashlib.sha256(blob).hexdigest(),
+        first_at=entries[0]["occurred_at"],
+        last_at=entries[-1]["occurred_at"],
+    )
+
+
+def decode_segment(segment: EventSegment, blob: bytes) -> List[Dict]:
+    """核对一卷的字节与清单，返回它的事件。任何一处对不上都是 ArchiveCorrupt。
+
+    核对顺序是从便宜到贵：字节数、哈希、再逐行解析。哈希对得上之后的解析失败
+    只可能是写入方自己写坏了 —— 同样不许跳过。
+    """
+    name = segment.file
+    if len(blob) != segment.bytes:
+        raise ArchiveCorrupt(
+            f"分卷 {name} 有 {len(blob)} 字节，清单记的是 {segment.bytes}（截断或被改过）"
+        )
+    if hashlib.sha256(blob).hexdigest() != segment.sha256:
+        raise ArchiveCorrupt(f"分卷 {name} 的 sha256 跟清单对不上（内容被改过）")
+    try:
+        lines = blob.decode("utf-8").split("\n")
+    except UnicodeDecodeError as e:
+        raise ArchiveCorrupt(f"分卷 {name} 不是 UTF-8: {e}") from e
+    if lines[-1] != "":
+        raise ArchiveCorrupt(f"分卷 {name} 最后一行没有换行（截断）")
+    entries: List[Dict] = []
+    for offset, line in enumerate(lines[:-1]):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ArchiveCorrupt(f"分卷 {name} 第 {offset + 1} 行不是 JSON: {e}") from e
+        if not isinstance(entry, dict):
+            raise ArchiveCorrupt(f"分卷 {name} 第 {offset + 1} 行不是一条事件")
+        expected = segment.first_sequence + offset
+        sequence = entry.get("sequence")
+        if isinstance(sequence, bool) or sequence != expected:
+            raise ArchiveCorrupt(
+                f"分卷 {name} 第 {offset + 1} 行的序号应当是 {expected}，收到 {sequence!r}"
+            )
+        entries.append(_plain(entry, f"{name}[{offset}]"))
+    if len(entries) != segment.count:
+        raise ArchiveCorrupt(
+            f"分卷 {name} 有 {len(entries)} 条事件，清单记的是 {segment.count}"
+        )
+    if (
+        entries[0].get("occurred_at") != segment.first_at
+        or entries[-1].get("occurred_at") != segment.last_at
+    ):
+        raise ArchiveCorrupt(f"分卷 {name} 的首尾时刻跟清单对不上")
+    return entries
+
+
+def _parse_segments(raw) -> Tuple[EventSegment, ...]:
+    if not isinstance(raw, list):
+        raise ArchiveError("segments 必须是数组")
+    segments = tuple(EventSegment.from_dict(item, i) for i, item in enumerate(raw))
+    _check_manifest(segments)
+    return segments
+
+
+def _check_manifest(segments: Sequence[EventSegment]) -> None:
+    """清单上各卷首尾相接：第一卷从 0 开始，每卷接着上一卷，时间不倒流。"""
+    expected = 0
+    previous_at: Optional[str] = None
+    for index, segment in enumerate(segments):
+        if segment.file != segment_file_name(index + 1):
+            raise ArchiveError(f"分卷清单第 {index + 1} 项的文件名不对: {segment.file}")
+        if segment.first_sequence != expected:
+            raise ArchiveError(
+                f"分卷 {segment.file} 应当从序号 {expected} 开始，清单记的是 "
+                f"{segment.first_sequence}（序号断开）"
+            )
+        if previous_at is not None and datetime.fromisoformat(
+            segment.first_at
+        ) < datetime.fromisoformat(previous_at):
+            raise ArchiveError(f"分卷 {segment.file} 的时间早于上一卷的末尾")
+        expected = segment.last_sequence + 1
+        previous_at = segment.last_at
+
+
+def _sealed_total(segments: Sequence[EventSegment]) -> int:
+    return segments[-1].last_sequence + 1 if segments else 0
+
+
+def _active_entries(state: Mapping) -> List:
+    events = state.get("events")
+    if not isinstance(events, Mapping):
+        raise ArchiveError("state.events 必须是字典")
+    entries = events.get("events", [])
+    if not isinstance(entries, list):
+        raise ArchiveError("state.events.events 必须是数组")
+    return entries
+
+
+def _check_active(segments: Sequence[EventSegment], state: Mapping) -> None:
+    """活动段必须紧接着最后一卷：第一条的序号 = 已封存条数，时间不早于最后一卷的末尾。"""
+    entries = _active_entries(state)
+    if not entries:
+        return
+    first = entries[0]
+    if not isinstance(first, Mapping):
+        raise ArchiveError("活动段第一条事件必须是字典")
+    total = _sealed_total(segments)
+    if first.get("sequence") != total or isinstance(first.get("sequence"), bool):
+        raise ArchiveError(
+            f"活动段应当从序号 {total} 开始（接在已封存的 {len(segments)} 卷之后），"
+            f"收到 {first.get('sequence')!r}"
+        )
+    if segments:
+        first_at = _parse_clock(first.get("occurred_at"), "活动段第一条事件的时刻")
+        if first_at < datetime.fromisoformat(segments[-1].last_at):
+            raise ArchiveError("活动段第一条事件早于最后一卷的末尾（时间倒流）")
+
+
+def _legacy_time_events(payload: Dict, clock: datetime) -> None:
+    """版本 2 没记时间事件链的起点，补一个。
+
+    优先用不随事件列表消失的独立记录：正式世界的开局时刻、认知时间线开张的
+    那一刻（之后加载时它们还会被交叉核对）。两者都没有时才退回旧规矩——从现存
+    第一条时间事件起算；那样的 v2 世界，删掉**任意开头一段**时间事件都发现不了
+    （复审 R2-F4），这是它们的兼容上限。
+    """
+    world = payload.get("world_state") if isinstance(payload.get("world_state"), Mapping) else {}
+    metadata = world.get("metadata") if isinstance(world.get("metadata"), Mapping) else {}
+    origin = metadata.get("origin") if isinstance(metadata.get("origin"), Mapping) else {}
+    cognition = payload.get("cognition") if isinstance(payload.get("cognition"), Mapping) else {}
+    intervals = cognition.get("intervals") if isinstance(cognition.get("intervals"), list) else []
+    anchored = None
+    if origin.get("start") is not None:
+        anchored = origin["start"]
+    elif intervals and isinstance(intervals[0], Mapping) and intervals[0].get("opened_by") == "opened":
+        anchored = intervals[0].get("opened_at_sim")
+    if anchored is not None:
+        try:
+            epoch = datetime.fromisoformat(anchored)
+        except (TypeError, ValueError):
+            raise ArchiveError("版本 2 存档里的开局时刻读不懂") from None
+        payload["time_events"] = TimeEventPolicy(epoch).to_dict()
+        return
+    steps = []
+    for entry in payload.get("events", {}).get("events", []):
+        if isinstance(entry, Mapping) and entry.get("type") == "world.time_advanced":
+            try:
+                steps.append((datetime.fromisoformat(entry["occurred_at"]), 0))
+            except (KeyError, TypeError, ValueError):
+                raise ArchiveError("版本 2 存档里有读不懂时刻的时间事件") from None
+    payload["time_events"] = TimeEventPolicy(legacy_epoch(steps, clock)).to_dict()
+
+
 @dataclass(frozen=True)
 class WorldArchive:
     """一个世界某一刻的完整存档，连同它的身份与版本。"""
@@ -132,8 +420,19 @@ class WorldArchive:
     revision: int
     clock: datetime
     saved_at: str
+    # state.events 里只有活动段（版本 3）；版本 2 与没封存过的世界里就是全部。
     state: Dict = field(default_factory=dict)
     version: int = WORLD_ARCHIVE_VERSION
+    # 分卷清单：已经封存、不再改动的历史。
+    segments: Tuple[EventSegment, ...] = ()
+    # 分卷里的事件，由 attach_history() 在核对之后挂上。它不进 world.json，
+    # 也不参与比较（清单上的 sha256 已经代表了它）。None 表示还没加载。
+    sealed_events: Optional[Tuple[Dict, ...]] = field(
+        default=None, compare=False, repr=False
+    )
+    # 这次封存的分卷目录同步过没有（store.seal 填）。平台不支持时为 False，
+    # 生命周期据此不把这一版报成"目录已同步"。不进 world.json。
+    history_synced: bool = field(default=True, compare=False, repr=False)
 
     # ── 捕获 ────────────────────────────────────────────────────────────
     @classmethod
@@ -166,12 +465,21 @@ class WorldArchive:
         *,
         revision: int,
         saved_at: Optional[str] = None,
+        segments: Sequence[EventSegment] = (),
     ) -> "WorldArchive":
         """从**已经取好的**状态快照建信封。
 
         生命周期层用这条路：快照必须在提交边界之内取，序列化和写盘可以在边界
         之外做。分开这两步，一次写盘就不会把停机和提交一起堵住。
+
+        `segments` 是磁盘上已经封存的分卷清单；这时 payload 里的事件只能是
+        清单之后的活动段（SessionState.to_dict(events_from=...)）。
         """
+        segments = tuple(segments)
+        for item in segments:
+            if not isinstance(item, EventSegment):
+                raise ArchiveError("segments 里只能是 EventSegment")
+        _check_manifest(segments)
         world_id = validate_world_id(world_id)
         revision = _require_revision(revision)
         state = _plain(payload)
@@ -183,6 +491,7 @@ class WorldArchive:
             raise ArchiveError("没有权威 WorldState 的会话不是一个世界")
         clock = _parse_clock(world_payload["clock"], "世界时钟")
         _cross_check(world_id, session_id, clock, state)
+        _check_active(segments, state)
         return cls(
             world_id=world_id,
             session_id=session_id,
@@ -191,6 +500,10 @@ class WorldArchive:
             saved_at=saved_at if saved_at is not None else datetime.now().isoformat(),
             state=state,
             version=WORLD_ARCHIVE_VERSION,
+            segments=segments,
+            # 活的状态里本来就有全部历史；有分卷时这份快照只带活动段，
+            # 分卷在磁盘上，不在这份信封里。
+            sealed_events=None if segments else (),
         )
 
     # ── 序列化 ──────────────────────────────────────────────────────────
@@ -204,6 +517,7 @@ class WorldArchive:
             "clock": self.clock.isoformat(),
             "saved_at": self.saved_at,
             "state": deepcopy(self.state),
+            "segments": [segment.to_dict() for segment in self.segments],
         }
 
     @classmethod
@@ -218,12 +532,26 @@ class WorldArchive:
         version = payload["version"]
         if isinstance(version, bool) or not isinstance(version, int):
             raise ArchiveError("version 必须是整数")
-        if version != WORLD_ARCHIVE_VERSION:
+        if version in RETIRED_ARCHIVE_VERSIONS:
+            raise ArchiveError(
+                f"世界存档格式版本 {version} 属于已退役的世界（WORLD-1 之前）。"
+                "存档保留在磁盘上未被改动；本进程不再加载它"
+            )
+        if version not in READABLE_ARCHIVE_VERSIONS:
             raise ArchiveError(
                 f"不支持的世界存档格式版本 {version}（本进程只认 "
-                f"{WORLD_ARCHIVE_VERSION}）。升级存档是一次明确的人为决定，"
+                f"{sorted(READABLE_ARCHIVE_VERSIONS)}）。升级存档是一次明确的人为决定，"
                 "不是恢复路径可以替人做的猜测。"
             )
+        if version == 2:
+            # 版本 2 没有分卷：带着清单的"版本 2"是两种格式拼出来的东西。
+            if "segments" in payload:
+                raise ArchiveError("版本 2 的存档不该有分卷清单")
+            segments: Tuple[EventSegment, ...] = ()
+        else:
+            if "segments" not in payload:
+                raise ArchiveError("世界存档缺少必填字段: segments")
+            segments = _parse_segments(payload["segments"])
 
         world_id = validate_world_id(payload["world_id"])
         session_id = payload["session_id"]
@@ -236,6 +564,7 @@ class WorldArchive:
             raise ArchiveError("saved_at 必须是 ISO 时间字符串")
         state = _plain(payload["state"])
         _cross_check(world_id, session_id, clock, state)
+        _check_active(segments, state)
         return cls(
             world_id=world_id,
             session_id=session_id,
@@ -244,6 +573,93 @@ class WorldArchive:
             saved_at=saved_at if saved_at is not None else "",
             state=state,
             version=version,
+            segments=segments,
+            sealed_events=None if segments else (),
+        )
+
+    # ── 分卷 ────────────────────────────────────────────────────────────
+    @property
+    def sealed_count(self) -> int:
+        """已经封存进分卷的事件条数（= 活动段第一条的序号）。"""
+        return _sealed_total(self.segments)
+
+    @property
+    def active_count(self) -> int:
+        return len(_active_entries(self.state))
+
+    @property
+    def sealed_bytes(self) -> int:
+        return sum(segment.bytes for segment in self.segments)
+
+    def attach_history(self, blobs: Sequence[bytes]) -> "WorldArchive":
+        """挂上逐卷核对过的分卷内容。blobs 与清单一一对应，顺序相同。"""
+        if len(blobs) != len(self.segments):
+            raise ArchiveCorrupt(
+                f"清单上有 {len(self.segments)} 卷，读到的是 {len(blobs)} 卷"
+            )
+        sealed: List[Dict] = []
+        for segment, blob in zip(self.segments, blobs):
+            sealed.extend(decode_segment(segment, blob))
+        return replace(self, sealed_events=tuple(sealed))
+
+    def seal_plan(
+        self,
+        *,
+        span: Optional[timedelta] = None,
+        max_events: Optional[int] = None,
+    ) -> Tuple[Tuple[Dict, ...], ...]:
+        """活动段里现在该封存的若干整段，从最早的开始。
+
+        一段 = 从活动段开头起，时间早于"第一条 + span"、且不超过 max_events 条的
+        最长前缀；只有它**后面还有事件**时才算满（否则这一段还在长）。满了就切下
+        来接着算下一段。结果只由活动段决定：同一份活动段永远切出同样的几段，
+        所以一次没写成的封存，下次原样重来。
+        """
+        span = SEGMENT_SPAN if span is None else span
+        max_events = SEGMENT_MAX_EVENTS if max_events is None else max_events
+        if max_events < 1:
+            raise ArchiveError("max_events 必须 ≥ 1")
+        if span <= timedelta(0):
+            raise ArchiveError("span 必须大于 0")
+        entries = _active_entries(self.state)
+        chunks = []
+        start = 0
+        while start < len(entries):
+            limit = datetime.fromisoformat(entries[start]["occurred_at"]) + span
+            end = start
+            while (
+                end < len(entries)
+                and end - start < max_events
+                and datetime.fromisoformat(entries[end]["occurred_at"]) < limit
+            ):
+                end += 1
+            if end >= len(entries):
+                break  # 这一段后面没有事件了：还没满
+            chunks.append(tuple(entries[start:end]))
+            start = end
+        return tuple(chunks)
+
+    def sealed(self, new_segments: Sequence[EventSegment]) -> "WorldArchive":
+        """封存之后的信封：清单加上新卷，活动段去掉它们包含的事件。
+
+        不改 sealed_events —— 一份刚封存过的存档本来就不需要把分卷读回来；
+        它只会被写下去。
+        """
+        segments = self.segments + tuple(new_segments)
+        _check_manifest(segments)
+        moved = sum(segment.count for segment in new_segments)
+        entries = _active_entries(self.state)
+        if moved > len(entries):
+            raise ArchiveError("封存的条数超过了活动段")
+        state = dict(self.state)
+        state["events"] = {**self.state["events"], "events": entries[moved:]}
+        _check_active(segments, state)
+        return replace(
+            self,
+            state=state,
+            segments=segments,
+            version=WORLD_ARCHIVE_VERSION,
+            sealed_events=None,
         )
 
     # ── 恢复 ────────────────────────────────────────────────────────────
@@ -254,8 +670,24 @@ class WorldArchive:
         冷适配器来做（见 lifecycle.py）。分开这两步是刻意的：存档里没有、也
         不该有任何能变成一个活服务的东西。
         """
+        if self.sealed_events is None:
+            raise ArchiveError(
+                f"世界 '{self.world_id}' 的 {len(self.segments)} 卷历史还没加载，"
+                "只有活动段的存档恢复不出一个完整世界"
+            )
+        if len(self.sealed_events) != self.sealed_count:
+            raise ArchiveError("加载的分卷条数跟清单对不上")
+        payload = deepcopy(self.state)
+        if self.sealed_events:
+            payload["events"] = {
+                **payload["events"],
+                "events": deepcopy(list(self.sealed_events))
+                + list(payload["events"].get("events", [])),
+            }
+        if self.version == 2 and payload.get("time_events") is None:
+            _legacy_time_events(payload, self.clock)
         try:
-            state = SessionState.from_dict(deepcopy(self.state))
+            state = SessionState.from_dict(payload)
         except ArchiveError:
             raise
         except (ValueError, TypeError, KeyError, IndexError, RuntimeError) as e:

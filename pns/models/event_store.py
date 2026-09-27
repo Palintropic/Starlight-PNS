@@ -112,12 +112,20 @@ class EventStore:
         return tuple(event for event in self._events if event.type == event_type)
 
     # ── 序列化 ──────────────────────────────────────────────────────────
-    def to_dict(self) -> Dict:
-        """安全序列化：每条事件都是新的可变结构，序号即世界历史顺序。"""
+    def to_dict(self, start: int = 0) -> Dict:
+        """安全序列化：每条事件都是新的可变结构，序号即世界历史顺序。
+
+        `start` 只给分卷存档用：已经封存进分卷的前缀不必每次 checkpoint 都重新
+        序列化一遍。序号仍是全历史里的序号，所以结果不是一份能单独恢复的历史。
+        """
+        if isinstance(start, bool) or not isinstance(start, int):
+            raise EventStoreError("序列化起点必须是整数")
+        if start < 0 or start > len(self._events):
+            raise EventStoreError(f"序列化起点越界: {start}")
         return {
             "events": [
-                {"sequence": index, **event.to_dict()}
-                for index, event in enumerate(self._events)
+                {"sequence": index, **self._events[index].to_dict()}
+                for index in range(start, len(self._events))
             ]
         }
 

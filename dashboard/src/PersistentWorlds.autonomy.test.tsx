@@ -1,15 +1,14 @@
-// dashboard/src/PersistentWorlds.autonomy.test.tsx — 自动推进那对按钮（MVP-1）
+// dashboard/src/PersistentWorlds.autonomy.test.tsx — 认知开关与世界时钟（WORLD-1）
 //
-// 这个文件只盯三件 lint / typecheck / build 都证明不了的事：
+// 这个文件只盯 lint / typecheck / build 都证明不了的事：
 //
-//   1. **按钮跟着服务器状态走，不跟着本地猜测走。** 一个 running=true 但驱动
-//      停着的世界，给的必须是「开始自动推进」；反过来也一样。
-//   2. **`stopping` 不许被显示成"已停止"。** 那一轮还在跑，还可能落地一次
-//      提交 —— 说它停了就是一句会被事实拆穿的话，而这一页正是操作者判断
-//      "现在还在不在花钱"的地方。
-//   3. **新按钮沿用 WEB-1 那套时序保护。** 它们跟 checkpoint / close 共用
-//      同一个 run()，所以"慢的刷新吞掉操作结果"这类 bug 不许因为多了两个
-//      动作又长回来。
+//   1. **按钮跟着服务器状态走，不跟着本地猜测走。** 认知没开的世界给的是
+//      「开始认知」；开着的给「停止认知」。
+//   2. **认知不可用要把原因说出来。** Start 了但此刻有故障、现实时钟落后，
+//      不许显示成"运行中"，也不许只说一句"已停"。
+//   3. **时间跟认知是两件事。** 认知没开，世界时钟照样在走，两个都要看得见。
+//   4. **按钮沿用 WEB-1 那套时序保护。** 它们跟 checkpoint / close 共用同一个
+//      run()，所以"慢的刷新吞掉操作结果"这类 bug 不许长回来。
 //
 // 每个用例都用手动兑现的 promise，不靠计时器：竞态测试不该赌调度。
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -31,13 +30,13 @@ function deferred<T>() {
 
 const driver = (
   world_id: string,
-  state: 'running' | 'stopping' | 'stopped',
+  state: 'running' | 'stopped',
   overrides: Partial<WorldDriverStatus> = {},
 ): WorldDriverStatus => ({
   world_id,
   state,
   running: state === 'running',
-  stopping: state === 'stopping',
+  stopping: false,
   stopped: state === 'stopped',
   stop_reason: null,
   exit_reason: null,
@@ -58,13 +57,24 @@ const driver = (
   },
   next_due_at: '2026-08-23T02:20:00',
   cadence: {
-    tick_minutes: 5,
-    interval_seconds: 30,
+    interval_seconds: 5,
+    rate: 1,
+    max_steps_per_iteration: 240,
+    fault_threshold: 5,
     stop_timeout_seconds: 10,
     max_activations_per_run: 200,
   },
   run_budget: { limit: 200, used: 3, remaining: 197 },
   world_actions: { committed: 3, cap: 100000, remaining: 99997 },
+  worker_alive: true,
+  worker_exit_reason: null,
+  clock_state: 'healthy',
+  clock_lag_minutes: 0,
+  last_clock_progress: '2026-08-23T02:10:00+00:00',
+  fault_since: null,
+  last_clock_error: null,
+  cognition_available: state === 'running',
+  cognition_causes: state === 'running' ? [] : ['not_started'],
   ...overrides,
 });
 
@@ -83,7 +93,7 @@ const world = (
   owner: null,
   recovered_from: null,
   last_saved_at: null,
-  last_checkpoint_reason: 'autonomy_tick',
+  last_checkpoint_reason: 'clock_step',
   durable: true,
   directory_synced: true,
   last_error: null,
@@ -95,7 +105,16 @@ const world = (
   archive_path: `/tmp/worlds/${world_id}/world.json`,
   boundaries_since_checkpoint: 0,
   policy: { every_boundaries: 1, min_interval_seconds: 60, on_close: true },
-  autonomy: null,
+  quiet_time_events: { record: true, since_sim: null, since_wall: null, flips: 0 },
+  archive: {
+    total_bytes: 3_400_000,
+    world_bytes: 1_300_000,
+    segments: 2,
+    sealed_events: 2880,
+    sealed_bytes: 2_100_000,
+    active_events: 700,
+  },
+  autonomy: driver(world_id, 'stopped'),
   ...overrides,
 });
 
@@ -116,45 +135,73 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('自动推进的控制与状态', () => {
-  it('开着但没人推的世界，给的是「开始自动推进」', async () => {
+describe('认知开关与世界时钟', () => {
+  it('认知没开的世界，给的是「开始认知」，时钟照样在走', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
       worlds: [world('alpha')],
     });
     renderAs(OPERATOR, <PersistentWorlds />);
-    await screen.findByRole('button', { name: '开始自动推进' });
-    expect(screen.queryByRole('button', { name: '停止自动推进' })).toBeNull();
-    // P12 的「运行中」和驱动的「未启动」是两件事，两个都要看得见。
+    await screen.findByRole('button', { name: '开始认知' });
+    expect(screen.queryByRole('button', { name: '停止认知' })).toBeNull();
+    // P12 的「运行中」和认知的「未开启」是两件事，两个都要看得见。
     expect(screen.getByText('运行中')).toBeTruthy();
-    expect(screen.getByText('未启动')).toBeTruthy();
+    expect(screen.getByText('认知未开启')).toBeTruthy();
   });
 
-  it('正在推的世界，给的是「停止自动推进」', async () => {
+  it('认知开着的世界，给的是「停止认知」', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
       worlds: [world('alpha', { autonomy: driver('alpha', 'running') })],
     });
     renderAs(OPERATOR, <PersistentWorlds />);
-    await screen.findByRole('button', { name: '停止自动推进' });
-    expect(screen.queryByRole('button', { name: '开始自动推进' })).toBeNull();
-    expect(screen.getByText('自动推进中')).toBeTruthy();
+    await screen.findByRole('button', { name: '停止认知' });
+    expect(screen.queryByRole('button', { name: '开始认知' })).toBeNull();
+    expect(screen.getByText('认知运行中')).toBeTruthy();
   });
 
-  it('stopping 既不显示成已停止，也不给出「开始」按钮', async () => {
+  it('Start 了但此刻有故障，不显示成运行中', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
-      worlds: [world('alpha', { autonomy: driver('alpha', 'stopping') })],
+      worlds: [
+        world('alpha', {
+          autonomy: driver('alpha', 'running', {
+            cognition_available: false,
+            cognition_causes: ['fault'],
+            clock_state: 'faulted',
+          }),
+        }),
+      ],
     });
     renderAs(OPERATOR, <PersistentWorlds />);
-    // 还没停干净 —— 这一轮仍然可能落地一次提交。
-    await screen.findByText('正在停止…');
-    expect(screen.queryByText('已停')).toBeNull();
-    expect(screen.queryByRole('button', { name: '开始自动推进' })).toBeNull();
-    expect(screen.getByRole('button', { name: '停止自动推进' })).toBeTruthy();
+    await screen.findByText('认知暂不可用');
+    expect(screen.queryByText('认知运行中')).toBeNull();
+    expect(screen.getByRole('button', { name: '停止认知' })).toBeTruthy();
   });
 
-  it('停止请求超时时，报的是"还没结束"，不是"已停止"', async () => {
+  it('展开之后，时钟状态与认知不可用的全部原因都看得见', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('alpha', {
+          autonomy: driver('alpha', 'stopped', {
+            cognition_causes: ['not_started', 'wall_clock_behind'],
+            clock_state: 'healthy',
+            clock_lag_minutes: -8,
+          }),
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText('不可用：还没 Start、现实时钟落后于存档')).toBeTruthy();
+    expect(screen.getByText(/现实时钟落后 8 分钟/)).toBeTruthy();
+  });
+
+  it('停止之后说清楚：时间照走', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
       worlds: [world('alpha', { autonomy: driver('alpha', 'running') })],
@@ -163,29 +210,7 @@ describe('自动推进的控制与状态', () => {
     vi.spyOn(api, 'stopWorldAutonomy').mockReturnValue(pending.promise);
 
     renderAs(OPERATOR, <PersistentWorlds />);
-    const button = await screen.findByRole('button', { name: '停止自动推进' });
-    await act(async () => {
-      button.click();
-    });
-    await act(async () => {
-      pending.resolve(world('alpha', { autonomy: driver('alpha', 'stopping') }));
-      await pending.promise;
-    });
-    await screen.findByText(
-      '停止请求已发出，但当前这一轮还没结束——它仍然可能落地一次提交',
-    );
-  });
-
-  it('停干净了才说"已停止"', async () => {
-    stubMountFetches();
-    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
-      worlds: [world('alpha', { autonomy: driver('alpha', 'running') })],
-    });
-    const pending = deferred<PersistentWorldStatus>();
-    vi.spyOn(api, 'stopWorldAutonomy').mockReturnValue(pending.promise);
-
-    renderAs(OPERATOR, <PersistentWorlds />);
-    const button = await screen.findByRole('button', { name: '停止自动推进' });
+    const button = await screen.findByRole('button', { name: '停止认知' });
     await act(async () => {
       button.click();
     });
@@ -193,10 +218,37 @@ describe('自动推进的控制与状态', () => {
       pending.resolve(world('alpha', { autonomy: driver('alpha', 'stopped') }));
       await pending.promise;
     });
-    await screen.findByText('已停止自动推进（世界仍然开着，可以再启动）');
+    await screen.findByText('已停止认知（时间与作息照走，可以再启动）');
   });
 
-  it('连点两下「开始自动推进」只发一次请求', async () => {
+  it('Start 之后认知仍不可用时，把原因说出来', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    const pending = deferred<PersistentWorldStatus>();
+    vi.spyOn(api, 'startWorldAutonomy').mockReturnValue(pending.promise);
+
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const button = await screen.findByRole('button', { name: '开始认知' });
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {
+      pending.resolve(
+        world('alpha', {
+          autonomy: driver('alpha', 'stopped', {
+            exit_reason: 'world_action_cap',
+            cognition_causes: ['world_action_cap'],
+          }),
+        }),
+      );
+      await pending.promise;
+    });
+    await screen.findByText('已 Start，但认知此刻仍不可用：世界动作上限');
+  });
+
+  it('连点两下「开始认知」只发一次请求', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
       worlds: [world('alpha')],
@@ -205,7 +257,7 @@ describe('自动推进的控制与状态', () => {
     const start = vi.spyOn(api, 'startWorldAutonomy').mockReturnValue(pending.promise);
 
     renderAs(OPERATOR, <PersistentWorlds />);
-    const button = await screen.findByRole('button', { name: '开始自动推进' });
+    const button = await screen.findByRole('button', { name: '开始认知' });
     await act(async () => {
       button.click();
       button.click();
@@ -227,17 +279,15 @@ describe('自动推进的控制与状态', () => {
     vi.spyOn(api, 'startWorldAutonomy').mockReturnValue(pending.promise);
 
     renderAs(OPERATOR, <PersistentWorlds />);
-    const button = await screen.findByRole('button', { name: '开始自动推进' });
+    const button = await screen.findByRole('button', { name: '开始认知' });
     await act(async () => {
       button.click();
     });
     await act(async () => {
-      pending.reject(
-        new api.ApiError('世界 alpha 的驱动正在停止，等它停干净再启动', 409, 'autonomy_busy'),
-      );
+      pending.reject(new api.ApiError('世界 alpha 已经关闭', 409, 'autonomy_refused'));
       await pending.promise.catch(() => undefined);
     });
-    await screen.findByText('世界 alpha 的驱动正在停止，等它停干净再启动');
+    await screen.findByText('世界 alpha 已经关闭');
   });
 
   it('一次慢的列表刷新，吞不掉启动的结果', async () => {
@@ -254,7 +304,7 @@ describe('自动推进的控制与状态', () => {
     vi.spyOn(api, 'startWorldAutonomy').mockReturnValue(pending.promise);
 
     renderAs(OPERATOR, <PersistentWorlds />);
-    const button = await screen.findByRole('button', { name: '开始自动推进' });
+    const button = await screen.findByRole('button', { name: '开始认知' });
     const refresh = await screen.findByRole('button', { name: '刷新' });
     await act(async () => {
       button.click();
@@ -269,6 +319,151 @@ describe('自动推进的控制与状态', () => {
       pending.resolve(world('alpha', { autonomy: driver('alpha', 'running') }));
       await pending.promise;
     });
-    await screen.findByText('已开始自动推进：每 30 秒推 5 模拟分钟');
+    await screen.findByText('已开始认知：从下一个完整模拟分钟起，角色开始自己做决定');
+  });
+});
+
+describe('正式世界开局', () => {
+  it('还没有「夜明け前」时给出开局按钮，确认之后只发一次请求', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({ worlds: [world('alpha')] });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const pending = deferred<PersistentWorldStatus>();
+    const bootstrap = vi.spyOn(api, 'bootstrapFormalWorld').mockReturnValue(pending.promise);
+
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const button = await screen.findByRole('button', { name: '建立「夜明け前」' });
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledWith('yoake-mae');
+    await act(async () => {
+      pending.resolve(
+        world('yoake-mae', { revision: 1, clock: '2026-09-27T19:00:00' }),
+      );
+      await pending.promise;
+    });
+    await screen.findByText('已建立「夜明け前」，开局于 2026-09-27 19:00，存档第 1 版');
+  });
+
+  it('取消确认就什么都不发', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({ worlds: [] });
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const bootstrap = vi.spyOn(api, 'bootstrapFormalWorld');
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const button = await screen.findByRole('button', { name: '建立「夜明け前」' });
+    await act(async () => {
+      button.click();
+    });
+    expect(bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('已经有「夜明け前」就不再给开局按钮', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('yoake-mae')],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    await screen.findByText('yoake-mae');
+    expect(screen.queryByRole('button', { name: '建立「夜明け前」' })).toBeNull();
+  });
+
+  it('展开之后看得见「记录安静的分钟」与存档大小', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText(/^记录（默认）/)).toBeTruthy();
+    expect(
+      screen.getByText('3.2 MB（已封存 2 卷、2880 条事件；world.json 里 700 条）'),
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: '不再记录' })).toBeTruthy();
+  });
+
+  it('拨开关要先确认；取消就什么都不发', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    const flip = vi.spyOn(api, 'setQuietTimeEvents');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: '不再记录' }).click();
+    });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(String(confirm.mock.calls[0][0])).toContain('只影响之后');
+    expect(flip).not.toHaveBeenCalled();
+  });
+
+  it('确认之后拨下去，并说清楚从哪一刻起', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const pending = deferred<PersistentWorldStatus>();
+    const flip = vi.spyOn(api, 'setQuietTimeEvents').mockReturnValue(pending.promise);
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    await act(async () => {
+      screen.getByRole('button', { name: '不再记录' }).click();
+    });
+    expect(flip).toHaveBeenCalledWith('alpha', false);
+    await act(async () => {
+      pending.resolve(
+        world('alpha', {
+          quiet_time_events: {
+            record: false,
+            since_sim: '2026-08-23T02:05:00',
+            since_wall: '2026-08-22T17:05:00+00:00',
+            flips: 1,
+          },
+        }),
+      );
+      await pending.promise;
+    });
+    await screen.findByText('已停止记录安静的分钟（从 2026-08-23 02:05 起）');
+  });
+
+  it('没开着的世界只显示开关状态，不给拨', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('alpha', {
+          owned: false,
+          running: null,
+          autonomy: null,
+          quiet_time_events: {
+            record: false,
+            since_sim: '2026-08-23T02:05:00',
+            since_wall: null,
+            flips: 1,
+          },
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText(/^不记录（从 2026-08-23 02:05 起）/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重新记录' })).toBeNull();
   });
 });

@@ -37,7 +37,7 @@ from pns.interfaces.composition import (  # noqa: E402
     ContentUnavailable,
     WorldControlPlane,
 )
-from pns.runtime.autonomy.driver import DriverConfig  # noqa: E402
+from pns.runtime.autonomy.clock_worker import ClockConfig  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
 from pns.models.activation import ActivationKind  # noqa: E402
 from pns.models.agency import AgencyOutcome  # noqa: E402
@@ -252,7 +252,6 @@ class MvpTestCase(unittest.TestCase):
 
     def tearDown(self):
         try:
-            self.plane.drivers.stop_all("test teardown", 5.0)
             self.plane.service.release_all()
         finally:
             self._env.stop()
@@ -265,10 +264,19 @@ class MvpTestCase(unittest.TestCase):
             scene_id=SCENE,
             character_ids=list(CHARACTERS if characters is None else characters),
         )
-        return self.plane.service.opened(world_id)
+        return self.manual_clock(self.plane.service.opened(world_id))
+
+    @staticmethod
+    def manual_clock(world):
+        """这一组用例自己推时间、盯生成本身：停掉时钟 worker，认知直接 Start
+        （不设单次额度）。时钟 worker 的语义在 test_clock_worker 与
+        test_mvp_world_api 里单独盯。"""
+        assert world.clock_worker.stop(), "时钟 worker 没能停下"
+        world.runtime.start_cognition(None)
+        return world
 
     def advance(self, world, minutes):
-        """手动推一次时间。驱动的并发语义在 test_autonomy_driver 里单独盯。"""
+        """手动推一次时间。"""
         return world.runtime.advance(minutes)
 
     def prompt_owner(self, system: str):
@@ -841,7 +849,7 @@ class WorldLifetimeBudgetTests(MvpTestCase):
 
     # 把节律压密，好在一个用例里真的跑过 128 那条旧边界。
     autonomy = AutonomySettings(
-        driver=DriverConfig(interval_seconds=0.01, stop_timeout_seconds=1.0),
+        clock=ClockConfig(interval_seconds=0.01, stop_timeout_seconds=1.0),
         cadence=ActivationCadence(
             interval_minutes=1, first_delay_minutes=1, stagger_minutes=1
         ),
@@ -907,7 +915,7 @@ class WorldLifetimeBudgetTests(MvpTestCase):
             root=self.root / "capped",
             client_factory=lambda *a, **k: self.provider,
             autonomy=AutonomySettings(
-                driver=DriverConfig(interval_seconds=0.01, stop_timeout_seconds=1.0),
+                clock=ClockConfig(interval_seconds=0.01, stop_timeout_seconds=1.0),
                 cadence=ActivationCadence(
                     interval_minutes=1, first_delay_minutes=1, stagger_minutes=1
                 ),
@@ -918,16 +926,17 @@ class WorldLifetimeBudgetTests(MvpTestCase):
             plane.create(
                 world_id="tiny", scene_id=SCENE, character_ids=list(CHARACTERS)
             )
-            world = plane.service.opened("tiny")
+            world = self.manual_clock(plane.service.opened("tiny"))
             for _ in range(6):
                 world.runtime.advance(5)
-            # 引擎那道硬闸仍然在，而且认的就是配置里那个数。
+            # 引擎那道硬闸仍然在，而且认的就是配置里那个数。到顶之后认知以
+            # world_action_cap 关闭（WORLD-1 设计 §14.2），不再是 rejected_budget。
             self.assertEqual(world.state.agency.committed_actions(), 3)
-            self.assertNotEqual(
-                world.state.agency.for_outcome(AgencyOutcome.REJECTED_BUDGET), ()
-            )
+            capped = world.state.agency.for_outcome(AgencyOutcome.REJECTED_UNAVAILABLE)
+            self.assertNotEqual(capped, ())
+            for record in capped:
+                self.assertIn("world_action_cap", record.detail["causes"])
         finally:
-            plane.drivers.stop_all("test", 5.0)
             plane.service.release_all()
 
 

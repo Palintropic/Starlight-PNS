@@ -52,6 +52,8 @@ SCENE = "nightcord"
 CHARACTERS = ["mizuki", "ena"]
 
 STARTUP_TIMEOUT = 40.0
+# 生产世界时间与现实 1:1：最早的一条开局到期在 1 分钟之后。
+REAL_TIME_DUE_WAIT = 100.0
 
 
 def free_port() -> int:
@@ -349,12 +351,10 @@ class RestartDoesNotStartTests(ProcessTestCase):
         self.assertEqual(first.request("POST", "/api/persistent-worlds/nightcord/checkpoint")[0], 200)
         self.assert_stopped_cleanly(first)
 
-        second = self.started(
-            PNS_AUTONOMY_TICK_MINUTES="10", PNS_AUTONOMY_INTERVAL_SECONDS="0.5"
-        )
+        second = self.started(PNS_AUTONOMY_INTERVAL_SECONDS="0.5")
         status, world = second.request("POST", "/api/persistent-worlds/nightcord/restore")
         self.assertEqual(status, 200, world)
-        # 若干个 tick 周期都过去了。自动调用如果存在，早该发生了。
+        # 若干个时钟 worker 周期都过去了。自动调用如果存在，早该发生了。
         time.sleep(3.0)
         self.assertEqual(
             self.stub.count, 0, f"重启之后自己开始花额度了：{self.stub.requests[:1]}"
@@ -363,15 +363,17 @@ class RestartDoesNotStartTests(ProcessTestCase):
         self.assertEqual(status, 200, world)
         self.assertTrue(world["running"], "世界应当是开着的")
         autonomy = world["autonomy"]
-        self.assertTrue(
-            autonomy is None or autonomy["state"] == "stopped",
-            f"恢复之后驱动不该在跑：{autonomy}",
-        )
+        self.assertEqual(autonomy["state"], "stopped", f"恢复之后认知不该可用：{autonomy}")
+        self.assertIn("not_started", autonomy["cognition_causes"])
+        self.assertTrue(autonomy["worker_alive"], "时间应当在走")
 
     def test_an_explicit_start_does_reach_the_model(self):
-        """上一条的证伪能力全靠这一条：假端点确实数得到调用。"""
+        """上一条的证伪能力全靠这一条：假端点确实数得到调用。
+
+        生产时间与现实 1:1，不能快进：开局延迟调到最小的 1 分钟，老实等它到期。
+        """
         server = self.started(
-            PNS_AUTONOMY_TICK_MINUTES="10", PNS_AUTONOMY_INTERVAL_SECONDS="0.5"
+            PNS_AUTONOMY_FIRST_DELAY_MINUTES="1", PNS_AUTONOMY_INTERVAL_SECONDS="0.5"
         )
         self.create_world(server)
         self.assertEqual(self.stub.count, 0)
@@ -379,7 +381,7 @@ class RestartDoesNotStartTests(ProcessTestCase):
             "POST", "/api/persistent-worlds/nightcord/autonomy/start"
         )
         self.assertEqual(status, 200, body)
-        deadline = time.monotonic() + 25.0
+        deadline = time.monotonic() + REAL_TIME_DUE_WAIT
         while time.monotonic() < deadline and self.stub.count == 0:
             time.sleep(0.25)
         self.assertGreater(
@@ -455,7 +457,7 @@ class ShutdownAndRecoveryTests(ProcessTestCase):
         """
         self.stub.delay = 4.0
         server = self.started(
-            PNS_AUTONOMY_TICK_MINUTES="10",
+            PNS_AUTONOMY_FIRST_DELAY_MINUTES="1",
             PNS_AUTONOMY_INTERVAL_SECONDS="0.2",
             PNS_GRACEFUL_TIMEOUT="5",
         )
@@ -464,7 +466,7 @@ class ShutdownAndRecoveryTests(ProcessTestCase):
             server.request("POST", "/api/persistent-worlds/nightcord/autonomy/start")[0],
             200,
         )
-        deadline = time.monotonic() + 25.0
+        deadline = time.monotonic() + REAL_TIME_DUE_WAIT
         while time.monotonic() < deadline and self.stub.count == 0:
             time.sleep(0.2)
         self.assertGreater(self.stub.count, 0, "没能让一次 tick 真的开始")

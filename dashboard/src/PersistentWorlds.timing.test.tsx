@@ -58,6 +58,15 @@ const world = (
   archive_path: `/tmp/worlds/${world_id}/world.json`,
   boundaries_since_checkpoint: 0,
   policy: { every_boundaries: 1, min_interval_seconds: 60, on_close: true },
+  quiet_time_events: { record: true, since_sim: null, since_wall: null, flips: 0 },
+  archive: {
+    total_bytes: 3_400_000,
+    world_bytes: 1_300_000,
+    segments: 2,
+    sealed_events: 2880,
+    sealed_bytes: 2_100_000,
+    active_events: 700,
+  },
   autonomy: null,
   ...overrides,
 });

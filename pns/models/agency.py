@@ -22,6 +22,7 @@ from enum import Enum
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 from pns.models.action import ActionError, ActionProposal
+from pns.models.cognition import CognitionCauseError, normalize_causes
 from pns.models.frozen import freeze_json_value, thaw_json_value
 
 
@@ -43,8 +44,11 @@ class AgencyOutcome(str, Enum):
                               频道成员变了）。
       REJECTED_BUDGET         触到了显式声明的安全/算力上限。
       REJECTED_POLICY_ERROR   策略实现自己失败了（模型适配器拿到垃圾、抛异常）。
+      REJECTED_UNAVAILABLE    到期时认知不可用（未 Start、暂停、额度用完、停机、
+                              故障……）。世界照常发生，这一刻的决定没有发生；
+                              原因在 detail 里，见 pns/models/cognition.py。
 
-    四个 REJECTED_* 的共同后果完全一样：不产出事件，不产出观察，不留下任何
+    五个 REJECTED_* 的共同后果完全一样：不产出事件，不产出观察，不留下任何
     半截世界状态。区分它们是为了让"为什么没动"是可查的事实。
     """
 
@@ -54,6 +58,7 @@ class AgencyOutcome(str, Enum):
     REJECTED_STALE = "rejected_stale"
     REJECTED_BUDGET = "rejected_budget"
     REJECTED_POLICY_ERROR = "rejected_policy_error"
+    REJECTED_UNAVAILABLE = "rejected_unavailable"
 
     @property
     def acted(self) -> bool:
@@ -70,6 +75,7 @@ _REJECTED_OUTCOMES = frozenset(
         AgencyOutcome.REJECTED_STALE,
         AgencyOutcome.REJECTED_BUDGET,
         AgencyOutcome.REJECTED_POLICY_ERROR,
+        AgencyOutcome.REJECTED_UNAVAILABLE,
     }
 )
 
@@ -208,6 +214,32 @@ class AgencyRecord:
             "detail",
             freeze_json_value(self.detail, path="detail", error=AgencyError),
         )
+        if self.outcome is AgencyOutcome.REJECTED_UNAVAILABLE:
+            self._require_unavailable_detail()
+
+    def _require_unavailable_detail(self) -> None:
+        """认知不可用的记录必须说清楚为什么，而且不能声称问过策略。
+
+        存档恢复也走这里，所以一条被改过原因、或者被塞进策略名的不可用记录
+        在加载时就会被拒绝。
+        """
+        if self.policy:
+            # 不可用意味着这一刻根本没有做决定：写上策略名，等于声称策略被
+            # 问过、给出了"不动"的答案。
+            raise AgencyError("rejected_unavailable 记录不能带策略名：没有策略被询问")
+        detail = self.detail
+        if detail.get("reason") != "cognition_unavailable":
+            raise AgencyError("rejected_unavailable 记录的 reason 必须是 cognition_unavailable")
+        causes = detail.get("causes")
+        try:
+            normalized = normalize_causes(causes if causes is not None else ())
+        except CognitionCauseError as e:
+            raise AgencyError(f"rejected_unavailable 记录的原因不合法：{e}") from None
+        if list(causes) != [cause.value for cause in normalized]:
+            raise AgencyError("rejected_unavailable 记录的原因必须去重并排序")
+        interval = detail.get("interval")
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0:
+            raise AgencyError("rejected_unavailable 记录必须指向一个认知时间线区间序号")
 
     def __hash__(self) -> int:
         return hash(self.due_id)

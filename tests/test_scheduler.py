@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from grants_support import grant_everything
 from pns.models.activation import (
     ActivationDue,
     ActivationError,
@@ -56,6 +57,7 @@ def _world(clock=CLOCK):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     world.place_character("mizuki", "mizuki_home_room")
     world.place_character("ena", "ena_home_studio")
     return world
@@ -438,14 +440,33 @@ class TimeAdvanceEventTests(unittest.TestCase):
         self.assertEqual(second.event["correlation_id"], self.state.session_id)
 
     def test_the_scheduler_module_never_mutates_the_clock_directly(self):
-        """静态检查：调度器里不允许出现 advance_time() 或对 clock 的赋值。"""
+        """静态检查：调度器里不允许对 clock 赋值；advance_time() 只有一处明示例外。
+
+        例外是安静的一步（WORLD-1 存档增长设计 §3）：它只能在 `_tick` 里、
+        而且只能在 `if not record:` 分支里。
+        """
         source = inspect.getsource(scheduler_mod)
         tree = ast.parse(source)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == "advance_time"
+        ]
+        self.assertEqual(len(calls), 1, "调度器不能绕过事件推进时钟")
+        tick = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_tick"
+        )
+        quiet = [
+            node
+            for node in ast.walk(tick)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "not record"
+        ]
+        self.assertEqual(len(quiet), 1)
+        self.assertIn(calls[0], list(ast.walk(quiet[0])))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                self.assertNotEqual(
-                    node.attr, "advance_time", "调度器不能绕过事件推进时钟"
-                )
             if isinstance(node, (ast.Assign, ast.AugAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:
@@ -1379,16 +1400,16 @@ class DurableDueTests(unittest.TestCase):
         self.assertTrue(self.scheduler.outbox.has(due_id))
         self.assertTrue(self.scheduler.outbox.is_acknowledged(due_id))
 
-    def test_an_acknowledgement_is_not_lost_and_not_redelivered(self):
+    def test_a_bare_acknowledgement_cannot_be_archived(self):
+        # ack ⇔ record（WORLD-1 设计 §13.5）：确认过、却没有 Agency 记录说明结局
+        # 的到期资格，是一条静默丢失的决定。带记录的往返见 test_agency。
         self.scheduler.schedule(_activation("once", minutes_ahead=10))
         self.scheduler.schedule(_activation("other", minutes_ahead=10, character_id="ena"))
-        first, second = self.scheduler.advance_by(10).due
+        first, _second = self.scheduler.advance_by(10).due
         self.scheduler.acknowledge(first.due_id)
 
-        _, restored = _reopen(self.state)
-        self.assertEqual([r.due_id for r in restored.pending_due()], [second.due_id])
-        self.assertTrue(restored.outbox.is_acknowledged(first.due_id))
-        self.assertFalse(restored.acknowledge(first.due_id))
+        with self.assertRaisesRegex(SessionStateError, "没有任何 Agency 记录"):
+            _reopen(self.state)
 
     def test_acknowledging_something_that_never_happened_is_loud(self):
         for bad in ("nope@2026-08-22T00:00:00", "", None, 7):

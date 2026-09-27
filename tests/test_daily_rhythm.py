@@ -18,6 +18,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from grants_support import grant_everything
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore
@@ -27,7 +28,11 @@ from pns.runtime.autonomy.audit import ScriptedAuditor
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
 from pns.runtime.autonomy.generation import AuthoredLinePolicy, ScriptedLineGenerator
 from pns.runtime.content_registry import ConfigValidationError, _build_character
-from pns.runtime.event_commit import EventCommitError, commit_session_event
+from pns.runtime.event_commit import (
+    EventCommitError,
+    _commit_rhythm_event,
+    commit_session_event,
+)
 from pns.runtime.memory.recall import MemoryRecall
 from pns.runtime.rhythm import RhythmDirector, RhythmDirectorError
 from pns.runtime.scheduler import PersistentScheduler
@@ -37,6 +42,7 @@ from pns.world.rhythm import (
     DailyRhythm,
     RhythmError,
     RhythmSegment,
+    RhythmSource,
     parse_daily_rhythm,
     parse_day_minute,
 )
@@ -70,6 +76,7 @@ def _world(clock, *, join_nightcord=("mizuki", "ena")):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     world.place_character("mizuki", "mizuki_home_room")
     world.place_character("ena", "ena_home_studio")
     for character_id in join_nightcord:
@@ -77,9 +84,20 @@ def _world(clock, *, join_nightcord=("mizuki", "ena")):
     return world
 
 
-def _rig(clock=datetime(2026, 8, 21, 7, 55), *, rhythms=None, generator=None):
-    """一个绑好调度器、Agency、协调器的最小世界。"""
-    world = _world(clock)
+def _rig(
+    clock=datetime(2026, 8, 21, 7, 30),
+    *,
+    rhythms=None,
+    generator=None,
+    join_nightcord=("mizuki", "ena"),
+    align=True,
+):
+    """一个绑好调度器、Agency、协调器的最小世界。
+
+    默认 07:30 起步：08:00 那一段在学校，从房间出发要走 16 分钟（07:44 出门、
+    08:00 到），所以起点必须早于出发时刻，才能看到一次按时的行程。
+    """
+    world = _world(clock, join_nightcord=join_nightcord)
     state = SessionState(
         session_id="s1", scene="gate", characters=["mizuki", "ena"]
     )
@@ -101,6 +119,10 @@ def _rig(clock=datetime(2026, 8, 21, 7, 55), *, rhythms=None, generator=None):
         ),
     )
     runtime.start()
+    if align:
+        # 正式世界的 bootstrap 会按作息写好初始状态；测试夹具在这里做同一件事，
+        # 否则一建出来就"逾期"，第一分钟先补一次对齐。
+        runtime.apply_rhythm()
     return state, scheduler, runtime
 
 
@@ -151,18 +173,29 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
             self.assertIn(expect, str(caught.exception))
 
     def test_unknown_activity_is_rejected(self):
-        self._reject([{"at": "08:00", "activity": "probably_working"}])
+        self._reject(
+            [{"at": "08:00", "activity": "probably_working", "source": "inferred"}],
+            expect="未知的角色活动",
+        )
 
     def test_unknown_location_is_rejected(self):
         self._reject(
-            [{"at": "08:00", "activity": "studying", "location_id": "atlantis"}],
+            [
+                {
+                    "at": "08:00",
+                    "activity": "studying",
+                    "location_id": "atlantis",
+                    "source": "inferred",
+                }
+            ],
             expect="未知的 location_id",
         )
 
     def test_unspecified_is_not_a_segment(self):
         # 一段作息是来声明事实的；声明"没有事实"跟不写这一段是同一个意思。
         self._reject(
-            [{"at": "08:00", "activity": "unspecified"}], expect="unspecified"
+            [{"at": "08:00", "activity": "unspecified", "source": "inferred"}],
+            expect="unspecified",
         )
 
     def test_free_text_cannot_ride_along(self):
@@ -181,8 +214,8 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
     def test_two_segments_at_the_same_minute_are_rejected(self):
         self._reject(
             [
-                {"at": "08:00", "activity": "studying"},
-                {"at": "08:00", "activity": "drawing"},
+                {"at": "08:00", "activity": "studying", "source": "inferred"},
+                {"at": "08:00", "activity": "drawing", "source": "inferred"},
             ],
             expect="冲突",
         )
@@ -190,16 +223,63 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
     def test_identical_neighbours_are_rejected(self):
         self._reject(
             [
-                {"at": "08:00", "activity": "studying", "location_id": "kamiyama_high"},
-                {"at": "12:00", "activity": "studying", "location_id": "kamiyama_high"},
+                {
+                    "at": "08:00",
+                    "activity": "studying",
+                    "location_id": "kamiyama_high",
+                    "source": "inferred",
+                },
+                {
+                    "at": "12:00",
+                    "activity": "studying",
+                    "location_id": "kamiyama_high",
+                    "source": "official",
+                },
             ],
             expect="完全相同",
         )
 
+    def test_source_is_required(self):
+        # 不写出处就等于让缺省值替作者声明一次，所以 YAML 路径上它是必填。
+        self._reject([{"at": "08:00", "activity": "studying"}], expect="source")
+
+    def test_unknown_source_is_rejected(self):
+        for bad in ("canon", "OFFICIAL", "", None, True, ["official"]):
+            with self.subTest(source=bad):
+                self._reject(
+                    [{"at": "08:00", "activity": "studying", "source": bad}],
+                    expect="出处",
+                )
+
+    def test_source_is_carried_on_the_segment(self):
+        rhythm = parse_daily_rhythm(
+            [
+                {"at": "01:00", "activity": "online_chatting", "source": "official"},
+                {"at": "04:00", "activity": "resting", "source": "inferred"},
+            ],
+            character_id="mizuki",
+            locations=self.locations,
+        )
+        self.assertEqual(
+            [segment.source for segment in rhythm.segments],
+            [RhythmSource.OFFICIAL, RhythmSource.INFERRED],
+        )
+        self.assertEqual(rhythm.segments[0].to_dict()["source"], "official")
+
+    def test_a_directly_built_segment_never_defaults_to_official(self):
+        # 缺省值只能往保守那边偏：代码里忘了传，也不会被当成官方出处。
+        segment = RhythmSegment(at=480, activity="studying")
+        self.assertIs(segment.source, RhythmSource.INFERRED)
+
     def test_malformed_times_are_rejected(self):
         for bad in ("傍晚 17:30", "8:0:0", "25:00", "08-00", -1, 24 * 60, True):
             with self.subTest(bad=bad):
-                self._reject([{"at": bad, "activity": "studying"}])
+                # 带上 source，确保被拒是因为时间本身，而不是提前卡在缺字段上；
+                # 错误信息必须点名是 at 这一项。
+                self._reject(
+                    [{"at": bad, "activity": "studying", "source": "inferred"}],
+                    expect="的 at",
+                )
 
     def test_the_time_format_is_strict_hh_mm(self):
         """文档说"严格 HH:MM"，实现就必须真的严格。
@@ -258,6 +338,7 @@ class AuthoredRhythmIsValidatedAtContentBuildTests(unittest.TestCase):
                 },
                 Path("."),
                 self.locations,
+                build_default_channel_registry(),
             )
 
     def test_real_pack_rhythms_are_loadable_and_cover_the_two_leads(self):
@@ -320,32 +401,44 @@ class SegmentLookupTests(unittest.TestCase):
 class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
     def test_crossing_a_boundary_commits_typed_events_and_moves_the_world(self):
         state, _scheduler, runtime = _rig()
-        runtime.advance(10)  # 07:55 → 08:05，跨过 08:00
+        runtime.advance(35)  # 07:30 → 08:05，跨过 08:00
 
         world = state.world_state
         self.assertIs(
             world.activity_of("mizuki").kind, ActivityKind.STUDYING
         )
         self.assertEqual(world.location_of("mizuki"), "kamiyama_high")
-        self.assertEqual(world.activity_of("mizuki").since, world.clock)
+        # 按时出门、准点到：07:44 出发，08:00 到校并开始上课。
+        self.assertEqual(world.activity_of("mizuki").since, datetime(2026, 8, 21, 8, 0))
+        commuting = [
+            event for event in _activity_events(state)
+            if event.payload["activity"] == "commuting"
+        ]
+        self.assertEqual([event.occurred_at for event in commuting], [datetime(2026, 8, 21, 7, 44)])
 
-        kinds = [event.type for event in state.events.events()]
-        self.assertIn(EventType.CHARACTER_LOCATION_CHANGED, kinds)
-        self.assertIn(EventType.CHARACTER_ACTIVITY_CHANGED, kinds)
-        # 先到地方，再开始做事。
-        self.assertLess(
-            kinds.index(EventType.CHARACTER_LOCATION_CHANGED),
-            kinds.index(EventType.CHARACTER_ACTIVITY_CHANGED),
+        # 08:00 那一刻：先到地方，再开始做事。
+        at_eight = [
+            event
+            for event in state.events.events()
+            if event.occurred_at == datetime(2026, 8, 21, 8, 0)
+            and event.type is not EventType.WORLD_TIME_ADVANCED
+        ]
+        self.assertEqual(
+            [event.type for event in at_eight],
+            [EventType.CHARACTER_LOCATION_CHANGED, EventType.CHARACTER_ACTIVITY_CHANGED],
         )
+        self.assertEqual(at_eight[0].location_id, "kamiyama_high")
         activity_event = _activity_events(state)[-1]
         self.assertIs(activity_event.scope, EventScope.PRIVATE)
         self.assertEqual(activity_event.payload, {"activity": "studying"})
         self.assertEqual(activity_event.provenance["kind"], "daily_rhythm")
         self.assertEqual(activity_event.provenance["segment_at"], "08:00")
+        # 出处跟着这一段进审计记录：官方资料更新门要能区分推断出来的变更。
+        self.assertEqual(activity_event.provenance["segment_source"], "inferred")
 
     def test_the_world_stays_restorable_after_a_transition(self):
         state, _scheduler, runtime = _rig()
-        runtime.advance(10)
+        runtime.advance(35)
         runtime.advance(60)
 
         restored = SessionState.from_dict(state.to_dict())
@@ -358,7 +451,7 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
 
     def test_a_second_apply_in_the_same_minute_commits_nothing(self):
         # 挡住第二次的是判据本身：这一段的世界历史里已经有这个角色的状态变更了。
-        state, _scheduler, runtime = _rig()
+        state, _scheduler, runtime = _rig(align=False)
         first = runtime.apply_rhythm()
         self.assertTrue(first)
         self.assertEqual(runtime.apply_rhythm(), ())
@@ -367,7 +460,7 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
     def test_the_planned_event_ids_are_deterministic_and_unrepeatable(self):
         # 判据挡住了正常路径上的第二次；确定性 id 是第二道闸：万一世界状态与
         # 世界历史真的分了叉，同一分钟的同一条变更也进不了历史两次。
-        state, _scheduler, runtime = _rig()
+        state, _scheduler, runtime = _rig(align=False)
         world = state.world_state
         plan = runtime.rhythm.plan(world, state.events, correlation_id=state.session_id)
         again = runtime.rhythm.plan(world, state.events, correlation_id=state.session_id)
@@ -378,7 +471,7 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
         self.assertTrue(
             all(event.event_id.startswith("rhythm:mizuki:") for event in plan)
         )
-        commit_session_event(state, plan[0])
+        _commit_rhythm_event(state, plan[0])
         with self.assertRaises(Exception) as caught:
             # 同一条事件再来一次：世界历史按 id 拒绝。
             state.events._check_can_append(plan[0])
@@ -386,11 +479,15 @@ class RhythmTransitionsAreEventBackedTests(unittest.TestCase):
 
     def test_a_settled_segment_produces_nothing_on_later_ticks(self):
         state, _scheduler, runtime = _rig()
-        runtime.advance(10)
+        runtime.advance(35)
         before = len(state.events)
         runtime.advance(10)
         runtime.advance(10)
-        self.assertEqual(len(_activity_events(state)), 1)
+        studying = [
+            event for event in _activity_events(state)
+            if event.payload["activity"] == "studying"
+        ]
+        self.assertEqual(len(studying), 1)
         # 只多了两条 world.time_advanced。
         self.assertEqual(len(state.events) - before, 2)
 
@@ -422,19 +519,15 @@ class SameActivityDifferentPlaceTests(unittest.TestCase):
 
     def _rig_same_activity(self):
         state, scheduler, runtime = _rig(
-            clock=datetime(2026, 8, 21, 7, 55), rhythms={"mizuki": self.RHYTHM}
+            clock=datetime(2026, 8, 21, 8, 0), rhythms={"mizuki": self.RHYTHM}
         )
-        runtime.advance(10)  # 08:05：第一段，活动 idle
+        runtime.advance(5)  # 08:05：第一段，活动 idle
         self.assertIs(
             state.world_state.activity_of("mizuki").kind, ActivityKind.IDLE
         )
-        runtime.advance(4 * 60)  # 12:05：跨段，只换地点
+        runtime.advance(4 * 60)  # 12:05：跨段，换地点（路上是 commuting，到了仍是 idle）
         self.assertEqual(state.world_state.location_of("mizuki"), "kamiyama_high")
-        # 活动没变过，所以它的 since 仍然停在第一段 —— 这正是旧判据的盲区。
-        self.assertLess(
-            state.world_state.activity_of("mizuki").since,
-            datetime(2026, 8, 21, 12, 0),
-        )
+        self.assertIs(state.world_state.activity_of("mizuki").kind, ActivityKind.IDLE)
         return state, scheduler, runtime
 
     def test_a_move_after_a_location_only_switch_is_not_pulled_back(self):
@@ -487,25 +580,49 @@ class SameActivityDifferentPlaceTests(unittest.TestCase):
 
         director = RhythmDirector({"mizuki": self.RHYTHM})
         plan = director.plan(restored.world_state, restored.events)
-        self.assertEqual([event.type for event in plan], [EventType.CHARACTER_LOCATION_CHANGED])
-        self.assertEqual(plan[0].location_id, "kamiyama_high")
+        # 丢掉的是整趟行程：自愈从头再出发一次，而不是一步瞬移到学校。
+        self.assertEqual([event.type for event in plan], [EventType.CHARACTER_ACTIVITY_CHANGED])
+        self.assertEqual(plan[0].payload, {"activity": "commuting"})
 
 
-# ── AC4 跨过去的段没有发生过 ────────────────────────────────────────────
-class OnlyTheCurrentSegmentCanBecomeTrueTests(unittest.TestCase):
-    def test_a_long_jump_lands_on_the_current_segment_only(self):
-        state, _scheduler, runtime = _rig(clock=datetime(2026, 8, 21, 7, 55))
-        # 07:55 → 21:05：跨过 08:00、15:00、21:00 三道边界。
-        runtime.advance(13 * 60 + 10)
+# ── AC4（WORLD-1 修订）跨过去的每一段都在自己的时刻发生 ──────────────
+class EverySegmentHappensAtItsOwnTimeTests(unittest.TestCase):
+    """CONTENT-1 的旧契约是"跨过去的段没有发生过"。WORLD-1 设计 §5.1 把它改成
+    逐边界推进：世界时间是真的走过去的，中间的上学、打工、回家都发生了，而且
+    各自盖着自己的时刻，而不是被压成终点时刻。"""
+
+    def test_a_long_jump_lives_through_every_segment(self):
+        state, _scheduler, runtime = _rig(clock=datetime(2026, 8, 21, 7, 30))
+        # 07:30 → 21:05：跨过 08:00、15:00、21:00 三道边界。
+        runtime.advance(13 * 60 + 35)
 
         world = state.world_state
-        self.assertIs(
-            world.activity_of("mizuki").kind, ActivityKind.EDITING_VIDEO
-        )
+        self.assertIs(world.activity_of("mizuki").kind, ActivityKind.EDITING_VIDEO)
         self.assertEqual(world.location_of("mizuki"), "mizuki_home_room")
-        # 一次推进至多一条活动变更、一条位置变更 —— 被跨过的段不补演。
-        self.assertEqual(len(_activity_events(state)), 1)
-        self.assertEqual(len(_location_events(state)), 0)  # 本来就在家
+        settled = [
+            (event.payload["activity"], event.occurred_at)
+            for event in _activity_events(state)
+            if event.payload["activity"] != "commuting"
+            and event.occurred_at > datetime(2026, 8, 21, 7, 30)  # 开局对齐之后
+        ]
+        self.assertEqual(
+            settled,
+            [
+                ("studying", datetime(2026, 8, 21, 8, 0)),
+                ("working_part_time", datetime(2026, 8, 21, 15, 0)),
+                ("editing_video", datetime(2026, 8, 21, 21, 0)),
+            ],
+        )
+        # 每一跳都只走到相邻地点，并且严格晚于上一跳至少一段路程。
+        hops = _location_events(state)
+        graph = world.locations
+        for earlier, later in zip(hops, hops[1:]):
+            minutes = graph.travel_minutes(earlier.location_id, later.location_id)
+            self.assertIsNotNone(minutes, f"{earlier.location_id} → {later.location_id} 不相邻")
+            self.assertGreaterEqual(
+                later.occurred_at - earlier.occurred_at, timedelta(minutes=minutes)
+            )
+        self.assertEqual(hops[-1].location_id, "mizuki_home_room")
 
     def test_a_wrapped_segment_is_applied_after_midnight(self):
         state, _scheduler, runtime = _rig(clock=datetime(2026, 8, 21, 23, 55))
@@ -531,7 +648,7 @@ class OnlyTheCurrentSegmentCanBecomeTrueTests(unittest.TestCase):
 class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
     def test_an_operator_change_survives_every_tick_inside_the_segment(self):
         state, _scheduler, runtime = _rig()
-        runtime.advance(10)  # 进入 08:00 那一段
+        runtime.advance(35)  # 进入 08:00 那一段
 
         # 操作者在段内明确改成"画画"（跟 MVP-2 的接口同一条提交路径）。
         runtime.commit_external_event(
@@ -545,13 +662,13 @@ class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
             )
         )
         for _ in range(6):
-            runtime.advance(30)  # 一路推到 11:35，仍在 08:00 那一段里
+            runtime.advance(30)  # 一路推到 11:05，仍在 08:00 那一段里
         self.assertIs(
             state.world_state.activity_of("mizuki").kind, ActivityKind.DRAWING
         )
 
         # 下一段开始，作息表重新接手。
-        runtime.advance(4 * 60)  # → 15:35
+        runtime.advance(4 * 60)  # → 15:05（14:48 出发，15:00 到店）
         self.assertIs(
             state.world_state.activity_of("mizuki").kind,
             ActivityKind.WORKING_PART_TIME,
@@ -564,7 +681,7 @@ class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
         # 只移动、不碰活动。走的是 movement.move_to 落成的那条事件本身，
         # 所以这条用例盯的是角色自己走的路，不是测试里的旁路写法。
         state, _scheduler, runtime = _rig()
-        runtime.advance(10)  # 08:05，作息表把人放到了学校
+        runtime.advance(35)  # 08:05，作息表把人带到了学校
         _move(state, "mizuki", "kamiyama_high_gate", "move-1")
         runtime.advance(30)
         runtime.advance(30)
@@ -572,7 +689,7 @@ class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
             state.world_state.location_of("mizuki"), "kamiyama_high_gate"
         )
 
-        runtime.advance(6 * 60)  # → 15:15，下一段开始
+        runtime.advance(6 * 60)  # → 15:05，下一段开始（从校门出发，15:00 到店）
         self.assertEqual(
             state.world_state.location_of("mizuki"), "clothing_store_floor"
         )
@@ -583,7 +700,7 @@ class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
         # 把活动清成"未指定"同样是这一段之内的一次决定，所以它跟别的决定一样
         # 站得住 —— 判据不看活动是什么，只看这一段里有没有人动过这个角色。
         state, _scheduler, runtime = _rig()
-        runtime.advance(10)
+        runtime.advance(35)
         runtime.commit_external_event(
             Event(
                 event_id="operator-unspecified",
@@ -610,66 +727,92 @@ class InSegmentDecisionsWinUntilTheNextSegmentTests(unittest.TestCase):
         )
 
 
-# ── AC3/AC6 一批变更是一个事务，而且失败可以自愈 ────────────────────────
+# ── AC3/AC6 一个时钟步是一个事务，而且失败可以自愈 ──────────────────────
 class RhythmApplicationIsAtomicAndSelfHealingTests(unittest.TestCase):
-    def _broken(self):
-        """一份指向不存在地点的作息表：位置变更会在提交时失败。"""
-        return DailyRhythm(
-            character_id="mizuki",
-            segments=(
-                RhythmSegment(
-                    at=parse_day_minute("08:00"),
-                    activity=ActivityKind.STUDYING,
-                    location_id="atlantis",
-                ),
-            ),
-        )
+    """08:00 这一段在原地换活动并加入 Nightcord。让"加入"那一条提交失败：
+    整个时钟步必须回滚 —— 活动、时间事件、连时钟本身都回到步前（设计 §3.1）。"""
 
-    def test_a_failed_transition_leaves_neither_state_nor_events(self):
-        state, _scheduler, runtime = _rig(rhythms={"mizuki": self._broken()})
+    RHYTHM = DailyRhythm(
+        character_id="mizuki",
+        segments=(
+            RhythmSegment(
+                at=parse_day_minute("08:00"),
+                activity=ActivityKind.STUDYING,
+                location_id="mizuki_home_room",
+                channel_id="nightcord",
+            ),
+            RhythmSegment(
+                at=parse_day_minute("15:00"),
+                activity=ActivityKind.IDLE,
+                location_id="mizuki_home_room",
+            ),
+        ),
+    )
+
+    def _rig(self):
+        return _rig(rhythms={"mizuki": self.RHYTHM}, join_nightcord=())
+
+    @staticmethod
+    def _refuse_joins(state):
+        original = state.events._append
+
+        def refusing(event):
+            if event.type is EventType.PRESENCE_JOINED_CHANNEL:
+                raise EventCommitError("加入频道这一条写不进去")
+            return original(event)
+
+        state.events._append = refusing
+        return lambda: delattr(state.events, "_append")
+
+    def test_a_failed_step_leaves_neither_state_nor_events_nor_time(self):
+        state, _scheduler, runtime = self._rig()
+        clock = state.world_state.clock
+        activity = state.world_state.activity_of("mizuki").kind  # 开局对齐的 idle
+        activity_events = len(_activity_events(state))
+        restore = self._refuse_joins(state)
         with self.assertRaises(EventCommitError):
-            runtime.advance(10)
+            runtime.advance(35)
+        restore()
 
         world = state.world_state
-        self.assertIs(world.activity_of("mizuki").kind, ActivityKind.UNSPECIFIED)
-        self.assertEqual(world.location_of("mizuki"), "mizuki_home_room")
-        self.assertEqual(_activity_events(state), [])
-        self.assertEqual(_location_events(state), [])
+        self.assertEqual(world.clock, clock, "时钟也属于这一步，必须一起回滚")
+        self.assertIs(world.activity_of("mizuki").kind, activity)
+        self.assertFalse(world.is_in_channel("mizuki", "nightcord"))
+        self.assertEqual(len(_activity_events(state)), activity_events)
         # 世界仍然是自洽的、可恢复的。
         SessionState.from_dict(state.to_dict())
 
     def test_the_next_tick_re_applies_what_the_failed_one_lost(self):
-        state, _scheduler, runtime = _rig(rhythms={"mizuki": self._broken()})
+        state, _scheduler, runtime = self._rig()
+        restore = self._refuse_joins(state)
         with self.assertRaises(EventCommitError):
-            runtime.advance(10)
+            runtime.advance(35)
+        restore()
 
-        # 换成一份好的作息表（等价于修好内容之后重开这个世界），下一次推进
-        # 必须把那次丢掉的变更补上 —— 判据在耐久状态里，不在内存标记里。
-        runtime._rhythm = RhythmDirector({"mizuki": MIZUKI_RHYTHM})
-        runtime.advance(10)
-        self.assertIs(
-            state.world_state.activity_of("mizuki").kind, ActivityKind.STUDYING
-        )
-        self.assertEqual(state.world_state.location_of("mizuki"), "kamiyama_high")
+        runtime.advance(35)
+        world = state.world_state
+        self.assertIs(world.activity_of("mizuki").kind, ActivityKind.STUDYING)
+        self.assertTrue(world.is_in_channel("mizuki", "nightcord"))
 
     def test_removing_the_transaction_makes_this_test_red(self):
-        """把整批变更拆成两次独立提交，就会留下"人还没到、活动已经变了"。
-
-        这条不是断言现在的实现，而是证明上面那条测试真的在盯着事务边界：
-        逐条提交的版本在第二条失败时会留下第一条。
-        """
-        state, _scheduler, runtime = _rig(rhythms={"mizuki": self._broken()})
+        """把整批变更拆成独立提交，就会留下"活动已经变了、频道却没进"。"""
+        state, _scheduler, runtime = self._rig()
+        runtime.advance(29)  # 07:59
+        state.world_state.advance_time(1)  # 直接到 08:00，只为拿到那一刻的计划
         world = state.world_state
-        plan = runtime.rhythm.plan(
-            world, state.events, correlation_id=state.session_id
+        plan = runtime.rhythm.plan(world, state.events, correlation_id=state.session_id)
+        self.assertEqual(
+            [event.type for event in plan],
+            [EventType.CHARACTER_ACTIVITY_CHANGED, EventType.PRESENCE_JOINED_CHANNEL],
         )
-        self.assertEqual(len(plan), 2)
+        restore = self._refuse_joins(state)
         with self.assertRaises(EventCommitError):
-            for event in reversed(plan):  # 先活动、后位置：逐条提交
-                commit_session_event(state, event)
-        # 逐条提交确实留下了半截世界 —— 这正是 apply_rhythm() 不允许的那种。
+            for event in plan:  # 逐条提交
+                _commit_rhythm_event(state, event)
+        restore()
+        # 逐条提交确实留下了半截世界 —— 这正是时钟步不允许的那种。
         self.assertIs(world.activity_of("mizuki").kind, ActivityKind.STUDYING)
-        self.assertEqual(world.location_of("mizuki"), "mizuki_home_room")
+        self.assertFalse(world.is_in_channel("mizuki", "nightcord"))
 
 
 # ── AC7 生成读到的是对齐之后的活动 ──────────────────────────────────────
@@ -689,17 +832,19 @@ class GenerationSeesThePostTransitionActivityTests(unittest.TestCase):
             ScheduledActivation(
                 activation_id="wake",
                 kind=ActivationKind.CHARACTER_ACTIVATION,
-                due_at=scheduler.clock + timedelta(minutes=10),
+                due_at=scheduler.clock + timedelta(minutes=30),
                 character_id="mizuki",
             )
         )
-        runtime.advance(10)  # 同一次推进里：跨过 08:00 边界 + 到期资格
+        # 同一个时刻 08:00：到校、开始上课、到期资格。同时间戳的全序是先行程、
+        # 再活动、最后才轮到认知（设计 §3.2），所以生成看到的是"在上课"。
+        runtime.advance(30)
 
         self.assertEqual(seen.get("mizuki"), "studying")
 
     def test_another_characters_activity_never_enters_the_prompt_context(self):
         state, scheduler, runtime = _rig()
-        runtime.advance(10)
+        runtime.advance(35)
         from pns.runtime.agency.context import build_agency_context
 
         due = None
@@ -711,7 +856,9 @@ class GenerationSeesThePostTransitionActivityTests(unittest.TestCase):
                 character_id="ena",
             )
         )
-        due = scheduler.advance_by(5).due[0]
+        # 作息驱动的世界只能经由运行时推时钟；先不处理，取出这条到期记录。
+        runtime.advance(5, max_results=0)
+        (due,) = state.activation_outbox.pending()
         context = build_agency_context(
             state.world_state,
             "ena",
@@ -744,11 +891,11 @@ class RhythmBookkeepingNeverReachesAPromptTests(unittest.TestCase):
             ScheduledActivation(
                 activation_id="wake",
                 kind=ActivationKind.CHARACTER_ACTIVATION,
-                due_at=scheduler.clock + timedelta(minutes=10),
+                due_at=scheduler.clock + timedelta(minutes=35),
                 character_id="mizuki",
             )
         )
-        runtime.advance(10)
+        runtime.advance(35)
 
         situation = seen["situation"]
         self.assertIn("学习", situation, "当前活动本身是角色该知道的事")
@@ -788,7 +935,7 @@ class CharactersWithoutARhythmAreUntouchedTests(unittest.TestCase):
         self.assertEqual(_location_events(state), [])
 
     def test_a_stopped_runtime_commits_nothing(self):
-        state, _scheduler, runtime = _rig()
+        state, _scheduler, runtime = _rig(align=False)
         runtime.stop("done")
         self.assertEqual(runtime.apply_rhythm(), ())
         self.assertEqual(_activity_events(state), [])

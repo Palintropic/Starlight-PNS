@@ -38,6 +38,14 @@ from pns.world.data_module import DataModuleError, evaluate_data_source, require
 from pns.world.characters.registry import CharacterNotReadyError, load_pack_data
 from pns.world.context import render_world_context
 from pns.world.locations import build_default_location_graph
+from pns.world.grants import (
+    CharacterGrants,
+    GrantError,
+    parse_access_grants,
+    require_rhythm_channels_joinable,
+    require_rhythm_is_enterable,
+    require_rhythm_trips_fit,
+)
 from pns.world.rhythm import DailyRhythm, RhythmError, parse_daily_rhythm
 from pns.world.scene_compat import (
     SCENE_WORLD_MAP,
@@ -228,6 +236,9 @@ class CharacterContent:
     # 作者写下的日常作息表（`daily_rhythm`）。没写就是 None —— 没有作息表是
     # 正常的，它是逐个角色补的内容，不是每个角色都必须有的字段。
     rhythm: Optional[DailyRhythm] = None
+    # 作者声明的静态授予（`access_grants`）。没写就是 None —— 这个角色只能出现在
+    # 公开地点，也不是任何频道的成员。
+    grants: Optional[CharacterGrants] = None
 
     @property
     def status(self) -> str:
@@ -248,7 +259,7 @@ def _read_optional(base_dir: Path, filename: Optional[str]) -> Optional[str]:
 
 
 def _build_character(
-    character_id: str, info: Dict, pack_dir: Path, locations
+    character_id: str, info: Dict, pack_dir: Path, locations, channels
 ) -> CharacterContent:
     """读出一个角色在这份快照里的全部内容。
 
@@ -277,11 +288,31 @@ def _build_character(
         # 而它自己是可重载内容，两者对不上必须在切换之前暴露，而不是等到某天
         # 凌晨那一段作息真的到点、提交事件时才炸。
         rhythm = parse_daily_rhythm(
-            info.get("daily_rhythm"), character_id=character_id, locations=locations
+            info.get("daily_rhythm"),
+            character_id=character_id,
+            locations=locations,
+            channels=channels,
         )
     except RhythmError as e:
         raise ConfigValidationError(
             f"角色 {character_id} 的 daily_rhythm 不合法：{e}"
+        ) from e
+
+    try:
+        # 授予跟作息表同一条规矩：引用的地点/频道是 cold 结构，写错必须在切换
+        # 之前暴露。
+        grants = parse_access_grants(
+            info.get("access_grants"),
+            character_id=character_id,
+            locations=locations,
+            channels=channels,
+        )
+        require_rhythm_is_enterable(rhythm, grants, locations)
+        require_rhythm_channels_joinable(rhythm, grants)
+        require_rhythm_trips_fit(rhythm, grants, locations)
+    except GrantError as e:
+        raise ConfigValidationError(
+            f"角色 {character_id} 的 access_grants 不合法：{e}"
         ) from e
 
     return CharacterContent(
@@ -296,6 +327,7 @@ def _build_character(
         constitution=_read_optional(char_dir, info.get("constitution_file")),
         router_reference=_read_optional(char_dir, info.get("router_reference_file")),
         rhythm=rhythm,
+        grants=grants,
     )
 
 
@@ -377,6 +409,9 @@ class ContentRegistry:
             if content.rhythm is not None
         }
 
+    def grants(self, character_id: str) -> Optional[CharacterGrants]:
+        return self.character(character_id).grants
+
     def character_system(self, character_id: str, context, compat: bool = False) -> str:
         """组装角色 system prompt。等价于 pns.world.get_character_system，
         但文本全部来自本快照，运行期不再回磁盘 —— 会话中途改文件不会串味。"""
@@ -415,11 +450,21 @@ class ContentRegistry:
         注意方向：配置 → 初始状态，只发生一次，且只发生在会话开始时。
         没有任何反向通道能让重载去改一个已经存在的 WorldState。
         """
+        character_ids = list(character_ids)
+        # 授予是这个世界的静态结构，跟位置图一样只在建世界时装入一次；它必须在
+        # 放人之前装好，否则放人那一步的授权检查会拒绝合法的初始安排。
+        grants = {
+            character_id: self.characters[character_id].grants
+            for character_id in character_ids
+            if character_id in self.characters
+            and self.characters[character_id].grants is not None
+        }
         return build_initial_world_state(
             scene,
             character_ids,
             locations=self.new_location_graph(),
             channels=self.new_channel_registry(),
+            grants=grants,
         )
 
     def to_dict(self) -> Dict:
@@ -548,7 +593,9 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
 
     characters: Dict[str, CharacterContent] = {}
     for character_id, info in pack["characters"].items():
-        content = _build_character(character_id, info, pack["pack_dir"], locations)
+        content = _build_character(
+            character_id, info, pack["pack_dir"], locations, channels
+        )
         # status=ready 的角色必须真的能开口，否则整份配置不算通过。
         if content.status == "ready" and content.system_prompt is None:
             raise ConfigValidationError(content.prompt_error or f"角色 {character_id} 无提示词")

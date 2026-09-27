@@ -57,6 +57,7 @@ _ACTIVITY_LABELS = {
     "composing": "作曲",
     "editing_video": "制作视频",
     "online_chatting": "在线聊天",
+    "commuting": "在路上",
 }
 
 

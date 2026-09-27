@@ -34,11 +34,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from grants_support import grant_everything
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.models.activation_outbox import ActivationOutbox
 from pns.models.activation_queue import ActivationQueue
 from pns.models.event import EventType
-from pns.models.session import SessionState, TransactionBoundaryError
+from pns.models.session import SessionFencedError, SessionState, TransactionBoundaryError
 from pns.models.world_state import WorldState
 from pns.runtime.autonomy.audit import ScriptedAuditor
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
@@ -91,6 +92,7 @@ def _world(clock=CLOCK):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     world.place_character("mizuki", "mizuki_home_room")
     world.place_character("ena", "ena_home_studio")
     world.join_channel("mizuki", "nightcord")
@@ -296,6 +298,15 @@ class ArchiveEnvelopeTests(WorldTestCase):
         with self.assertRaises(ArchiveError) as caught:
             WorldArchive.from_dict(payload)
         self.assertIn(str(WORLD_ARCHIVE_VERSION + 99), str(caught.exception))
+
+    def test_a_pre_world_1_archive_is_refused_as_retired(self):
+        # WORLD-1 之前的 v1 存档属于已退役的世界：明确拒绝，不迁移、不猜。
+        state = _cold_state()
+        payload = WorldArchive.capture("nightcord", state, revision=1).to_dict()
+        payload["version"] = 1
+        with self.assertRaises(ArchiveError) as caught:
+            WorldArchive.from_dict(payload)
+        self.assertIn("退役", str(caught.exception))
 
     def test_an_envelope_whose_session_disagrees_with_its_state_is_refused(self):
         state = _cold_state()
@@ -1312,12 +1323,16 @@ class ShutdownOrderTests(WorldTestCase):
 
     def test_a_closed_world_refuses_further_work(self):
         world = self.created()
+        due = _due(world.runtime.scheduler)
         world.close()
         with self.assertRaises(LifecycleError):
             world.checkpoint()
         self.assertFalse(world.runtime.running)
-        result = world.runtime.process_due(_due(world.runtime.scheduler))
+        result = world.runtime.process_due(due)
         self.assertEqual(result.outcome.value, "stopped")
+        # 关上之后，连排期、推进时间这种绕开协调器的写入也被内存栅栏拒绝。
+        with self.assertRaises(SessionFencedError):
+            _due(world.runtime.scheduler, activation_id="late")
 
     def test_closing_frees_the_world_for_a_new_owner(self):
         world = self.created()
@@ -1726,12 +1741,12 @@ class LifecycleServiceTests(WorldTestCase):
         # 所有权还回去了，运行时却还在接写入 —— 那些写入既不会落盘，又可能
         # 跟接手这个世界的下一个进程并行发生。
         world = self.created()
+        due = _due(world.runtime.scheduler)
         world.release()
         self.assertFalse(world.runtime.running)
-        self.assertEqual(
-            world.runtime.process_due(_due(world.runtime.scheduler)).outcome.value,
-            "stopped",
-        )
+        self.assertEqual(world.runtime.process_due(due).outcome.value, "stopped")
+        with self.assertRaises(SessionFencedError):
+            _due(world.runtime.scheduler, activation_id="late")
 
     def test_releasing_from_inside_a_transaction_is_refused_not_deadlocked(self):
         world = self.created()

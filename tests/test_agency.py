@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from grants_support import grant_everything
 from pns.models.action import (
     ActionDefinition,
     ActionError,
@@ -89,6 +90,7 @@ def _world(clock=CLOCK, *, join_nightcord=("mizuki",)):
         locations=build_default_location_graph(),
         channels=build_default_channel_registry(),
     )
+    grant_everything(world)
     world.place_character("mizuki", "mizuki_home_room")
     world.place_character("ena", "ena_home_studio")
     for character_id in join_nightcord:
@@ -587,6 +589,7 @@ class PolicyTests(unittest.TestCase):
             locations=build_default_location_graph(),
             channels=ChannelRegistry(),
         )
+        grant_everything(world)
         world.place_character("mizuki", "tokyo")
         state, scheduler, engine = _rig(world=world)
         context = engine.context_for(_due(scheduler))

@@ -29,7 +29,7 @@ from . import accounts_api
 from . import auth as auth_routes
 from . import config, health, persistent_worlds, review, simulate, world
 from .accounts import AccountError, AccountStore
-from .composition import WorldControlPlane
+from .composition import AutonomySettings, WorldControlPlane
 from .paths import ACCOUNTS_DB_FILE, DASHBOARD_DIST
 from .security import (
     ENV_ACCOUNTS_DB,
@@ -194,8 +194,14 @@ def create_app(
     dashboard_dist: Optional[Path] = None,
     registry_provider: Optional[Callable[[], object]] = None,
 ) -> FastAPI:
-    plane = control_plane if control_plane is not None else WorldControlPlane()
     deployment = settings if settings is not None else DeploymentSettings.from_env()
+    plane = (
+        control_plane
+        if control_plane is not None
+        else WorldControlPlane(
+            autonomy=AutonomySettings.from_env(production=deployment.production)
+        )
+    )
     dist = Path(dashboard_dist) if dashboard_dist is not None else DASHBOARD_DIST
     if registry_provider is None and deployment.production:
         # 生产必填校验需要一份真配置。这个 import 放在函数里：模块 import
@@ -204,6 +210,12 @@ def create_app(
 
         registry_provider = BOUNDARY.active
     _verify_production_config(deployment, dist, registry_provider)
+    if deployment.production and float(plane.autonomy.clock.rate) != 1.0:
+        # 生产环境的世界时间必须与现实 1:1。注入进来的控制面也一样查。
+        raise DeploymentConfigError(
+            f"生产模式要求世界时间与现实 1:1，控制面配置的倍率是 "
+            f"{plane.autonomy.clock.rate}"
+        )
 
     # 顺序是刻意的：先拿到账户库，再 bootstrap，最后才构造 AdminAuth ——
     # `AdminAuth` 在构造时就把"这台服务器要不要凭据"定下来，所以它必须看到

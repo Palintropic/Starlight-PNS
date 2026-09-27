@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set
 
 from pns.models.channel import ChannelRegistry
-from pns.models.location import LocationGraph
+from pns.models.location import LocationGraph, access_admits
 
 
 class WorldStateError(ValueError):
@@ -56,6 +56,8 @@ class ActivityKind(str, Enum):
     COMPOSING = "composing"
     EDITING_VIDEO = "editing_video"
     ONLINE_CHATTING = "online_chatting"
+    # 在路上：作息行程从出发到到达之间的活动（WORLD-1）。
+    COMMUTING = "commuting"
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,17 @@ class WorldState:
     character_activities: Dict[str, CharacterActivity] = field(default_factory=dict)
     location_state: Dict[str, Dict] = field(default_factory=dict)
     metadata: Dict = field(default_factory=dict)
+    # 进入非公开地点、加入频道的静态授予。只在建世界时由内容注册表（以及遗留
+    # 场景声明的访客身份）装入，没有任何事件能改它们。关系、意愿、模型文本都
+    # 没有通往这里的路（Articles VIII–IX）。没有授予就是拒绝。
+    #
+    # 不变量：任何时刻，一个角色所在的地点它都 may_enter，所在的频道它都
+    # may_join。place_character / join_channel 执行它，validate()（含存档加载）
+    # 校验它。
+    #   location_grants: 角色 → {location_id: role}
+    #   channel_grants:  角色 → {channel_id}
+    location_grants: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    channel_grants: Dict[str, Set[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Own and validate all mutable state supplied at construction time."""
@@ -128,7 +141,28 @@ class WorldState:
         }
         self.location_state = deepcopy(self.location_state)
         self.metadata = deepcopy(self.metadata)
+        self.location_grants = {
+            character_id: dict(grants)
+            for character_id, grants in self.location_grants.items()
+        }
+        self.channel_grants = {
+            character_id: set(grants)
+            for character_id, grants in self.channel_grants.items()
+        }
+        # 挂在 SessionState 上之后，由它装一个写守卫：会话关上（fence）之后、
+        # 或处在只读快照块里时，这里的每个写方法都会失败。它不是世界状态的一部分，
+        # 不进存档、不参与相等性比较；没挂到会话上的 WorldState（建世界、测试）
+        # 没有守卫。
+        self._write_guard = None
+        # 时钟守卫：挂在会话上、且会话声明了"时钟有主"之后，只有调度器的推进
+        # 事务能改时钟（见 SessionState.claim_clock）。同样不进存档。
+        self._clock_guard = None
         self.validate()
+
+    def _check_writable(self) -> None:
+        guard = self._write_guard
+        if guard is not None:
+            guard()
 
     def validate(self) -> None:
         """Reject state that bypassed the public mutation methods."""
@@ -180,6 +214,37 @@ class WorldState:
                 )
             if not isinstance(facts, dict):
                 raise WorldStateError(f"地点 '{location_id}' 的状态必须是字典")
+        for character_id, grants in self.location_grants.items():
+            self._require_character_id(character_id)
+            for location_id, role in grants.items():
+                if not self.locations.has(location_id):
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 的进入授予引用了未知的 location_id: "
+                        f"{location_id}"
+                    )
+                if not isinstance(role, str) or not role:
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 对 '{location_id}' 的授予必须写明角色身份"
+                    )
+        for character_id, grants in self.channel_grants.items():
+            self._require_character_id(character_id)
+            for channel_id in grants:
+                if not self.channels.has(channel_id):
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 的频道授予引用了未知的 channel_id: "
+                        f"{channel_id}"
+                    )
+        for character_id, location_id in self.character_locations.items():
+            if not self.may_enter(character_id, location_id):
+                raise WorldStateError(
+                    f"角色 '{character_id}' 位于 '{location_id}'，但没有进入它的授予"
+                )
+        for channel_id, members in self.channel_members.items():
+            for character_id in members:
+                if not self.may_join(character_id, channel_id):
+                    raise WorldStateError(
+                        f"角色 '{character_id}' 在频道 '{channel_id}' 里，但不是它的成员"
+                    )
 
     # ── 时间 ────────────────────────────────────────────────────────────
     @property
@@ -193,6 +258,9 @@ class WorldState:
 
     def advance_time(self, minutes: int = 10) -> datetime:
         """推进模拟时间，跨零点时日期一并进位。"""
+        self._check_writable()
+        if self._clock_guard is not None:
+            self._clock_guard()
         if minutes < 0:
             raise WorldStateError("模拟时间不能倒退")
         self.clock = self.clock + timedelta(minutes=minutes)
@@ -200,12 +268,18 @@ class WorldState:
 
     # ── 物理位置 ────────────────────────────────────────────────────────
     def place_character(self, character_id: str, location_id: str) -> None:
+        self._check_writable()
         self._require_character_id(character_id)
         if not self.locations.has(location_id):
             raise WorldStateError(f"未知的 location_id: {location_id}")
+        if not self.may_enter(character_id, location_id):
+            raise WorldStateError(
+                f"角色 '{character_id}' 没有进入 '{location_id}' 的授予"
+            )
         self.character_locations[character_id] = location_id
 
     def remove_character(self, character_id: str) -> None:
+        self._check_writable()
         self.character_locations.pop(character_id, None)
         self.character_availability.pop(character_id, None)
         self.character_activities.pop(character_id, None)
@@ -232,14 +306,57 @@ class WorldState:
         ]
         return sorted(found)
 
-    # ── 线上频道 ────────────────────────────────────────────────────────
-    def join_channel(self, character_id: str, channel_id: str) -> None:
+    # ── 进入与加入的授权 ────────────────────────────────────────────────
+    def may_enter(self, character_id: str, location_id: str) -> bool:
+        """这个角色有没有资格出现在这个地点。
+
+        只有 `access.public is True` 的地点对所有人开放；其余一律要一条针对
+        这个地点的授予，地点声明了 `access.role` 时授予的身份还必须一致。
+        没写 access 的地点不算公开 —— 缺省只能往拒绝那边偏。
+        """
+        if not self.locations.has(location_id):
+            return False
+        return access_admits(
+            self.locations.get(location_id).access,
+            self.location_grants.get(character_id, {}).get(location_id),
+        )
+
+    def may_join(self, character_id: str, channel_id: str) -> bool:
+        """这个角色是不是这个频道的成员（有没有资格加入，不是此刻在不在）。"""
+        return channel_id in self.channel_grants.get(character_id, set())
+
+    def _grant_location(self, character_id: str, location_id: str, role: str) -> None:
+        """建世界时装入一条进入授予。**只给建世界的代码用**，运行期没有调用方。"""
+        self._check_writable()
+        self._require_character_id(character_id)
+        if not self.locations.has(location_id):
+            raise WorldStateError(f"未知的 location_id: {location_id}")
+        if not isinstance(role, str) or not role:
+            raise WorldStateError("进入授予必须写明角色身份")
+        self.location_grants.setdefault(character_id, {})[location_id] = role
+
+    def _grant_channel(self, character_id: str, channel_id: str) -> None:
+        """建世界时装入一条频道成员资格。**只给建世界的代码用**。"""
+        self._check_writable()
         self._require_character_id(character_id)
         if not self.channels.has(channel_id):
             raise WorldStateError(f"未知的 channel_id: {channel_id}")
+        self.channel_grants.setdefault(character_id, set()).add(channel_id)
+
+    # ── 线上频道 ────────────────────────────────────────────────────────
+    def join_channel(self, character_id: str, channel_id: str) -> None:
+        self._check_writable()
+        self._require_character_id(character_id)
+        if not self.channels.has(channel_id):
+            raise WorldStateError(f"未知的 channel_id: {channel_id}")
+        if not self.may_join(character_id, channel_id):
+            raise WorldStateError(
+                f"角色 '{character_id}' 不是频道 '{channel_id}' 的成员"
+            )
         self.channel_members.setdefault(channel_id, set()).add(character_id)
 
     def leave_channel(self, character_id: str, channel_id: str) -> None:
+        self._check_writable()
         if channel_id in self.channel_members:
             self.channel_members[channel_id].discard(character_id)
 
@@ -260,6 +377,7 @@ class WorldState:
 
     # ── 可用性 ──────────────────────────────────────────────────────────
     def set_availability(self, character_id: str, availability) -> None:
+        self._check_writable()
         self._require_character_id(character_id)
         availability = Availability(availability)
         if availability is Availability.AVAILABLE:
@@ -272,6 +390,7 @@ class WorldState:
 
     # ── 当前活动 ────────────────────────────────────────────────────────
     def set_activity(self, character_id: str, activity) -> CharacterActivity:
+        self._check_writable()
         self._require_character_id(character_id)
         if character_id not in self.known_characters():
             raise WorldStateError(f"世界里不存在角色 '{character_id}'")
@@ -307,6 +426,7 @@ class WorldState:
 
     # ── 地点环境状态 ────────────────────────────────────────────────────
     def set_environment(self, location_id: str, facts: Dict) -> None:
+        self._check_writable()
         if not self.locations.has(location_id):
             raise WorldStateError(f"未知的 location_id: {location_id}")
         self.location_state.setdefault(location_id, {}).update(deepcopy(facts))
@@ -333,10 +453,26 @@ class WorldState:
             "character_activities": dict(self.character_activities),
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
+            # 授予没有运行期写入口，但回滚快照照样覆盖它：一次在事务里误装的
+            # 授予必须跟着事务一起撤销，而不是因为"本来就不该变"而漏掉。
+            "location_grants": {
+                character_id: dict(grants)
+                for character_id, grants in self.location_grants.items()
+            },
+            "channel_grants": {
+                character_id: set(grants)
+                for character_id, grants in self.channel_grants.items()
+            },
         }
 
-    def restore_mutable_state(self, snapshot: Dict) -> None:
-        """就地恢复到 snapshot_mutable_state() 的那一刻。"""
+    def _restore_mutable_state(self, snapshot: Dict) -> None:
+        """就地恢复到 snapshot_mutable_state() 的那一刻。只给提交失败时的回滚用。
+
+        它整体替换全部权威可变状态，所以跟其它写方法一样先过写守卫：会话 fence
+        之后、或处在只读快照块里时，它同样失败。回滚总发生在一次仍可写的提交
+        里面，守卫不会挡住正常的回滚。
+        """
+        self._check_writable()
         self.clock = snapshot["clock"]
         self.character_locations = dict(snapshot["character_locations"])
         self.channel_members = {
@@ -347,6 +483,14 @@ class WorldState:
         self.character_activities = dict(snapshot["character_activities"])
         self.location_state = deepcopy(snapshot["location_state"])
         self.metadata = deepcopy(snapshot["metadata"])
+        self.location_grants = {
+            character_id: dict(grants)
+            for character_id, grants in snapshot["location_grants"].items()
+        }
+        self.channel_grants = {
+            character_id: set(grants)
+            for character_id, grants in snapshot["channel_grants"].items()
+        }
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
@@ -372,6 +516,14 @@ class WorldState:
             },
             "location_state": deepcopy(self.location_state),
             "metadata": deepcopy(self.metadata),
+            "location_grants": {
+                character_id: dict(grants)
+                for character_id, grants in self.location_grants.items()
+            },
+            "channel_grants": {
+                character_id: sorted(grants)
+                for character_id, grants in self.channel_grants.items()
+            },
         }
 
     @classmethod
@@ -389,6 +541,14 @@ class WorldState:
             character_activities=dict(payload.get("character_activities", {})),
             location_state=deepcopy(payload.get("location_state", {})),
             metadata=deepcopy(payload.get("metadata", {})),
+            location_grants={
+                character_id: dict(grants)
+                for character_id, grants in payload.get("location_grants", {}).items()
+            },
+            channel_grants={
+                character_id: set(grants)
+                for character_id, grants in payload.get("channel_grants", {}).items()
+            },
         )
 
     @staticmethod

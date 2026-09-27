@@ -16,14 +16,15 @@
 //      序号的话，先回来的那次操作触发的刷新会把后回来的那次操作的成功/失败
 //      直接吞掉 —— 一次 close 失败就这么从屏幕上消失了。
 //   3. **关闭要确认。** 它会停掉一个正在跑的世界。
-//   4. **自动推进是显式开关，而且它跟"世界开着"是两件事。**（MVP-1）
-//      `running` 是 P12 的"运行时还接不接受写入"，`autonomy.state` 是"服务器
-//      此刻在不在推它"。开始自动推进 = 服务器开始自己花 API 额度，所以它只
-//      能由操作者按下，而且 `stopping` 绝不显示成"已停止"——那一轮还可能落地
-//      一次提交。
+//   4. **认知是显式开关，而且它跟"世界开着"、"时间在走"都是两件事。**（WORLD-1）
+//      `running` 是 P12 的"运行时还接不接受写入"；时间从世界打开起就跟着现实
+//      走（`clock_state`）；`autonomy.state` 是"服务器会不会替角色花模型调用"。
+//      开始认知 = 服务器开始自己花 API 额度，所以它只能由操作者按下；认知不可用
+//      时要把**全部**原因摆出来，而不是一句"已停"。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
+  bootstrapFormalWorld,
   checkpointPersistentWorld,
   closePersistentWorld,
   createPersistentWorld,
@@ -31,16 +32,26 @@ import {
   fetchReloadStatus,
   fetchWorldScenes,
   restorePersistentWorld,
+  setQuietTimeEvents,
   startWorldAutonomy,
   stopWorldAutonomy,
   SCOPE_OPERATE,
+  type ArchiveFootprint,
   type PersistentWorldStatus,
   type WorldDriverStatus,
 } from './api';
 import { useCan } from './principal';
 import './worlds.css';
 
-type Action = 'create' | 'restore' | 'checkpoint' | 'close' | 'autonomy-start' | 'autonomy-stop';
+type Action =
+  | 'create'
+  | 'bootstrap'
+  | 'restore'
+  | 'checkpoint'
+  | 'close'
+  | 'autonomy-start'
+  | 'autonomy-stop'
+  | 'quiet-time';
 
 interface Feedback {
   worldId: string;
@@ -57,6 +68,10 @@ interface SceneOption {
 // （world_id 只允许小写字母、数字和 . _ -，且必须以字母或数字开头）。
 const CREATE_KEY = ' create';
 
+// 正式世界（WORLD-1）。身份、时区、开局时刻都在服务器侧定义，这里只认 ID。
+const FORMAL_WORLD_ID = 'yoake-mae';
+const FORMAL_WORLD_NAME = '夜明け前';
+
 const describe = (e: unknown, fallback: string): string =>
   e instanceof ApiError ? e.message : e instanceof Error ? e.message : fallback;
 
@@ -71,13 +86,15 @@ function summarize(world: PersistentWorldStatus): { label: string; tone: string 
   return { label: '已归档', tone: 'dim' };
 }
 
-/** 驱动那一格给人看的一句话。只由服务器字段推出来。 */
+/** 认知那一格给人看的一句话。只由服务器字段推出来。 */
 function describeDriver(driver: WorldDriverStatus | null): { label: string; tone: string } {
-  // `null` = 从来没起过驱动。它跟"起过、现在停着"要分开说：后者还带着上一次
-  // tick 的结果，操作者要看得见。
-  if (driver === null) return { label: '未启动', tone: 'dim' };
-  if (driver.state === 'running') return { label: '自动推进中', tone: 'ok' };
-  if (driver.state === 'stopping') return { label: '正在停止…', tone: 'warn' };
+  if (driver === null) return { label: '未打开', tone: 'dim' };
+  if (driver.state === 'running') {
+    // 操作者开着，但此刻可能因为故障、现实时钟落后而用不了：如实说。
+    return driver.cognition_available
+      ? { label: '认知运行中', tone: 'ok' }
+      : { label: '认知暂不可用', tone: 'warn' };
+  }
   // 两种"花完了"必须分开说：一种再按一次 Start 就好，另一种按多少次都没用。
   if (driver.exit_reason === 'run_budget_exhausted') {
     return { label: '本轮额度用完', tone: 'warn' };
@@ -85,15 +102,46 @@ function describeDriver(driver: WorldDriverStatus | null): { label: string; tone
   if (driver.exit_reason === 'world_action_cap') {
     return { label: '已达世界动作上限', tone: 'ooc' };
   }
-  if (driver.last_error) return { label: '已停（上次 tick 失败）', tone: 'ooc' };
-  return { label: '已停', tone: 'dim' };
+  return { label: '认知未开启', tone: 'dim' };
 }
+
+const CAUSE_TEXT: Record<string, string> = {
+  not_started: '还没 Start',
+  operator_paused: '操作者已停止',
+  run_budget_exhausted: '本轮额度用完',
+  world_action_cap: '世界动作上限',
+  process_stopped: '停机期间',
+  fault: '时钟故障',
+  wall_clock_behind: '现实时钟落后于存档',
+};
+
+const CLOCK_STATE_TEXT: Record<string, string> = {
+  catching_up: '补跑中',
+  healthy: '与现实同步',
+  faulted: '故障（退避重试中）',
+};
+
+const causesText = (causes: string[]): string =>
+  causes.map((cause) => CAUSE_TEXT[cause] ?? cause).join('、');
 
 const clockText = (iso: string | null): string =>
   iso === null ? '—' : iso.replace('T', ' ').slice(0, 16);
 
 const boolText = (value: boolean | null, yes: string, no: string): string =>
   value === null ? '未知' : value ? yes : no;
+
+const bytesText = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+};
+
+const archiveText = (archive: ArchiveFootprint | null): string =>
+  archive === null
+    ? '—'
+    : `${bytesText(archive.total_bytes)}（已封存 ${archive.segments} 卷、` +
+      `${archive.sealed_events} 条事件；world.json 里 ${archive.active_events} 条）`;
 
 export default function PersistentWorlds() {
   const [worlds, setWorlds] = useState<PersistentWorldStatus[] | null>(null);
@@ -249,6 +297,24 @@ export default function PersistentWorlds() {
     );
   };
 
+  const onBootstrap = () => {
+    // 开局之后这个世界的时间就一直跟着现实走，而且它只能开局一次。
+    const confirmed = window.confirm(
+      `建立「${FORMAL_WORLD_NAME}」（${FORMAL_WORLD_ID}）？\n\n` +
+        '世界从东京时间当天 19:00 开局，时间从此跟着现实走；角色要等你按「开始认知」' +
+        '才会自己做决定。这个世界只能开局一次。',
+    );
+    if (!confirmed) return;
+    run(
+      CREATE_KEY,
+      'bootstrap',
+      FORMAL_WORLD_ID,
+      () => bootstrapFormalWorld(FORMAL_WORLD_ID),
+      (status) =>
+        `已建立「${FORMAL_WORLD_NAME}」，开局于 ${clockText(status.clock)}，存档第 ${status.revision} 版`,
+    );
+  };
+
   const onRestore = (worldId: string) =>
     run(
       `${worldId}:restore`,
@@ -274,10 +340,11 @@ export default function PersistentWorlds() {
       worldId,
       () => startWorldAutonomy(worldId),
       (status) => {
-        const cadence = status.autonomy?.cadence;
-        return cadence
-          ? `已开始自动推进：每 ${cadence.interval_seconds} 秒推 ${cadence.tick_minutes} 模拟分钟`
-          : '已开始自动推进';
+        const autonomy = status.autonomy;
+        if (autonomy && !autonomy.cognition_available && autonomy.cognition_causes.length) {
+          return `已 Start，但认知此刻仍不可用：${causesText(autonomy.cognition_causes)}`;
+        }
+        return '已开始认知：从下一个完整模拟分钟起，角色开始自己做决定';
       },
     );
 
@@ -287,19 +354,42 @@ export default function PersistentWorlds() {
       'autonomy-stop',
       worldId,
       () => stopWorldAutonomy(worldId),
-      (status) =>
-        // `stopping` 绝不显示成"已停止"：那一轮还在跑（多半卡在一次模型调用
-        // 上），它仍然可能落地一次提交。说成停了就是一句会被事实拆穿的话。
-        status.autonomy?.state === 'stopping'
-          ? '停止请求已发出，但当前这一轮还没结束——它仍然可能落地一次提交'
-          : '已停止自动推进（世界仍然开着，可以再启动）',
+      () =>
+        // 正在飞的那次调用回来之后，提交时按新区间判为不可用：不会再落地。
+        '已停止认知（时间与作息照走，可以再启动）',
     );
+
+  const onQuietTime = (worldId: string, record: boolean) => {
+    // 这个开关决定之后的世界历史长什么样，所以拨之前确认一次。
+    const confirmed = window.confirm(
+      record
+        ? `让「${worldId}」重新记录安静的分钟？\n\n` +
+            '从此刻起每个时钟步都记一条时间事件。之前没记的那段不会补上——' +
+            '那段时间里确实什么都没发生，账本里记着它从哪一刻开始不记。'
+        : `让「${worldId}」不再记录安静的分钟？\n\n` +
+            '只影响之后：从此刻起，没有到期、没有作息变化的时钟步照样往前走，但不再记成' +
+            '世界事件。已经存下的每一条都不动；这次拨动本身会记进运维账本，随时可以拨回来。',
+    );
+    if (!confirmed) return;
+    run(
+      `${worldId}:quiet-time`,
+      'quiet-time',
+      worldId,
+      () => setQuietTimeEvents(worldId, record),
+      (status) => {
+        const since = status.quiet_time_events?.since_sim ?? null;
+        return record
+          ? `已开始记录安静的分钟（从 ${clockText(since)} 起）`
+          : `已停止记录安静的分钟（从 ${clockText(since)} 起）`;
+      },
+    );
+  };
 
   const onClose = (worldId: string) => {
     // 关闭会停掉一个正在跑的世界，所以先确认。
     const confirmed = window.confirm(
       `关闭世界「${worldId}」？\n\n` +
-        '会先请自动推进停下、停止接受新的行动、等在跑的事务落定、写下最后一份存档，' +
+        '会先停下世界时钟、停止接受新的行动、等在跑的事务落定、写下最后一份存档，' +
         '然后归还所有权。存不下去时不会假装关干净了，世界会继续开着。',
     );
     if (!confirmed) return;
@@ -338,6 +428,21 @@ export default function PersistentWorlds() {
       </div>
 
       {loadError ? <div className="worlds-error">{loadError}</div> : null}
+
+      {canOperate &&
+      worlds !== null &&
+      !worlds.some((world) => world.world_id === FORMAL_WORLD_ID) ? (
+        <div className="worlds-create">
+          <h3>正式世界</h3>
+          <div className="worlds-create-actions">
+            <button className="btn btn-accent" disabled={creating} onClick={onBootstrap}>
+              {pending[CREATE_KEY] === 'bootstrap'
+                ? '开局中…'
+                : `建立「${FORMAL_WORLD_NAME}」`}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {canOperate ? (
       <form className="worlds-create" onSubmit={onCreate}>
@@ -412,9 +517,7 @@ export default function PersistentWorlds() {
             const busy = (action: Action) => pending[`${world.world_id}:${action}`] !== undefined;
             const driver = world.autonomy;
             const driverState = describeDriver(driver);
-            // 「在推」= running 或者 stopping。stopping 也算，因为那时该给的
-            // 按钮仍然是"停止"——再按一次 Start 只会拿到 409。
-            const driving = driver !== null && !driver.stopped;
+            const driving = driver !== null && driver.running;
             return (
               <li key={world.world_id} className="worlds-item">
                 <div className="worlds-item-head">
@@ -447,7 +550,7 @@ export default function PersistentWorlds() {
                             disabled={busy('autonomy-stop')}
                             onClick={() => onStopAutonomy(world.world_id)}
                           >
-                            {busy('autonomy-stop') ? '停止中…' : '停止自动推进'}
+                            {busy('autonomy-stop') ? '停止中…' : '停止认知'}
                           </button>
                         ) : (
                           <button
@@ -455,7 +558,7 @@ export default function PersistentWorlds() {
                             disabled={busy('autonomy-start')}
                             onClick={() => onStartAutonomy(world.world_id)}
                           >
-                            {busy('autonomy-start') ? '启动中…' : '开始自动推进'}
+                            {busy('autonomy-start') ? '启动中…' : '开始认知'}
                           </button>
                         )}
                         <button
@@ -569,24 +672,42 @@ export default function PersistentWorlds() {
                       </dd>
                     </div>
                     <div>
-                      <dt>自动推进</dt>
-                      <dd>
-                        {driver === null
-                          ? '未启动（这台服务器还没为它起过驱动）'
-                          : `${driverState.label}` +
-                            `　已跑 ${driver.ticks} 轮` +
-                            (driver.failures ? `，失败 ${driver.failures} 次` : '') +
-                            (driver.stop_reason ? `　停止理由：${driver.stop_reason}` : '') +
-                            (driver.exit_reason ? `　自行收摊：${driver.exit_reason}` : '')}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>推进节拍</dt>
+                      <dt>世界时钟</dt>
                       <dd>
                         {driver === null
                           ? '—'
-                          : `每 ${driver.cadence.interval_seconds} 秒推 ` +
-                            `${driver.cadence.tick_minutes} 模拟分钟`}
+                          : (driver.worker_alive
+                              ? (CLOCK_STATE_TEXT[driver.clock_state ?? ''] ??
+                                driver.clock_state ??
+                                '—')
+                              : `已停（${driver.worker_exit_reason ?? '—'}）`) +
+                            (driver.clock_lag_minutes !== null && driver.clock_lag_minutes !== 0
+                              ? driver.clock_lag_minutes > 0
+                                ? `，落后现实 ${driver.clock_lag_minutes} 分钟`
+                                : `，现实时钟落后 ${-driver.clock_lag_minutes} 分钟`
+                              : '') +
+                            (driver.fault_since ? `　故障始于 ${driver.fault_since}` : '') +
+                            `　已跑 ${driver.ticks} 轮` +
+                            (driver.failures ? `，失败 ${driver.failures} 次` : '')}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>认知</dt>
+                      <dd>
+                        {driver === null
+                          ? '—'
+                          : driver.cognition_available
+                            ? '可用'
+                            : `不可用：${causesText(driver.cognition_causes)}`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>时钟节拍</dt>
+                      <dd>
+                        {driver === null
+                          ? '—'
+                          : `每 ${driver.cadence.interval_seconds} 秒追一次现实时间` +
+                            (driver.cadence.rate !== 1 ? `（开发倍率 ×${driver.cadence.rate}）` : '')}
                       </dd>
                     </div>
                     <div>
@@ -596,7 +717,7 @@ export default function PersistentWorlds() {
                           ? '—'
                           : `${driver.run_budget.used} / ${driver.run_budget.limit} 条激活` +
                             (driver.exit_reason === 'run_budget_exhausted'
-                              ? '（已用完；再按一次「开始自动推进」就是新的一轮）'
+                              ? '（已用完；再按一次「开始认知」就是新的一轮）'
                               : '')}
                       </dd>
                     </div>
@@ -634,8 +755,8 @@ export default function PersistentWorlds() {
                       </dd>
                     </div>
                     <div>
-                      <dt>上次 tick 错误</dt>
-                      <dd>{driver?.last_error ?? '无'}</dd>
+                      <dt>上次时钟错误</dt>
+                      <dd>{driver?.last_clock_error ?? '无'}</dd>
                     </div>
                     <div>
                       <dt>上次操作错误</dt>
@@ -644,6 +765,36 @@ export default function PersistentWorlds() {
                     <div>
                       <dt>读取状态时的错误</dt>
                       <dd>{world.error ?? '无'}</dd>
+                    </div>
+                    <div>
+                      <dt>记录安静的分钟</dt>
+                      <dd>
+                        {world.quiet_time_events === null
+                          ? '—'
+                          : (world.quiet_time_events.record ? '记录' : '不记录') +
+                            (world.quiet_time_events.since_sim
+                              ? `（从 ${clockText(world.quiet_time_events.since_sim)} 起）`
+                              : '（默认）')}
+                        {canOperate && world.owned && world.quiet_time_events !== null ? (
+                          <button
+                            className="btn worlds-inline-btn"
+                            disabled={busy('quiet-time')}
+                            onClick={() =>
+                              onQuietTime(world.world_id, !world.quiet_time_events!.record)
+                            }
+                          >
+                            {busy('quiet-time')
+                              ? '拨动中…'
+                              : world.quiet_time_events.record
+                                ? '不再记录'
+                                : '重新记录'}
+                          </button>
+                        ) : null}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>存档大小</dt>
+                      <dd>{archiveText(world.archive)}</dd>
                     </div>
                     <div>
                       <dt>存档位置</dt>

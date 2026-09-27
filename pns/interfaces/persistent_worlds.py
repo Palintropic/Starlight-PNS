@@ -33,12 +33,12 @@ from contextlib import contextmanager
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from pns.runtime.agency.policy import AgencyPolicyError
 from pns.runtime.autonomy.audit import AuditError
 from pns.runtime.autonomy.coordinator import AutonomyError
-from pns.runtime.autonomy.driver import DriverBusy, DriverError
+from pns.runtime.autonomy.clock_worker import ClockWorkerError
 from pns.runtime.event_commit import EventCommitError
 from pns.models.world_state import ActivityKind
 from pns.runtime.persistence import (
@@ -55,6 +55,7 @@ from pns.runtime.persistence import (
     WorldIdError,
 )
 
+from .authz import principal_of
 from .composition import AdaptersUnavailable, ContentUnavailable, WorldControlPlane
 
 router = APIRouter(prefix="/api/persistent-worlds", tags=["persistent-worlds"])
@@ -84,10 +85,12 @@ class CheckpointPolicyModel(BaseModel):
 
 
 class DriverCadenceModel(BaseModel):
-    """驱动的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。"""
+    """时钟 worker 的节拍与单次 Start 的额度。服务器侧配置，浏览器只能读。"""
 
-    tick_minutes: int
     interval_seconds: float
+    rate: float
+    max_steps_per_iteration: int
+    fault_threshold: int
     stop_timeout_seconds: float
     max_activations_per_run: int
 
@@ -130,23 +133,24 @@ class DriverTickModel(BaseModel):
 
 
 class DriverStatusModel(BaseModel):
-    """自主驱动此刻的样子。
+    """时钟 worker 与认知此刻的样子。
 
     它跟 P12 的 `running` 是**两件事**，而且这个区分必须保住：`running` 说的
-    是"这个世界的运行时还接不接受写入"，`state` 说的是"这台服务器此刻在不在
-    推它"。一个 running=True 而 state=stopped 的世界就是"开着但没人推"——
-    那正是新建和恢复之后的默认状态，因为自动模型调用是 opt-in 的。
+    是"这个世界的运行时还接不接受写入"，`state` 说的是"服务器会不会替这些
+    角色花模型调用"。一个 running=True 而 state=stopped 的世界就是"时间在走、
+    没人在做决定"——那正是新建和恢复之后的默认状态，因为自动模型调用是
+    opt-in 的。时间本身走没走看 `clock_state`。
     """
 
     world_id: str
-    # running / stopping / stopped。stopping 的意思很具体：**还没停干净**，
-    # 当前那次 tick 可能仍会落地一次提交。
+    # running / stopped。Stop 只是一次认知时间线转换，不等任何线程，所以不再
+    # 有 stopping 这一档；字段保留，恒为 false。
     state: str
     running: bool
     stopping: bool
     stopped: bool
     stop_reason: Optional[str] = None
-    # worker 自己收摊的原因（世界关了、运行时终局停机了）。
+    # 认知因花费边界关闭的原因：run_budget_exhausted / world_action_cap。
     exit_reason: Optional[str] = None
     ticks: int = 0
     failures: int = 0
@@ -161,6 +165,47 @@ class DriverStatusModel(BaseModel):
     # 一道跟着这个世界一辈子。
     run_budget: RunBudgetModel
     world_actions: WorldActionsModel
+    # 时钟（WORLD-1 设计 §7.1）。时钟 worker 跟着世界开关，不跟着 Start/Stop。
+    worker_alive: bool = False
+    worker_exit_reason: Optional[str] = None
+    # catching_up / healthy / faulted
+    clock_state: Optional[str] = None
+    # 锚点换算出的此刻比世界时钟超前多少模拟分钟（负数：现实时钟落后）。
+    clock_lag_minutes: Optional[int] = None
+    last_clock_progress: Optional[str] = None
+    fault_since: Optional[str] = None
+    last_clock_error: Optional[str] = None
+    # 认知此刻可不可用，为什么（全部原因，不选"主因"）。
+    cognition_available: bool = False
+    cognition_causes: List[str] = Field(default_factory=list)
+
+
+class ArchiveFootprintModel(BaseModel):
+    """存档在磁盘上占了多少、分成了几卷（WORLD-1 存档增长设计 §2.5）。"""
+
+    total_bytes: int
+    # world.json 的字节数；还没有存档时是 null。
+    world_bytes: Optional[int] = None
+    segments: int
+    sealed_events: int
+    sealed_bytes: int
+    active_events: int
+
+
+class QuietTimeEventsModel(BaseModel):
+    """「记录安静的分钟」开关（WORLD-1 存档增长设计 §3）。"""
+
+    # true = 每个时钟步都记一条 world.time_advanced（默认）；false = 安静的步不记。
+    record: bool
+    # 当前值从哪一刻起生效（最近一次拨动的模拟时刻 / 现实时刻）；从没拨过是 null。
+    since_sim: Optional[str] = None
+    since_wall: Optional[str] = None
+    flips: int = 0
+
+
+class QuietTimeEventsRequest(BaseModel):
+    # 严格布尔：一个拨了就影响整份世界历史的开关，不接受 "no" / 0 这类猜测。
+    record: StrictBool
 
 
 class WorldStatusModel(BaseModel):
@@ -200,6 +245,8 @@ class WorldStatusModel(BaseModel):
     archive_path: Optional[str] = None
     boundaries_since_checkpoint: Optional[int] = None
     policy: Optional[CheckpointPolicyModel] = None
+    quiet_time_events: Optional[QuietTimeEventsModel] = None
+    archive: Optional[ArchiveFootprintModel] = None
     # 本进程有没有在推这个世界。`null` 的意思是**从来没为它起过驱动**，
     # 跟"起过、现在停着"不是一回事 —— 后者还带着上一次 tick 的错误。
     autonomy: Optional[DriverStatusModel] = None
@@ -276,11 +323,7 @@ def _translate(
         return _error(400, "invalid_content", e)
     if isinstance(e, AdaptersUnavailable):
         return _error(503, "adapters_unavailable", e)
-    if isinstance(e, DriverBusy):
-        # 上一个 worker 还没走干净。这不是"已经在跑"（那是幂等成功），
-        # 是说不清 —— 所以它必须是一次失败，让操作者再等一下重试。
-        return _error(409, "autonomy_busy", e)
-    if isinstance(e, DriverError):
+    if isinstance(e, ClockWorkerError):
         return _error(409, "autonomy_refused", e)
     if isinstance(e, EventCommitError):
         return _error(409, "event_refused", e)
@@ -320,13 +363,14 @@ def _translate(
         # store / service，不是这一层自己记的账。
         if world_id is not None:
             try:
-                if op == "create" and plane.store.exists(world_id):
+                if op in ("create", "bootstrap") and plane.store.exists(world_id):
                     return _error(409, "archive_already_exists", e)
                 if op in (
                     "checkpoint",
                     "close",
                     "autonomy_start",
                     "autonomy_stop",
+                    "quiet_time_events",
                 ) and (
                     plane.service.opened(world_id) is None
                 ):
@@ -403,6 +447,29 @@ def create_persistent_world(
         )
 
 
+@router.post(
+    "/{world_id}/bootstrap", response_model=WorldStatusModel, status_code=201
+)
+def bootstrap_formal_world(
+    world_id: str,
+    request: Request,
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """按正式世界的规则开局（WORLD-1「夜明け前」）。
+
+    请求体里什么都不收：世界身份、时区、开局时刻、resident 全部来自服务器侧的
+    正式世界定义，初始状态由已校验的内容推出。操作者身份记进世界的开局来源。
+    已经有存档的世界不会被覆盖（409 `archive_already_exists`）。
+    """
+    principal = principal_of(request)
+    with _translated(plane, "bootstrap", world_id):
+        return _status(
+            plane.create_formal(
+                world_id, operator=principal.username if principal is not None else None
+            )
+        )
+
+
 @router.post("/{world_id}/restore", response_model=WorldStatusModel)
 def restore_persistent_world(
     world_id: str, plane: WorldControlPlane = Depends(get_control_plane)
@@ -439,18 +506,33 @@ def set_character_activity(
         )
 
 
+@router.post("/{world_id}/quiet-time-events", response_model=WorldStatusModel)
+def set_quiet_time_events(
+    world_id: str,
+    payload: QuietTimeEventsRequest,
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """拨「记录安静的分钟」。只影响之后，已经写下的时间事件一条都不动。
+
+    拨动本身作为一条策略记录进运维账本（随存档走，重启不会拨回去），并立即
+    checkpoint。值与当前相同时什么都不记。
+    """
+    with _translated(plane, "quiet_time_events", world_id):
+        return _status(plane.set_quiet_time_events(world_id, payload.record))
+
+
 @router.post("/{world_id}/autonomy/start", response_model=WorldStatusModel)
 def start_world_autonomy(
     world_id: str, plane: WorldControlPlane = Depends(get_control_plane)
 ):
-    """开始自动推这个世界的时间。
+    """让认知从下一个完整模拟分钟起可用，并装满单次额度。
 
     这是**唯一**一个会让服务器自己开始花 API 额度的入口，所以它是显式的：
-    建世界、恢复世界、重启进程都不会替操作者按下它。
+    建世界、恢复世界、重启进程都不会替操作者按下它。时间不归它管——世界
+    开着，时钟就在走。
 
-    幂等：已经在跑的驱动再启动一次，返回同一份状态，不会出现第二个 worker。
-    上一次停机还没停干净时是 409 `autonomy_busy` —— 那一档说不清，而说不清
-    不能报成成功。
+    故障、现实时钟落后、世界上限还在时，Start 照样成功，但 `autonomy`
+    如实报告认知仍不可用及原因（`cognition_causes`）。
     """
     with _translated(plane, "autonomy_start", world_id):
         return _status(plane.start_autonomy(world_id))
@@ -460,15 +542,11 @@ def start_world_autonomy(
 def stop_world_autonomy(
     world_id: str, plane: WorldControlPlane = Depends(get_control_plane)
 ):
-    """请驱动暂停，并有界地等当前这一次 tick 落定。
+    """认知从此刻起不可用。
 
-    它是**可重启的暂停**，不是关闭：世界仍然开着、仍然属于本进程，P11 的
-    运行时也仍然接受写入（`running` 不变）。稍后可以再 Start。
-
-    返回的 `autonomy.state` 有两种可能，而且区分是要害：`stopped` 表示当前
-    tick 已经整个结束、之后不会再有；`stopping` 表示等超时了 —— 那次 tick
-    还在跑（多半卡在一次模型调用上），它仍然可能落地一次提交。这时**不**谎称
-    已经停了。
+    它是**可重启的暂停**，不是关闭：世界仍然开着，时间、作息照走，到期以
+    operator_paused 收尾、不调模型。正在进行的那次模型调用回来之后，提交时
+    按新区间判为不可用，世界不受影响。稍后可以再 Start。
     """
     with _translated(plane, "autonomy_stop", world_id):
         return _status(plane.stop_autonomy(world_id))
