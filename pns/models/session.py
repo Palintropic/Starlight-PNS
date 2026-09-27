@@ -13,6 +13,7 @@ from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
 from pns.models.cognition import (
     CognitionTimeline,
     CognitionTimelineError,
+    consumes_allowance,
     unavailable_causes,
 )
 from pns.models.authored import AuthoredTextError, GenerationAudit
@@ -1112,6 +1113,20 @@ def _validate_cognition(state: "SessionState") -> None:
             raise SessionStateError(
                 f"Agency 记录 '{record.due_id}' 的不可用原因或区间序号与时间线不一致"
             )
+        if not unavailable and record.detail.get("cognition_interval") != interval.index:
+            raise SessionStateError(
+                f"Agency 记录 '{record.due_id}' 没有写明它所在的认知区间 {interval.index}"
+            )
+        if interval.run_allowance is not None and consumes_allowance(record.outcome):
+            used = sum(
+                1
+                for earlier in records[interval.allowance_since_log : position + 1]
+                if consumes_allowance(earlier.outcome)
+            )
+            if used > interval.run_allowance:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 超出了单次额度 {interval.run_allowance}"
+                )
 def _parse_clock(value, label: str) -> Optional[datetime]:
     if value is None:
         return None

@@ -7,7 +7,7 @@
 # 这些原因属于 Operational History（Article XIII）：它们解释的是"这一刻为什么
 # 没有做决定"，不是任何 resident 的经历，也不会进入观察、记忆或提示词。
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
@@ -169,6 +169,9 @@ class CognitionInterval:
     causes: FrozenSet[CognitionCause]
     backlog: Tuple[BacklogItem, ...]
     run_allowance: Optional[int]
+    # 额度是从日志哪个位置开始算的（设置它的那次 Start）。额度跟着区间往后带，
+    # 消耗也必须从这里起算：否则中途插一次故障转换，额度就被悄悄装满了。
+    allowance_since_log: Optional[int]
     opened_by: TransitionKind
     opened_at_sim: datetime
     opened_at_wall: str
@@ -195,6 +198,16 @@ class CognitionInterval:
             isinstance(allowance, bool) or not isinstance(allowance, int) or allowance < 0
         ):
             raise CognitionTimelineError("run_allowance 必须是非负整数或 None")
+        since = self.allowance_since_log
+        if (allowance is None) != (since is None):
+            raise CognitionTimelineError("run_allowance 与 allowance_since_log 必须同时给出或同时为空")
+        if since is not None and (
+            isinstance(since, bool)
+            or not isinstance(since, int)
+            or since < 0
+            or since > self.from_log
+        ):
+            raise CognitionTimelineError("allowance_since_log 必须是不晚于区间起点的非负整数")
         try:
             set_(self, "opened_by", TransitionKind(self.opened_by))
         except ValueError:
@@ -214,6 +227,7 @@ class CognitionInterval:
             "causes": _sorted_values(self.causes),
             "backlog": [item.to_dict() for item in self.backlog],
             "run_allowance": self.run_allowance,
+            "allowance_since_log": self.allowance_since_log,
             "opened_by": self.opened_by.value,
             "opened_at_sim": self.opened_at_sim.isoformat(),
             "opened_at_wall": self.opened_at_wall,
@@ -233,6 +247,7 @@ class CognitionInterval:
                     for item in payload["backlog"]
                 ),
                 run_allowance=payload["run_allowance"],
+                allowance_since_log=payload["allowance_since_log"],
                 opened_by=payload["opened_by"],
                 opened_at_sim=payload["opened_at_sim"],
                 opened_at_wall=payload["opened_at_wall"],
@@ -295,6 +310,7 @@ class CognitionTimeline:
                     causes=frozenset({CognitionCause.NOT_STARTED}),
                     backlog=(),
                     run_allowance=None,
+                    allowance_since_log=None,
                     opened_by=TransitionKind.OPENED,
                     opened_at_sim=sim,
                     opened_at_wall=wall,
@@ -356,7 +372,11 @@ class CognitionTimeline:
             carried = current.causes | _causes(backlog_extra, allow_empty=True)
             if carried:
                 backlog = _append_backlog(backlog, BacklogItem(backlog_until, carried))
-        allowance = current.run_allowance if keep_allowance else run_allowance
+        if keep_allowance:
+            allowance, since = current.run_allowance, current.allowance_since_log
+        else:
+            allowance = run_allowance
+            since = None if run_allowance is None else log_length
         return CognitionTimeline(
             self.intervals
             + (
@@ -366,6 +386,7 @@ class CognitionTimeline:
                     causes=causes,
                     backlog=backlog,
                     run_allowance=allowance,
+                    allowance_since_log=since,
                     opened_by=kind,
                     opened_at_sim=sim,
                     opened_at_wall=wall,
@@ -499,6 +520,20 @@ def _is_merged_extension(previous, current) -> bool:
     return merged.until_sim == last.until_sim and last.causes <= merged.causes
 
 
+def wall_now() -> str:
+    """现实时间（UTC，ISO）。只进运维记录，不进世界。"""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def consumes_allowance(outcome) -> bool:
+    """一条 Agency 结局是否用掉了认知（从而消耗单次额度）。
+
+    只有"认知不可用"没有用到认知；其余结局——行动、弃权、各种拒绝——都是
+    认知真的运行过之后给出的。
+    """
+    return getattr(outcome, "value", outcome) != "rejected_unavailable"
+
+
 def next_minute_after(moment: datetime) -> datetime:
     """严格晚于 moment 的第一个完整分钟（backlog 的 cutoff 都用它算）。"""
     if not isinstance(moment, datetime):
@@ -515,7 +550,9 @@ __all__ = [
     "CognitionTimelineError",
     "OPERATOR_CLEARABLE",
     "TransitionKind",
+    "consumes_allowance",
     "next_minute_after",
     "normalize_causes",
     "unavailable_causes",
+    "wall_now",
 ]

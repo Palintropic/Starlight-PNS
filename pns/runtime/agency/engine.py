@@ -39,7 +39,12 @@ from pns.models.agency import (
     AgencyRecord,
 )
 from pns.models.activation_outbox import ActivationOutboxError
-from pns.models.cognition import CognitionCauseError, normalize_causes
+from pns.models.cognition import (
+    CognitionCause,
+    consumes_allowance,
+    unavailable_causes,
+    wall_now,
+)
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.agency.context import AgencyContext, build_agency_context
@@ -382,27 +387,18 @@ class AgencyEngine:
         return None
 
     # ── 认知不可用 ──────────────────────────────────────────────────────
-    def _close_unavailable(
-        self, due: ActivationDue, causes, *, interval: int
-    ) -> AgencyRecord:
-        """这条到期资格到来时认知不可用：不问策略、不建上下文，直接收尾。
+    def _close_unavailable(self, due: ActivationDue) -> AgencyRecord:
+        """这条到期资格此刻认知不可用：不问策略、不建上下文，直接收尾。
 
-        **不是公开写入口。** 它只做"把这一条记成不可用"这件事本身，不检查运行时
-        是否已经停机，也不核对 interval 是否真的存在于认知时间线 —— 那两件事属于
-        协调器的到期收尾入口（WORLD-1 时钟修订），只有那里可以调用它。
+        **不是公开写入口**，只给协调器的到期收尾路径用。它不自带原因：原因和
+        区间序号由 commit() 在事务内从认知时间线算出来。时间线说"此刻可用"时
+        它被拒绝 —— 不能凭空制造一条不可用记录。
 
         世界照常发生了，这一刻的决定没有发生。它走跟其它结论完全相同的提交
-        路径（审计记录 + 交接确认同一个事务），所以"这条到期处理过没有"仍然
-        只有一个答案；它不产出事件、观察或记忆。
+        路径（审计记录 + 交接确认同一个事务），不产出事件、观察或记忆。
         """
         self._require_handoff(due)
         character_id = self._require_character(due)
-        try:
-            normalized = normalize_causes(causes)
-        except CognitionCauseError as e:
-            raise AgencyEngineError(str(e)) from None
-        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0:
-            raise AgencyEngineError("interval 必须是非负整数（认知时间线区间序号）")
         return self.commit(
             ProposalPlan(
                 due=due,
@@ -410,21 +406,31 @@ class AgencyEngine:
                 policy="",
                 proposed_at=self.clock,
                 verdict=AgencyOutcome.REJECTED_UNAVAILABLE,
-                detail={
-                    "reason": "cognition_unavailable",
-                    "causes": [cause.value for cause in normalized],
-                    "interval": interval,
-                },
             )
         )
 
+    def unavailable_causes_for(self, due: ActivationDue):
+        """此刻若提交这条到期资格，认知不可用的原因（空集表示可用）。
+
+        它是提交前的**省钱预检**：可用性真正的判定在 commit() 的事务里，用的是
+        同一个函数。没有认知时间线的会话恒可用。
+        """
+        timeline = self._state.cognition
+        if timeline is None:
+            return frozenset()
+        return unavailable_causes(timeline.current, due.fired_at)
+
     # ── 提交（事务） ────────────────────────────────────────────────────
     def commit(self, plan: ProposalPlan) -> AgencyRecord:
-        """把一个判断落地：重判前置条件、写审计、确认交接、必要时提交事件。
+        """把一个判断落地：判认知可用性、重判前置条件、写审计、确认交接、必要时提交事件。
 
         全部落在 SessionState.atomic_commit() 里：世界、事件历史、观察、曝光
-        判定、排期队列、到期投递箱、Agency 日志同生共死。中途任何一步失败，
-        到期记录仍然是待处理的，可以重来 —— 这正是重试所需要的状态。
+        判定、排期队列、到期投递箱、Agency 日志、认知时间线同生共死。中途任何
+        一步失败，到期记录仍然是待处理的，可以重来 —— 这正是重试所需要的状态。
+
+        认知可用性在事务内、追加记录之前判定（WORLD-1 设计 §13–§14）。所有结局都
+        经过这里，所以没有绕过它的提交口：此刻不可用，无论计划原本是什么，一律
+        改写成 REJECTED_UNAVAILABLE，丢弃生成结果，不提交事件。
         """
         if not isinstance(plan, ProposalPlan):
             raise AgencyEngineError("只能提交 propose() 产出的计划")
@@ -432,9 +438,76 @@ class AgencyEngine:
         self._require_handoff(due)
         self._require_plan_integrity(plan)
 
+        decided_at = self.clock
+        state = self._state
+        with state.atomic_commit():
+            verdict, detail, policy = self._judge(plan)
+            event_id = None
+            if verdict.acted:
+                event = event_for_proposal(
+                    self.world,
+                    state.events,
+                    self.session_id,
+                    due,
+                    plan.proposal,
+                    policy=plan.policy,
+                    audit=plan.audit,
+                )
+                commit_session_event(state, event)
+                event_id = event.event_id
+
+            record = AgencyRecord(
+                due_id=due.due_id,
+                character_id=plan.character_id,
+                decided_at=decided_at,
+                outcome=verdict,
+                policy=policy,
+                proposal=plan.proposal if verdict.acted else None,
+                event_id=event_id,
+                detail=detail,
+            )
+            try:
+                state.agency._append(record)
+            except AgencyError as e:
+                raise AgencyEngineError(str(e)) from e
+
+            # 确认放在最后：审计先落地，交接才算完成。这一步失败整笔回滚，
+            # 于是到期记录留在待处理，不会出现"确认了但没记录"。
+            try:
+                state.activation_outbox._acknowledge(due.due_id)
+            except ActivationOutboxError as e:
+                raise AgencyEngineError(str(e)) from e
+
+            # 额度与上限的转换跟触发它的这条记录在**同一个**事务里：两者之间
+            # 插不进另一条提交（R4-3）。
+            self._settle_cognition(record)
+        return record
+
+    def _judge(self, plan: ProposalPlan):
+        """在事务内给出这条计划最终的 (结论, 细节, 策略名)。调用方持着事务。"""
+        due = plan.due
+        timeline = self._state.cognition
+        interval = timeline.current if timeline is not None else None
+
+        if interval is not None:
+            causes = unavailable_causes(interval, due.fired_at)
+            if causes:
+                return (
+                    AgencyOutcome.REJECTED_UNAVAILABLE,
+                    {
+                        "reason": "cognition_unavailable",
+                        "causes": sorted(cause.value for cause in causes),
+                        "interval": interval.index,
+                    },
+                    "",
+                )
+        if plan.verdict is AgencyOutcome.REJECTED_UNAVAILABLE:
+            raise AgencyEngineError(
+                "认知此刻可用（或这个会话不区分认知可用），不能把这条到期记成不可用"
+            )
+
         verdict = plan.verdict
         detail = dict(plan.detail)
-
         if verdict.acted:
             refusal = self._commit_refusal(plan)
             if refusal is not None:
@@ -456,45 +529,46 @@ class AgencyEngine:
             # 事后就只剩一个结果码。
             detail.setdefault("rationale", plan.rationale)
 
-        decided_at = self.clock
+        if interval is not None:
+            # 每条记录都写明它是在哪个认知区间里判定的，存档加载据此复核。
+            detail["cognition_interval"] = interval.index
+        return verdict, detail, plan.policy
+
+    def _settle_cognition(self, record: AgencyRecord) -> None:
+        """记录落地之后，额度或世界上限若因此用尽，在同一事务里开启对应区间。"""
         state = self._state
-        with state.atomic_commit():
-            event_id = None
-            if verdict.acted:
-                event = event_for_proposal(
-                    self.world,
-                    state.events,
-                    self.session_id,
-                    due,
-                    plan.proposal,
-                    policy=plan.policy,
-                    audit=plan.audit,
-                )
-                commit_session_event(state, event)
-                event_id = event.event_id
-
-            record = AgencyRecord(
-                due_id=due.due_id,
-                character_id=plan.character_id,
-                decided_at=decided_at,
-                outcome=verdict,
-                policy=plan.policy,
-                proposal=plan.proposal if verdict.acted else None,
-                event_id=event_id,
-                detail=detail,
+        timeline = state.cognition
+        if timeline is None:
+            return
+        log_length = len(state.agency)
+        current = timeline.current
+        changed = False
+        if (
+            consumes_allowance(record.outcome)
+            and current.run_allowance is not None
+            and CognitionCause.RUN_BUDGET_EXHAUSTED not in current.causes
+        ):
+            used = sum(
+                1
+                for earlier in state.agency.records()[current.allowance_since_log :]
+                if consumes_allowance(earlier.outcome)
             )
-            try:
-                state.agency._append(record)
-            except AgencyError as e:
-                raise AgencyEngineError(str(e)) from e
-
-            # 确认放在最后：审计先落地，交接才算完成。这一步失败整笔回滚，
-            # 于是到期记录留在待处理，不会出现"确认了但没记录"。
-            try:
-                state.activation_outbox._acknowledge(due.due_id)
-            except ActivationOutboxError as e:
-                raise AgencyEngineError(str(e)) from e
-        return record
+            if used >= current.run_allowance:
+                timeline = timeline.run_budget_exhausted(
+                    log_length=log_length, sim=self.clock, wall=wall_now()
+                )
+                changed = True
+        if (
+            CognitionCause.WORLD_ACTION_CAP not in timeline.current.causes
+            and state.agency.committed_actions()
+            >= self._budget.max_committed_actions_per_session
+        ):
+            timeline = timeline.world_action_cap(
+                log_length=log_length, sim=self.clock, wall=wall_now()
+            )
+            changed = True
+        if changed:
+            state.set_cognition(timeline)
 
     def _require_plan_integrity(self, plan: ProposalPlan) -> None:
         """计划自身必须自洽。
