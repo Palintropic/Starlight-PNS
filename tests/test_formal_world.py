@@ -41,9 +41,11 @@ from pns.models.world_state import ActivityKind  # noqa: E402
 from pns.runtime.autonomy.clock_worker import ClockConfig  # noqa: E402
 from pns.runtime.autonomy.seeding import ActivationCadence  # noqa: E402
 from pns.runtime.formal_world import (  # noqa: E402
+    ABSENT,
     YOAKE_MAE,
     FormalWorldError,
     formal_session_state,
+    gated_rhythms,
     rhythm_fingerprint,
     rhythm_subject,
 )
@@ -418,6 +420,17 @@ class ContentGateTests(PlaneTestCase):
                 "rhythm:mizuki", rhythm_fingerprint(changed.rhythm("mizuki"))
             )
         )
+
+    def test_a_removed_rhythm_is_a_conflict_not_a_silent_change(self):
+        state = _state()
+        rhythms = self.registry.rhythms()
+        rhythms.pop("mizuki")
+        with state.atomic_commit():
+            accepted = gated_rhythms(state, rhythms, registry_revision=2, wall="w")
+        self.assertEqual(sorted(accepted), ["ena"])
+        (conflict,) = state.content.pending()
+        self.assertEqual(conflict.subject, "rhythm:mizuki")
+        self.assertEqual(conflict.offered_fingerprint, ABSENT)
 
     def test_a_declined_version_stays_out(self):
         self.plane.create_formal("yoake-mae")

@@ -75,6 +75,10 @@ def rhythm_fingerprint(rhythm) -> str:
     return content_fingerprint(rhythm.to_dict())
 
 
+# 内容里没有这一项时的指纹。
+ABSENT = content_fingerprint(None)
+
+
 def _grants_fingerprint(grants) -> str:
     return content_fingerprint(
         {
@@ -177,15 +181,21 @@ def gated_rhythms(state: SessionState, rhythms: Mapping, *, registry_revision: i
     if ledger is None:
         return dict(rhythms)
     accepted = {}
-    for character_id, rhythm in rhythms.items():
+    residents = {
+        subject[len("rhythm:"):]
+        for subject, _ in ledger.adopted
+        if subject.startswith("rhythm:")
+    }
+    for character_id in sorted(residents):
         subject = rhythm_subject(character_id)
-        if ledger.adopted_fingerprint(subject) is None:
-            continue  # 这个世界没有采用过这个角色的作息：不是 resident
-        fingerprint = rhythm_fingerprint(rhythm)
+        rhythm = rhythms.get(character_id)
+        # 作息表从内容里消失了也是"新的一版"：同样要明确采用才生效，不能因为
+        # 少了一个键就悄悄让这个人不再受作息驱动。
+        fingerprint = rhythm_fingerprint(rhythm) if rhythm is not None else ABSENT
         ledger = ledger.offered(
             subject, fingerprint, registry_revision=registry_revision, wall=wall
         )
-        if ledger.accepts(subject, fingerprint):
+        if rhythm is not None and ledger.accepts(subject, fingerprint):
             accepted[character_id] = rhythm
     if ledger is not state.content:
         state.set_content(ledger)
