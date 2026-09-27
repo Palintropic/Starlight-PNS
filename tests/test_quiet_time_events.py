@@ -110,7 +110,7 @@ class SwitchTests(QuietTimeTestCase):
     def test_a_flip_to_the_same_value_records_nothing(self):
         world = self.created()
         self.assertFalse(world.runtime.set_quiet_time_events(True)["changed"])
-        self.assertIsNone(world.state.time_events)
+        self.assertEqual(world.state.time_events.records, ())
         self.skip(world)
         self.assertFalse(self.skip(world)["changed"])
         self.assertEqual(len(world.state.time_events.records), 1)
@@ -128,6 +128,7 @@ class SwitchTests(QuietTimeTestCase):
         gaps = time_gaps(
             ((e.occurred_at, e.payload["minutes"]) for e in times),
             world.state.world_state.clock,
+            world.state.time_events.epoch,
         )
         self.assertEqual(gaps, [(T0 + timedelta(minutes=1), T0 + timedelta(minutes=5))])
         self.assertEqual(
@@ -161,38 +162,46 @@ class SwitchTests(QuietTimeTestCase):
         with self.assertRaises(RuntimeError):
             with world.state.atomic_commit():
                 world.state.set_time_events(
-                    TimeEventPolicy().flipped(
+                    world.state.time_events.flipped(
                         QuietTime.SKIP, sim=world.state.world_state.clock, wall="w"
                     )
                 )
                 raise RuntimeError("abort")
-        self.assertIsNone(world.state.time_events)
+        self.assertEqual(world.state.time_events.records, ())
 
     def test_a_flip_must_be_stamped_with_the_current_clock(self):
         world = self.created()
         with world.state.atomic_commit():
             with self.assertRaises(SessionStateError):
                 world.state.set_time_events(
-                    TimeEventPolicy().flipped(
-                        QuietTime.SKIP, sim=T0 - timedelta(minutes=5), wall="w"
+                    world.state.time_events.flipped(
+                        QuietTime.SKIP, sim=T0 + timedelta(minutes=5), wall="w"
                     )
                 )
 
-    def test_the_public_scheduler_cannot_skip_a_step_without_the_ledger(self):
-        # 攻击：runtime.scheduler 是公开的。record 生效时不记事件地推时钟，会造出
-        # 一段加载时判为"缺了事件"的空档 —— 存得下、读不回来。
+    def test_the_public_scheduler_has_no_silent_advance(self):
+        # 攻击（全量审查 F2）：runtime.scheduler 是公开的。它看不见作息边界，
+        # 让它自己宣布"这一步安静"就能跨过作息变化而不写、不应用。
         world = self.created()
-        with self.assertRaises(SchedulerError):
+        self.skip(world)
+        with self.assertRaises(TypeError):
             world.runtime.scheduler.advance_to(T0 + timedelta(minutes=5), record=False)
         self.assertEqual(world.state.world_state.clock, T0)
-        world.runtime.set_quiet_time_events(True)  # 同值，不是拨动
+        # 公开推进照样记事件。
+        world.runtime.scheduler.advance_to(T0 + timedelta(minutes=5))
+        self.assertEqual(len(_times(world.state)), 1)
+
+    def test_the_quiet_primitive_still_needs_the_skip_ledger(self):
+        # 纵深：即使内部原语被误用，record 生效时也拒绝，不存下读不回来的空档。
+        world = self.created()
         with self.assertRaises(SchedulerError):
-            world.runtime.scheduler.advance_to(T0 + timedelta(minutes=5), record=False)
+            world.runtime.scheduler._advance_quietly(T0 + timedelta(minutes=5))
+        self.assertEqual(world.state.world_state.clock, T0)
         self.skip(world)
-        world.runtime.scheduler.advance_to(T0 + timedelta(minutes=5), record=False)
+        world.runtime.scheduler._advance_quietly(T0 + timedelta(minutes=5))
         world.runtime.set_quiet_time_events(True)
         with self.assertRaises(SchedulerError):
-            world.runtime.scheduler.advance_to(T0 + timedelta(minutes=9), record=False)
+            world.runtime.scheduler._advance_quietly(T0 + timedelta(minutes=9))
         self.reopen(world)
 
     def test_the_scheduler_refuses_a_quiet_step_that_has_a_due(self):
@@ -208,7 +217,7 @@ class SwitchTests(QuietTimeTestCase):
             )
         )
         with self.assertRaises(SchedulerError):
-            scheduler.advance_to(T0 + timedelta(minutes=1), record=False)
+            scheduler._advance_quietly(T0 + timedelta(minutes=1))
         self.assertEqual(world.state.world_state.clock, T0)
 
 
@@ -239,6 +248,81 @@ class GapValidationTests(QuietTimeTestCase):
         with self.assertRaises(ArchiveError) as caught:
             self.service.restore("nightcord", adapters=_adapters())
         self.assertIn("存档缺了事件", str(caught.exception))
+
+    def test_deleting_every_time_event_is_caught(self):
+        # 全量审查 F3：一条时间事件都不剩时，时钟从起点走到现在也必须有解释。
+        self.recorded_world()
+
+        def wipe(payload):
+            payload["state"]["events"]["events"] = [
+                e for e in payload["state"]["events"]["events"]
+                if e["type"] != "world.time_advanced"
+            ]
+            for index, entry in enumerate(payload["state"]["events"]["events"]):
+                entry["sequence"] = index
+
+        self.rewrite_archive(wipe)
+        with self.assertRaises(ArchiveError) as caught:
+            self.service.restore("nightcord", adapters=_adapters())
+        self.assertIn("存档缺了事件", str(caught.exception))
+
+    def test_a_gap_before_the_first_time_event_is_caught(self):
+        self.recorded_world()
+        self.rewrite_archive(lambda p: self.drop_time_event(p, 0))
+        with self.assertRaises(ArchiveError):
+            self.service.restore("nightcord", adapters=_adapters())
+
+    def test_the_epoch_cannot_be_dropped_or_moved(self):
+        self.recorded_world()
+        payload = self.archive_json()
+        self.rewrite_archive(lambda p: p["state"].__setitem__("time_events", None))
+        with self.assertRaises(ArchiveError) as caught:
+            self.service.restore("nightcord", adapters=_adapters())
+        self.assertIn("缺少 time_events", str(caught.exception))
+        self.archive_path().write_text(json.dumps(payload), encoding="utf-8")
+
+        def later(p):
+            p["state"]["time_events"]["epoch"] = "2026-08-22T23:55:00"
+            p["state"]["events"]["events"] = [
+                e for e in p["state"]["events"]["events"]
+                if e["type"] != "world.time_advanced"
+            ]
+            for index, entry in enumerate(p["state"]["events"]["events"]):
+                entry["sequence"] = index
+
+        # 把起点挪到此刻再删光时间事件：这个测试世界既没有开局来源、也没有认知
+        # 时间线可以交叉核对，只剩账本自己 —— 多字段伪造，同 R2-F4 一类，能加载。
+        # 正式世界与按现实时间走的世界会被拒绝（见 test_formal_world 与下一条）。
+        self.rewrite_archive(later)
+        self.service.restore("nightcord", adapters=_adapters()).close()
+
+    def test_a_moved_epoch_contradicts_the_cognition_timeline(self):
+        from pns.runtime.autonomy.clock_worker import ClockConfig
+
+        world = self.created(clock=ClockConfig(rate=1.0, interval_seconds=60.0))
+        world.close()
+
+        def later(p):
+            p["state"]["time_events"]["epoch"] = "2026-08-22T23:51:00"
+
+        self.rewrite_archive(later)
+        with self.assertRaises(ArchiveError) as caught:
+            self.service.restore("nightcord", adapters=_adapters())
+        self.assertIn("认知时间线", str(caught.exception))
+
+    def test_a_version_2_archive_uses_the_legacy_epoch(self):
+        self.recorded_world()
+
+        def downgrade(p):
+            p["version"] = 2
+            del p["segments"]
+            p["state"]["time_events"] = None
+
+        self.rewrite_archive(downgrade)
+        restored = self.service.restore("nightcord", adapters=_adapters())
+        self.assertEqual(restored.state.time_events.epoch, T0)
+        restored.close()
+        self.assertEqual(self.archive_json()["state"]["time_events"]["epoch"], T0.isoformat())
 
     def test_a_gap_that_outlives_the_skip_span_is_refused(self):
         # skip 从第 1 分钟到第 3 分钟；第 5 分钟那条被删掉 —— 落在 record 里。
@@ -272,28 +356,28 @@ class PolicyLedgerTests(unittest.TestCase):
 
     def test_the_first_record_must_turn_skip_on(self):
         with self.assertRaises(TimeEventPolicyError):
-            TimeEventPolicy((self.rec("record", 0),))
+            TimeEventPolicy(T0, (self.rec("record", 0),))
 
     def test_records_alternate_and_never_go_back_in_time(self):
         with self.assertRaises(TimeEventPolicyError):
-            TimeEventPolicy((self.rec("skip", 0), self.rec("skip", 1)))
+            TimeEventPolicy(T0, (self.rec("skip", 0), self.rec("skip", 1)))
         with self.assertRaises(TimeEventPolicyError):
-            TimeEventPolicy((self.rec("skip", 5), self.rec("record", 1)))
+            TimeEventPolicy(T0, (self.rec("skip", 5), self.rec("record", 1)))
 
     def test_coverage_is_the_complement_of_the_record_spans(self):
         policy = TimeEventPolicy(
-            (self.rec("skip", 10), self.rec("record", 20), self.rec("skip", 20))
+            T0, (self.rec("skip", 10), self.rec("record", 20), self.rec("skip", 20))
         )
         at = lambda m: T0 + timedelta(minutes=m)  # noqa: E731
         self.assertTrue(policy.covers(at(10), at(30)), "长度为 0 的 record 段不打断 skip")
         self.assertFalse(policy.covers(at(9), at(12)))
         self.assertTrue(policy.covers(at(25), at(10_000)))
-        flipped_back = TimeEventPolicy((self.rec("skip", 10), self.rec("record", 20)))
+        flipped_back = TimeEventPolicy(T0, (self.rec("skip", 10), self.rec("record", 20)))
         self.assertFalse(flipped_back.covers(at(15), at(21)))
         self.assertTrue(flipped_back.covers(at(15), at(20)))
 
     def test_it_round_trips(self):
-        policy = TimeEventPolicy((self.rec("skip", 3, "2026-09-27T10:00:00+00:00"),))
+        policy = TimeEventPolicy(T0, (self.rec("skip", 3, "2026-09-27T10:00:00+00:00"),))
         self.assertEqual(TimeEventPolicy.from_dict(policy.to_dict()), policy)
         self.assertEqual(
             policy.to_dict()["records"][0]["policy"], "quiet_time_events"
@@ -301,7 +385,7 @@ class PolicyLedgerTests(unittest.TestCase):
 
     def test_overlapping_time_events_are_refused(self):
         with self.assertRaises(TimeEventPolicyError):
-            time_gaps([(T0, 10), (T0 + timedelta(minutes=5), 1)], T0 + timedelta(minutes=6))
+            time_gaps([(T0, 10), (T0 + timedelta(minutes=5), 1)], T0 + timedelta(minutes=6), T0)
 
 
 # ── 5. 作息越界：回滚改记录 ─────────────────────────────────────────────
@@ -391,6 +475,29 @@ class FormalWorldTests(PlaneTestCase):
         restored = self.client.post("/api/persistent-worlds/yoake-mae/restore")
         self.assertEqual(restored.status_code, 200, restored.text)
         self.assertFalse(restored.json()["quiet_time_events"]["record"])
+
+    def test_the_public_scheduler_cannot_skip_the_21_oclock_boundary(self):
+        # 全量审查 F2 的反例：skip 下公开 scheduler 从 19:00 一步静默推到 21:00。
+        self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        self.client.post(
+            "/api/persistent-worlds/yoake-mae/quiet-time-events", json={"record": False}
+        )
+        world = self.world()
+        start = world.state.world_state.clock
+        with self.assertRaises(TypeError):
+            world.runtime.scheduler.advance_to(start + timedelta(hours=2), record=False)
+        self.assertEqual(world.state.world_state.clock, start)
+        # 正规推进过 21:00：作息照走、边界那一步照写。
+        for _ in range(2 * 60 + 1):
+            world.runtime.advance(1)
+        self.assertEqual(
+            world.state.world_state.activity_of("mizuki").kind.value, "editing_video"
+        )
+        reached = {
+            e.occurred_at + timedelta(minutes=e.payload["minutes"])
+            for e in _times(world.state)
+        }
+        self.assertIn(start.replace(hour=21, minute=0), reached)
 
     def test_the_switch_needs_an_open_world_and_a_boolean(self):
         self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")

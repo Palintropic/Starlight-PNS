@@ -11,7 +11,7 @@ from pns.models.activation_queue import ActivationQueue, ActivationQueueError
 from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
 from pns.models.clock_anchor import ClockAnchor, ClockAnchorError
-from pns.models.content_ledger import ContentLedger, ContentLedgerError
+from pns.models.content_ledger import ContentLedger, ContentLedgerError, genesis_from_origin
 from pns.models.time_events import TimeEventPolicy, TimeEventPolicyError, time_gaps
 from pns.models.cognition import (
     CognitionCause,
@@ -442,6 +442,8 @@ class SessionState:
         world_state.locations._freeze()
         world_state.channels._freeze()
         self.world_state = world_state
+        # 时间事件链从这一刻起算（WORLD-1 存档增长 / 全量审查 F3）。
+        self.time_events = TimeEventPolicy(world_state.clock)
 
     def attach_scheduler(self, scheduler) -> None:
         """绑定本会话唯一一份调度器（只允许一次）。
@@ -764,11 +766,22 @@ class SessionState:
         if not isinstance(ledger, ContentLedger):
             raise SessionStateError("只能设置 ContentLedger")
         previous = self.content
-        if previous is not None and (
-            ledger.conflicts[: len(previous.conflicts)] != previous.conflicts
-            and not _only_decided(previous.conflicts, ledger.conflicts)
-        ):
-            raise SessionStateError("冲突记录只能追加或被决定，不能删改")
+        try:
+            if previous is None:
+                # 开局那一版：只能在组装期、没有任何冲突记录，而且必须正是开局
+                # 来源里记下的那几份作息。
+                self._require_building("设置开局内容账本")
+                if ledger.conflicts:
+                    raise ContentLedgerError("开局内容账本不能带冲突记录")
+                if self.world_state is None:
+                    raise ContentLedgerError("先绑定世界状态，再设内容账本")
+                ledger.check_genesis(
+                    genesis_from_origin(self.world_state.metadata.get("origin"))
+                )
+            else:
+                ledger.check_successor_of(previous)
+        except ContentLedgerError as e:
+            raise SessionStateError(str(e)) from e
         self.content = ledger
 
     def set_time_events(self, policy: TimeEventPolicy) -> None:
@@ -778,7 +791,11 @@ class SessionState:
             raise SessionStateError("时间事件策略只能在本线程的提交事务里修改")
         if not isinstance(policy, TimeEventPolicy):
             raise SessionStateError("只能设置 TimeEventPolicy")
-        previous = self.time_events.records if self.time_events is not None else ()
+        if self.time_events is None:
+            raise SessionStateError("没有世界状态的会话没有时间事件策略")
+        previous = self.time_events.records
+        if policy.epoch != self.time_events.epoch:
+            raise SessionStateError("时间事件链的起点不能改")
         if policy.records[: len(previous)] != previous or len(policy.records) != len(
             previous
         ) + 1:
@@ -1147,14 +1164,26 @@ class SessionState:
         if content is not None:
             try:
                 state.content = ContentLedger.from_dict(content)
+                state.content.check_genesis(
+                    genesis_from_origin(
+                        state.world_state.metadata.get("origin")
+                        if state.world_state is not None
+                        else None
+                    )
+                )
             except ContentLedgerError as e:
                 raise SessionStateError(f"内容账本不合法：{e}") from e
         time_events = payload.get("time_events")
-        if time_events is not None:
+        if state.world_state is not None:
+            # 有世界就必须有时间事件链的起点；缺了它，删光时间事件就无从发现。
+            if time_events is None:
+                raise SessionStateError("有世界状态的会话缺少 time_events（时间事件链的起点）")
             try:
                 state.time_events = TimeEventPolicy.from_dict(time_events)
             except TimeEventPolicyError as e:
                 raise SessionStateError(f"时间事件策略不合法：{e}") from e
+        elif time_events is not None:
+            raise SessionStateError("没有世界状态的会话不该有 time_events")
         _validate_time_gaps(state)
         dispositions = payload.get("rhythm_dispositions", [])
         if not isinstance(dispositions, list) or not all(
@@ -1214,17 +1243,30 @@ def _validate_time_gaps(state: "SessionState") -> None:
     world = state.world_state
     if world is None:
         return
-    policy = state.time_events if state.time_events is not None else TimeEventPolicy()
-    if state.time_events is not None and state.time_events.records:
-        last = state.time_events.records[-1].from_sim
-        if last > world.clock:
-            raise SessionStateError("时间事件策略的拨动时刻晚于世界时钟")
+    policy = state.time_events
+    if policy.records and policy.records[-1].from_sim > world.clock:
+        raise SessionStateError("时间事件策略的拨动时刻晚于世界时钟")
+    # 起点跟着存档走，所以能拿到别的独立记录就交叉核对：正式世界的开局时刻、
+    # 认知时间线开张的那一刻，都是绑定世界时的时钟。
+    origin = world.metadata.get("origin") if isinstance(world.metadata, dict) else None
+    if isinstance(origin, dict) and origin.get("start") is not None:
+        try:
+            start = datetime.fromisoformat(origin["start"])
+        except (TypeError, ValueError):
+            raise SessionStateError("开局来源的 start 不是 ISO 时间") from None
+        if start != policy.epoch:
+            raise SessionStateError("时间事件链的起点与正式世界的开局时刻不一致")
+    timeline = state.cognition
+    if timeline is not None:
+        first = timeline.intervals[0]
+        if first.opened_by is TransitionKind.OPENED and first.opened_at_sim != policy.epoch:
+            raise SessionStateError("时间事件链的起点与认知时间线开张的时刻不一致")
     steps = (
         (event.occurred_at, int(event.payload["minutes"]))
         for event in state.events.by_type(EventType.WORLD_TIME_ADVANCED)
     )
     try:
-        gaps = time_gaps(steps, world.clock)
+        gaps = time_gaps(steps, world.clock, policy.epoch)
     except TimeEventPolicyError as e:
         raise SessionStateError(str(e)) from e
     for start, end in gaps:
@@ -1314,24 +1356,6 @@ def _validate_cognition(state: "SessionState") -> None:
                 f"认知区间 {interval.index} 声称额度耗尽，但 Agency 日志在那里并没有"
                 f"恰好用完额度 {previous.run_allowance}"
             )
-
-
-def _only_decided(previous, current) -> bool:
-    """current 是否只是把 previous 里的待决记录改成了已决、再追加了新的。"""
-    if len(current) < len(previous):
-        return False
-    for before, after in zip(previous, current):
-        if before == after:
-            continue
-        if before.status.value != "pending" or after.status.value == "pending":
-            return False
-        if (before.subject, before.offered_fingerprint, before.recorded_at_wall) != (
-            after.subject,
-            after.offered_fingerprint,
-            after.recorded_at_wall,
-        ):
-            return False
-    return True
 
 
 def _opens_exhaustion(timeline, interval, log_position: int) -> bool:

@@ -53,7 +53,7 @@ from pns.models.cognition import (
 )
 from pns.models.event import Event, EventType
 from pns.models.session import SessionState
-from pns.models.time_events import QuietTime, TimeEventPolicy, quiet_time_report
+from pns.models.time_events import QuietTime, quiet_time_report
 from pns.models.world_state import WorldState
 from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
 from pns.runtime.autonomy.audit import AuditError, AuditRequest
@@ -963,7 +963,11 @@ class AutonomousRuntime:
                         boundaries.add(boundary)
                 step_to = min(moment for moment in candidates if moment > clock)
                 silent = quiet and step_to not in boundaries
-                tick = self._scheduler.advance_to(step_to, record=not silent)
+                tick = (
+                    self._scheduler._advance_quietly(step_to)
+                    if silent
+                    else self._scheduler.advance_to(step_to)
+                )
                 transitions = self._apply_rhythm_locked()
                 if silent and transitions:
                     raise _NotQuiet()
@@ -986,7 +990,9 @@ class AutonomousRuntime:
         changed = []
 
         def change(state: SessionState) -> None:
-            policy = state.time_events if state.time_events is not None else TimeEventPolicy()
+            policy = state.time_events
+            if policy is None:
+                raise AutonomyError("这个会话没有时间事件策略（没有世界状态）")
             if policy.current is value:
                 return
             state.set_time_events(policy.flipped(value, sim=self.clock, wall=stamp))

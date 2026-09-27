@@ -331,6 +331,7 @@ class PersistentWorld:
         durable: Optional[bool] = None,
         directory_synced: Optional[bool] = None,
         segments: Tuple[EventSegment, ...] = (),
+        baseline: Optional[Tuple] = None,
     ) -> None:
         self._world_id = world_id
         self._store = store
@@ -350,7 +351,10 @@ class PersistentWorld:
         self._last_reason: Optional[str] = None
         self._boundaries = 0
         self._last_checkpoint_at: Optional[datetime] = None
-        self._fingerprint = _fingerprint(state)
+        # 磁盘上那一版的指纹。恢复路径必须交进来**读档那一刻**的指纹：绑定适配器
+        # 时可能已经改了状态（记下内容冲突、认知转换），那些改动还没落盘，不能被
+        # 当成"干净"（全量审查 F4）。
+        self._fingerprint = baseline if baseline is not None else _fingerprint(state)
         # 最后一次保存的耐久性证据。True/False 只由本进程亲自完成的保存得出；
         # 从存档恢复时没有携带这份文件系统证据，因此必须是 None（未知），不能
         # 因为文件此刻读得出来就把过去一次未经目录同步的保存重新说成耐久。
@@ -836,6 +840,9 @@ class WorldLifecycleService:
             archive = self._store.load(name)
             # 数据在前：恢复出一份冷状态，跨段校验全部走既有构造函数。
             state = archive.restore_state()
+            # 磁盘那一版的样子，在任何绑定改动它之前记下。
+            baseline = _fingerprint(state)
+            content_on_disk = state.content
             # 服务在后：调用方的冷适配器显式绑定，存档里一个活对象都没有。
             runtime = adapters.bind(state)
             if clock is not None:
@@ -859,7 +866,13 @@ class WorldLifecycleService:
                 service=self,
                 snapshot_timeout=snapshot_timeout,
                 segments=archive.segments,
+                baseline=baseline,
             )
+            if state.content is not content_on_disk:
+                # 恢复时识别出了新的内容冲突：它声称"已经记下"，就要在恢复成功之前
+                # 真的落盘。存不下去就是恢复失败（下面的 except 归还所有权）。
+                with world._lock:
+                    world._checkpoint_locked("restore_content_conflict")
             state.publish()
             if start:
                 runtime.start()

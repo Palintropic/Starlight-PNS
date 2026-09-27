@@ -13,9 +13,11 @@
 #      WorldState.advance_time() —— 那会是一次没有记录在世界历史里的状态变更，
 #      而世界历史必须能解释时钟为什么是现在这个值。
 #      唯一的明示例外（WORLD-1 存档增长设计 §3）：持久世界拨到"安静的分钟不
-#      记"之后，一个**什么都没到期**的时钟步可以 `record=False` 只推时钟。那时
-#      解释时钟的是时间事件加上 SessionState.time_events 这份策略账本：空档
-#      必须落在 skip 生效的范围里，存档加载时逐段核对。
+#      记"之后，自主运行时可以用内部原语 `_advance_quietly()` 只推时钟。安不
+#      安静要连作息边界一起判断，而调度器看不见作息，所以这不是公开入口：只有
+#      协调器的时钟步（它的计划里有到期和作息边界）调用它。那时解释时钟的是
+#      时间事件加上 SessionState.time_events 这份策略账本：空档必须落在 skip
+#      生效的范围里，存档加载时逐段核对。
 #   2. 一次推进是一个事务。时钟、事件历史、曝光判定、激活队列、产出的到期
 #      记录，要么全部成立，要么一起回到推进之前的样子。中途失败留下"时间走了
 #      但队列没动"或者"队列动了但事件没记下"都是不可接受的。
@@ -219,7 +221,7 @@ class PersistentScheduler:
             raise SchedulerError("推进后的模拟时间超出可表示的时间范围") from None
         return self._tick(target, minutes)
 
-    def advance_to(self, target: datetime, *, record: bool = True) -> TickResult:
+    def advance_to(self, target: datetime) -> TickResult:
         """把模拟时间推进到 target。
 
         target 必须严格晚于当前时钟，并且距离当前时钟是整分钟 —— 世界历史里
@@ -236,7 +238,19 @@ class PersistentScheduler:
             raise SchedulerError(
                 f"目标时间必须与当前时钟相差整分钟，收到 {target.isoformat()}"
             )
-        return self._tick(target, delta // _MINUTE, record=record)
+        return self._tick(target, delta // _MINUTE)
+
+    def _advance_quietly(self, target: datetime) -> TickResult:
+        """安静的一步：推到 target，不写时间事件。只给协调器的时钟步用。
+
+        调用方负责判断这一步确实安静（没有到期、不是作息边界）；这里仍然拒绝
+        有到期的一步，并且要求账本当前是 skip。
+        """
+        target = self._require_simulation_time(target, "target")
+        delta = target - self.clock
+        if delta <= timedelta(0) or delta % _MINUTE:
+            raise SchedulerError(f"安静的一步必须严格向前、按整分钟推进：{target.isoformat()}")
+        return self._tick(target, delta // _MINUTE, record=False)
 
     def advance_to_next_due(self) -> Optional[TickResult]:
         """推进到下一条激活到期的那一刻；队列为空就返回 None，不动时钟。"""

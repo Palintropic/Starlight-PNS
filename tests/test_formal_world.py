@@ -448,5 +448,227 @@ class ContentGateTests(PlaneTestCase):
         self.assertEqual(world.state.content.pending(), ())
 
 
+class AdoptionChainTests(unittest.TestCase):
+    """全量审查 F1：已采用版本只能经由一次采用决定改变，加载时从开局重放。"""
+
+    B = content_fingerprint("b")
+    C = content_fingerprint("c")
+
+    def test_a_setter_cannot_swap_the_adopted_version(self):
+        state = _state()
+        forged = ContentLedger(
+            tuple(
+                (subject, self.B if subject == "rhythm:mizuki" else fp)
+                for subject, fp in state.content.adopted
+            )
+        )
+        with state.atomic_commit():
+            with self.assertRaises(SessionStateError):
+                state.set_content(forged)
+        self.assertEqual(state.content.conflicts, ())
+        changed = _with_rhythm(BOUNDARY.active(), "mizuki", ActivityKind.DRAWING)
+        with state.atomic_commit():
+            accepted = gated_rhythms(state, changed.rhythms(), registry_revision=2, wall="w")
+        self.assertEqual(sorted(accepted), ["ena"], "新版仍被内容门挡住")
+
+    def test_an_archive_with_a_swapped_adopted_version_is_refused(self):
+        state = _state()
+        payload = state.to_dict()
+        payload["content"]["adopted"]["rhythm:mizuki"] = self.B
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(payload)
+
+    def test_a_forged_adoption_that_does_not_link_to_the_genesis_is_refused(self):
+        state = _state()
+        payload = state.to_dict()
+        payload["content"]["adopted"]["rhythm:mizuki"] = self.C
+        payload["content"]["conflicts"].append(
+            {
+                "subject": "rhythm:mizuki",
+                "adopted_fingerprint": self.B,  # 开局版本不是 B
+                "offered_fingerprint": self.C,
+                "registry_revision": 2,
+                "status": "adopted",
+                "recorded_at_wall": "w",
+                "decided_at_wall": "d",
+            }
+        )
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(payload)
+
+    def test_a_real_adoption_chain_round_trips(self):
+        state = _state()
+        with state.atomic_commit():
+            state.set_content(
+                state.content.offered("rhythm:mizuki", self.B, registry_revision=2, wall="w1")
+            )
+        with state.atomic_commit():
+            state.set_content(
+                state.content.decided(
+                    state.content.pending()[0].conflict_id, "adopted", wall="d1"
+                )
+            )
+        with state.atomic_commit():
+            state.set_content(
+                state.content.offered("rhythm:mizuki", self.C, registry_revision=3, wall="w2")
+            )
+        with state.atomic_commit():
+            state.set_content(
+                state.content.decided(
+                    state.content.pending()[0].conflict_id, "adopted", wall="d2"
+                )
+            )
+        self.assertTrue(state.content.accepts("rhythm:mizuki", self.C))
+        restored = SessionState.from_dict(state.to_dict())
+        self.assertEqual(restored.content, state.content)
+
+    def test_an_adoption_cannot_carry_a_second_change_along(self):
+        state = _state()
+        with state.atomic_commit():
+            state.set_content(
+                state.content.offered("rhythm:mizuki", self.B, registry_revision=2, wall="w")
+            )
+        decided = state.content.decided(
+            state.content.pending()[0].conflict_id, "adopted", wall="d"
+        )
+        smuggled = ContentLedger(
+            tuple(
+                (subject, self.C if subject == "rhythm:ena" else fp)
+                for subject, fp in decided.adopted
+            ),
+            decided.conflicts,
+        )
+        with state.atomic_commit():
+            with self.assertRaises(SessionStateError):
+                state.set_content(smuggled)
+
+    def test_a_new_record_cannot_arrive_already_decided(self):
+        state = _state()
+        pending = state.content.offered("rhythm:mizuki", self.B, registry_revision=2, wall="w")
+        decided = pending.decided(pending.pending()[0].conflict_id, "declined", wall="d")
+        with state.atomic_commit():
+            with self.assertRaises(SessionStateError):
+                state.set_content(decided)
+
+    def test_the_time_event_epoch_must_match_the_launch(self):
+        # 全量审查 F3 的补强：起点跟着存档走，正式世界拿开局时刻交叉核对。
+        # 伪造：时钟走了 5 分钟，时间事件删光，起点挪到此刻 —— 链本身自洽。
+        state = _state()
+        payload = state.to_dict()
+        moved = (state.world_state.clock + timedelta(minutes=5)).isoformat()
+        launch = state.world_state.clock.isoformat()
+        for section in payload.values():
+            if isinstance(section, dict) and section.get("clock") == launch:
+                section["clock"] = moved  # 世界、调度、Agency、记忆各自记着时钟
+        payload["time_events"]["epoch"] = moved
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(payload)
+        self.assertIn("开局时刻", str(caught.exception))
+
+    def test_a_dangling_adoption_beside_a_real_chain_is_refused(self):
+        # 真实的链：开局 → B；另塞一条接不上任何版本的"采用"（C → D），放在前面，
+        # 于是"最后一次采用 = 此刻版本"仍然成立，只有逐条接链才能发现它。
+        state = _state()
+        genesis = state.content.adopted_fingerprint("rhythm:mizuki")
+        D = content_fingerprint("d")
+        payload = state.to_dict()
+        payload["content"]["adopted"]["rhythm:mizuki"] = self.B
+
+        def record(adopted, offered, status):
+            return {
+                "subject": "rhythm:mizuki",
+                "adopted_fingerprint": adopted,
+                "offered_fingerprint": offered,
+                "registry_revision": 2,
+                "status": status,
+                "recorded_at_wall": "w",
+                "decided_at_wall": "d",
+            }
+
+        payload["content"]["conflicts"] = [
+            record(self.C, D, "declined"),
+            record(genesis, self.B, "adopted"),
+        ]
+        SessionState.from_dict(payload)  # 驳回的记录不在链上，没问题
+        payload["content"]["conflicts"][0]["status"] = "adopted"
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(payload)
+        self.assertIn("接不上", str(caught.exception))
+
+    def test_the_first_ledger_must_be_the_launch_versions(self):
+        payload = _state().to_dict()
+        genuine = payload.pop("content")
+        payload["content"] = None
+        state = SessionState.from_dict(payload)
+        forged = ContentLedger(
+            tuple(
+                (subject, self.B if subject == "rhythm:mizuki" else fp)
+                for subject, fp in genuine["adopted"].items()
+            )
+        )
+        with state.atomic_commit():
+            with self.assertRaises(SessionStateError):
+                state.set_content(forged)
+            state.set_content(ContentLedger(tuple(genuine["adopted"].items())))
+
+    def test_the_genesis_must_match_the_origin(self):
+        state = _state()
+        payload = state.to_dict()
+        payload["world_state"]["metadata"]["origin"]["content"]["rhythms"]["mizuki"] = self.B
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(payload)
+
+
+class RestoreConflictDurabilityTests(PlaneTestCase):
+    """全量审查 F4：恢复时识别出的冲突要么已经落盘，要么恢复失败。"""
+
+    rate = 1.0
+
+    def test_a_conflict_found_on_restore_is_on_disk_before_restore_returns(self):
+        self.plane.create_formal("yoake-mae")
+        self.plane.close("yoake-mae")
+        changed = _with_rhythm(self.registry, "mizuki", ActivityKind.DRAWING)
+        plane = self.make_plane(registry_provider=lambda: changed)
+        self.addCleanup(plane.service.release_all)
+        plane.restore("yoake-mae")
+        world = plane.service.opened("yoake-mae")
+        self.assertEqual(len(world.state.content.pending()), 1)
+        self.assertEqual(world.status()["last_checkpoint_reason"], "restore_content_conflict")
+        # 模拟没来得及再存一次就退出。
+        world.release()
+        on_disk = plane.store.load("yoake-mae", history=False).state["content"]
+        self.assertEqual(len(on_disk["conflicts"]), 1)
+        self.assertEqual(on_disk["conflicts"][0]["status"], "pending")
+
+    def test_a_conflict_that_cannot_be_saved_fails_the_restore(self):
+        self.plane.create_formal("yoake-mae")
+        self.plane.close("yoake-mae")
+        changed = _with_rhythm(self.registry, "mizuki", ActivityKind.DRAWING)
+        plane = self.make_plane(registry_provider=lambda: changed)
+        self.addCleanup(plane.service.release_all)
+        from pns.runtime.persistence.store import FileWorldStore, StorageError
+
+        with patch.object(FileWorldStore, "save", side_effect=StorageError("磁盘满了")):
+            with self.assertRaises(Exception):
+                plane.restore("yoake-mae")
+        self.assertIsNone(plane.service.opened("yoake-mae"), "恢复失败要归还所有权")
+        on_disk = plane.store.load("yoake-mae", history=False).state["content"]
+        self.assertEqual(on_disk["conflicts"], [])
+
+    def test_restore_time_changes_count_as_unsaved(self):
+        # 恢复时的认知转换（停机期间）也是还没落盘的运维记录：dirty 不许说谎。
+        self.plane.create_formal("yoake-mae")
+        self.plane.close("yoake-mae")
+        closed_revision = self.plane.store.load("yoake-mae", history=False).revision
+        self.plane.restore("yoake-mae")
+        world = self.world()
+        status = world.status()
+        # 1:1 的时钟 worker 若恰好跨过整分钟会先存一次；那样 dirty 为假是实话。
+        if status["revision"] == closed_revision:
+            disk = self.plane.store.load("yoake-mae", history=False).state
+            self.assertNotEqual(disk["cognition"], world.state.cognition.to_dict())
+            self.assertTrue(status["dirty"])
+
+
 if __name__ == "__main__":
     unittest.main()

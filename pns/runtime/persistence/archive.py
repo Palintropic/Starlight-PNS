@@ -42,6 +42,7 @@ from math import isfinite
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pns.models.session import SessionState
+from pns.models.time_events import TimeEventPolicy, legacy_epoch
 from pns.runtime.persistence.naming import validate_world_id
 
 # 存档格式版本。改变形状就 +1，并且在这里写清楚旧版怎么升级 —— 不认识的版本
@@ -375,6 +376,18 @@ def _check_active(segments: Sequence[EventSegment], state: Mapping) -> None:
             raise ArchiveError("活动段第一条事件早于最后一卷的末尾（时间倒流）")
 
 
+def _legacy_time_events(payload: Dict, clock: datetime) -> None:
+    """版本 2 没记时间事件链的起点：按旧规矩补一个（见 time_events.legacy_epoch）。"""
+    steps = []
+    for entry in payload.get("events", {}).get("events", []):
+        if isinstance(entry, Mapping) and entry.get("type") == "world.time_advanced":
+            try:
+                steps.append((datetime.fromisoformat(entry["occurred_at"]), 0))
+            except (KeyError, TypeError, ValueError):
+                raise ArchiveError("版本 2 存档里有读不懂时刻的时间事件") from None
+    payload["time_events"] = TimeEventPolicy(legacy_epoch(steps, clock)).to_dict()
+
+
 @dataclass(frozen=True)
 class WorldArchive:
     """一个世界某一刻的完整存档，连同它的身份与版本。"""
@@ -643,6 +656,8 @@ class WorldArchive:
                 "events": deepcopy(list(self.sealed_events))
                 + list(payload["events"].get("events", [])),
             }
+        if self.version == 2 and payload.get("time_events") is None:
+            _legacy_time_events(payload, self.clock)
         try:
             state = SessionState.from_dict(payload)
         except ArchiveError:

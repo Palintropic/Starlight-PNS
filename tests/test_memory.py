@@ -401,7 +401,17 @@ class RecallTests(unittest.TestCase):
         self.encoder.commit_and_encode(
             _message(self.state, "mizuki，我答应了明天把和声写完。", event_id="e1")
         )
-        self.state.world_state.advance_time(5)
+        # 这组用例要做存档往返，所以时间经由时间事件前进（存档要能解释时钟）。
+        commit_session_event(
+            self.state,
+            Event(
+                event_id="t1",
+                type=EventType.WORLD_TIME_ADVANCED,
+                occurred_at=self.state.world_state.clock,
+                scope=EventScope.PUBLIC,
+                payload={"minutes": 5},
+            ),
+        )
         self.encoder.commit_and_encode(
             _message(self.state, "今天的天气不错。", event_id="e2")
         )

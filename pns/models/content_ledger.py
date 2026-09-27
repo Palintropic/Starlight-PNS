@@ -226,6 +226,74 @@ class ContentLedger:
             return ContentLedger(tuple(adopted.items()), tuple(conflicts))
         raise ContentLedgerError(f"没有这条冲突记录: {conflict_id}")
 
+    # ── 校验：已采用版本从哪来 ──────────────────────────────────────────
+    def check_successor_of(self, previous: "ContentLedger") -> None:
+        """self 是不是 previous 的一次合法后继（一个事务里的变化）。
+
+        合法的变化只有三种：追加待决记录；把待决记录决定掉；因为某条待决被决定
+        为采用，把那一项的已采用版本换成它提议的那一版。已采用版本的其它任何
+        变化 —— 直接换指纹、加减内容项 —— 都不成立。
+        """
+        before_all, after_all = previous.conflicts, self.conflicts
+        if len(after_all) < len(before_all):
+            raise ContentLedgerError("冲突记录只能追加或被决定，不能删")
+        current = dict(previous.adopted)
+        if set(dict(self.adopted)) != set(current):
+            raise ContentLedgerError("内容账本不能增减内容项")
+        for before, after in zip(before_all, after_all):
+            if before == after:
+                continue
+            if before.status is not ConflictStatus.PENDING or after.status is ConflictStatus.PENDING:
+                raise ContentLedgerError("冲突记录只能追加或被决定，不能删改")
+            if _identity(before) != _identity(after):
+                raise ContentLedgerError(f"冲突 '{before.conflict_id}' 在决定时被改了内容")
+            if after.status is ConflictStatus.ADOPTED:
+                if current[after.subject] != after.adopted_fingerprint:
+                    raise ContentLedgerError(
+                        f"冲突 '{after.conflict_id}' 针对的已采用版本已经变了"
+                    )
+                current[after.subject] = after.offered_fingerprint
+        for after in after_all[len(before_all):]:
+            if after.status is not ConflictStatus.PENDING:
+                raise ContentLedgerError("新追加的冲突记录只能是待决")
+            if after.adopted_fingerprint != current[after.subject]:
+                raise ContentLedgerError(
+                    f"新冲突 '{after.conflict_id}' 记的已采用版本不是此刻的那一版"
+                )
+        if dict(self.adopted) != current:
+            raise ContentLedgerError("已采用版本只能由一次采用决定改变")
+
+    def check_genesis(self, genesis: Mapping[str, str]) -> None:
+        """从开局时采用的那一版出发，沿采用记录重放，必须恰好得到此刻的已采用版本。
+
+        每一项内容的采用记录连成一条链：第一条针对开局版本，之后每条针对上一条
+        提议的版本。链接不上、有用不上的采用记录、终点不是此刻的版本，都说明
+        已采用版本不是靠采用走到这里的。
+        """
+        adopted = dict(self.adopted)
+        if set(adopted) != set(genesis):
+            raise ContentLedgerError("内容账本的内容项与开局来源不一致")
+        for subject, start in genesis.items():
+            links = [
+                c
+                for c in self.conflicts
+                if c.subject == subject and c.status is ConflictStatus.ADOPTED
+            ]
+            head = start
+            while links:
+                candidates = [c for c in links if c.adopted_fingerprint == head]
+                if not candidates:
+                    raise ContentLedgerError(
+                        f"'{subject}' 的采用记录接不上开局版本（有采用记录不在链上）"
+                    )
+                step = min(candidates, key=lambda c: c.decided_at_wall or "")
+                links.remove(step)
+                head = step.offered_fingerprint
+            if head != adopted[subject]:
+                raise ContentLedgerError(
+                    f"'{subject}' 的已采用版本不是从开局版本经采用记录走到的"
+                )
+
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
         return {
@@ -247,10 +315,34 @@ class ContentLedger:
         )
 
 
+def _identity(conflict: ContentConflict) -> Tuple:
+    return (
+        conflict.subject,
+        conflict.adopted_fingerprint,
+        conflict.offered_fingerprint,
+        conflict.registry_revision,
+        conflict.recorded_at_wall,
+    )
+
+
+def genesis_from_origin(origin) -> Dict[str, str]:
+    """正式世界开局来源里记下的作息指纹 → 内容账本的开局版本。
+
+    内容项的命名与 pns.runtime.formal_world.rhythm_subject 一致（rhythm:<角色>）。
+    """
+    content = origin.get("content") if isinstance(origin, Mapping) else None
+    rhythms = content.get("rhythms") if isinstance(content, Mapping) else None
+    if not isinstance(rhythms, Mapping):
+        raise ContentLedgerError("有内容账本的世界必须带开局来源里的作息指纹")
+    return {f"rhythm:{cid}": _fingerprint(fp, f"开局来源里 {cid} 的作息指纹")
+            for cid, fp in rhythms.items()}
+
+
 __all__ = [
     "ConflictStatus",
     "ContentConflict",
     "ContentLedger",
     "ContentLedgerError",
     "content_fingerprint",
+    "genesis_from_origin",
 ]

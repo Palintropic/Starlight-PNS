@@ -9,6 +9,10 @@
 # 于是读历史的人能把"没记"和"丢了"分开：两条时间事件之间出现空档，那段时间
 # 必须整个落在 skip 生效的范围里，否则这份存档就是缺了事件（validate_time_gaps）。
 #
+# 时间事件链有一个独立的起点 epoch：会话绑定世界状态那一刻的时钟。它存在这份
+# 账本里，而不是靠"第一条时间事件自己说从哪开始" —— 否则把时间事件整条删掉，
+# 就没有任何东西能证明时钟是怎么走到现在的（全量审查 F3）。
+#
 # 规则：
 #   * 每拨一次追加一条记录 {value, from_sim, at_wall}，与拨动同一个事务；
 #     值与当前相同的"拨动"不是拨动，不记。
@@ -45,8 +49,6 @@ def _sim(value, label: str) -> datetime:
         raise TimeEventPolicyError(f"{label} 必须是 ISO 时间")
     if moment.tzinfo is not None:
         raise TimeEventPolicyError(f"{label} 必须是不带时区的模拟时间")
-    if moment.second or moment.microsecond:
-        raise TimeEventPolicyError(f"{label} 必须落在整分钟上")
     return moment
 
 
@@ -86,15 +88,20 @@ class TimeEventPolicyRecord:
 
 @dataclass(frozen=True)
 class TimeEventPolicy:
-    """一个世界的安静分钟策略：拨动记录，按时间顺序。"""
+    """一个世界的安静分钟策略：时间事件链的起点 + 拨动记录，按时间顺序。"""
 
+    epoch: datetime
     records: Tuple[TimeEventPolicyRecord, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "epoch", _sim(self.epoch, "epoch"))
+        object.__setattr__(self, "records", tuple(self.records))
         previous: Optional[TimeEventPolicyRecord] = None
         for record in self.records:
             if not isinstance(record, TimeEventPolicyRecord):
                 raise TimeEventPolicyError("策略账本里只能是 TimeEventPolicyRecord")
+            if record.from_sim < self.epoch:
+                raise TimeEventPolicyError("策略记录的 from_sim 早于时间事件链的起点")
             if previous is None:
                 if record.value is QuietTime.RECORD:
                     # 默认就是 record：第一条记录只能是拨到 skip。
@@ -121,8 +128,9 @@ class TimeEventPolicy:
         if value is self.current:
             raise TimeEventPolicyError(f"安静的分钟已经是 {value.value}，没有可拨的")
         return TimeEventPolicy(
+            self.epoch,
             self.records
-            + (TimeEventPolicyRecord(value=value, from_sim=_sim(sim, "sim"), at_wall=wall),)
+            + (TimeEventPolicyRecord(value=value, from_sim=_sim(sim, "sim"), at_wall=wall),),
         )
 
     def record_spans(self) -> List[Tuple[Optional[datetime], Optional[datetime]]]:
@@ -154,7 +162,10 @@ class TimeEventPolicy:
         return True
 
     def to_dict(self) -> Dict:
-        return {"records": [record.to_dict() for record in self.records]}
+        return {
+            "epoch": self.epoch.isoformat(),
+            "records": [record.to_dict() for record in self.records],
+        }
 
     @classmethod
     def from_dict(cls, payload) -> "TimeEventPolicy":
@@ -163,22 +174,27 @@ class TimeEventPolicy:
         records = payload.get("records")
         if not isinstance(records, list):
             raise TimeEventPolicyError("时间事件策略的 records 必须是数组")
-        return cls(tuple(TimeEventPolicyRecord.from_dict(item) for item in records))
+        return cls(
+            _sim(payload.get("epoch"), "epoch"),
+            tuple(TimeEventPolicyRecord.from_dict(item) for item in records),
+        )
 
 
-def time_gaps(steps: Iterable[Tuple[datetime, int]], clock: datetime):
-    """时间事件之间、以及最后一条之后到此刻时钟之间的空档 [起, 止)。
+def time_gaps(steps: Iterable[Tuple[datetime, int]], clock: datetime, epoch: datetime):
+    """从 epoch 起、时间事件之间、以及最后一条之后到此刻时钟之间的空档 [起, 止)。
 
     steps 是按历史顺序的 (occurred_at, minutes)。一条 world.time_advanced 的
     occurred_at 是推进**前**的时刻，推到 occurred_at + minutes；下一条应当正好从
-    那里开始。第一条之前不查：开局时钟不在事件历史里。
+    那里开始，第一条应当正好从 epoch 开始。一条都没有时，[epoch, clock) 整段是空档。
     """
-    from datetime import timedelta
-
+    if clock < epoch:
+        raise TimeEventPolicyError(
+            f"世界时钟 {clock.isoformat()} 早于时间事件链的起点 {epoch.isoformat()}"
+        )
     gaps = []
-    reached: Optional[datetime] = None
+    reached: datetime = epoch
     for occurred_at, minutes in steps:
-        if reached is not None and occurred_at != reached:
+        if occurred_at != reached:
             if occurred_at < reached:
                 raise TimeEventPolicyError(
                     f"时间事件重叠：{occurred_at.isoformat()} 早于上一条推到的 "
@@ -186,13 +202,24 @@ def time_gaps(steps: Iterable[Tuple[datetime, int]], clock: datetime):
                 )
             gaps.append((reached, occurred_at))
         reached = occurred_at + timedelta(minutes=minutes)
-    if reached is not None and clock != reached:
+    if clock != reached:
         if clock < reached:
             raise TimeEventPolicyError(
                 f"世界时钟 {clock.isoformat()} 早于最后一条时间事件推到的 {reached.isoformat()}"
             )
         gaps.append((reached, clock))
     return gaps
+
+
+def legacy_epoch(steps: Iterable[Tuple[datetime, int]], clock: datetime) -> datetime:
+    """版本 2 存档没有 epoch：按旧规矩从第一条时间事件起算，一条都没有就是此刻。
+
+    这是旧存档的已知上限：它们本来就没记起点，所以"整条时间事件被删掉"在
+    版本 2 上无法被发现。版本 3 起 epoch 必填。
+    """
+    for occurred_at, _ in steps:
+        return occurred_at
+    return clock
 
 
 def quiet_time_report(policy: Optional[TimeEventPolicy]) -> Dict:

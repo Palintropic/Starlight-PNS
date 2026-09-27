@@ -210,7 +210,17 @@ class ActivityHistoryRestoreTests(unittest.TestCase):
         state, world = self._state()
         commit_session_event(state, self._activity_event(world, "a1", "drawing"))
         commit_session_event(state, self._activity_event(world, "a2", "unspecified"))
-        world.advance_time(30)
+        # 时间只能经由时间事件前进：存档要能解释时钟为什么是现在这个值。
+        commit_session_event(
+            state,
+            Event(
+                event_id="t1",
+                type=EventType.WORLD_TIME_ADVANCED,
+                occurred_at=world.clock,
+                scope=EventScope.PUBLIC,
+                payload={"minutes": 30},
+            ),
+        )
 
         restored = SessionState.from_dict(state.to_dict())
         self.assertEqual(restored.world_state.character_activities, {})
