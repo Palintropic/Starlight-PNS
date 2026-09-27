@@ -146,9 +146,11 @@ df -h /var/lib/docker                # 卷装在这里；存档会随世界一�
 
 存档增长的预算：1:1 运行的世界每个现实分钟记一条时间推进事件，实测约 1.3 MB / 模拟日，
 也就是约 40 MB / 月、约 475 MB / 年（每个世界）。这是"一条事件都不丢"的代价，目前是刻意的。
-已经过去的历史按模拟日封存成不再改动的分卷（`history/events-NNNNNN.jsonl`），每分钟一次的 checkpoint
-只重写 `world.json`（当前状态 + 最近不到一天的事件），不会随世界变老而变慢。后台世界详情里的
-存档大小、分卷数就是这笔账，看着它涨。
+已经过去的事件按模拟日封存成不再改动的分卷（`history/events-NNNNNN.jsonl`），每分钟一次的 checkpoint
+不再重写这些事件。**但目前只有事件分卷**：曝光判定、排期投递箱与 Agency 记录仍整份留在 `world.json`
+里，正式世界实测它们让 `world.json` 每模拟日多约 0.9 MB、checkpoint 每天慢约 30 ms。在它们也分卷
+（或不再为时间事件写曝光判定）之前，不要让世界长期连续运行而不看这笔账。后台世界详情里的存档大小
+就是它，看着它涨。
 
 想收紧的时候，在后台世界详情里把「记录安静的分钟」拨成「不再记录」
 （`POST /api/persistent-worlds/<world_id>/quiet-time-events`，`{"record": false}`，需要 operate）：

@@ -646,8 +646,10 @@ class FormalWorldTests(PlaneTestCase):
         # B-F4 的卡死：id 按"已有几条时间事件"编号，少一条就撞号。改为按序号。
         self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
         world = self.world()
-        for _ in range(3):
+        for _ in range(2 * 60 + 5):  # 推过 21:00，让作息事件插在时间事件之间
             world.runtime.advance(1)
+        kinds = {e.type for e in world.state.events.events()}
+        self.assertGreater(len(kinds), 1)
         for position, event in enumerate(world.state.events.events()):
             if event.type is EventType.WORLD_TIME_ADVANCED:
                 self.assertTrue(event.event_id.endswith(f":clock:{position}"))

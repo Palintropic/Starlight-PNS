@@ -276,6 +276,14 @@ class InterruptedSealTests(SegmentTestCase):
             [self.segment(i).stat().st_ino for i in (1, 2)], listed, "清单里的分卷不许被重写"
         )
 
+    def test_any_unexpected_error_after_the_replace_is_not_durable(self):
+        world = self.created()
+        with patch.object(FileWorldStore, "_sync_dir", side_effect=RuntimeError("意外")):
+            with self.assertRaises(CheckpointError):
+                world.checkpoint()
+        self.assertEqual(world.revision, self.archive_json()["revision"])
+        self.assertFalse(world.status()["durable"])
+
     def test_an_interrupt_after_the_replace_is_reconciled_with_the_disk(self):
         world = self.created()
         self.advance_hours(world, 30)
