@@ -39,7 +39,7 @@
 # 什么都不会到期，而且 session_runtime.py 不 import 这个包（有 AST 测试盯着）。
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Mapping, Optional, Set, Tuple
 
 from pns.models.activation import ActivationDue
@@ -526,77 +526,147 @@ class AutonomousRuntime:
 
     # ── 日常作息 ────────────────────────────────────────────────────────
     def apply_rhythm(self) -> Tuple[Dict, ...]:
-        """把世界对齐到内容作者写下的作息表，返回这次提交的事件投影。
+        """把世界对齐到此刻的作息，返回这次提交的事件投影。
 
-        产品路径上只有一处调用它：模拟时间刚刚往前走过之后（见 `_tick_report`）。
-        它本身是幂等的、只依赖当前时钟，所以多调一次不会多提交一条 —— 但时钟
-        不动的世界不会因此产生作息变更：作息表是时间的函数，不是后台循环。
-
-        整批变更共用**一个**事务：一个"人到了店里、却还在家里画画"的中间态
-        比晚一拍对齐糟糕得多。任何一条提交失败，这一批一起回滚，而且下一次
-        推进会重新算出同样的一批 —— 判据是世界历史（当前时段里这个角色有没有
-        提交过状态变更），不是内存里的标记。
-
-        它跟 `commit_external_event()` 走同一条闸门与停机语义：停机之后不提交。
+        产品路径上它发生在每一个时钟步里（见 `_clock_step_locked`）；这个公开
+        入口只在当前时刻单独对齐一次，给操作面和测试用。它是幂等的：判据是世界
+        历史，不是内存里的标记。整批变更共用**一个**事务，并跟
+        `commit_external_event()` 走同一条闸门与停机语义：停机之后不提交。
         """
         if self._rhythm is None:
             return ()
         with self._gate:
             if not self._running:
-                # 还没启动，或者已经停了。什么都不碰 —— 下一次启动后的推进会
-                # 重新算出该补的那几条。
                 return ()
-            plan = self._rhythm.plan(
-                self.world,
-                self._state.events,
-                correlation_id=self._state.session_id,
-            )
-            if not plan:
-                return ()
-            committed: List[Dict] = []
             with self._committing():
                 with self._state.atomic_commit():
-                    for event in plan:
-                        committed.append(commit_session_event(self._state, event))
-            return tuple(committed)
+                    return self._apply_rhythm_locked()
+
+    def _apply_rhythm_locked(self) -> Tuple[Dict, ...]:
+        """调用方持着闸门和事务。提交作息事件，记下新发现"走不到"的段。"""
+        if self._rhythm is None:
+            return ()
+        state = self._state
+        step = self._rhythm.plan_step(
+            self.world,
+            state.events,
+            correlation_id=state.session_id,
+            dispositions=state.rhythm_dispositions,
+        )
+        committed = tuple(commit_session_event(state, event) for event in step.events)
+        if step.unreachable:
+            state.add_rhythm_dispositions(step.unreachable)
+        return committed
 
     # ── 推进模拟时钟 ────────────────────────────────────────────────────
     def advance(self, minutes: int, *, max_results: Optional[int] = None) -> Dict:
-        """把模拟时间往前推，并处理这段时间里到期的一切。
+        """把模拟时间往前推 minutes 分钟，**逐边界**推进并处理途中到期的一切。
 
-        时间推进本身是调度器的事务（时钟 + 世界历史 + 队列 + 投递箱同生
-        共死），这里不重复它，也不绕过它。
+        不会一步跳过去：作息边界、行程的每一跳、每一条到期激活都是一个时钟步，
+        各自以自己的时刻提交（WORLD-1 设计 §3–§4）。一步跨过几段作息会把中间的
+        上学、回家压成终点时刻，那是瞬移。
         """
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+            raise AutonomyError(f"minutes 必须是正整数，收到 {minutes!r}")
         with self._gate:
             self._require_running("推进模拟时钟")
-            tick = self._scheduler.advance_by(minutes)
-        # 保留既有的 `_tick_report(tick)` 调用形状：生命周期并发测试会替换这条
-        # 内部缝来精确停在“推进后、处理前”。只有驱动真的交了额度时才扩展参数。
-        if max_results is None:
-            return self._tick_report(tick)
-        return self._tick_report(tick, max_results=max_results)
+            target = self.world.clock + timedelta(minutes=minutes)
+        return self._advance_until(target, max_results=max_results)
 
     def advance_to_next_due(self) -> Optional[Dict]:
         """推进到下一条排期到期的那一刻；队列为空就返回 None，不动时钟。"""
         with self._gate:
             self._require_running("推进模拟时钟")
-            tick = self._scheduler.advance_to_next_due()
-            if tick is None:
+            due_at = self._scheduler.next_due_at()
+            if due_at is None:
                 return None
-        return self._tick_report(tick)
+            target = _ceil_minute(due_at)
+        return self._advance_until(target)
+
+    def _advance_until(self, target: datetime, *, max_results: Optional[int] = None) -> Dict:
+        """一个时钟步接一个时钟步，推进到 target。每步之后处理本步可用的到期资格。
+
+        时钟步本身是原子的（见 `_clock_step_locked`）；步与步之间 checkpoint、
+        close、stop 都可以插进来，插进来之后看到的是一个完整的边界。停机之后不再
+        开新的一步。
+        """
+        from_clock = self.world.clock
+        due_ids: List[str] = []
+        rhythm_events: List[str] = []
+        results: List[Dict] = []
+        remaining = max_results
+        while True:
+            with self._gate:
+                if not self._running or self.world.clock >= target:
+                    break
+                tick, transitions = self._clock_step_locked(target)
+            due_ids.extend(tick.due_ids)
+            rhythm_events.extend(record["event_id"] for record in transitions)
+            # 保留既有的 `_tick_report(tick)` 调用形状：生命周期并发测试会替换这条
+            # 内部缝来精确停在"推进后、处理前"。
+            if remaining is None:
+                report = self._tick_report(tick)
+            else:
+                report = self._tick_report(tick, max_results=remaining)
+                remaining = max(0, remaining - len(report["results"]))
+            results.extend(report["results"])
+        to_clock = self.world.clock
+        return {
+            "from_clock": from_clock.isoformat(),
+            "to_clock": to_clock.isoformat(),
+            "minutes": int((to_clock - from_clock).total_seconds() // 60),
+            "due_ids": due_ids,
+            "rhythm_events": rhythm_events,
+            "results": results,
+        }
+
+    def _clock_step_locked(self, target: datetime):
+        """一个时钟步。调用方持着闸门。
+
+        推进到 min(下一个作息/行程边界, 下一条到期, target)，并在**同一个事务**里
+        完成这一刻的全部确定性后果：时钟与时间事件、作息与行程、频道进出、以及
+        此刻认知不可用的到期资格的收尾。任何一步失败整步回滚；checkpoint 与
+        close 走同一把闸门和会话边界，只可能看到步前或步后（设计 §3.1）。
+        """
+        state = self._state
+        with self._committing():
+            with state.atomic_commit():
+                clock = self.world.clock
+                candidates = [target]
+                due_at = self._scheduler.next_due_at()
+                if due_at is not None:
+                    candidates.append(_ceil_minute(due_at))
+                if self._rhythm is not None:
+                    boundary = self._rhythm.next_boundary_after(
+                        self.world,
+                        state.events,
+                        dispositions=state.rhythm_dispositions,
+                    )
+                    if boundary is not None:
+                        candidates.append(boundary)
+                step_to = min(moment for moment in candidates if moment > clock)
+                tick = self._scheduler.advance_to(step_to)
+                transitions = self._apply_rhythm_locked()
+                self._close_unavailable_dues(tick.due)
+        return tick, transitions
+
+    def _close_unavailable_dues(self, dues) -> None:
+        """本步触发、此刻认知不可用的到期资格，当场以 REJECTED_UNAVAILABLE 收尾。"""
+        if self._state.cognition is None:
+            return
+        for due in dues:
+            if self._agency.unavailable_causes_for(due):
+                self._agency._close_unavailable(due)
 
     def _tick_report(self, tick, *, max_results: Optional[int] = None) -> Dict:
-        # 作息表先对齐，再处理到期资格：顺序是刻意的。生成与判分读的是"这个
-        # 角色此刻在做什么"，所以时间走过一道作息边界之后，那个答案必须在这一
-        # 轮生成之前就已经是新的 —— 反过来的话，角色会按上一段的活动说这一句话。
-        transitions = self.apply_rhythm()
+        # 作息已经在时钟步里对齐过了：生成与判分读的是"这个角色此刻在做什么"，
+        # 时间走过一道作息边界之后，那个答案在这一轮生成之前就已经是新的。
         results = self.process_pending(max_results=max_results)
         return {
             "from_clock": tick.from_clock.isoformat(),
             "to_clock": tick.to_clock.isoformat(),
             "minutes": tick.minutes,
             "due_ids": list(tick.due_ids),
-            "rhythm_events": [record["event_id"] for record in transitions],
             "results": [result.to_dict() for result in results],
         }
 
@@ -997,3 +1067,9 @@ def _plain(value):
 
 
 __all__ = ["AutonomousRuntime", "AutonomyError"]
+
+
+def _ceil_minute(moment: datetime) -> datetime:
+    """不早于 moment 的第一个整分钟。调度器只接受整分钟推进。"""
+    floored = moment.replace(second=0, microsecond=0)
+    return floored if floored == moment else floored + timedelta(minutes=1)

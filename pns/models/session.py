@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Iterator, List, Mapping, Optional, Sequence
+from typing import Dict, FrozenSet, Iterator, List, Mapping, Optional, Sequence
 
 from pns.models.activation import ActivationError
 from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
@@ -231,6 +231,9 @@ class SessionState:
     # None 表示这个会话不区分"认知可用"——研究模式的场景会话就是这样。它是
     # 运维记录（Article XIII），不是世界真相，也不进任何角色的上下文。
     cognition: Optional[CognitionTimeline] = None
+    # 作息段的耐久处置（WORLD-1 设计 §12.5）：记下"走不到"的段（segment_key），
+    # 之后不再规划、也不再重复记。运维记录，不是世界事件。
+    rhythm_dispositions: FrozenSet[str] = field(default_factory=frozenset)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "created"  # created / active / completed / paused / cancelled
     last_error: Optional[str] = None
@@ -647,10 +650,12 @@ class SessionState:
         outbox_snapshot = outbox._snapshot()
         # 时间线是不可变值，记引用就够了：块内的转换只会换引用，不会改旧值。
         cognition = self.cognition
+        dispositions = self.rhythm_dispositions
         try:
             yield self
         except BaseException:
             self.cognition = cognition
+            self.rhythm_dispositions = dispositions
             if world_snapshot is not None:
                 world.restore_mutable_state(world_snapshot)
             self.events._rollback_to(events_length)
@@ -694,6 +699,16 @@ class SessionState:
         if timeline.current.from_log > len(self.agency):
             raise SessionStateError("认知区间不能从一条还不存在的 Agency 记录开始")
         self.cognition = timeline
+
+    def add_rhythm_dispositions(self, keys) -> None:
+        """在当前事务内记下新的"走不到"的作息段。只增不减。"""
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("作息处置只能在本线程的提交事务里记")
+        keys = frozenset(keys)
+        if not all(isinstance(key, str) and key for key in keys):
+            raise SessionStateError("作息处置的键必须是非空字符串")
+        self.rhythm_dispositions = self.rhythm_dispositions | keys
 
     def advance_character(self) -> None:
         self.require_writable()
@@ -1033,6 +1048,12 @@ class SessionState:
             except CognitionTimelineError as e:
                 raise SessionStateError(f"认知时间线不合法：{e}") from e
         _validate_cognition(state)
+        dispositions = payload.get("rhythm_dispositions", [])
+        if not isinstance(dispositions, list) or not all(
+            isinstance(key, str) and key for key in dispositions
+        ):
+            raise SessionStateError("rhythm_dispositions 必须是非空字符串数组")
+        state.rhythm_dispositions = frozenset(dispositions)
 
         created_at = payload.get("created_at")
         if created_at is not None:
@@ -1063,6 +1084,7 @@ class SessionState:
             "agency": self.agency_archive(),
             "memory": self.memory_archive(),
             "cognition": self.cognition.to_dict() if self.cognition else None,
+            "rhythm_dispositions": sorted(self.rhythm_dispositions),
             "created_at": self.created_at,
             "status": self.status,
             "last_error": self.last_error,
