@@ -42,7 +42,7 @@ import os
 import stat
 import tempfile
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -432,8 +432,20 @@ class FileWorldStore(WorldStore):
                 residue=residue,
             ) from e
         # 走到这里新存档已经可见了。剩下的只有"那次改名耐不耐得住掉电"，
-        # 而它有可能失败 —— 失败就必须说出来，见 ArchiveNotDurable。
-        supported = self._sync_dir(directory, archive)
+        # 而它有可能失败 —— 失败就必须说出来，见 ArchiveNotDurable。这之后抛出
+        # 的**任何**错误都只能是这一档：新版已经在盘上，调用方必须按"已经发生"
+        # 记账，否则内存会落后磁盘一版，下一次拿同一个修订号写不同的内容。
+        try:
+            supported = self._sync_dir(directory, archive)
+        except ArchiveNotDurable:
+            raise
+        except Exception as e:
+            raise ArchiveNotDurable(
+                f"世界 '{archive.world_id}' 的第 {archive.revision} 版已经写在磁盘上，"
+                f"但之后的目录同步出了意外错误，耐久性无法证实: {type(e).__name__}: {e}",
+                revision=archive.revision,
+                path=str(target),
+            ) from e
         return SaveResult(
             world_id=archive.world_id,
             path=str(target),
@@ -471,11 +483,12 @@ class FileWorldStore(WorldStore):
             segment = describe_segment(index, chunk, blob)
             self._write_segment(archive.world_id, history, segment, blob)
             new_segments.append(segment)
-        # 分卷的改名必须先耐久，world.json 才能指着它们。
-        self._sync_history(history, archive.world_id)
+        # 分卷的改名必须先耐久，world.json 才能指着它们。平台说"不支持"时照常
+        # 往下走，但这份信封要如实带着"分卷目录没同步过"，不许被报成已同步。
+        synced = self._sync_history(history, archive.world_id)
         if created:
-            self._sync_history(world_dir, archive.world_id)
-        return archive.sealed(new_segments)
+            synced = self._sync_history(world_dir, archive.world_id) and synced
+        return replace(archive.sealed(new_segments), history_synced=synced)
 
     def _write_segment(
         self, world_id: str, history: Path, segment: EventSegment, blob: bytes
@@ -506,16 +519,17 @@ class FileWorldStore(WorldStore):
             ) from e
 
     @classmethod
-    def _sync_history(cls, directory: Path, world_id: str) -> None:
-        """分卷所在目录的同步。平台不支持照常放行；真失败就是这次封存失败。"""
+    def _sync_history(cls, directory: Path, world_id: str) -> bool:
+        """分卷所在目录的同步，返回"这里支不支持"。真失败就是这次封存失败。"""
         try:
             dir_fd = os.open(str(directory), os.O_RDONLY)
         except OSError as e:
             if cls._is_unsupported(e):
-                return
+                return False
             raise StorageError(
                 f"世界 '{world_id}' 的分卷目录打不开，新分卷的耐久性无法证实: {e}"
             ) from e
+        supported = True
         try:
             os.fsync(dir_fd)
         except OSError as e:
@@ -523,8 +537,15 @@ class FileWorldStore(WorldStore):
                 raise StorageError(
                     f"世界 '{world_id}' 的分卷目录同步失败，新分卷的耐久性无法证实: {e}"
                 ) from e
+            supported = False
         finally:
-            os.close(dir_fd)
+            try:
+                os.close(dir_fd)
+            except OSError as e:
+                raise StorageError(
+                    f"世界 '{world_id}' 关闭分卷目录时出错，新分卷的耐久性无法证实: {e}"
+                ) from e
+        return supported
 
     def acquire(self, world_id: str) -> OwnershipHandle:
         name = validate_world_id(world_id)
@@ -598,7 +619,16 @@ class FileWorldStore(WorldStore):
                 path=str(directory / cls.ARCHIVE_NAME),
             ) from e
         finally:
-            os.close(dir_fd)
+            try:
+                os.close(dir_fd)
+            except OSError as e:
+                # 关闭目录句柄报错（EIO）同样说明这次同步不可信。
+                raise ArchiveNotDurable(
+                    f"世界 '{archive.world_id}' 的第 {archive.revision} 版已经写在"
+                    f"磁盘上，但关闭存档目录时出错，耐久性无法证实: {e}",
+                    revision=archive.revision,
+                    path=str(directory / cls.ARCHIVE_NAME),
+                ) from e
         return True
 
     @staticmethod

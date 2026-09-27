@@ -148,6 +148,8 @@ class RuntimeAdapters:
         """
         if not isinstance(state, SessionState):
             raise LifecycleError("只能把服务绑在 SessionState 上")
+        # 持久世界的时钟只归调度器推：在任何回调拿到这份状态之前声明。
+        state.claim_clock()
         if state.scheduler is None:
             PersistentScheduler(state)
         if self.rhythm is not None:
@@ -475,14 +477,29 @@ class PersistentWorld:
                 f"世界 '{self._world_id}' 的 checkpoint 失败，磁盘上仍然是第 "
                 f"{self._revision} 版: {e}"
             ) from e
+        except BaseException as e:
+            # 意料之外的中断（KeyboardInterrupt 之类）可能落在 replace 之后：先对一下
+            # 磁盘，写上去了就按"已经发生、保证不到"记账，再原样抛出。
+            if archive is not None and self._disk_holds(archive):
+                self._adopt(archive, fingerprint, reason, durable=False, synced=False)
+            self._last_error = f"{type(e).__name__}: {e}"
+            raise
         self._adopt(
             archive,
             fingerprint,
             reason,
             durable=True,
-            synced=result.directory_synced,
+            synced=result.directory_synced and archive.history_synced,
         )
         return self._status_locked()
+
+    def _disk_holds(self, archive: WorldArchive) -> bool:
+        """磁盘上此刻是不是正好这一版（修订号与保存时刻都对得上）。"""
+        try:
+            on_disk = self._store.load(self._world_id, history=False)
+        except Exception:
+            return False
+        return on_disk.revision == archive.revision and on_disk.saved_at == archive.saved_at
 
     def _snapshot_locked(self) -> Tuple[Dict, Tuple]:
         """在独占边界之内取一份一致快照。调用方持着世界锁。
@@ -707,7 +724,7 @@ class PersistentWorld:
                 fingerprint,
                 "created",
                 durable=True,
-                synced=result.directory_synced,
+                synced=result.directory_synced and archive.history_synced,
             )
 
 

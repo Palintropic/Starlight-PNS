@@ -336,7 +336,7 @@ class PersistentScheduler:
                     "这一步有到期，不是安静的一步，必须记成时间事件："
                     + ", ".join(activation.activation_id for _, activation, _, _ in plan)
                 )
-            with state.atomic_commit():
+            with state.atomic_commit(), state._moving_clock():
                 state.require_writable()
                 world.advance_time(minutes)
             return TickResult(
@@ -346,7 +346,7 @@ class PersistentScheduler:
 
         # 队列和投递箱都在 SessionState.atomic_commit() 的回滚范围内，所以这里
         # 不需要（也不应该）另建一套快照：一次推进的全部后果由同一个事务兜底。
-        with state.atomic_commit():
+        with state.atomic_commit(), state._moving_clock():
             committed = commit_session_event(state, event)
             if world.clock != target:
                 # 事件的状态效果没把时钟落在预期的位置上：宁可整体作废，
@@ -435,8 +435,10 @@ class PersistentScheduler:
         store = self._state.events
         latest = store.latest()
         return Event(
-            event_id=f"{self.session_id}:clock:"
-            f"{len(store.by_type(EventType.WORLD_TIME_ADVANCED))}",
+            # 用这条事件将来在世界历史里的序号：严格递增、唯一，不依赖"已经有几条
+            # 时间事件"（那样一旦少了一条，下一条就会撞上已有的 id），也不用每步
+            # 扫一遍整段历史。
+            event_id=f"{self.session_id}:clock:{len(store)}",
             type=EventType.WORLD_TIME_ADVANCED,
             occurred_at=self.clock,
             scope=EventScope.PUBLIC,

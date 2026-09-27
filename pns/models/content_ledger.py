@@ -10,6 +10,12 @@
 # pending，这一项继续按"未采用新版"对待；采用、驳回、暂缓由项目所有者决定，
 # 采用在下一次打开世界时生效。不自动采纳、不回写历史、不改 resident 记忆。
 #
+# 账本上的每一次操作（记下一版、做一次决定）各占一个**操作序号**，从 0 连续
+# 往上数，一个不缺。加载时按序号从开局版本完整重放：每次记录都要针对当时的
+# 已采用版本、每次采用都要针对当时的已采用版本，最后恰好走到此刻的版本。
+# 顺序只看序号，不看墙钟（墙钟会被往回拨）；删掉任何一条记录都会在序号里
+# 留下空洞。
+#
 # 它是运维记录（Article XIII），不是世界真相，不进任何角色的上下文。不可变值
 # 对象，整体替换，随事务回滚、随存档往返。
 import hashlib
@@ -59,7 +65,10 @@ class ContentConflict:
     registry_revision: int
     status: ConflictStatus
     recorded_at_wall: str
+    # 记下这一版时占用的操作序号；决定时再占一个。
+    offered_seq: int
     decided_at_wall: Optional[str] = None
+    decided_seq: Optional[int] = None
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -76,14 +85,20 @@ class ContentConflict:
         except ValueError:
             raise ContentLedgerError(f"未知的冲突状态: {self.status!r}") from None
         _text(self.recorded_at_wall, "recorded_at_wall")
-        if (self.status is ConflictStatus.PENDING) != (self.decided_at_wall is None):
-            raise ContentLedgerError("只有待决记录没有决定时间，已决记录必须有")
+        _seq(self.offered_seq, "offered_seq")
+        pending = self.status is ConflictStatus.PENDING
+        if pending != (self.decided_at_wall is None) or pending != (self.decided_seq is None):
+            raise ContentLedgerError("只有待决记录没有决定（时间与序号），已决记录必须都有")
         if self.decided_at_wall is not None:
             _text(self.decided_at_wall, "decided_at_wall")
+        if self.decided_seq is not None:
+            _seq(self.decided_seq, "decided_seq")
+            if self.decided_seq <= self.offered_seq:
+                raise ContentLedgerError("决定的序号必须晚于记录的序号")
 
     @property
     def conflict_id(self) -> str:
-        return f"{self.subject}@{self.offered_fingerprint[:16]}"
+        return f"{self.subject}@{self.offered_fingerprint[:16]}#{self.offered_seq}"
 
     def to_dict(self) -> Dict:
         return {
@@ -93,7 +108,9 @@ class ContentConflict:
             "registry_revision": self.registry_revision,
             "status": self.status.value,
             "recorded_at_wall": self.recorded_at_wall,
+            "offered_seq": self.offered_seq,
             "decided_at_wall": self.decided_at_wall,
+            "decided_seq": self.decided_seq,
         }
 
     @classmethod
@@ -108,16 +125,26 @@ class ContentConflict:
                 registry_revision=payload["registry_revision"],
                 status=payload["status"],
                 recorded_at_wall=payload["recorded_at_wall"],
+                offered_seq=payload["offered_seq"],
                 decided_at_wall=payload["decided_at_wall"],
+                decided_seq=payload["decided_seq"],
             )
         except KeyError as e:
             raise ContentLedgerError(f"冲突记录缺字段: {e}") from None
+
+
+def _seq(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ContentLedgerError(f"{label} 必须是非负整数")
+    return value
 
 
 @dataclass(frozen=True)
 class ContentLedger:
     adopted: Tuple[Tuple[str, str], ...]
     conflicts: Tuple[ContentConflict, ...] = ()
+    # 下一次操作要用的序号 = 已经发生过的操作数。
+    next_seq: int = 0
 
     def __post_init__(self) -> None:
         adopted = tuple(sorted((str(k), str(v)) for k, v in dict(self.adopted).items()))
@@ -127,25 +154,38 @@ class ContentLedger:
             _text(subject, "subject")
             _fingerprint(fingerprint, f"{subject} 的指纹")
         object.__setattr__(self, "adopted", adopted)
-        seen = set()
+        _seq(self.next_seq, "next_seq")
+        current = dict(adopted)
+        used = []
+        previous_offer = -1
         for conflict in self.conflicts:
             if not isinstance(conflict, ContentConflict):
                 raise ContentLedgerError("conflicts 里只能放 ContentConflict")
-            if conflict.conflict_id in seen:
-                raise ContentLedgerError(f"重复的冲突记录: {conflict.conflict_id}")
-            seen.add(conflict.conflict_id)
-        # 采用是唯一能让已采用版本变化的途径：一项内容若有过 adopted 记录，
-        # 它的已采用版本必须恰好是最后一次采用的那一版。
-        current = dict(adopted)
-        latest_adoption: Dict[str, str] = {}
-        for conflict in self.conflicts:
             if conflict.subject not in current:
                 raise ContentLedgerError(
                     f"冲突记录引用了这个世界没有采用过的内容 '{conflict.subject}'"
                 )
+            if conflict.offered_seq <= previous_offer:
+                raise ContentLedgerError("冲突记录必须按记录序号排列")
+            previous_offer = conflict.offered_seq
+            used.append(conflict.offered_seq)
+            if conflict.decided_seq is not None:
+                used.append(conflict.decided_seq)
+        # 序号从 0 连续到 next_seq - 1，每个恰好用一次：删掉、改回待决、凭空多出
+        # 的任何一条操作都会在这里露出空洞或重号。
+        if sorted(used) != list(range(self.next_seq)):
+            raise ContentLedgerError(
+                "内容账本的操作序号不连续（有记录被删、被改回待决或被凭空加入）"
+            )
+        # 不用开局版本也能查的一条：每项内容若被采用过，此刻的版本就是按序号
+        # 最后一次采用的那一版。完整的重放见 check_genesis。
+        latest: Dict[str, Tuple[int, str]] = {}
+        for conflict in self.conflicts:
             if conflict.status is ConflictStatus.ADOPTED:
-                latest_adoption[conflict.subject] = conflict.offered_fingerprint
-        for subject, fingerprint in latest_adoption.items():
+                seen = latest.get(conflict.subject)
+                if seen is None or conflict.decided_seq > seen[0]:
+                    latest[conflict.subject] = (conflict.decided_seq, conflict.offered_fingerprint)
+        for subject, (_, fingerprint) in latest.items():
             if current[subject] != fingerprint:
                 raise ContentLedgerError(
                     f"'{subject}' 的已采用版本与最后一次采用记录不一致"
@@ -167,17 +207,23 @@ class ContentLedger:
     def offered(
         self, subject: str, fingerprint: str, *, registry_revision: int, wall: str
     ) -> "ContentLedger":
-        """内容包里此刻是这一版。与已采用版本不同、又没记过，就记一条 pending。"""
+        """内容包里此刻是这一版。与已采用版本不同、又没针对此刻版本记过，就记一条 pending。
+
+        "记过"按（这一项，这一版，针对的版本）判断：已采用版本变了之后，同一版
+        再出现就是针对新版本的一个新提议，要重新记，否则它永远没有能被决定的记录。
+        """
         adopted = self.adopted_fingerprint(subject)
         if adopted is None:
             raise ContentLedgerError(f"'{subject}' 不是这个世界采用过的内容")
         if adopted == fingerprint:
             return self
         if any(
-            c.subject == subject and c.offered_fingerprint == fingerprint
+            c.subject == subject
+            and c.offered_fingerprint == fingerprint
+            and c.adopted_fingerprint == adopted
             for c in self.conflicts
         ):
-            return self  # 这一版已经记过（无论决定了没有），不重复记
+            return self  # 针对此刻版本已经记过（无论决定了没有），不重复记
         return ContentLedger(
             self.adopted,
             self.conflicts
@@ -189,12 +235,18 @@ class ContentLedger:
                     registry_revision=registry_revision,
                     status=ConflictStatus.PENDING,
                     recorded_at_wall=wall,
+                    offered_seq=self.next_seq,
                 ),
             ),
+            self.next_seq + 1,
         )
 
     def decided(self, conflict_id: str, status, *, wall: str) -> "ContentLedger":
-        """项目所有者对一条待决记录的决定。采用会替换已采用版本。"""
+        """项目所有者对一条待决记录的决定。采用会替换已采用版本。
+
+        驳回、暂缓对任何待决记录都成立；采用要求它针对的正是此刻的已采用版本
+        （过期的待决可以驳回；那一版若仍在内容里，下次打开会针对新版本重新记一条）。
+        """
         try:
             status = ConflictStatus(status)
         except ValueError:
@@ -207,9 +259,13 @@ class ContentLedger:
                 continue
             if conflict.status is not ConflictStatus.PENDING:
                 raise ContentLedgerError(f"冲突 '{conflict_id}' 已经决定过了")
-            if conflict.adopted_fingerprint != self.adopted_fingerprint(conflict.subject):
+            if (
+                status is ConflictStatus.ADOPTED
+                and conflict.adopted_fingerprint != self.adopted_fingerprint(conflict.subject)
+            ):
                 raise ContentLedgerError(
-                    f"冲突 '{conflict_id}' 针对的已采用版本已经变了，先处理更新的那条"
+                    f"冲突 '{conflict_id}' 针对的已采用版本已经变了，不能再采用；"
+                    "可以驳回它，那一版若仍在内容里，下次打开会针对新版本重新记一条"
                 )
             conflicts[index] = ContentConflict(
                 subject=conflict.subject,
@@ -218,27 +274,30 @@ class ContentLedger:
                 registry_revision=conflict.registry_revision,
                 status=status,
                 recorded_at_wall=conflict.recorded_at_wall,
+                offered_seq=conflict.offered_seq,
                 decided_at_wall=wall,
+                decided_seq=self.next_seq,
             )
             adopted = dict(self.adopted)
             if status is ConflictStatus.ADOPTED:
                 adopted[conflict.subject] = conflict.offered_fingerprint
-            return ContentLedger(tuple(adopted.items()), tuple(conflicts))
+            return ContentLedger(tuple(adopted.items()), tuple(conflicts), self.next_seq + 1)
         raise ContentLedgerError(f"没有这条冲突记录: {conflict_id}")
 
     # ── 校验：已采用版本从哪来 ──────────────────────────────────────────
     def check_successor_of(self, previous: "ContentLedger") -> None:
         """self 是不是 previous 的一次合法后继（一个事务里的变化）。
 
-        合法的变化只有三种：追加待决记录；把待决记录决定掉；因为某条待决被决定
-        为采用，把那一项的已采用版本换成它提议的那一版。已采用版本的其它任何
-        变化 —— 直接换指纹、加减内容项 —— 都不成立。
+        旧记录只能原样保留，或由待决变成已决；新操作的序号都在 previous 之后。
+        "每次记录 / 采用都针对当时的版本、最后走到此刻的版本"由 check_genesis 的
+        完整重放负责，调用方两者都要调。
         """
         before_all, after_all = previous.conflicts, self.conflicts
         if len(after_all) < len(before_all):
             raise ContentLedgerError("冲突记录只能追加或被决定，不能删")
-        current = dict(previous.adopted)
-        if set(dict(self.adopted)) != set(current):
+        if self.next_seq < previous.next_seq:
+            raise ContentLedgerError("操作序号不能倒退")
+        if set(dict(self.adopted)) != set(dict(previous.adopted)):
             raise ContentLedgerError("内容账本不能增减内容项")
         for before, after in zip(before_all, after_all):
             if before == after:
@@ -247,68 +306,48 @@ class ContentLedger:
                 raise ContentLedgerError("冲突记录只能追加或被决定，不能删改")
             if _identity(before) != _identity(after):
                 raise ContentLedgerError(f"冲突 '{before.conflict_id}' 在决定时被改了内容")
-            if after.status is ConflictStatus.ADOPTED:
-                if current[after.subject] != after.adopted_fingerprint:
-                    raise ContentLedgerError(
-                        f"冲突 '{after.conflict_id}' 针对的已采用版本已经变了"
-                    )
-                current[after.subject] = after.offered_fingerprint
+            if after.decided_seq < previous.next_seq:
+                raise ContentLedgerError("决定用了一个已经用过的序号")
         for after in after_all[len(before_all):]:
-            if after.status is not ConflictStatus.PENDING:
-                raise ContentLedgerError("新追加的冲突记录只能是待决")
-            if after.adopted_fingerprint != current[after.subject]:
-                raise ContentLedgerError(
-                    f"新冲突 '{after.conflict_id}' 记的已采用版本不是此刻的那一版"
-                )
-        if dict(self.adopted) != current:
-            raise ContentLedgerError("已采用版本只能由一次采用决定改变")
+            if after.offered_seq < previous.next_seq:
+                raise ContentLedgerError("新记录用了一个已经用过的序号")
 
     def check_genesis(self, genesis: Mapping[str, str]) -> None:
-        """从开局时采用的那一版出发，沿采用记录重放，必须恰好得到此刻的已采用版本。
+        """从开局版本出发，按操作序号重放全部记录与决定，必须恰好走到此刻的版本。
 
-        每一项内容的采用记录连成一条链：第一条针对开局版本，之后每条针对上一条
-        提议的版本。链接不上、有用不上的采用记录、终点不是此刻的版本，都说明
-        已采用版本不是靠采用走到这里的。
+        每条记录针对的必须是记录那一刻的已采用版本；每次采用针对的必须是采用那一
+        刻的已采用版本。只有序号决定先后，墙钟时间不参与。
         """
-        adopted = dict(self.adopted)
-        if set(adopted) != set(genesis):
+        current = dict(genesis)
+        if set(dict(self.adopted)) != set(current):
             raise ContentLedgerError("内容账本的内容项与开局来源不一致")
-        for subject, start in genesis.items():
-            links = [
-                c
-                for c in self.conflicts
-                if c.subject == subject and c.status is ConflictStatus.ADOPTED
-            ]
-            head = start
-            versions = {start}
-            while links:
-                candidates = [c for c in links if c.adopted_fingerprint == head]
-                if not candidates:
+        operations = []
+        for conflict in self.conflicts:
+            operations.append((conflict.offered_seq, "offer", conflict))
+            if conflict.decided_seq is not None:
+                operations.append((conflict.decided_seq, "decide", conflict))
+        for _, kind, conflict in sorted(operations, key=lambda op: op[0]):
+            base = current[conflict.subject]
+            if kind == "offer":
+                if conflict.adopted_fingerprint != base:
                     raise ContentLedgerError(
-                        f"'{subject}' 的采用记录接不上开局版本（有采用记录不在链上）"
+                        f"冲突 '{conflict.conflict_id}' 记录时针对的不是当时的已采用版本"
                     )
-                step = min(candidates, key=lambda c: c.decided_at_wall or "")
-                links.remove(step)
-                head = step.offered_fingerprint
-                versions.add(head)
-            if head != adopted[subject]:
-                raise ContentLedgerError(
-                    f"'{subject}' 的已采用版本不是从开局版本经采用记录走到的"
-                )
-            # 其余记录（待决、驳回、暂缓）记的"针对哪一版"，必须是这一项真的采用过
-            # 的某一版：凭空的基线既不是真相，也会让这条记录再也决定不了（复审
-            # R2-F3）。没有操作序号，记录"在哪一刻"针对它仍无法重放 —— 已写明的边。
-            for conflict in self.conflicts:
-                if conflict.subject == subject and conflict.adopted_fingerprint not in versions:
+            elif conflict.status is ConflictStatus.ADOPTED:
+                if conflict.adopted_fingerprint != base:
                     raise ContentLedgerError(
-                        f"冲突 '{conflict.conflict_id}' 针对的版本从来没有被采用过"
+                        f"冲突 '{conflict.conflict_id}' 被采用时针对的不是当时的已采用版本"
                     )
+                current[conflict.subject] = conflict.offered_fingerprint
+        if current != dict(self.adopted):
+            raise ContentLedgerError("已采用版本不是从开局版本经采用记录走到的")
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
         return {
             "adopted": dict(self.adopted),
             "conflicts": [c.to_dict() for c in self.conflicts],
+            "next_seq": self.next_seq,
         }
 
     @classmethod
@@ -319,9 +358,12 @@ class ContentLedger:
         conflicts = payload.get("conflicts")
         if not isinstance(adopted, Mapping) or not isinstance(conflicts, list):
             raise ContentLedgerError("内容账本必须有 adopted（字典）与 conflicts（列表）")
+        if "next_seq" not in payload:
+            raise ContentLedgerError("内容账本缺少 next_seq（操作序号）")
         return cls(
             tuple(adopted.items()),
             tuple(ContentConflict.from_dict(item) for item in conflicts),
+            payload["next_seq"],
         )
 
 
@@ -332,6 +374,7 @@ def _identity(conflict: ContentConflict) -> Tuple:
         conflict.offered_fingerprint,
         conflict.registry_revision,
         conflict.recorded_at_wall,
+        conflict.offered_seq,
     )
 
 

@@ -154,6 +154,9 @@ class WorldState:
         # 不进存档、不参与相等性比较；没挂到会话上的 WorldState（建世界、测试）
         # 没有守卫。
         self._write_guard = None
+        # 时钟守卫：挂在会话上、且会话声明了"时钟有主"之后，只有调度器的推进
+        # 事务能改时钟（见 SessionState.claim_clock）。同样不进存档。
+        self._clock_guard = None
         self.validate()
 
     def _check_writable(self) -> None:
@@ -256,6 +259,8 @@ class WorldState:
     def advance_time(self, minutes: int = 10) -> datetime:
         """推进模拟时间，跨零点时日期一并进位。"""
         self._check_writable()
+        if self._clock_guard is not None:
+            self._clock_guard()
         if minutes < 0:
             raise WorldStateError("模拟时间不能倒退")
         self.clock = self.clock + timedelta(minutes=minutes)

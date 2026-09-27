@@ -241,6 +241,97 @@ class InterruptedSealTests(SegmentTestCase):
         self.assertEqual(self.archive_json()["segments"], [])
 
 
+    def test_an_error_after_the_replace_is_booked_as_written_not_durable(self):
+        # 第三方反向测试 A-2：replace 之后关闭目录句柄报 EIO。
+        world = self.sealed_world()  # history/ 已经在了，下一次只有 save 会打开世界目录
+        self.advance_hours(world, 30)
+        real_open, real_close = os.open, os.close
+        world_dir = str(self.root / "nightcord")
+        fds = set()
+
+        def opening(path, flags, *a, **k):
+            fd = real_open(path, flags, *a, **k)
+            if str(path) == world_dir:
+                fds.add(fd)
+            return fd
+
+        def closing(fd):
+            real_close(fd)
+            if fd in fds:
+                fds.discard(fd)
+                raise OSError(5, "Input/output error")
+
+        with patch.object(os, "open", side_effect=opening), patch.object(
+            os, "close", side_effect=closing
+        ):
+            with self.assertRaises(CheckpointError):
+                world.checkpoint()
+        status = world.status()
+        self.assertEqual(status["revision"], self.archive_json()["revision"])
+        self.assertFalse(status["durable"])
+        self.assertEqual(status["archive"]["segments"], len(self.archive_json()["segments"]))
+        listed = [self.segment(i).stat().st_ino for i in (1, 2)]
+        world.checkpoint()
+        self.assertEqual(
+            [self.segment(i).stat().st_ino for i in (1, 2)], listed, "清单里的分卷不许被重写"
+        )
+
+    def test_an_interrupt_after_the_replace_is_reconciled_with_the_disk(self):
+        world = self.created()
+        self.advance_hours(world, 30)
+        real = FileWorldStore._sync_dir
+
+        def interrupted(directory, archive):
+            raise KeyboardInterrupt("SIGINT during dir fsync")
+
+        with patch.object(FileWorldStore, "_sync_dir", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                world.checkpoint()
+        self.assertEqual(world.revision, self.archive_json()["revision"])
+        self.assertFalse(world.status()["durable"])
+        del real
+
+    def test_an_unsupported_history_sync_is_not_reported_as_synced(self):
+        world = self.created()
+        self.advance_hours(world, 30)
+        real_open, real_fsync = os.open, os.fsync
+        history = str(self.history())
+        fds = set()
+
+        def opening(path, flags, *a, **k):
+            fd = real_open(path, flags, *a, **k)
+            if str(path) == history:
+                fds.add(fd)
+            return fd
+
+        real_close = os.close
+
+        def syncing(fd):
+            if fd in fds:
+                raise OSError(22, "Invalid argument")  # EINVAL：平台不支持
+            return real_fsync(fd)
+
+        def closing(fd):
+            fds.discard(fd)
+            return real_close(fd)
+
+        with patch.object(os, "open", side_effect=opening), patch.object(
+            os, "fsync", side_effect=syncing
+        ), patch.object(os, "close", side_effect=closing):
+            world.checkpoint()
+        self.assertFalse(world.status()["directory_synced"])
+
+    def test_a_non_positive_span_is_refused(self):
+        world = self.created()
+        _ = world
+        archive = WorldArchive.from_state_payload(
+            "nightcord", world.state.to_dict(), revision=2
+        )
+        for span in (archive_mod.timedelta(0), archive_mod.timedelta(minutes=-1)):
+            with self.assertRaises(ArchiveError):
+                archive.seal_plan(span=span)
+
+
 # ── 3. 损坏的分卷 ───────────────────────────────────────────────────────
 class DamagedHistoryTests(SegmentTestCase):
     def closed_sealed_world(self):

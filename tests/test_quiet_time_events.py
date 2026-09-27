@@ -547,6 +547,111 @@ class FormalWorldTests(PlaneTestCase):
         }
         self.assertIn(start.replace(hour=21, minute=0), reached)
 
+    def _forged_time_event(self, state, minutes):
+        from pns.models.event import Event, EventScope
+
+        return Event(
+            event_id="forged-clock",
+            type=EventType.WORLD_TIME_ADVANCED,
+            occurred_at=state.world_state.clock,
+            scope=EventScope.PUBLIC,
+            payload={"minutes": minutes},
+        )
+
+    def test_only_the_scheduler_moves_a_persistent_clock(self):
+        # 第三方反向测试 B-F1/F2/F3：从调度器以外推时钟，一律拒绝、时钟不动。
+        from pns.runtime.event_commit import commit_session_event
+
+        self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        world = self.world()
+        start = world.state.world_state.clock
+        attempts = {
+            "commit_session_event": lambda: commit_session_event(
+                world.state, self._forged_time_event(world.state, 121)
+            ),
+            "commit_external_event": lambda: world.runtime.commit_external_event(
+                self._forged_time_event(world.state, 121)
+            ),
+            "WorldState.advance_time": lambda: world.state.world_state.advance_time(2),
+        }
+        for record in (True, False):
+            self.client.post(
+                "/api/persistent-worlds/yoake-mae/quiet-time-events", json={"record": record}
+            )
+            for label, attempt in attempts.items():
+                with self.subTest(record=record, path=label):
+                    with self.assertRaises(Exception):
+                        attempt()
+                    self.assertEqual(world.state.world_state.clock, start)
+        # 存档照样读得回来。
+        self.assertEqual(self.client.post("/api/persistent-worlds/yoake-mae/close").status_code, 200)
+        self.assertEqual(self.client.post("/api/persistent-worlds/yoake-mae/restore").status_code, 200)
+
+    def test_a_restore_callback_cannot_forge_a_time_event(self):
+        import dataclasses
+
+        from pns.runtime.event_commit import commit_session_event
+
+        self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        self.client.post("/api/persistent-worlds/yoake-mae/close")
+        outcomes = []
+        real = self.plane.build_adapters
+
+        def wrapped(*args, **kwargs):
+            adapters = real(*args, **kwargs)
+            inner = adapters.policy_factory
+
+            def policy_factory(state):
+                try:
+                    with state.atomic_commit():
+                        commit_session_event(state, self._forged_time_event(state, 8))
+                    outcomes.append("forged")
+                except Exception:
+                    outcomes.append("refused")
+                return inner(state)
+
+            return dataclasses.replace(adapters, policy_factory=policy_factory)
+
+        self.plane.build_adapters = wrapped
+        self.plane.restore("yoake-mae")
+        self.assertEqual(outcomes, ["refused"])
+        self.assertEqual(self.world().state.world_state.clock.minute, 0)
+
+    def test_a_dropped_due_step_inside_a_skip_span_is_caught(self):
+        # 第三方反向测试 B-F4：skip 范围里删掉一条带到期的时间事件，不能被当成"没记"。
+        self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        self.client.post(
+            "/api/persistent-worlds/yoake-mae/quiet-time-events", json={"record": False}
+        )
+        world = self.world()
+        for _ in range(20):
+            world.runtime.advance(1)
+        self.client.post("/api/persistent-worlds/yoake-mae/close")
+        path = self.root / "yoake-mae" / "world.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        entries = payload["state"]["events"]["events"]
+        index = next(
+            i for i, e in enumerate(entries)
+            if e["type"] == "world.time_advanced" and e["provenance"]["due_activations"]
+        )
+        del entries[index]
+        for position, entry in enumerate(entries):
+            entry["sequence"] = position
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        restored = self.client.post("/api/persistent-worlds/yoake-mae/restore")
+        self.assertEqual(restored.status_code, 422, restored.text)
+        self.assertIn("存档缺了事件", restored.json()["detail"]["message"])
+
+    def test_time_event_ids_are_their_history_positions(self):
+        # B-F4 的卡死：id 按"已有几条时间事件"编号，少一条就撞号。改为按序号。
+        self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        world = self.world()
+        for _ in range(3):
+            world.runtime.advance(1)
+        for position, event in enumerate(world.state.events.events()):
+            if event.type is EventType.WORLD_TIME_ADVANCED:
+                self.assertTrue(event.event_id.endswith(f":clock:{position}"))
+
     def test_the_switch_needs_an_open_world_and_a_boolean(self):
         self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
         bad = self.client.post(

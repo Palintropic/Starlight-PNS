@@ -491,9 +491,12 @@ class AdoptionChainTests(unittest.TestCase):
                 "registry_revision": 2,
                 "status": "adopted",
                 "recorded_at_wall": "w",
+                "offered_seq": 0,
                 "decided_at_wall": "d",
+                "decided_seq": 1,
             }
         )
+        payload["content"]["next_seq"] = 2
         with self.assertRaises(SessionStateError):
             SessionState.from_dict(payload)
 
@@ -538,18 +541,11 @@ class AdoptionChainTests(unittest.TestCase):
                 for subject, fp in decided.adopted
             ),
             decided.conflicts,
+            decided.next_seq,
         )
         with state.atomic_commit():
             with self.assertRaises(SessionStateError):
                 state.set_content(smuggled)
-
-    def test_a_new_record_cannot_arrive_already_decided(self):
-        state = _state()
-        pending = state.content.offered("rhythm:mizuki", self.B, registry_revision=2, wall="w")
-        decided = pending.decided(pending.pending()[0].conflict_id, "declined", wall="d")
-        with state.atomic_commit():
-            with self.assertRaises(SessionStateError):
-                state.set_content(decided)
 
     def test_the_time_event_epoch_must_match_the_launch(self):
         # 全量审查 F3 的补强：起点跟着存档走，正式世界拿开局时刻交叉核对。
@@ -565,36 +561,6 @@ class AdoptionChainTests(unittest.TestCase):
         with self.assertRaises(SessionStateError) as caught:
             SessionState.from_dict(payload)
         self.assertIn("开局时刻", str(caught.exception))
-
-    def test_a_dangling_adoption_beside_a_real_chain_is_refused(self):
-        # 真实的链：开局 → B；另塞一条也针对开局版本的"采用"（开局 → D），放在前面，
-        # 于是"最后一次采用 = 此刻版本"仍然成立，只有逐条接链才能发现它。
-        state = _state()
-        genesis = state.content.adopted_fingerprint("rhythm:mizuki")
-        D = content_fingerprint("d")
-        payload = state.to_dict()
-        payload["content"]["adopted"]["rhythm:mizuki"] = self.B
-
-        def record(adopted, offered, status):
-            return {
-                "subject": "rhythm:mizuki",
-                "adopted_fingerprint": adopted,
-                "offered_fingerprint": offered,
-                "registry_revision": 2,
-                "status": status,
-                "recorded_at_wall": "w",
-                "decided_at_wall": "d",
-            }
-
-        payload["content"]["conflicts"] = [
-            record(genesis, D, "declined"),
-            record(genesis, self.B, "adopted"),
-        ]
-        SessionState.from_dict(payload)  # 驳回的记录不在链上，没问题
-        payload["content"]["conflicts"][0]["status"] = "adopted"
-        with self.assertRaises(SessionStateError) as caught:
-            SessionState.from_dict(payload)
-        self.assertIn("接不上", str(caught.exception))
 
     def test_the_first_ledger_must_be_the_launch_versions(self):
         payload = _state().to_dict()
@@ -635,7 +601,7 @@ class AdoptionChainTests(unittest.TestCase):
                 payload["content"]["conflicts"][0]["adopted_fingerprint"] = self.C
                 with self.assertRaises(SessionStateError) as caught:
                     SessionState.from_dict(payload)
-                self.assertIn("从来没有被采用过", str(caught.exception))
+                self.assertIn("针对的不是当时的已采用版本", str(caught.exception))
 
     def test_publish_refuses_a_clock_moved_without_a_time_event(self):
         # 发布与加载查同一套：组装期经由公开 WorldState.advance_time() 推了时钟，
@@ -653,6 +619,101 @@ class AdoptionChainTests(unittest.TestCase):
         payload["world_state"]["metadata"]["origin"]["content"]["rhythms"]["mizuki"] = self.B
         with self.assertRaises(SessionStateError):
             SessionState.from_dict(payload)
+
+
+class LedgerSequenceTests(unittest.TestCase):
+    """第三方反向测试（C）：账本按操作序号重放，不看墙钟；正常操作永不卡死。"""
+
+    A_ = None  # 开局版本，运行时取
+    B = content_fingerprint("b")
+    C = content_fingerprint("c")
+
+    def _do(self, state, change):
+        with state.atomic_commit():
+            state.set_content(change(state.content))
+
+    def _offer(self, state, fp, wall="w"):
+        self._do(state, lambda c: c.offered("rhythm:mizuki", fp, registry_revision=2, wall=wall))
+
+    def _decide(self, state, status, wall="d", which=-1):
+        self._do(
+            state, lambda c: c.decided(c.pending()[which].conflict_id, status, wall=wall)
+        )
+
+    def test_a_wall_clock_that_steps_back_cannot_brick_the_world(self):
+        # A → B → A → C，第三次决定时墙钟往回跳了 20 分钟。
+        state = _state()
+        genesis = state.content.adopted_fingerprint("rhythm:mizuki")
+        self._offer(state, self.B, "10:00")
+        self._decide(state, "adopted", "10:01")
+        self._offer(state, genesis, "10:02")
+        self._decide(state, "adopted", "10:03")
+        self._offer(state, self.C, "10:04")
+        self._decide(state, "adopted", "09:43")
+        self.assertTrue(state.content.accepts("rhythm:mizuki", self.C))
+        restored = SessionState.from_dict(state.to_dict())
+        self.assertEqual(restored.content, state.content)
+
+    def test_a_stale_pending_can_be_declined_and_the_version_is_offered_again(self):
+        state = _state()
+        self._offer(state, self.B)  # 开局 → B，待决
+        self._offer(state, self.C)  # 开局 → C，待决
+        self._decide(state, "adopted", which=1)  # 采用 C
+        stale = state.content.pending()[0]
+        with self.assertRaises(ContentLedgerError):
+            state.content.decided(stale.conflict_id, "adopted", wall="d")
+        self._offer(state, self.B)  # B 又出现：针对 C 重新记一条
+        fresh = [c for c in state.content.pending() if c.adopted_fingerprint == self.C]
+        self.assertEqual(len(fresh), 1)
+        self._do(state, lambda c: c.decided(stale.conflict_id, "declined", wall="d"))
+        self._do(state, lambda c: c.decided(fresh[0].conflict_id, "adopted", wall="d"))
+        self.assertTrue(state.content.accepts("rhythm:mizuki", self.B))
+        SessionState.from_dict(state.to_dict())
+
+    def _declined_payload(self):
+        state = _state()
+        self._offer(state, self.B)
+        self._decide(state, "declined")
+        return state.to_dict()
+
+    def test_ledger_only_edits_are_refused(self):
+        cases = {
+            "delete the declined record": lambda p: p["content"]["conflicts"].pop(0),
+            "declined back to pending": lambda p: p["content"]["conflicts"][0].update(
+                status="pending", decided_at_wall=None, decided_seq=None
+            ),
+        }
+        for label, edit in cases.items():
+            with self.subTest(label):
+                payload = self._declined_payload()
+                SessionState.from_dict(payload)
+                edit(payload)
+                with self.assertRaises(SessionStateError):
+                    SessionState.from_dict(payload)
+
+    def test_rolling_back_an_adoption_by_deleting_it_is_refused(self):
+        state = _state()
+        genesis = state.content.adopted_fingerprint("rhythm:mizuki")
+        self._offer(state, self.B)
+        self._decide(state, "adopted")
+        payload = state.to_dict()
+        payload["content"]["conflicts"] = []
+        payload["content"]["adopted"]["rhythm:mizuki"] = genesis
+        with self.assertRaises(SessionStateError):
+            SessionState.from_dict(payload)
+
+    def test_a_base_swapped_to_another_real_version_is_refused(self):
+        # 原先写明的剩余边：有了操作序号之后也能查出来了。
+        state = _state()
+        genesis = state.content.adopted_fingerprint("rhythm:mizuki")
+        self._offer(state, self.B)
+        self._decide(state, "adopted")  # 开局 → B
+        self._offer(state, self.C)  # 针对 B
+        payload = state.to_dict()
+        payload["content"]["conflicts"][1]["adopted_fingerprint"] = genesis
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(payload)
+        self.assertIn("记录时针对的不是当时的已采用版本", str(caught.exception))
 
 
 class RestoreConflictDurabilityTests(PlaneTestCase):

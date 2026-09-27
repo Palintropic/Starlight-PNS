@@ -1007,6 +1007,8 @@ class AutonomousRuntime:
         changed = []
 
         def change(state: SessionState) -> None:
+            # 在闸门里再问一次：检查和拨动之间可能有人停了运行时。
+            self._require_running("拨安静分钟的开关")
             policy = state.time_events
             if policy is None:
                 raise AutonomyError("这个会话没有时间事件策略（没有世界状态）")

@@ -2,7 +2,7 @@ import threading
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, FrozenSet, Iterator, List, Mapping, Optional, Sequence
 
 from pns.models.activation import ActivationError
@@ -294,6 +294,9 @@ class SessionState:
         # 只读快照块的嵌套深度（本线程）。块内任何写方法都失败。
         self._read_only_thread: Optional[int] = None
         self._read_only_depth = 0
+        # 时钟有主（持久世界）：只有调度器的推进事务能改世界时钟。
+        self._clock_claimed = False
+        self._clock_mover: Optional[int] = None
 
     # ── 生命周期阶段与写栅栏 ────────────────────────────────────────────
     @property
@@ -345,6 +348,38 @@ class SessionState:
             if self._phase != "fenced":
                 self._phase = "fenced"
                 self._fence_reason = reason
+
+    # ── 时钟归属 ────────────────────────────────────────────────────────
+    def claim_clock(self) -> None:
+        """声明这份会话的世界时钟有主：此后只有调度器的推进事务能改它。
+
+        持久世界在绑定服务的第一步就声明（见 RuntimeAdapters.bind）。之后直接调
+        WorldState.advance_time()、从外部提交一条 world.time_advanced，都会在状态
+        效果那一步被拒绝、整个事务回滚 —— 时钟不会绕过调度器（到期）、协调器
+        （作息）与时间事件链往前走（第三方反向测试 B）。只能打开，不能关回。
+        """
+        self._clock_claimed = True
+
+    @property
+    def clock_claimed(self) -> bool:
+        return self._clock_claimed
+
+    @contextmanager
+    def _moving_clock(self):
+        """调度器推进事务内部：本线程此刻被允许改时钟。"""
+        previous = self._clock_mover
+        self._clock_mover = threading.get_ident()
+        try:
+            yield
+        finally:
+            self._clock_mover = previous
+
+    def _check_clock_move(self) -> None:
+        if self._clock_claimed and self._clock_mover != threading.get_ident():
+            raise SessionStateError(
+                "这个世界的时钟只能由调度器推进（runtime.advance / 时钟 worker），"
+                "不能直接改 WorldState，也不能从外部提交时间事件"
+            )
 
     def require_writable(self) -> None:
         """每个受支持的写方法的第一行。"""
@@ -452,6 +487,7 @@ class SessionState:
         self.world_state = world_state
         # 时间事件链从这一刻起算（WORLD-1 存档增长 / 全量审查 F3）。
         self.time_events = TimeEventPolicy(world_state.clock)
+        world_state._clock_guard = self._check_clock_move
 
     def attach_scheduler(self, scheduler) -> None:
         """绑定本会话唯一一份调度器（只允许一次）。
@@ -788,6 +824,9 @@ class SessionState:
                 )
             else:
                 ledger.check_successor_of(previous)
+                ledger.check_genesis(
+                    genesis_from_origin(self.world_state.metadata.get("origin"))
+                )
         except ContentLedgerError as e:
             raise SessionStateError(str(e)) from e
         self.content = ledger
@@ -1277,6 +1316,21 @@ def _validate_time_gaps(state: "SessionState") -> None:
         gaps = time_gaps(steps, world.clock, policy.epoch)
     except TimeEventPolicyError as e:
         raise SessionStateError(str(e)) from e
+    # 到期只会在一次**记下来**的推进里触发，而那条时间事件带着它：每条到期记录
+    # 的触发时刻都必须有一条时间事件正好推到那里、并列出它。于是在 skip 生效的
+    # 范围里删掉一条不安静的时间事件，也不会被当成"没记"（第三方反向测试 B）。
+    reached = {}
+    for event in state.events.by_type(EventType.WORLD_TIME_ADVANCED):
+        moment = event.occurred_at + timedelta(minutes=int(event.payload["minutes"]))
+        reached.setdefault(moment, set()).update(
+            event.provenance.get("due_activations", ()) if event.provenance else ()
+        )
+    for due in state.activation_outbox.records():
+        if due.fired_at > policy.epoch and due.activation_id not in reached.get(due.fired_at, ()):
+            raise SessionStateError(
+                f"到期记录 '{due.due_id}' 在 {due.fired_at.isoformat()} 触发，却没有时间事件"
+                "推到那一刻 —— 存档缺了事件"
+            )
     for start, end in gaps:
         if not policy.covers(start, end):
             raise SessionStateError(

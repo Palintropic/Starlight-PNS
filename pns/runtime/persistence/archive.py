@@ -430,6 +430,9 @@ class WorldArchive:
     sealed_events: Optional[Tuple[Dict, ...]] = field(
         default=None, compare=False, repr=False
     )
+    # 这次封存的分卷目录同步过没有（store.seal 填）。平台不支持时为 False，
+    # 生命周期据此不把这一版报成"目录已同步"。不进 world.json。
+    history_synced: bool = field(default=True, compare=False, repr=False)
 
     # ── 捕获 ────────────────────────────────────────────────────────────
     @classmethod
@@ -616,6 +619,8 @@ class WorldArchive:
         max_events = SEGMENT_MAX_EVENTS if max_events is None else max_events
         if max_events < 1:
             raise ArchiveError("max_events 必须 ≥ 1")
+        if span <= timedelta(0):
+            raise ArchiveError("span 必须大于 0")
         entries = _active_entries(self.state)
         chunks = []
         start = 0
