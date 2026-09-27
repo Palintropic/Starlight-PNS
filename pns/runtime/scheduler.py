@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Mapping, Optional, Tuple
 
+from pns.models.time_events import QuietTime
 from pns.models.activation import (
     ActivationDue,
     ActivationError,
@@ -277,6 +278,13 @@ class PersistentScheduler:
 
         plan = self._plan_due(target)
         if not record:
+            policy = state.time_events
+            if policy is None or policy.current is not QuietTime.SKIP:
+                # 不记的一步只能由账本授权：record 生效时出现的空档，加载时就是
+                # "存档缺了事件"。在这里拒绝，而不是存下一份读不回来的世界。
+                raise SchedulerError(
+                    "这个世界记录安静的分钟（time_events 不是 skip），不能不记事件地推进时钟"
+                )
             if plan:
                 raise SchedulerError(
                     "这一步有到期，不是安静的一步，必须记成时间事件："

@@ -178,8 +178,26 @@ class SwitchTests(QuietTimeTestCase):
                     )
                 )
 
+    def test_the_public_scheduler_cannot_skip_a_step_without_the_ledger(self):
+        # 攻击：runtime.scheduler 是公开的。record 生效时不记事件地推时钟，会造出
+        # 一段加载时判为"缺了事件"的空档 —— 存得下、读不回来。
+        world = self.created()
+        with self.assertRaises(SchedulerError):
+            world.runtime.scheduler.advance_to(T0 + timedelta(minutes=5), record=False)
+        self.assertEqual(world.state.world_state.clock, T0)
+        world.runtime.set_quiet_time_events(True)  # 同值，不是拨动
+        with self.assertRaises(SchedulerError):
+            world.runtime.scheduler.advance_to(T0 + timedelta(minutes=5), record=False)
+        self.skip(world)
+        world.runtime.scheduler.advance_to(T0 + timedelta(minutes=5), record=False)
+        world.runtime.set_quiet_time_events(True)
+        with self.assertRaises(SchedulerError):
+            world.runtime.scheduler.advance_to(T0 + timedelta(minutes=9), record=False)
+        self.reopen(world)
+
     def test_the_scheduler_refuses_a_quiet_step_that_has_a_due(self):
         world = self.created()
+        self.skip(world)
         scheduler = world.state.scheduler
         scheduler.schedule(
             ScheduledActivation(
