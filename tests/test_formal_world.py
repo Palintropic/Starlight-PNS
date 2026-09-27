@@ -51,6 +51,7 @@ from pns.runtime.formal_world import (  # noqa: E402
 )
 from pns.runtime.persistence.lifecycle import _fingerprint  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
+from pns.runtime.scheduler import SchedulerError  # noqa: E402
 from pns.world.context import render_world_context  # noqa: E402
 from pns.world.rhythm import DailyRhythm  # noqa: E402
 
@@ -734,6 +735,82 @@ class RestoreConflictDurabilityTests(PlaneTestCase):
             disk = self.plane.store.load("yoake-mae", history=False).state
             self.assertNotEqual(disk["cognition"], world.state.cognition.to_dict())
             self.assertTrue(status["dirty"])
+
+
+class BindWindowClockTests(PlaneTestCase):
+    """复审 R3-F1：作息世界的时钟守卫覆盖整个绑定期，不只是运行时挂上之后。"""
+
+    rate = 1.0
+    PUSHES = {
+        "advance_by": lambda sch: sch.advance_by(120),
+        "advance_to": lambda sch: sch.advance_to(sch.clock + timedelta(hours=2)),
+        "advance_to_next_due": lambda sch: sch.advance_to_next_due(),
+        "quiet": lambda sch: sch._advance_quietly(sch.clock + timedelta(hours=2)),
+    }
+
+    def _with_callback(self, plane, where, push, outcomes):
+        real = plane.build_adapters
+
+        def wrapped(*args, **kwargs):
+            adapters = real(*args, **kwargs)
+            self.assertIsNotNone(adapters.rhythm, "这组用例要的是作息世界")
+
+            def attempt(state):
+                clock = state.world_state.clock
+                try:
+                    push(state.scheduler)
+                    outcomes.append("advanced")
+                except SchedulerError:
+                    outcomes.append("refused")
+                self.assertEqual(state.world_state.clock, clock)
+
+            if where == "seed":
+                inner = adapters.seed
+
+                def seed(state):
+                    attempt(state)
+                    if inner is not None:
+                        inner(state)
+
+                return dataclasses.replace(adapters, seed=seed)
+            inner = adapters.policy_factory
+
+            def policy_factory(state):
+                attempt(state)
+                return inner(state)
+
+            return dataclasses.replace(adapters, policy_factory=policy_factory)
+
+        plane.build_adapters = wrapped
+
+    def test_create_callbacks_cannot_move_the_clock(self):
+        for where in ("seed", "policy_factory"):
+            for name, push in self.PUSHES.items():
+                with self.subTest(where=where, push=name):
+                    outcomes = []
+                    # 每个子用例一个自己的存档根：正式世界的 ID 是固定的。
+                    self.root = self.root.parent / f"worlds-{where}-{name}"
+                    plane = self.make_plane()
+                    self.addCleanup(plane.service.release_all)
+                    self._with_callback(plane, where, push, outcomes)
+                    plane.create_formal("yoake-mae")
+                    self.assertEqual(outcomes, ["refused"])
+                    world = plane.service.opened("yoake-mae")
+                    self.assertEqual(world.state.world_state.clock.hour, 19)
+                    plane.close("yoake-mae")
+
+    def test_restore_callbacks_cannot_move_the_clock(self):
+        self.plane.create_formal("yoake-mae")
+        self.plane.close("yoake-mae")
+        for name, push in self.PUSHES.items():
+            with self.subTest(push=name):
+                outcomes = []
+                plane = self.make_plane()
+                self.addCleanup(plane.service.release_all)
+                self._with_callback(plane, "policy_factory", push, outcomes)
+                plane.restore("yoake-mae")
+                self.assertEqual(outcomes, ["refused"])
+                plane.close("yoake-mae")
 
 
 if __name__ == "__main__":

@@ -150,6 +150,10 @@ class RuntimeAdapters:
             raise LifecycleError("只能把服务绑在 SessionState 上")
         if state.scheduler is None:
             PersistentScheduler(state)
+        if self.rhythm is not None:
+            # 作息世界的时钟只归协调器的时钟步推。在把调度器交给 seed /
+            # policy_factory 之前就声明，绑定期间也没有旁路（复审 R3-F1）。
+            state.scheduler.claim_clock_for_rhythm()
         if self.seed is not None:
             # 新世界的初始排期。它在第一份存档之前落进队列，所以要么这个世界
             # 带着排期诞生，要么它根本没诞生 —— 没有第三种结果。

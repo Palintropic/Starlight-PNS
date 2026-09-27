@@ -99,6 +99,9 @@ class PersistentScheduler:
         if not isinstance(state.world_state, WorldState):
             raise SchedulerError("调度器绑定的会话还没有权威 WorldState")
         self._state = state
+        # 时钟归作息所有：由生命周期在交出这个调度器给任何回调之前打上（见
+        # RuntimeAdapters.bind 与 claim_clock_for_rhythm）。一经打上不再撤销。
+        self._rhythm_owned = False
         # 绑定只允许一次。第二个调度器会带来第二份队列，两份都在推同一个时钟，
         # 于是"这条一次性激活触发过没有"会有两个互相看不见的答案。
         try:
@@ -254,6 +257,8 @@ class PersistentScheduler:
 
     def advance_to_next_due(self) -> Optional[TickResult]:
         """推进到下一条激活到期的那一刻；队列为空就返回 None，不动时钟。"""
+        # 守卫在入口：作息驱动的会话里这个调用本身就不被允许，不看队列空不空。
+        self._require_clock_owner()
         activation = self.queue.next_due()
         if activation is None:
             return None
@@ -269,6 +274,15 @@ class PersistentScheduler:
         return self._tick(self.clock + timedelta(minutes=minutes), minutes)
 
     # ── 事务本体 ────────────────────────────────────────────────────────
+    def claim_clock_for_rhythm(self) -> None:
+        """声明这个会话的时间由作息驱动：此后只有协调器的时钟步能推它。
+
+        必须在调度器被交给任何外部回调之前调用（复审 R3-F1）：守卫若等到自主
+        运行时挂上才生效，绑定期间的回调就能先把时钟推过作息边界。只能打开，
+        不能关回去。
+        """
+        self._rhythm_owned = True
+
     def _require_clock_owner(self) -> None:
         """挂着作息的自主运行时在场时，时间只能由它的时钟步推进。
 
@@ -276,11 +290,11 @@ class PersistentScheduler:
         被整段跳过，而那份状态能存能读（全量审查 R2-F2）。没有作息的会话不受影响。
         """
         autonomy = self._state.autonomy
-        if (
-            autonomy is not None
-            and autonomy.rhythm is not None
-            and not autonomy._owns_clock_step()
-        ):
+        rhythm_driven = self._rhythm_owned or (
+            autonomy is not None and autonomy.rhythm is not None
+        )
+        # 默认拒绝：作息驱动的会话里，协调器还没挂上时谁都不能推时钟。
+        if rhythm_driven and not (autonomy is not None and autonomy._owns_clock_step()):
             raise SchedulerError(
                 "这个世界由作息驱动：时间只能经由运行时推进（runtime.advance() 或时钟 "
                 "worker），直接推调度器会跳过作息、行程与频道的后果"
