@@ -9,6 +9,7 @@
 #     POST /api/persistent-worlds/{world_id}/close
 #     POST /api/persistent-worlds/{world_id}/autonomy/start
 #     POST /api/persistent-worlds/{world_id}/autonomy/stop
+#     GET  /api/persistent-worlds/{world_id}/overview
 #
 # 这一层只做三件事：把请求翻译成一次生命周期调用、把 P12 的状态词汇原样交出去、
 # 把失败翻译成一个稳定的类别 + 一句安全的话。它**不**判断一个世界能不能被
@@ -32,7 +33,7 @@
 from contextlib import contextmanager
 from typing import Annotated, Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictBool
 
 from pns.runtime.agency.policy import AgencyPolicyError
@@ -40,6 +41,7 @@ from pns.runtime.autonomy.audit import AuditError
 from pns.runtime.autonomy.coordinator import AutonomyError
 from pns.runtime.autonomy.clock_worker import ClockWorkerError
 from pns.runtime.event_commit import EventCommitError
+from pns.models.session import SessionFencedError, TransactionBoundaryError
 from pns.models.world_state import ActivityKind
 from pns.runtime.persistence import (
     ArchiveCorrupt,
@@ -279,6 +281,71 @@ class ActivityUpdateRequest(BaseModel):
     activity: ActivityKind
 
 
+class OverviewActivityModel(BaseModel):
+    kind: str
+    since: str
+
+
+class OverviewResidentModel(BaseModel):
+    """一位居民此刻的**客观**状态。不是她感知到或记得的东西。"""
+
+    id: str
+    name: str
+    unit: Optional[str] = None
+    # 没有物理位置（只挂在频道上）时是 null。
+    location_id: Optional[str] = None
+    activity: OverviewActivityModel
+    availability: str
+    # 远程在场的频道。不是第二个物理位置。
+    channels: List[str] = Field(default_factory=list)
+
+
+class OverviewLocationModel(BaseModel):
+    id: str
+    name: str
+    parent_id: Optional[str] = None
+
+
+class OverviewChannelModel(BaseModel):
+    id: str
+    name: str
+
+
+class OverviewEventModel(BaseModel):
+    # 在世界历史里的序号（含被略去的时间推进事件），所以两条之间可以有空号。
+    seq: int
+    event_id: str
+    type: str
+    at: str
+    scope: str
+    actor: Optional[str] = None
+    participants: List[str] = Field(default_factory=list)
+    location_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorldOverviewModel(BaseModel):
+    """「世界」页：时钟、居民此刻的状态、最近的世界历史（World History 层）。
+
+    只有开着的世界才有概览：关着的世界没有权威的"此刻"，读存档拼一个出来
+    会把一份可能已经过时的快照当成现在。
+    """
+
+    world_id: str
+    clock: str
+    revision: int
+    autonomy: Optional[DriverStatusModel] = None
+    residents: List[OverviewResidentModel]
+    locations: List[OverviewLocationModel]
+    channels: List[OverviewChannelModel]
+    # 最近的非时间推进事件，旧的在前。
+    events: List[OverviewEventModel]
+    # 整份世界历史的条数（含时间推进），和最早一条的时刻。
+    total_events: int
+    first_event_at: Optional[str] = None
+
+
 class ActivityUpdateModel(BaseModel):
     world: WorldStatusModel
     character_id: str
@@ -327,6 +394,11 @@ def _translate(
         return _error(409, "autonomy_refused", e)
     if isinstance(e, EventCommitError):
         return _error(409, "event_refused", e)
+    if isinstance(e, TransactionBoundaryError):
+        # 一次提交一直占着会话：只读请求等不到一致快照。暂时的，稍后再拉。
+        return _error(503, "world_busy", "世界正在提交一次变更，稍后再试")
+    if isinstance(e, SessionFencedError):
+        return _error(409, "world_not_open", e)
     if isinstance(e, WorldAlreadyOwned):
         return _error(409, "world_already_open", e)
     if isinstance(e, OwnershipUnsupported):
@@ -371,6 +443,7 @@ def _translate(
                     "autonomy_start",
                     "autonomy_stop",
                     "quiet_time_events",
+                    "overview",
                 ) and (
                     plane.service.opened(world_id) is None
                 ):
@@ -430,6 +503,20 @@ def get_persistent_world(
             if not known:
                 raise _error(404, "archive_not_found", f"世界 '{world_id}' 还没有存档")
         return _status(status)
+
+
+@router.get("/{world_id}/overview", response_model=WorldOverviewModel)
+def get_world_overview(
+    world_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """一个开着的世界此刻的样子，外加最近 `limit` 条世界事件（不含时间推进）。
+
+    这是客观记录，不是任何居民的经历或记忆。没开着的世界是 409 `world_not_open`。
+    """
+    with _translated(plane, "overview", world_id):
+        return WorldOverviewModel.model_validate(plane.overview(world_id, limit))
 
 
 @router.post("", response_model=WorldStatusModel, status_code=201)

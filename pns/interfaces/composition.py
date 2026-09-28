@@ -110,6 +110,10 @@ MAX_GENERATION_TOKENS = 8192
 # 它跟单次 Start 的额度是两件事，见 AutonomySettings.world_action_cap。
 MAX_WORLD_ACTION_CAP = 10_000_000
 
+# 世界概览取一致快照时最多等多久。它跟提交事务抢同一把锁；一次只读的页面刷新
+# 不该在那里挂 30 秒（会话默认值），等不到就如实说"世界正忙"，让页面下次再拉。
+OVERVIEW_SNAPSHOT_TIMEOUT = 2.0
+
 
 class CompositionError(RuntimeError):
     """这台服务器现在组装不出这次操作需要的东西。"""
@@ -755,6 +759,89 @@ class WorldControlPlane:
         if world is None or world.clock_worker is None:
             return None
         return world.clock_worker.status()
+
+    # ── 世界概览（只读）─────────────────────────────────────────────────
+    #
+    # 给「世界」页看的：时钟、每位居民此刻的客观状态、最近的世界历史。它读的
+    # 是 World History 这一层（客观记录），**不是**任何居民的经历或记忆——
+    # 观察、曝光、记忆一概不读。provenance 也不透出：那是审计链路的内部结构。
+    def overview(self, world_id: str, limit: int = 200) -> Dict:
+        world = self._require_open(world_id)
+        registry = self.registry()
+
+        def resident_meta(character_id: str) -> Dict:
+            try:
+                meta = registry.character_metadata(character_id)
+            except ValueError:
+                # 内容包里已经没有这个角色：照实显示 ID，不猜名字。
+                meta = {}
+            name = str(meta.get("name") or character_id)
+            return {"name": name, "unit": meta.get("unit")}
+
+        with world.state.snapshot_boundary(timeout=OVERVIEW_SNAPSHOT_TIMEOUT) as state:
+            ws = state.world_state
+            residents = []
+            for character_id in ws.known_characters():
+                activity = ws.activity_of(character_id)
+                residents.append(
+                    {
+                        "id": character_id,
+                        **resident_meta(character_id),
+                        "location_id": ws.location_of(character_id),
+                        "activity": {
+                            "kind": activity.kind.value,
+                            "since": activity.since.isoformat(),
+                        },
+                        "availability": ws.availability_of(character_id).value,
+                        "channels": ws.channels_for(character_id),
+                    }
+                )
+            locations = [
+                {"id": loc.location_id, "name": loc.name, "parent_id": loc.parent_id}
+                for loc in ws.locations
+            ]
+            channels = [{"id": ch.channel_id, "name": ch.name} for ch in ws.channels]
+            # 从后往前取最近 limit 条非时间推进事件。时间推进会刷屏，而且"这段
+            # 时间没发生事"本来就能从相邻两条事件的间隔里看出来。
+            all_events = state.events.events()
+            recent = []
+            for seq in range(len(all_events) - 1, -1, -1):
+                event = all_events[seq]
+                if event.type is EventType.WORLD_TIME_ADVANCED:
+                    continue
+                recent.append(
+                    {
+                        "seq": seq,
+                        "event_id": event.event_id,
+                        "type": event.type.value,
+                        "at": event.occurred_at.isoformat(),
+                        "scope": event.scope.value,
+                        "actor": event.actor_id,
+                        "participants": list(event.participants),
+                        "location_id": event.location_id,
+                        "channel_id": event.channel_id,
+                        "payload": event.to_dict()["payload"],
+                    }
+                )
+                if len(recent) >= limit:
+                    break
+            recent.reverse()
+            clock = ws.clock.isoformat()
+            total_events = len(all_events)
+            first_event_at = all_events[0].occurred_at.isoformat() if all_events else None
+
+        return {
+            "world_id": world.world_id,
+            "clock": clock,
+            "revision": world.revision,
+            "autonomy": self.autonomy_status(world.world_id),
+            "residents": residents,
+            "locations": locations,
+            "channels": channels,
+            "events": recent,
+            "total_events": total_events,
+            "first_event_at": first_event_at,
+        }
 
     @staticmethod
     def _worker(world):

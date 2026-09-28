@@ -315,6 +315,107 @@ class ActivityControlTests(WorldApiTestCase):
         )
 
 
+class WorldOverviewTests(WorldApiTestCase):
+    """「世界」页的只读概览：客观记录，不带审计内部结构，不等于任何人的经历。"""
+
+    def overview(self, world_id="nightcord", **params):
+        return self.client.get(
+            f"/api/persistent-worlds/{world_id}/overview", params=params
+        )
+
+    def set_activity(self, character_id, activity):
+        response = self.client.post(
+            "/api/persistent-worlds/nightcord/activity",
+            json={"character_id": character_id, "activity": activity},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_an_open_world_reports_residents_and_recent_history(self):
+        self.open_world()
+        changed = self.set_activity("mizuki", "editing_video")
+        response = self.overview()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assert_no_canary(response)
+        body = response.json()
+        self.assertEqual(body["world_id"], "nightcord")
+        self.assertEqual(body["revision"], changed["world"]["revision"])
+        residents = {item["id"]: item for item in body["residents"]}
+        self.assertEqual(set(residents), set(CHARACTERS))
+        mizuki = residents["mizuki"]
+        self.assertEqual(mizuki["name"], self.registry.character_name("mizuki"))
+        self.assertEqual(mizuki["unit"], "25ji")
+        self.assertEqual(mizuki["activity"]["kind"], "editing_video")
+        ids = {location["id"] for location in body["locations"]}
+        for item in residents.values():
+            if item["location_id"] is not None:
+                self.assertIn(item["location_id"], ids)
+        last = body["events"][-1]
+        self.assertEqual(last["event_id"], changed["event_id"])
+        self.assertEqual(last["type"], "character.activity_changed")
+        self.assertEqual(last["actor"], "mizuki")
+        self.assertEqual(last["payload"], {"activity": "editing_video"})
+        self.assertNotIn("provenance", last)
+        self.assertGreaterEqual(body["total_events"], len(body["events"]))
+
+    def test_time_advance_events_are_left_out_and_order_is_oldest_first(self):
+        self.open_world()
+        world = self.plane.service.opened("nightcord")
+        before = len(world.state.events)
+        self.set_activity("mizuki", "editing_video")
+        self.set_activity("ena", "drawing")
+        body = self.overview().json()
+        types = [event["type"] for event in body["events"]]
+        self.assertNotIn("world.time_advanced", types)
+        seqs = [event["seq"] for event in body["events"]]
+        self.assertEqual(seqs, sorted(seqs))
+        self.assertGreaterEqual(seqs[-1], before)
+
+    def test_limit_keeps_the_newest_events(self):
+        self.open_world()
+        self.set_activity("mizuki", "editing_video")
+        latest = self.set_activity("ena", "drawing")
+        body = self.overview(limit=1).json()
+        self.assertEqual(len(body["events"]), 1)
+        self.assertEqual(body["events"][0]["event_id"], latest["event_id"])
+        self.assertEqual(self.overview(limit=0).status_code, 422)
+        self.assertEqual(self.overview(limit=100000).status_code, 422)
+
+    def test_a_world_that_is_not_open_has_no_overview(self):
+        self.open_world()
+        closed = self.client.post("/api/persistent-worlds/nightcord/close")
+        self.assertEqual(closed.status_code, 200, closed.text)
+        response = self.overview()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.category(response), "world_not_open")
+        never = self.overview("never-made")
+        self.assertEqual(never.status_code, 409, never.text)
+        self.assertEqual(self.category(never), "world_not_open")
+        self.assertEqual(self.category(self.overview("CON")), "invalid_world_id")
+
+    def test_a_busy_world_is_a_retryable_503_not_a_500(self):
+        from pns.models.session import TransactionBoundaryError
+
+        self.open_world()
+        state = self.plane.service.opened("nightcord").state
+
+        def refuse(*args, **kwargs):
+            raise TransactionBoundaryError("有一次提交一直占着它")
+
+        with patch.object(type(state), "snapshot_boundary", refuse):
+            response = self.overview()
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.category(response), "world_busy")
+
+    def test_the_overview_is_read_only(self):
+        self.open_world()
+        before = self.client.get("/api/persistent-worlds/nightcord").json()
+        self.overview()
+        after = self.client.get("/api/persistent-worlds/nightcord").json()
+        self.assertEqual(before["revision"], after["revision"])
+        self.assertEqual(before["dirty"], after["dirty"])
+
+
 class CreateAndRestoreRefusalTests(WorldApiTestCase):
     def test_create_never_overwrites_an_existing_archive(self):
         first = self.open_world()
@@ -1263,11 +1364,13 @@ class ExistingSurfaceTests(WorldApiTestCase):
             "/api/persistent-worlds/{world_id}/bootstrap",
             # WORLD-1 存档增长：「记录安静的分钟」开关。
             "/api/persistent-worlds/{world_id}/quiet-time-events",
+            # 「世界」页的只读概览。
+            "/api/persistent-worlds/{world_id}/overview",
         ):
             self.assertIn(expected, paths)
-        # 这个前缀下只有这十条，一条不多。
+        # 这个前缀下只有这十一条，一条不多。
         self.assertEqual(
-            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 10
+            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 11
         )
 
 
