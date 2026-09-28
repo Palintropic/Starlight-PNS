@@ -42,11 +42,11 @@
   color: var(--SystemBaseMedium);
 }
 
-.wo-sample-note {
+.wo-note {
   flex: 0 0 auto;
   margin: var(--gutter) var(--page-margin) 0;
   padding-left: var(--gutter);
-  border-left: 2px solid var(--caution);
+  border-left: 2px solid var(--SystemBaseLow);
   font: var(--type-caption);
   line-height: 18px;
   color: var(--SystemBaseMediumHigh);
@@ -234,20 +234,6 @@
   display: block;
   color: var(--SystemBaseHigh);
 }
-/* Events revealed by the last advance: an accent bar on the left, no motion beyond the page's. */
-.wo-event.new {
-  margin-left: -14px;
-  padding-left: 12px;
-  border-left: 2px solid var(--SystemAccent);
-}
-.wo-advance {
-  flex: 0 0 auto;
-  margin: 8px var(--page-margin) 0;
-  font: var(--type-caption);
-  line-height: 18px;
-  color: var(--SystemBaseMediumHigh);
-}
-
 /* Quiet stretch: a fact, not a warning, so no semantic colour. */
 .wo-quiet {
   margin: 4px 0 4px 68px;
