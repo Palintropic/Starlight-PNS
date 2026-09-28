@@ -80,6 +80,8 @@ class WorldApiTestCase(unittest.TestCase):
                 cadence=ActivationCadence(),
                 shutdown_timeout_seconds=1.0,
                 world_action_cap=self.world_action_cap,
+                # 这组用例钉的是固定节拍与播种；回话机会另有用例。
+                reply_delay_minutes=None,
             ),
         )
         self.app = create_app(self.plane)

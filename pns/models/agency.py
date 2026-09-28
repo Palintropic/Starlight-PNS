@@ -100,6 +100,10 @@ class AgencyBudget:
     max_observations: int = 64
     # 一个会话累计能提交的动作数。
     max_committed_actions_per_session: int = 128
+    # 有人当着别人说了话之后，隔多少模拟分钟给在场的其他人一次回话机会。None =
+    # 不给（只按固定节拍被考虑）。回不回仍由那个人自己的判断决定；这里只决定
+    # "多快被问到"，所以对话的密度由对话本身决定，而不是写死在某个时段上。
+    reply_delay_minutes: Optional[int] = None
 
     # 这里**没有**"允许提交台词动作"的开关，而且不该有：需要台词的动作在本
     # 阶段没有提交路径（见 pns/models/action.py 的 _require_committable），
@@ -120,6 +124,11 @@ class AgencyBudget:
                 raise AgencyError(f"{name} 必须是整数，收到 {value!r}")
             if value <= 0:
                 raise AgencyError(f"{name} 必须大于 0，收到 {value}")
+        delay = self.reply_delay_minutes
+        if delay is not None and (
+            isinstance(delay, bool) or not isinstance(delay, int) or not 1 <= delay <= 1440
+        ):
+            raise AgencyError(f"reply_delay_minutes 必须是 1–1440 的整数或不设，收到 {delay!r}")
 
     def to_dict(self) -> Dict:
         return {
@@ -129,6 +138,7 @@ class AgencyBudget:
             "max_committed_actions_per_session": (
                 self.max_committed_actions_per_session
             ),
+            "reply_delay_minutes": self.reply_delay_minutes,
         }
 
 

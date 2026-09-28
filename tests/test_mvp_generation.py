@@ -39,7 +39,7 @@ from pns.interfaces.composition import (  # noqa: E402
 )
 from pns.runtime.autonomy.clock_worker import ClockConfig  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
-from pns.models.activation import ActivationKind  # noqa: E402
+from pns.models.activation import ActivationKind, ScheduledActivation  # noqa: E402
 from pns.models.agency import AgencyOutcome  # noqa: E402
 from pns.models.event import EventType  # noqa: E402
 from pns.models.memory import MemoryClass, MemoryRecord  # noqa: E402
@@ -226,6 +226,8 @@ class MvpTestCase(unittest.TestCase):
     needs_review = False
     # None = 用服务器默认（环境变量）那一份。要压节律或压预算的用例覆盖它。
     autonomy = None
+    # 回话机会的延迟（环境变量的值）。"0" = 关：多数用例钉的是固定节拍。
+    reply_delay = "0"
 
     def setUp(self):
         self.registry = BOUNDARY.active()
@@ -236,7 +238,15 @@ class MvpTestCase(unittest.TestCase):
         )
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name) / "worlds"
-        self._env = patch.dict(os.environ, {self.registry.models.key_name: CANARY})
+        # 这些用例钉的是固定节拍与播种；回话机会（有人说话后在场者很快被问到）
+        # 有自己的用例，这里关掉它，免得两件事搅在一起。
+        self._env = patch.dict(
+            os.environ,
+            {
+                self.registry.models.key_name: CANARY,
+                "PNS_AUTONOMY_REPLY_DELAY_MINUTES": self.reply_delay,
+            },
+        )
         self._env.start()
         self.provider = self.make_provider()
         self.plane = WorldControlPlane(
@@ -673,6 +683,87 @@ class ProviderLeakTests(MvpTestCase):
                 character_ids=["mizuki", "akito"],
             )
         self.assertFalse((self.root / "notready").exists())
+
+
+# ── 回话机会：有人说话之后，在场的其他人很快被问到 ────────────────────────
+class ReplyTests(MvpTestCase):
+    reply_delay = "1"
+
+    def replies(self, world, character_id=None):
+        return [
+            a
+            for a in world.state.activations.pending()
+            if a.activation_id.startswith("reply.activation:")
+            and (character_id is None or a.character_id == character_id)
+        ]
+
+    def speakers(self, report):
+        return [r["character_id"] for r in report["results"]]
+
+    def test_a_line_in_the_channel_gets_the_other_member_asked_a_minute_later(self):
+        world = self.create()
+        start = world.state.world_state.clock
+        self.assertEqual(self.speakers(self.advance(world, 5)), ["mizuki"])
+        said = world.state.events.by_type(EventType.MESSAGE_SENT)[-1]
+        pending = self.replies(world, "ena")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].due_at, start + timedelta(minutes=6))
+        self.assertFalse(pending[0].is_recurring, "回话机会是一次性的")
+        self.assertEqual(pending[0].payload["reply_to"], said.event_id)
+        self.assertEqual(self.replies(world, "mizuki"), [], "不给说话的人自己排")
+        # 不用等到绘名自己的 +10：一分钟后她就被问到了，然后轮到瑞希。
+        self.assertEqual(self.speakers(self.advance(world, 1)), ["ena"])
+        self.assertEqual(self.speakers(self.advance(world, 1)), ["mizuki"])
+        self.assertEqual(len(world.state.events.by_type(EventType.MESSAGE_SENT)), 3)
+
+    def test_a_fired_reply_does_not_come_back(self):
+        world = self.create()
+        self.advance(world, 5)
+        first = self.replies(world, "ena")[0].activation_id
+        self.advance(world, 1)
+        ids = {a.activation_id for a in world.state.activations.pending()}
+        self.assertNotIn(first, ids)
+        for cid in CHARACTERS:
+            mine = [a for a in world.state.activations.pending() if a.character_id == cid]
+            self.assertLessEqual(len(mine), 2, "每人至多：自己的节拍 + 一次回话机会")
+
+    def test_someone_already_due_by_then_is_not_asked_twice(self):
+        world = self.create()
+        clock = world.state.world_state.clock
+        world.state.scheduler.schedule(
+            ScheduledActivation(
+                activation_id="manual:ena",
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=clock + timedelta(minutes=6),
+                character_id="ena",
+            )
+        )
+        self.advance(world, 5)
+        self.assertEqual(self.replies(world, "ena"), [])
+
+    def test_the_reply_is_rolled_back_with_a_failed_commit(self):
+        world = self.create()
+        with patch(
+            "pns.runtime.agency.engine.commit_session_event",
+            side_effect=RuntimeError("提交中途炸了"),
+        ) as broken:
+            self.advance(world, 5)
+        self.assertTrue(broken.called, "提交确实走到了、并且在事务里失败了")
+        self.assertEqual(world.state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertEqual(self.replies(world), [], "事件没落地，回话机会也不许留下")
+
+
+class RejectedLineReplyTests(MvpTestCase):
+    reply_delay = "1"
+    drift = 9.0
+
+    def test_a_rejected_line_asks_nobody(self):
+        world = self.create()
+        self.advance(world, 5)
+        self.assertEqual(world.state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertFalse(
+            any(a.activation_id.startswith("reply.") for a in world.state.activations.pending())
+        )
 
 
 # ── AC3 判分是唯一通道 ───────────────────────────────────────────────────

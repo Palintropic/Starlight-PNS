@@ -25,11 +25,11 @@
 # 归属跟调度器一样：审计日志归 SessionState 所有，引擎是它上面的服务，一个
 # 会话只能绑一个。存档里的 agency 段就是那份日志。
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Mapping, Optional, Tuple
 
 from pns.models.action import ActionProposal
-from pns.models.activation import ActivationDue
+from pns.models.activation import ActivationDue, ActivationKind, ScheduledActivation
 from pns.models.authored import GenerationAudit
 from pns.models.agency import (
     AgencyBudget,
@@ -455,6 +455,7 @@ class AgencyEngine:
                 )
                 commit_session_event(state, event)
                 event_id = event.event_id
+                self._offer_replies(event)
 
             record = AgencyRecord(
                 due_id=due.due_id,
@@ -482,6 +483,38 @@ class AgencyEngine:
             # 插不进另一条提交（R4-3）。
             self._settle_cognition(record)
         return record
+
+    def _offer_replies(self, event) -> None:
+        """给当时在场的其他人排一次一次性的回话机会（在提交事务之内）。
+
+        在场名单取事件自己记下的 participants（频道成员 / 同处一地的人），不是
+        会话名单。已经有一次不晚于那一刻的排期的人不再加：一个人同一时刻只
+        需要被问一次。排期跟触发它的事件同生共死，事务回滚它也一起消失。
+        """
+        delay = self._budget.reply_delay_minutes
+        if delay is None or not event.participants:
+            return
+        scheduler = self._state.scheduler
+        if scheduler is None:
+            return
+        due_at = self.clock + timedelta(minutes=delay)
+        for member in event.participants:
+            if member == event.actor_id:
+                continue
+            if any(
+                pending.character_id == member and pending.due_at <= due_at
+                for pending in scheduler.pending()
+            ):
+                continue
+            scheduler.schedule(
+                ScheduledActivation(
+                    activation_id=f"reply.activation:{member}:{event.event_id}",
+                    kind=ActivationKind.CHARACTER_ACTIVATION,
+                    due_at=due_at,
+                    character_id=member,
+                    payload={"reply_to": event.event_id},
+                )
+            )
 
     def _judge(self, plan: ProposalPlan):
         """在事务内给出这条计划最终的 (结论, 细节, 策略名)。调用方持着事务。"""

@@ -100,6 +100,8 @@ STAGGER_ENV = "PNS_AUTONOMY_STAGGER_MINUTES"
 MAX_TOKENS_ENV = "PNS_AUTONOMY_MAX_TOKENS"
 TEMPERATURE_ENV = "PNS_AUTONOMY_TEMPERATURE"
 ACTIVATIONS_PER_RUN_ENV = "PNS_AUTONOMY_ACTIVATIONS_PER_RUN"
+# 有人当着别人说话之后，多少模拟分钟后给在场的其他人一次回话机会；0 = 关。
+REPLY_DELAY_ENV = "PNS_AUTONOMY_REPLY_DELAY_MINUTES"
 WORLD_ACTION_CAP_ENV = "PNS_AUTONOMY_WORLD_ACTION_CAP"
 # 正式世界的开局时刻。不设 = 正式世界定义里写的时刻（夜明け前是东京 19:00）；
 # `now` = 按下开局的那一分钟，世界时间从第一分钟起就与现实对齐。认不出来的值
@@ -185,6 +187,8 @@ class AutonomySettings:
     # 到顶时认知以 world_action_cap 关闭、状态里写明原因（调高它，然后重新
     # 打开这个世界），不会让世界在没人看得出原因的情况下永远失声。
     world_action_cap: int = 100_000
+    # 回话机会的延迟（模拟分钟）。None = 关，只按固定节拍被考虑。
+    reply_delay_minutes: Optional[int] = 1
     # 进程收尾时最多等每个时钟 worker 多少秒。比 clock.stop_timeout_seconds 短：
     # 停机不该被一次慢模型调用无限期拖住，而真正挡住"晚到的提交"的是 P11
     # 的终局 stop()，不是这次等待。
@@ -260,6 +264,7 @@ class AutonomySettings:
             max_tokens=_env_number(MAX_TOKENS_ENV, 1024, int),
             temperature=_env_number(TEMPERATURE_ENV, 0.85, float),
             world_action_cap=_env_number(WORLD_ACTION_CAP_ENV, 100_000, int),
+            reply_delay_minutes=_env_number(REPLY_DELAY_ENV, 1, int) or None,
         )
 
     def agency_budget(self) -> AgencyBudget:
@@ -269,7 +274,10 @@ class AutonomySettings:
         判断的形状预算（一次激活最多几条提案、枚举多少合法动作、喂多少条
         观察），跟世界活多久没关系。
         """
-        return AgencyBudget(max_committed_actions_per_session=self.world_action_cap)
+        return AgencyBudget(
+            max_committed_actions_per_session=self.world_action_cap,
+            reply_delay_minutes=self.reply_delay_minutes,
+        )
 
     def to_dict(self) -> Dict:
         return {
