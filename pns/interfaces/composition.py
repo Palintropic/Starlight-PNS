@@ -36,6 +36,7 @@
 #     全局引用，不是任何一份已经存在的 `WorldState`。
 #   * 所以重载只喂**将来**的冷构造：下一次 create 用新内容，已经在跑的世界
 #     的时钟、位置、频道成员、事件、观察和记忆一个字都不会被动。
+import dataclasses
 import os
 import threading
 from dataclasses import dataclass
@@ -100,6 +101,10 @@ MAX_TOKENS_ENV = "PNS_AUTONOMY_MAX_TOKENS"
 TEMPERATURE_ENV = "PNS_AUTONOMY_TEMPERATURE"
 ACTIVATIONS_PER_RUN_ENV = "PNS_AUTONOMY_ACTIVATIONS_PER_RUN"
 WORLD_ACTION_CAP_ENV = "PNS_AUTONOMY_WORLD_ACTION_CAP"
+# 正式世界的开局时刻。不设 = 正式世界定义里写的时刻（夜明け前是东京 19:00）；
+# `now` = 按下开局的那一分钟，世界时间从第一分钟起就与现实对齐。认不出来的值
+# 让开局响亮失败，不悄悄回落。
+FORMAL_START_ENV = "PNS_FORMAL_START"
 
 # 一次生成能配到的 token 上限（配置的上界，不是默认值；默认 1024）。
 # 撞到这个上限**不会**变成一句被砍掉一半的台词：那种情况在
@@ -605,6 +610,13 @@ class WorldControlPlane:
         spec = formal_world(name)
         if spec is None:
             raise ContentUnavailable(f"'{name}' 不是已定义的正式世界")
+        start_mode = os.environ.get(FORMAL_START_ENV, "").strip()
+        if start_mode == "now":
+            spec = dataclasses.replace(spec, start=None)
+        elif start_mode:
+            raise ContentUnavailable(
+                f"{FORMAL_START_ENV} 只认 'now' 或不设，收到 {start_mode!r}"
+            )
         registry = self.registry()
 
         def seed(bound: SessionState) -> None:

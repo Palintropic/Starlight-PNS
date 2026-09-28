@@ -329,6 +329,30 @@ class BootstrapApiTests(PlaneTestCase):
         self.assertEqual(state.world_state.metadata["origin"]["kind"], "formal_bootstrap")
         self.assertEqual(state.anchor.sim_epoch, state.world_state.clock)
 
+    def test_start_now_launches_at_the_tokyo_minute_it_was_pressed(self):
+        # 东京 2026-09-29 02:01:15：瑞希和绘名都在 25 時那一段里。
+        pressed = datetime(2026, 9, 28, 17, 1, 15, tzinfo=timezone.utc)
+        with patch.dict(os.environ, {"PNS_FORMAL_START": "now"}), patch(
+            "pns.interfaces.composition.utc_now", return_value=pressed
+        ):
+            response = self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        self.assertEqual(response.status_code, 201, response.text)
+        state = self.world().state
+        self.assertEqual(state.world_state.clock, datetime(2026, 9, 29, 2, 1))
+        self.assertEqual(state.world_state.metadata["origin"]["start"], "2026-09-29T02:01:00")
+        self.assertEqual(state.anchor.sim_epoch, datetime(2026, 9, 29, 2, 1))
+        self.assertEqual(
+            set(state.world_state.channel_participants("nightcord")), {"mizuki", "ena"}
+        )
+        self.assertEqual(len(state.events), 0, "开局不写世界事件")
+
+    def test_an_unknown_start_mode_is_refused_not_ignored(self):
+        with patch.dict(os.environ, {"PNS_FORMAL_START": "tonight"}):
+            response = self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["detail"]["category"], "invalid_content")
+        self.assertIsNone(self.plane.service.opened("yoake-mae"))
+
     def test_it_never_overwrites_an_existing_archive(self):
         self.assertEqual(
             self.client.post("/api/persistent-worlds/yoake-mae/bootstrap").status_code, 201
