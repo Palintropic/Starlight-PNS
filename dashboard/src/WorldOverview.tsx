@@ -17,6 +17,7 @@ const ACTIVITY_LABEL: Record<string, string> = {
   unspecified: '未记录活动',
   idle: '空闲',
   resting: '休息',
+  eating: '吃饭',
   studying: '学习',
   working_part_time: '打工',
   drawing: '画画',

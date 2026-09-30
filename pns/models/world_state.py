@@ -50,6 +50,7 @@ class ActivityKind(str, Enum):
     UNSPECIFIED = "unspecified"
     IDLE = "idle"
     RESTING = "resting"
+    EATING = "eating"
     STUDYING = "studying"
     WORKING_PART_TIME = "working_part_time"
     DRAWING = "drawing"

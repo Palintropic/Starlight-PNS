@@ -111,6 +111,20 @@ class LaunchClockTests(unittest.TestCase):
             YOAKE_MAE.launch_clock(datetime(2026, 9, 27, 10, 0))
 
 
+class MealTests(unittest.TestCase):
+    def test_every_resident_has_somewhere_to_eat_twice_a_day(self):
+        # 实机上见过的：作息里没有吃饭，"好饿"就只能靠嘴念一整个下午。
+        registry = BOUNDARY.active()
+        for character_id in YOAKE_MAE.residents:
+            with self.subTest(character_id=character_id):
+                meals = [
+                    segment
+                    for segment in registry.rhythm(character_id).segments
+                    if segment.activity is ActivityKind.EATING
+                ]
+                self.assertGreaterEqual(len(meals), 2)
+
+
 class InitialStateTests(unittest.TestCase):
     def test_every_resident_starts_where_the_rhythm_puts_them_at_19(self):
         registry = BOUNDARY.active()
@@ -123,8 +137,9 @@ class InitialStateTests(unittest.TestCase):
                 self.assertEqual(world.location_of(character_id), segment.location_id)
                 self.assertIs(world.activity_of(character_id).kind, segment.activity)
                 self.assertEqual(world.activity_of(character_id).since, world.clock)
-        # 计划 §5.2 的清单：瑞希在家、绘名在夜间定时制；19:00 谁都不在 Nightcord。
-        self.assertEqual(world.location_of("mizuki"), "mizuki_home_room")
+        # 计划 §5.2 的清单：瑞希在家（19:00 正在吃晚饭）、绘名在夜间定时制；
+        # 19:00 谁都不在 Nightcord。
+        self.assertEqual(world.location_of("mizuki"), "mizuki_home")
         self.assertEqual(world.location_of("ena"), "kamiyama_high")
         self.assertEqual(world.channels_for("mizuki"), [])
         self.assertEqual(world.channels_for("ena"), [])

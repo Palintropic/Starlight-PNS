@@ -532,8 +532,9 @@ class FormalWorldTests(PlaneTestCase):
             with self.assertRaises(SchedulerError):
                 push()
         self.assertEqual(world.state.world_state.clock, start)
+        # 19:00 开局那一段是晚饭：被拒的推进一段作息都没应用。
         self.assertEqual(
-            world.state.world_state.activity_of("mizuki").kind.value, "idle"
+            world.state.world_state.activity_of("mizuki").kind.value, "eating"
         )
         # 正规推进过 21:00：作息照走、边界那一步照写。
         for _ in range(2 * 60 + 1):

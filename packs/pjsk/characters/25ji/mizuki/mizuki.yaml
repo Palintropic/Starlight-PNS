@@ -31,6 +31,10 @@ daily_rhythm:
     activity: resting
     location_id: mizuki_home_room
     source: inferred
+  - at: "11:15"        # 起床后在家吃早午饭再出门；官方无此描写，纯推断
+    activity: eating
+    location_id: mizuki_home
+    source: inferred
   - at: "12:00"        # 神山高校 2-B；官方描写为经常缺课、通常中午才到校
     activity: studying
     location_id: kamiyama_high
@@ -39,7 +43,11 @@ daily_rhythm:
     activity: working_part_time
     location_id: clothing_store_floor
     source: inferred
-  - at: "19:00"
+  - at: "19:00"        # 打工回家后的晚饭；时刻为推断
+    activity: eating
+    location_id: mizuki_home
+    source: inferred
+  - at: "19:40"
     activity: idle
     location_id: mizuki_home_room
     source: inferred

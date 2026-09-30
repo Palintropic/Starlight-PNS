@@ -370,7 +370,7 @@ scope 决定，非安全方法默认要求 `operate`。既没配管理凭据、�
 {"character_id": "mizuki", "activity": "editing_video"}
 ```
 
-`activity` 是服务器声明的闭集：`unspecified`、`idle`、`resting`、`studying`、
+`activity` 是服务器声明的闭集：`unspecified`、`idle`、`resting`、`eating`、`studying`、
 `working_part_time`、`drawing`、`composing`、`editing_video`、`online_chatting`。
 接口不接受自由文本。
 
