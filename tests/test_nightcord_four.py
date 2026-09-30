@@ -8,7 +8,8 @@
 #      "身边没有别人"；
 #   4. 授予是闭的：真冬进不了神山高校，瑞希进不了奏的房间，奏进不了宫女；
 #   5. 01:00 四人都进 Nightcord，之后按各自作息离开（真冬 02:00，其余三人 04:00）；
-#   6. 真冬睡觉的时候，奏不在同一个房间里（ena 对 §3 疑点 3 的判断）。
+#   6. 真冬睡觉的时候，奏不在同一个房间里（ena 对 §3 疑点 3 的判断）；
+#   7. 真冬在奏的房间作词（研究 #8），作词是独立的活动，提示词里有自己的名字。
 #
 # 运行: python -m unittest discover -s tests -p test_nightcord_four.py
 import dataclasses
@@ -18,6 +19,7 @@ from datetime import datetime, time, timedelta
 from pns.models.activation import ActivationDue, ActivationKind
 from pns.models.world_state import ActivityKind
 from pns.runtime.agency.context import build_agency_context
+from pns.runtime.autonomy.prompt import _ACTIVITY_LABELS
 from pns.runtime.formal_world import YOAKE_MAE, formal_session_state
 from pns.runtime.reload import BOUNDARY
 
@@ -46,6 +48,25 @@ def _due(world, character_id):
 class ResidentsTests(unittest.TestCase):
     def test_yoake_mae_has_the_four_of_25ji(self):
         self.assertEqual(set(YOAKE_MAE.residents), set(FOUR))
+
+
+class LyricsTests(unittest.TestCase):
+    def test_mafuyu_writes_lyrics_in_kanades_room(self):
+        segments = [
+            segment
+            for segment in BOUNDARY.active().rhythm("mafuyu").segments
+            if segment.activity is ActivityKind.WRITING_LYRICS
+        ]
+        self.assertTrue(segments, "真冬的一天里没有作词")
+        for segment in segments:
+            self.assertEqual(segment.location_id, "kanade_home_room")
+
+    def test_every_activity_has_a_prompt_label(self):
+        # 没有标签的活动会以英文 id 原样进提示词。
+        for kind in ActivityKind:
+            with self.subTest(kind=kind.value):
+                self.assertIn(kind.value, _ACTIVITY_LABELS)
+        self.assertEqual(_ACTIVITY_LABELS["writing_lyrics"], "作词")
 
 
 class LaunchAnyMinuteTests(unittest.TestCase):
