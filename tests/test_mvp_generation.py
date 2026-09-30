@@ -44,10 +44,12 @@ from pns.models.agency import AgencyOutcome  # noqa: E402
 from pns.models.cognition import REPLY_LAPSED, consumes_allowance  # noqa: E402
 from pns.models.world_state import Availability  # noqa: E402
 from pns.models.event import Event, EventScope, EventType  # noqa: E402
+from pns.models.exposure import ExposureReason  # noqa: E402
 from pns.runtime.agency.engine import reply_activation_id  # noqa: E402
 from pns.runtime.event_commit import commit_session_event  # noqa: E402
 from pns.runtime.scheduler import SchedulerError  # noqa: E402
 from pns.models.memory import MemoryClass, MemoryRecord  # noqa: E402
+from pns.models.observation import Observation  # noqa: E402
 from pns.runtime.autonomy.context import (  # noqa: E402
     ActivationCue,
     GenerationContext,
@@ -601,6 +603,75 @@ class PromptScopeTests(MvpTestCase):
         self.assertIn("【此刻与你同处一地的】宵崎奏", situation)
         self.assertIn("【此刻与你同一在线频道的】东云绘名", situation)
         self.assertNotIn("和你在一起", situation)
+        self.assertNotIn("【此刻你身边】", situation)
+
+    def test_heard_lines_say_when_where_and_whether_they_were_your_own(self):
+        """生产上见过的失败：下线后在自己房间里，接着对频道里的人说话。
+
+        不带时间与地点时，一小时前频道里的聊天和刚才房间里的自言自语在
+        模型眼里是同一场正在进行的对话。
+        """
+        now = datetime(2026, 8, 23, 5, 0)
+        base = _context("ena")
+        context = replace(
+            base,
+            now=now,
+            action_id=ActionId.SPEAK_HERE,
+            target_id=None,
+            location_id="ena_home_studio",
+            channel_ids=(),
+            observations=(
+                Observation(
+                    source_event_id="e1",
+                    observer_id="ena",
+                    reason=ExposureReason.CHANNEL_MEMBER,
+                    observed_at=now - timedelta(minutes=62),
+                    perceived={
+                        "type": "message.sent",
+                        "actor_id": "mizuki",
+                        "char_name": "晓山瑞希",
+                        "text": "明天大概又起不来吧",
+                        "channel_id": "nightcord",
+                    },
+                ),
+                Observation(
+                    source_event_id="e2",
+                    observer_id="ena",
+                    reason=ExposureReason.SELF_ACTION,
+                    observed_at=now - timedelta(minutes=15),
+                    perceived={
+                        "type": "dialogue.spoken",
+                        "actor_id": "ena",
+                        "char_name": "东云绘名",
+                        "text": "说啊。",
+                        "location_id": "ena_home_studio",
+                    },
+                ),
+            ),
+        )
+        situation = render_situation(
+            context, channels=self.registry.new_channel_registry()
+        )
+        self.assertIn("[1 小时前 · 「", situation)
+        self.assertIn("] 晓山瑞希：明天大概又起不来吧", situation)
+        self.assertIn("- [15 分钟前 · 你这里] 你：说啊。", situation)
+        self.assertNotIn("东云绘名：说啊", situation)
+        # 身边没人要明说，而且要说清楚频道里的人也听不见。
+        self.assertIn("【此刻你身边】没有别人", situation)
+        self.assertIn("刚才跟你在线上频道里聊天的人也不在这里", situation)
+        self.assertIn("不要把你自己刚说过的意思换个说法再说一遍", situation)
+
+    def test_a_solo_speaker_is_not_told_they_are_alone_when_someone_is_there(self):
+        context = replace(
+            _context("mizuki"),
+            action_id=ActionId.SPEAK_HERE,
+            target_id=None,
+            co_located_characters=("ena",),
+        )
+        situation = render_situation(
+            context, channels=self.registry.new_channel_registry()
+        )
+        self.assertNotIn("【此刻你身边】", situation)
 
 
 # ── AC3/AC8 provider 侧的东西一个字节都不过边界 ─────────────────────────
