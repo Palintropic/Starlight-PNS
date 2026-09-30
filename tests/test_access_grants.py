@@ -341,6 +341,25 @@ class PackGrantTests(unittest.TestCase):
     def setUpClass(cls):
         cls.registry = build_content_registry()
 
+    def test_the_content_2_residents_declare_their_grants(self):
+        kanade = self.registry.grants("kanade")
+        mafuyu = self.registry.grants("mafuyu")
+        self.assertEqual(
+            dict(kanade.locations),
+            {"kanade_home": "household", "kanade_home_room": "household"},
+        )
+        # 真冬暂住宵崎家，与奏同属 household；学校只给她。
+        self.assertEqual(
+            dict(mafuyu.locations),
+            {
+                "kanade_home": "household",
+                "kanade_home_room": "household",
+                "miyamasuzaka_girls": "student",
+            },
+        )
+        self.assertEqual(kanade.channels, frozenset({"nightcord"}))
+        self.assertEqual(mafuyu.channels, frozenset({"nightcord"}))
+
     def test_the_two_world_1_residents_declare_their_grants(self):
         mizuki = self.registry.grants("mizuki")
         ena = self.registry.grants("ena")
@@ -365,22 +384,22 @@ class PackGrantTests(unittest.TestCase):
         self.assertEqual(ena.channels, frozenset({"nightcord"}))
 
     def test_characters_without_content_get_nothing_by_default(self):
-        # 奏、真冬的授予等 CONTENT-2 随各自内容包进来，这里不预写。
-        for character_id in ("kanade", "mafuyu"):
+        # 25 時以外的角色还没有世界侧内容。
+        for character_id in ("ichika", "airi"):
             with self.subTest(character_id=character_id):
                 self.assertIsNone(self.registry.grants(character_id))
 
     def test_a_new_world_carries_exactly_the_content_grants(self):
         # gate 场景在公开地点、不带频道：世界里只有内容包声明的授予。
         world = self.registry.new_world_state(
-            self.registry.scene("gate"), ["mizuki", "ena", "kanade"]
+            self.registry.scene("gate"), ["mizuki", "ena", "ichika"]
         )
         self.assertEqual(world.metadata["origin"]["scene_grants"], [])
         self.assertTrue(world.may_enter("mizuki", "clothing_store_floor"))
         self.assertFalse(world.may_enter("ena", "clothing_store_floor"))
         self.assertFalse(world.may_enter("ena", "mizuki_home_room"))
         self.assertTrue(world.may_join("ena", "nightcord"))
-        self.assertFalse(world.may_join("kanade", "nightcord"))
+        self.assertFalse(world.may_join("ichika", "nightcord"))
 
 
 class PresenceInvariantTests(unittest.TestCase):
@@ -400,7 +419,7 @@ class PresenceInvariantTests(unittest.TestCase):
         world = registry.new_world_state(registry.scene("gate"), ["mizuki", "ena"])
         for mutate in (
             lambda p: p["character_locations"].update(ena="mizuki_home_room"),
-            lambda p: p["channel_members"].setdefault("nightcord", []).append("mafuyu"),
+            lambda p: p["channel_members"].setdefault("nightcord", []).append("ichika"),
             lambda p: p["location_grants"].pop("mizuki")
             and p["character_locations"].update(mizuki="mizuki_home_room"),
         ):

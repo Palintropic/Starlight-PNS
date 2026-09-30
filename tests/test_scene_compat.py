@@ -88,10 +88,22 @@ class SceneInitializationTests(unittest.TestCase):
         self.assertIs(world.activity_of("ena").kind, ActivityKind.ONLINE_CHATTING)
 
     def test_characters_without_a_modelled_home_fall_back_to_the_placeholder(self):
-        world = _build("nightcord", characters=("mizuki", "kanade"))
+        # 一歌没有内容授予，也没有住处：落到占位地点，频道资格由场景给。
+        world = _build("nightcord", characters=("mizuki", "ichika"))
         self.assertEqual(world.location_of("mizuki"), "mizuki_home_room")
-        self.assertEqual(world.location_of("kanade"), "private_residence")
-        self.assertTrue(world.is_in_channel("kanade", "nightcord"))
+        self.assertEqual(world.location_of("ichika"), "private_residence")
+        self.assertTrue(world.is_in_channel("ichika", "nightcord"))
+
+    def test_kanade_and_mafuyu_come_online_from_kanades_room(self):
+        world = _build("nightcord", characters=("mizuki", "ena", "kanade", "mafuyu"))
+        for character_id in ("kanade", "mafuyu"):
+            with self.subTest(character_id=character_id):
+                self.assertEqual(world.location_of(character_id), "kanade_home_room")
+                self.assertTrue(world.is_in_channel(character_id, "nightcord"))
+                self.assertIs(
+                    world.activity_of(character_id).kind, ActivityKind.ONLINE_CHATTING
+                )
+        self.assertEqual(world.metadata["origin"]["scene_grants"], [])
 
     def test_origin_metadata_is_provenance_only(self):
         world = _build("ena_room")
@@ -194,10 +206,10 @@ class SceneGrantTests(unittest.TestCase):
         self.assertFalse(world.may_enter("mizuki", "ena_home"))
 
     def test_scene_channel_membership_is_recorded_as_scene_given(self):
-        world = _build("nightcord", characters=("mizuki", "kanade"))
-        self.assertTrue(world.may_join("kanade", "nightcord"))
+        world = _build("nightcord", characters=("mizuki", "ichika"))
+        self.assertTrue(world.may_join("ichika", "nightcord"))
         scene_grants = world.metadata["origin"]["scene_grants"]
-        self.assertIn({"character_id": "kanade", "channel_id": "nightcord"}, scene_grants)
+        self.assertIn({"character_id": "ichika", "channel_id": "nightcord"}, scene_grants)
         # 瑞希的成员资格来自内容包，不是场景给的。
         self.assertNotIn({"character_id": "mizuki", "channel_id": "nightcord"}, scene_grants)
 

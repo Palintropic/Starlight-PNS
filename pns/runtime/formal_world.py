@@ -61,7 +61,7 @@ YOAKE_MAE = FormalWorldSpec(
     timezone_name="Asia/Tokyo",
     utc_offset=timedelta(hours=9),
     start=time(19, 0),
-    residents=("mizuki", "ena"),
+    residents=("mizuki", "ena", "kanade", "mafuyu"),
 )
 
 FORMAL_WORLDS: Mapping[str, FormalWorldSpec] = {YOAKE_MAE.world_id: YOAKE_MAE}
