@@ -46,6 +46,7 @@ from pns.models.world_state import Availability  # noqa: E402
 from pns.models.event import Event, EventScope, EventType  # noqa: E402
 from pns.runtime.agency.engine import reply_activation_id  # noqa: E402
 from pns.runtime.event_commit import commit_session_event  # noqa: E402
+from pns.runtime.scheduler import SchedulerError  # noqa: E402
 from pns.models.memory import MemoryClass, MemoryRecord  # noqa: E402
 from pns.runtime.autonomy.context import (  # noqa: E402
     ActivationCue,
@@ -880,7 +881,8 @@ class ReplyBurstTests(MvpTestCase):
                 for a in world.state.activations.pending()
             ):
                 continue
-            world.state.scheduler.schedule(
+            # 回话前缀是保留名，这里走引擎排回话的那个入口。
+            world.state.scheduler._schedule_reply(
                 ScheduledActivation(
                     activation_id=reply_activation_id(cid, source),
                     kind=ActivationKind.CHARACTER_ACTIVATION,
@@ -897,6 +899,30 @@ class ReplyBurstTests(MvpTestCase):
             if r.detail.get("why") == "burst_full"
         ]
         self.assertEqual(len(lapsed), 1)
+
+    def test_nobody_but_the_engine_can_schedule_a_reply(self):
+        # R2 确认：用公开调度器拼一个回话格式的 ID，不管带不带 reply_to，
+        # 都排不进去 —— 于是既拿不到免单，也占不了回话名额。
+        world = self.create()
+        clock = world.state.world_state.clock
+        for payload in ({"reply_to": "missing-event"}, {}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(SchedulerError):
+                    world.state.scheduler.schedule(
+                        ScheduledActivation(
+                            activation_id="reply.activation:ena:missing-event",
+                            kind=ActivationKind.CHARACTER_ACTIVATION,
+                            due_at=clock + timedelta(minutes=1),
+                            character_id="ena",
+                            payload=payload,
+                        )
+                    )
+        self.assertFalse(
+            any(
+                a.activation_id.startswith("reply.activation:")
+                for a in world.state.activations.pending()
+            )
+        )
 
     def test_only_an_untouched_reply_record_is_free(self):
         # R2-B：免单的判据必须彼此印证，改一个理由拿不到它。
@@ -970,7 +996,7 @@ class ReplyBurstTests(MvpTestCase):
                     payload={"text": "在吗", "char_name": "晓山瑞希"},
                 ),
             )
-        world.state.scheduler.schedule(
+        world.state.scheduler._schedule_reply(
             ScheduledActivation(
                 activation_id=reply_activation_id("ena", "said"),
                 kind=ActivationKind.CHARACTER_ACTIVATION,

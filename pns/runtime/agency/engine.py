@@ -59,6 +59,7 @@ from pns.runtime.agency.policy import (
 )
 from pns.runtime.agency.preconditions import failed_preconditions
 from pns.runtime.event_commit import commit_session_event
+from pns.runtime.scheduler import REPLY_ACTIVATION_PREFIX
 
 
 # 回话机会的来源必须是一句话，而且回话只能回到那句话所在的媒介里。
@@ -87,7 +88,7 @@ def _reply_action(medium: Tuple[str, str]) -> Tuple[ActionId, Optional[str]]:
 
 def reply_activation_id(character_id: str, source_event_id: str) -> str:
     """一次回话机会的激活 ID。它就是回话身份：只有 _offer_replies 用这个格式排。"""
-    return f"reply.activation:{character_id}:{source_event_id}"
+    return f"{REPLY_ACTIVATION_PREFIX}{character_id}:{source_event_id}"
 
 
 def _reply_source(due: ActivationDue) -> Optional[str]:
@@ -112,7 +113,7 @@ def _is_reply_line(event) -> bool:
     return (
         provenance.get("kind") == "agency"
         and isinstance(activation_id, str)
-        and activation_id.startswith("reply.activation:")
+        and activation_id.startswith(REPLY_ACTIVATION_PREFIX)
     )
 
 
@@ -651,7 +652,7 @@ class AgencyEngine:
                 for pending in scheduler.pending()
             ):
                 continue
-            scheduler.schedule(
+            scheduler._schedule_reply(
                 ScheduledActivation(
                     activation_id=reply_activation_id(member, event.event_id),
                     kind=ActivationKind.CHARACTER_ACTIVATION,

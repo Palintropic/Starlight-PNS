@@ -1939,7 +1939,7 @@ class ReplyMediumTests(unittest.TestCase):
                 return PolicyDecision(rationale="just looking")
 
         engine = AgencyEngine(state, policy=_Look())
-        scheduler.schedule(
+        scheduler._schedule_reply(
             ScheduledActivation(
                 activation_id="reply.activation:ena:said",
                 kind=ActivationKind.CHARACTER_ACTIVATION,
