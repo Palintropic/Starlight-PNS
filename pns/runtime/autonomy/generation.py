@@ -44,7 +44,10 @@ from pns.runtime.memory.projection import recalled_lines
 MAX_LINE_CHARS = 2000
 
 # 模型可以明确选择不说话。使用一个不可能被误认成自然台词的精确令牌；只有
-# 整份输出逐字等于它才算弃权，夹在句子里的同样文本仍按普通台词处理。
+# 整份输出逐字等于它才算弃权。令牌跟台词混在一起（"……晚安。<ABSTAIN>"）
+# 是一次意图不明的输出：既说了又说不说。它不能当台词放行 —— 那样令牌会原样
+# 进世界历史、再被别人听见 —— 也不能擅自切掉令牌只留前半句，那等于替模型
+# 决定它想说话。所以按不合法输出拒绝，结果跟不说话一样安静，但留有审计。
 ABSTAIN_TOKEN = "<ABSTAIN>"
 
 _LEADING_STAGE_DIRECTION = re.compile(r"^(?:（[^）]*）|\([^)]*\))")
@@ -95,6 +98,10 @@ def parse_line(raw, context: GenerationContext) -> str:
         )
     if not text:
         raise GenerationError("生成输出是空的 —— 没说出口的话不是一句台词")
+    if ABSTAIN_TOKEN in text and text != ABSTAIN_TOKEN:
+        raise GenerationError(
+            f"生成输出把台词和 {ABSTAIN_TOKEN} 混在一起，意图不明，不当台词处理"
+        )
     if _LEADING_STAGE_DIRECTION.match(text):
         raise GenerationError("生成输出不能以括号动作或舞台说明开头")
     if _JAPANESE_KANA.search(text):

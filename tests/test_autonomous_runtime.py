@@ -796,10 +796,19 @@ class UntrustedOutputTests(unittest.TestCase):
         self.assertIs(result.outcome, ActivationOutcome.REJECTED)
         self.assertIs(result.agency_outcome, AgencyOutcome.REJECTED_POLICY_ERROR)
 
-    def test_the_abstain_token_inside_a_sentence_is_ordinary_dialogue(self):
-        state, scheduler, runtime = _rig(lines={"mizuki": f"不是 {ABSTAIN_TOKEN} 啦"})
-        result = runtime.process_due(_due(scheduler))
-        self.assertIs(result.outcome, ActivationOutcome.ACTED)
+    def test_a_line_mixed_with_the_abstain_token_is_rejected_not_spoken(self):
+        # 生产上见过的形状：一句台词后面挂着令牌。它既不能进世界历史，
+        # 也不能被切成前半句当台词说出去。
+        for raw in (f"……晚安啦，笨蛋。  {ABSTAIN_TOKEN}", f"不是 {ABSTAIN_TOKEN} 啦"):
+            with self.subTest(raw=raw):
+                state, scheduler, runtime = _rig(lines={"mizuki": raw})
+                result = runtime.process_due(_due(scheduler))
+                self.assertIs(result.outcome, ActivationOutcome.REJECTED)
+                self.assertIs(
+                    result.agency_outcome, AgencyOutcome.REJECTED_POLICY_ERROR
+                )
+                self.assertEqual(state.events.by_type(EventType.MESSAGE_SENT), ())
+                self.assertTrue(state.activation_outbox.is_acknowledged(result.due_id))
 
     def test_a_malformed_generation_is_a_terminal_rejection(self):
         state, scheduler, runtime = _rig(lines={"mizuki": lambda c: {"nope": 1}})
