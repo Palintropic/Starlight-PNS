@@ -102,6 +102,7 @@ TEMPERATURE_ENV = "PNS_AUTONOMY_TEMPERATURE"
 ACTIVATIONS_PER_RUN_ENV = "PNS_AUTONOMY_ACTIVATIONS_PER_RUN"
 # 有人当着别人说话之后，多少模拟分钟后给在场的其他人一次回话机会；0 = 关。
 REPLY_DELAY_ENV = "PNS_AUTONOMY_REPLY_DELAY_MINUTES"
+REPLY_BURST_ENV = "PNS_AUTONOMY_REPLY_BURST_LINES"
 WORLD_ACTION_CAP_ENV = "PNS_AUTONOMY_WORLD_ACTION_CAP"
 # 正式世界的开局时刻。不设 = 正式世界定义里写的时刻（夜明け前是东京 19:00）；
 # `now` = 按下开局的那一分钟，世界时间从第一分钟起就与现实对齐。认不出来的值
@@ -189,6 +190,8 @@ class AutonomySettings:
     world_action_cap: int = 100_000
     # 回话机会的延迟（模拟分钟）。None = 关，只按固定节拍被考虑。
     reply_delay_minutes: Optional[int] = 1
+    # 同一个频道 / 地点 30 分钟内说满这么多句，就不再给回话机会（见 AgencyBudget）。
+    reply_burst_lines: int = 8
     # 进程收尾时最多等每个时钟 worker 多少秒。比 clock.stop_timeout_seconds 短：
     # 停机不该被一次慢模型调用无限期拖住，而真正挡住"晚到的提交"的是 P11
     # 的终局 stop()，不是这次等待。
@@ -265,6 +268,7 @@ class AutonomySettings:
             temperature=_env_number(TEMPERATURE_ENV, 0.85, float),
             world_action_cap=_env_number(WORLD_ACTION_CAP_ENV, 100_000, int),
             reply_delay_minutes=_env_number(REPLY_DELAY_ENV, 1, int) or None,
+            reply_burst_lines=_env_number(REPLY_BURST_ENV, 8, int),
         )
 
     def agency_budget(self) -> AgencyBudget:
@@ -277,6 +281,7 @@ class AutonomySettings:
         return AgencyBudget(
             max_committed_actions_per_session=self.world_action_cap,
             reply_delay_minutes=self.reply_delay_minutes,
+            reply_burst_lines=self.reply_burst_lines,
         )
 
     def to_dict(self) -> Dict:

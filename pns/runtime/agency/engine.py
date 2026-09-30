@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Dict, Mapping, Optional, Tuple
 
-from pns.models.action import ActionProposal
+from pns.models.action import ActionId, ActionProposal
 from pns.models.activation import ActivationDue, ActivationKind, ScheduledActivation
 from pns.models.authored import GenerationAudit
 from pns.models.agency import (
@@ -40,11 +40,13 @@ from pns.models.agency import (
 )
 from pns.models.activation_outbox import ActivationOutboxError
 from pns.models.cognition import (
+    REPLY_LAPSED,
     CognitionCause,
     consumes_allowance,
     unavailable_causes,
     wall_now,
 )
+from pns.models.event import EventType
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.agency.context import AgencyContext, build_agency_context
@@ -57,6 +59,36 @@ from pns.runtime.agency.policy import (
 )
 from pns.runtime.agency.preconditions import failed_preconditions
 from pns.runtime.event_commit import commit_session_event
+
+
+# 回话机会的来源必须是一句话，而且回话只能回到那句话所在的媒介里。
+# 同一个媒介里，这段时间内说过的话达到 AgencyBudget.reply_burst_lines 条之后，
+# 就不再给回话机会，对话退回固定节拍。窗口按世界历史算，不按因果链：固定节拍
+# 在对话中途开口时会开一条新链，按链计数的上限因此永远到不了。
+REPLY_BURST_WINDOW = timedelta(minutes=30)
+
+
+def _reply_medium(event) -> Optional[Tuple[str, str]]:
+    """一句话发生在哪个媒介：("channel", 频道) 或 ("location", 地点)。不是话返回 None。"""
+    if event.type is EventType.MESSAGE_SENT and event.channel_id:
+        return ("channel", event.channel_id)
+    if event.type is EventType.DIALOGUE_SPOKEN and event.location_id:
+        return ("location", event.location_id)
+    return None
+
+
+def _reply_action(medium: Tuple[str, str]) -> Tuple[ActionId, Optional[str]]:
+    kind, anchor = medium
+    if kind == "channel":
+        return ActionId.SEND_CHANNEL_MESSAGE, anchor
+    return ActionId.SPEAK_HERE, None
+
+
+def _still_in(world: WorldState, character_id: str, medium: Tuple[str, str]) -> bool:
+    kind, anchor = medium
+    if kind == "channel":
+        return anchor in world.channels_for(character_id)
+    return world.location_of(character_id) == anchor
 
 
 class AgencyEngineError(ValueError):
@@ -275,6 +307,14 @@ class AgencyEngine:
                 detail={"reason": "unknown_character", "character_id": character_id},
             )
 
+        reply_medium = None
+        if "reply_to" in due.payload:
+            reply_medium, lapse = self._reply_gate(due, character_id)
+            if lapse is not None:
+                # 在问策略之前收尾：没有生成、没有判分，也就不花单次额度
+                # （见 consumes_allowance）。
+                return plan(AgencyOutcome.REJECTED_STALE, detail=lapse)
+
         committed = self._state.agency.committed_actions()
         if committed >= self._budget.max_committed_actions_per_session:
             return plan(
@@ -287,6 +327,18 @@ class AgencyEngine:
             )
 
         context = self.context_for(due)
+        if reply_medium is not None:
+            # 回话只能回到来源那句话的媒介里。收窄的是合法枚举本身，所以策略
+            # 选不出别的动作，提案期的 has_legal 检查也会拒绝任何别的动作。
+            action_id, target_id = _reply_action(reply_medium)
+            context = replace(
+                context,
+                legal_actions=tuple(
+                    legal
+                    for legal in context.legal_actions
+                    if legal.action_id is action_id and legal.target_id == target_id
+                ),
+            )
         try:
             decision = self._policy.decide(context)
         except AgencyPolicyError as e:
@@ -484,22 +536,66 @@ class AgencyEngine:
             self._settle_cognition(record)
         return record
 
+    def _reply_gate(self, due: ActivationDue, character_id: str):
+        """回话机会到期时还成不成立。成立返回 (媒介, None)，否则 (None, 失效细节)。
+
+        来源从世界历史里按 reply_to 取，不信排期 payload 里的任何别的东西。成立
+        的条件：来源是一句话；回话的人此刻仍在那句话的媒介里（还在那个频道 /
+        还在那个地点）；而且在那里开口的前置条件此刻都满足（比如没睡着）。
+        """
+        source_id = due.payload.get("reply_to")
+        events = self._state.events
+        if not isinstance(source_id, str) or not events.has(source_id):
+            return None, {"reason": REPLY_LAPSED, "why": "source_missing"}
+        medium = _reply_medium(events.get(source_id))
+        if medium is None:
+            return None, {"reason": REPLY_LAPSED, "why": "source_not_speech"}
+        if not _still_in(self.world, character_id, medium):
+            return None, {
+                "reason": REPLY_LAPSED,
+                "why": "left_the_conversation",
+                "medium": list(medium),
+            }
+        failed = failed_preconditions(self.world, character_id, *_reply_action(medium))
+        if failed:
+            return None, {
+                "reason": REPLY_LAPSED,
+                "why": "cannot_answer",
+                "failed": [precondition.value for precondition in failed],
+            }
+        return medium, None
+
     def _offer_replies(self, event) -> None:
         """给当时在场的其他人排一次一次性的回话机会（在提交事务之内）。
 
-        在场名单取事件自己记下的 participants（频道成员 / 同处一地的人），不是
-        会话名单。已经有一次不晚于那一刻的排期的人不再加：一个人同一时刻只
-        需要被问一次。排期跟触发它的事件同生共死，事务回滚它也一起消失。
+        只有一句话（频道消息 / 当面说话）才会引来回话；上线、下线、移动不会。
+        在场名单取事件自己记下的 participants，不是会话名单；此刻就答不了话
+        的人（比如睡着了）不排。这个媒介最近说过的话已经够多时一个都不排，
+        对话退回固定节拍。已经有一次不晚于那一刻的排期的人不再加。排期跟触发
+        它的事件同生共死，事务回滚它也一起消失。
         """
         delay = self._budget.reply_delay_minutes
         if delay is None or not event.participants:
             return
+        medium = _reply_medium(event)
+        if medium is None:
+            return
         scheduler = self._state.scheduler
         if scheduler is None:
             return
+        recent = sum(
+            1
+            for earlier in self._state.events.since(self.clock - REPLY_BURST_WINDOW)
+            if _reply_medium(earlier) == medium
+        )
+        if recent >= self._budget.reply_burst_lines:
+            return
+        action_id, target_id = _reply_action(medium)
         due_at = self.clock + timedelta(minutes=delay)
         for member in event.participants:
             if member == event.actor_id:
+                continue
+            if failed_preconditions(self.world, member, action_id, target_id):
                 continue
             if any(
                 pending.character_id == member and pending.due_at <= due_at
@@ -577,14 +673,14 @@ class AgencyEngine:
         current = timeline.current
         changed = False
         if (
-            consumes_allowance(record.outcome)
+            consumes_allowance(record)
             and current.run_allowance is not None
             and CognitionCause.RUN_BUDGET_EXHAUSTED not in current.causes
         ):
             used = sum(
                 1
                 for earlier in state.agency.records()[current.allowance_since_log :]
-                if consumes_allowance(earlier.outcome)
+                if consumes_allowance(earlier)
             )
             if used >= current.run_allowance:
                 timeline = timeline.run_budget_exhausted(

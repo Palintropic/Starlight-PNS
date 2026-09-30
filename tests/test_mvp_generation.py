@@ -41,6 +41,8 @@ from pns.runtime.autonomy.clock_worker import ClockConfig  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
 from pns.models.activation import ActivationKind, ScheduledActivation  # noqa: E402
 from pns.models.agency import AgencyOutcome  # noqa: E402
+from pns.models.cognition import REPLY_LAPSED, consumes_allowance  # noqa: E402
+from pns.models.world_state import Availability  # noqa: E402
 from pns.models.event import EventType  # noqa: E402
 from pns.models.memory import MemoryClass, MemoryRecord  # noqa: E402
 from pns.runtime.autonomy.context import (  # noqa: E402
@@ -751,6 +753,96 @@ class ReplyTests(MvpTestCase):
         self.assertTrue(broken.called, "提交确实走到了、并且在事务里失败了")
         self.assertEqual(world.state.events.by_type(EventType.MESSAGE_SENT), ())
         self.assertEqual(self.replies(world), [], "事件没落地，回话机会也不许留下")
+
+
+class ReplyGateTests(MvpTestCase):
+    """WEB-2 F1/F2/F4：回话机会到期时必须还是对那句话的回话。"""
+
+    reply_delay = "1"
+
+    def lapsed(self, world, character_id):
+        return [
+            r
+            for r in world.state.agency.records()
+            if r.character_id == character_id
+            and r.outcome is AgencyOutcome.REJECTED_STALE
+            and r.detail.get("reason") == REPLY_LAPSED
+        ]
+
+    def test_someone_who_left_the_channel_does_not_reply_anywhere_else(self):
+        # F1 的原样复现：瑞希在频道里说了一句，绘名在回话到期前离开了频道。
+        world = self.create()
+        self.advance(world, 5)
+        # 这一段里先有一条她自己的状态变更事件，作息就不会在下一分钟把她
+        # 放回频道（段内的决定优先于作息）。
+        self.plane.set_activity("nightcord", "ena", "drawing")
+        with world.state.atomic_commit():
+            world.state.world_state.leave_channel("ena", "nightcord")
+        generated = len(self.provider.generations)
+        self.advance(world, 1)
+        spoken_by_ena = [
+            e
+            for e in world.state.events
+            if e.actor_id == "ena"
+            and e.type in (EventType.MESSAGE_SENT, EventType.DIALOGUE_SPOKEN)
+        ]
+        self.assertEqual(spoken_by_ena, [], "回话不许换个媒介说出去")
+        [record] = self.lapsed(world, "ena")
+        self.assertEqual(record.detail["why"], "left_the_conversation")
+        self.assertEqual(len(self.provider.generations), generated, "失效的回话不调模型")
+        self.assertFalse(consumes_allowance(record), "失效的回话不花单次额度")
+
+    def test_someone_asleep_by_then_is_not_asked_and_spends_nothing(self):
+        # F4：排上之后睡着了。
+        world = self.create()
+        self.advance(world, 5)
+        with world.state.atomic_commit():
+            world.state.world_state.set_availability("ena", Availability.ASLEEP)
+        self.advance(world, 1)
+        [record] = self.lapsed(world, "ena")
+        self.assertEqual(record.detail["why"], "cannot_answer")
+        self.assertFalse(consumes_allowance(record))
+
+    def test_someone_already_asleep_is_not_scheduled_at_all(self):
+        # F4：说话那一刻就睡着的人，根本不排。
+        world = self.create()
+        with world.state.atomic_commit():
+            world.state.world_state.set_availability("ena", Availability.ASLEEP)
+        self.advance(world, 5)
+        self.assertTrue(world.state.events.by_type(EventType.MESSAGE_SENT))
+        self.assertFalse(
+            any(
+                a.activation_id.startswith("reply.activation:ena:")
+                for a in world.state.activations.pending()
+            )
+        )
+
+    def test_a_talkative_pair_stops_being_asked_after_a_burst(self):
+        # F2：两个人都愿意一直接话。30 分钟窗口里说满 8 句之后不再排回话，
+        # 对话退回固定节拍，而不是一分钟一句直到额度烧完。
+        world = self.create()
+        self.advance(world, 15)
+        lines = world.state.events.by_type(EventType.MESSAGE_SENT)
+        self.assertEqual(len(lines), 8)
+        self.assertFalse(
+            any(
+                a.activation_id.startswith("reply.activation:")
+                for a in world.state.activations.pending()
+            )
+        )
+        # 固定节拍还在：窗口里已经满了，节拍开口也不再引来回话。
+        self.advance(world, 15)
+        self.assertLessEqual(
+            len(world.state.events.by_type(EventType.MESSAGE_SENT)), 8 + 2
+        )
+
+    def test_a_lapse_record_that_carries_an_audit_still_spends_allowance(self):
+        # 免单只给"没问过策略"的失效回话；带着判分凭据的记录不能借这个理由。
+        class _Record:
+            outcome = AgencyOutcome.REJECTED_STALE
+            detail = {"reason": REPLY_LAPSED, "audit": {}}
+
+        self.assertTrue(consumes_allowance(_Record()))
 
 
 class RejectedLineReplyTests(MvpTestCase):

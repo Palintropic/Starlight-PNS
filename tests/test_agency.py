@@ -1873,6 +1873,90 @@ class EffectTests(unittest.TestCase):
                 self._event(proposal)
 
 
+# ── 回话机会只由一句话引来 ──────────────────────────────────────────────
+class ReplyOfferTests(unittest.TestCase):
+    """WEB-2 F3：上线、下线、移动都不是一句话，不该给任何人排"回话"。"""
+
+    def _commit(self, action_id, target_id, *, actor="ena", join=("mizuki", "ena")):
+        world = _world(join_nightcord=join)
+        state = _session(world)
+        scheduler = PersistentScheduler(state)
+        engine = AgencyEngine(
+            state, policy=ScriptedPolicy({}), budget=AgencyBudget(reply_delay_minutes=1)
+        )
+        due = _due(scheduler, character_id=actor)
+        record = engine.commit(
+            ProposalPlan(
+                due=due,
+                character_id=actor,
+                policy="manual",
+                proposed_at=world.clock,
+                verdict=AgencyOutcome.ACTED,
+                proposal=ActionProposal(
+                    proposal_id="p1",
+                    character_id=actor,
+                    action_id=action_id,
+                    target_id=target_id,
+                ),
+            )
+        )
+        self.assertIs(record.outcome, AgencyOutcome.ACTED)
+        return [
+            a
+            for a in state.activations.pending()
+            if a.activation_id.startswith("reply.activation:")
+        ]
+
+    def test_joining_a_channel_asks_nobody(self):
+        self.assertEqual(
+            self._commit(ActionId.JOIN_CHANNEL, "nightcord", join=("mizuki",)), []
+        )
+
+    def test_leaving_a_channel_asks_nobody(self):
+        self.assertEqual(self._commit(ActionId.LEAVE_CHANNEL, "nightcord"), [])
+
+    def test_moving_asks_nobody(self):
+        self.assertEqual(self._commit(ActionId.MOVE_TO, "ena_home"), [])
+
+
+class ReplyMediumTests(unittest.TestCase):
+    """WEB-2 F1：回话只能回到来源那句话的媒介里。"""
+
+    def test_a_reply_to_something_said_here_cannot_become_a_channel_message(self):
+        # 两人同处一室、又都挂在频道里：当面说的一句话，回话只能当面说。
+        world = _world(join_nightcord=("mizuki", "ena"))
+        world.place_character("ena", "mizuki_home_room")
+        state = _session(world)
+        scheduler = PersistentScheduler(state)
+        _commit_dialogue_at(state, "mizuki", "mizuki_home_room", "在吗", event_id="said")
+        seen = []
+
+        class _Look(AgencyPolicy):
+            name = "look"
+
+            def decide(self, context):
+                seen.append(context.legal_actions)
+                return PolicyDecision(rationale="just looking")
+
+        engine = AgencyEngine(state, policy=_Look())
+        scheduler.schedule(
+            ScheduledActivation(
+                activation_id="reply.activation:ena:said",
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=scheduler.clock + timedelta(minutes=1),
+                character_id="ena",
+                payload={"reply_to": "said"},
+            )
+        )
+        due = scheduler.advance_by(1).due[0]
+        engine.propose(due)
+        [legal] = seen
+        self.assertEqual(
+            [(action.action_id, action.target_id) for action in legal],
+            [(ActionId.SPEAK_HERE, None)],
+        )
+
+
 # ── 与曝光层的接合 ──────────────────────────────────────────────────────
 class ExposureIntegrationTests(unittest.TestCase):
     """自主动作跟别的已提交事件一样，逐个候选角色判定曝光。"""

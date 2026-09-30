@@ -545,13 +545,35 @@ def wall_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def consumes_allowance(outcome) -> bool:
-    """一条 Agency 结局是否用掉了认知（从而消耗单次额度）。
+# 回话机会到期时已经不成立（对方离开了那段对话、睡着了、来源不是一句话）。
+# 引擎在问策略**之前**就把它收尾成 rejected_stale，于是它没有用到认知。
+REPLY_LAPSED = "reply_lapsed"
 
-    只有"认知不可用"没有用到认知；其余结局——行动、弃权、各种拒绝——都是
-    认知真的运行过之后给出的。
+
+def consumes_allowance(record) -> bool:
+    """一条 Agency 记录是否用掉了认知（从而消耗单次额度）。
+
+    "认知不可用"没有用到认知；到期时就已失效、没问过策略的回话机会也没有。
+    其余结局——行动、弃权、各种拒绝——都是认知真的运行过之后给出的。
+
+    判据只读记录本身（结局码 + detail），所以引擎记账、存档加载复核和状态
+    报告三处算出来的永远是同一个数。传结局码也行（旧调用形状），那时只按
+    结局码判断。
     """
-    return getattr(outcome, "value", outcome) != "rejected_unavailable"
+    outcome = getattr(record, "outcome", record)
+    value = getattr(outcome, "value", outcome)
+    if value == "rejected_unavailable":
+        return False
+    detail = getattr(record, "detail", None)
+    if (
+        value == "rejected_stale"
+        and isinstance(detail, Mapping)
+        and detail.get("reason") == REPLY_LAPSED
+        # 判过分的记录一定调用过模型：带着凭据的记录不能借这个理由免单。
+        and "audit" not in detail
+    ):
+        return False
+    return True
 
 
 def next_minute_after(moment: datetime) -> datetime:
@@ -571,6 +593,7 @@ __all__ = [
     "OPERATOR_CLEARABLE",
     "TransitionKind",
     "consumes_allowance",
+    "REPLY_LAPSED",
     "next_minute_after",
     "normalize_causes",
     "unavailable_causes",

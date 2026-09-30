@@ -756,7 +756,7 @@ class AutonomousRuntime:
             used = sum(
                 1
                 for record in state.agency.records()[current.allowance_since_log :]
-                if consumes_allowance(record.outcome)
+                if consumes_allowance(record)
             )
             remaining = max(0, current.run_allowance - used)
         report = {
