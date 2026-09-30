@@ -641,12 +641,19 @@ class WorldControlPlane:
                 raise ContentUnavailable(f"这个世界的开局排期播不下去：{e}") from e
 
         adapters = self.build_adapters(registry, seed=seed)
+        # 开局状态和时钟锚点必须用**同一个**现实时刻。"now" 模式下模拟端是按下
+        # 那一分钟的整分，现实端也截到同一个整分：否则按在 02:01:15 的世界会
+        # 永远晚 15 秒走到每一分钟（WEB-2 F5）。"跟东京对齐"只在 1:1 时有意义；
+        # 别的倍率下截掉的那几秒会被放大成模拟里的几小时，所以不截。
+        pressed = utc_now()
+        aligned = spec.start is None and self._autonomy.clock.rate == 1
+        anchor_wall = pressed.replace(second=0, microsecond=0) if aligned else pressed
         try:
             state = formal_session_state(
                 spec,
                 registry,
                 session_id=_new_session_id(name),
-                wall=utc_now(),
+                wall=pressed,
                 operator=operator,
             )
         except FormalWorldError as e:
@@ -657,6 +664,7 @@ class WorldControlPlane:
             adapters=adapters,
             checkpoint_policy=self._policy,
             clock=self._autonomy.clock,
+            anchor_wall=anchor_wall,
         )
         return self._with_driver(world.status())
 

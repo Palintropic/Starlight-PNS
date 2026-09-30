@@ -762,8 +762,12 @@ class WorldLifecycleService:
         start: bool = True,
         clock: Optional[ClockConfig] = None,
         wall_clock: Optional[Callable[[], datetime]] = None,
+        anchor_wall: Optional[datetime] = None,
     ) -> PersistentWorld:
         """建一个新世界，并且当场写下第 1 版存档。
+
+        `anchor_wall` 只决定锚点的现实端（开局状态是按哪个现实时刻造的，就该
+        锚在哪个时刻），不是时钟源：时钟 worker 仍然读 `wall_clock` / 现实时间。
 
         带 `clock` 的世界按现实时间走：锚点从此刻、从世界的开局时钟开始，认知
         从"还没 Start"开始；句柄登记之后起时钟 worker。
@@ -800,7 +804,12 @@ class WorldLifecycleService:
                 )
             runtime = adapters.bind(state)
             if clock is not None:
-                now = wall_clock() if wall_clock is not None else utc_now()
+                if anchor_wall is not None:
+                    if anchor_wall.utcoffset() is None:
+                        raise LifecycleError("anchor_wall 必须带时区")
+                    now = anchor_wall
+                else:
+                    now = wall_clock() if wall_clock is not None else utc_now()
                 runtime.open_clock(
                     ClockAnchor(state.world_state.clock, now, clock.rate), wall=now
                 )

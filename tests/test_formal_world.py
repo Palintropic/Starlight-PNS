@@ -332,8 +332,13 @@ class BootstrapApiTests(PlaneTestCase):
     def test_start_now_launches_at_the_tokyo_minute_it_was_pressed(self):
         # 东京 2026-09-29 02:01:15：瑞希和绘名都在 25 時那一段里。
         pressed = datetime(2026, 9, 28, 17, 1, 15, tzinfo=timezone.utc)
+        # 时钟 worker 的现实时间也停在按下那一刻：替身时刻和真实时刻差着几天，
+        # 不这样的话 worker 会以为世界落后了几天，一口气追上去。
         with patch.dict(os.environ, {"PNS_FORMAL_START": "now"}), patch(
             "pns.interfaces.composition.utc_now", return_value=pressed
+        ), patch(
+            "pns.runtime.autonomy.clock_worker.monotonic_wall",
+            return_value=lambda: pressed,
         ):
             response = self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
         self.assertEqual(response.status_code, 201, response.text)
@@ -341,6 +346,13 @@ class BootstrapApiTests(PlaneTestCase):
         self.assertEqual(state.world_state.clock, datetime(2026, 9, 29, 2, 1))
         self.assertEqual(state.world_state.metadata["origin"]["start"], "2026-09-29T02:01:00")
         self.assertEqual(state.anchor.sim_epoch, datetime(2026, 9, 29, 2, 1))
+        # WEB-2 F5：现实端也是那一个整分，于是模拟的 02:02 就在现实的 02:02:00，
+        # 不是按下时刻带着的那 15 秒之后。
+        self.assertEqual(state.anchor.wall_epoch, pressed.replace(second=0))
+        self.assertEqual(
+            state.anchor.sim_at(datetime(2026, 9, 28, 17, 2, tzinfo=timezone.utc)),
+            datetime(2026, 9, 29, 2, 2),
+        )
         self.assertEqual(
             set(state.world_state.channel_participants("nightcord")), {"mizuki", "ena"}
         )
