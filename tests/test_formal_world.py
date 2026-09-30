@@ -112,10 +112,12 @@ class LaunchClockTests(unittest.TestCase):
 
 
 class MealTests(unittest.TestCase):
-    def test_every_resident_has_somewhere_to_eat_twice_a_day(self):
+    def test_mizuki_and_ena_keep_their_two_meals(self):
         # 实机上见过的：作息里没有吃饭，"好饿"就只能靠嘴念一整个下午。
+        # 只钉已经决定的这两人；饭点是逐个角色的内容取舍，不是全体居民的
+        # 规范（奏的研究 #5 就不支持每天固定两顿）。
         registry = BOUNDARY.active()
-        for character_id in YOAKE_MAE.residents:
+        for character_id in ("mizuki", "ena"):
             with self.subTest(character_id=character_id):
                 meals = [
                     segment

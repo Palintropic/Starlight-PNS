@@ -256,11 +256,12 @@ def render_situation(
     # "没有人"要明说。只列出在场者时，空着的那一栏在模型眼里跟"这里没写"
     # 没有区别，于是它会接着对刚才频道里的人说话，等一个永远不会来的回复。
     # 刻意不说"谁也听不见"：同处一地之外还有 audible_from 那条通道，那一句
-    # 由这份上下文担保不了；"身边没人、频道里的人不在这里"担保得了。
+    # 由这份上下文担保不了；也不说"你不是在回他们"，那是替角色判断意图。
+    # "身边没人、频道里的人不在这里、这句话不进频道"三件事都是世界事实。
     if context.action_id is ActionId.SPEAK_HERE and not context.co_located_characters:
         parts.append(
             "【此刻你身边】没有别人。刚才跟你在线上频道里聊天的人也不在这里，"
-            "你在这里说的话不是在回他们。"
+            "你在这里说的话不会发到线上频道。"
         )
     elif (
         context.action_id is ActionId.SEND_CHANNEL_MESSAGE

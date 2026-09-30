@@ -659,6 +659,7 @@ class PromptScopeTests(MvpTestCase):
         # 身边没人要明说，而且要说清楚频道里的人也听不见。
         self.assertIn("【此刻你身边】没有别人", situation)
         self.assertIn("刚才跟你在线上频道里聊天的人也不在这里", situation)
+        self.assertIn("你在这里说的话不会发到线上频道", situation)
         self.assertIn("不要把你自己刚说过的意思换个说法再说一遍", situation)
 
     def test_a_solo_speaker_is_not_told_they_are_alone_when_someone_is_there(self):
