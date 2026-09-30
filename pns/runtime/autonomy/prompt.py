@@ -51,6 +51,7 @@ _ACTIVITY_LABELS = {
     "unspecified": "未指定（不要根据职业、地点或习惯猜测具体活动）",
     "idle": "空闲",
     "resting": "休息",
+    "eating": "吃饭",
     "studying": "学习",
     "working_part_time": "打工",
     "drawing": "画画",
@@ -252,6 +253,21 @@ def render_situation(
             "【此刻与你同一在线频道的】"
             + visible_names(context.channel_characters)
         )
+    # "没有人"要明说。只列出在场者时，空着的那一栏在模型眼里跟"这里没写"
+    # 没有区别，于是它会接着对刚才频道里的人说话，等一个永远不会来的回复。
+    # 刻意不说"谁也听不见"：同处一地之外还有 audible_from 那条通道，那一句
+    # 由这份上下文担保不了；也不说"你不是在回他们"，那是替角色判断意图。
+    # "身边没人、频道里的人不在这里、这句话不进频道"三件事都是世界事实。
+    if context.action_id is ActionId.SPEAK_HERE and not context.co_located_characters:
+        parts.append(
+            "【此刻你身边】没有别人。刚才跟你在线上频道里聊天的人也不在这里，"
+            "你在这里说的话不会发到线上频道。"
+        )
+    elif (
+        context.action_id is ActionId.SEND_CHANNEL_MESSAGE
+        and not context.channel_characters
+    ):
+        parts.append("【此刻频道里】没有别人在线。")
     if (
         context.perceived_characters
         and not context.co_located_characters
@@ -263,9 +279,16 @@ def render_situation(
             + visible_names(context.perceived_characters)
         )
 
-    observed = _tail(context.observed_lines, max_observed)
+    observed = _tail(
+        [o for o in context.observations if o.render_line() is not None], max_observed
+    )
     if observed:
-        parts.append("【你刚刚看到/听到的】\n" + "\n".join(f"- {line}" for line in observed))
+        parts.append(
+            "【你最近看到/听到的】（标着「你」的是你自己说的）\n"
+            + "\n".join(
+                f"- {_observed_line(o, context, view, names)}" for o in observed
+            )
+        )
     elif context.observations:
         # 有观察、但一条都渲染不成对话行（比如只观察到别人上线/离线）。
         # 说清楚"你什么都没听见"和"这里没写"是两回事。
@@ -295,11 +318,51 @@ def render_situation(
         + "\n".join(f"- {rule}" for rule in DIALOGUE_OUTPUT_RULES)
     )
     parts.append(
-        "如果这一刻没有自然开口的必要，只输出 <ABSTAIN>。否则只输出你要说的"
-        "那一句话本身：不要旁白、不要动作描写、不要加你自己的名字前缀，"
-        "也不要解释你为什么这么说。"
+        "不要把你自己刚说过的意思换个说法再说一遍。一个人待着的时候，大多数时刻"
+        "人是不出声的。如果这一刻没有自然开口的必要，或者想说的跟刚才差不多，"
+        "只输出 <ABSTAIN>。否则只输出你要说的那一句话本身：不要旁白、不要动作"
+        "描写、不要加你自己的名字前缀，也不要解释你为什么这么说。"
     )
     return "\n\n".join(parts)
+
+
+def _ago(then: datetime, now: datetime) -> str:
+    minutes = int((now - then).total_seconds() // 60)
+    if minutes < 1:
+        return "刚刚"
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    return f"{minutes // 60} 小时前"
+
+
+def _observed_line(
+    observation, context: GenerationContext, view: CharacterWorldView, names
+) -> str:
+    """一条观察渲染成"什么时候、在哪、谁说的"。
+
+    不带时间和地点的对话流，会把一小时前频道里的聊天和此刻房间里的自言自语
+    读成同一场正在进行的对话。时间与地点都来自这条观察自己（它的锚点只有
+    观察者那条通道），不多读一个字段。
+    """
+    perceived = observation.perceived
+    when = _ago(observation.observed_at, context.now)
+    channel_id = perceived.get("channel_id")
+    location_id = perceived.get("location_id")
+    if channel_id:
+        where = f"「{view.channels.get(channel_id).display}」"
+    elif location_id and location_id == context.location_id:
+        where = "你这里"
+    elif location_id:
+        where = view.locations.get(location_id).display
+    else:
+        where = ""
+    if observation.is_self_observation:
+        speaker = "你"
+    else:
+        actor = perceived.get("actor_id")
+        speaker = perceived.get("char_name") or (names or {}).get(actor, actor)
+    tag = f"[{when} · {where}]" if where else f"[{when}]"
+    return f"{tag} {speaker}：{perceived['text']}" if speaker else f"{tag} {perceived['text']}"
 
 
 def _tail(lines: Sequence[str], limit: int) -> Tuple[str, ...]:

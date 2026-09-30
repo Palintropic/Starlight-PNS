@@ -545,13 +545,47 @@ def wall_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def consumes_allowance(outcome) -> bool:
-    """一条 Agency 结局是否用掉了认知（从而消耗单次额度）。
+# 回话机会到期时已经不成立（对方离开了那段对话、睡着了、来源不是一句话）。
+# 引擎在问策略**之前**就把它收尾成 rejected_stale，于是它没有用到认知。
+REPLY_LAPSED = "reply_lapsed"
 
-    只有"认知不可用"没有用到认知；其余结局——行动、弃权、各种拒绝——都是
-    认知真的运行过之后给出的。
+
+def consumes_allowance(record) -> bool:
+    """一条 Agency 记录是否用掉了认知（从而消耗单次额度）。
+
+    "认知不可用"没有用到认知；到期时就已失效、没问过策略的回话机会也没有。
+    其余结局——行动、弃权、各种拒绝——都是认知真的运行过之后给出的。
+
+    回话免单的判据全部来自记录自己，而且彼此印证：到期身份是这个人的回话
+    机会（`reply.activation:<角色>:` 开头）；结局是 rejected_stale、理由是
+    reply_lapsed；策略名为空、没有提案、没有凭据、没有策略说法 —— 也就是
+    记录本身说明它没走到策略那一步。普通节拍改个理由拿不到它。引擎记账、
+    存档加载复核和状态报告三处调用的都是这一个函数。传结局码也行（旧调用
+    形状），那时只按结局码判断。
     """
-    return getattr(outcome, "value", outcome) != "rejected_unavailable"
+    outcome = getattr(record, "outcome", record)
+    value = getattr(outcome, "value", outcome)
+    if value == "rejected_unavailable":
+        return False
+    detail = getattr(record, "detail", None)
+    if value != "rejected_stale" or not isinstance(detail, Mapping):
+        return True
+    if detail.get("reason") != REPLY_LAPSED:
+        return True
+    character_id = getattr(record, "character_id", None)
+    due_id = getattr(record, "due_id", "")
+    untouched = (
+        getattr(record, "policy", None) == ""
+        and getattr(record, "proposal", None) is None
+        and "audit" not in detail
+        and "rationale" not in detail
+    )
+    is_reply = (
+        isinstance(character_id, str)
+        and isinstance(due_id, str)
+        and due_id.startswith(f"reply.activation:{character_id}:")
+    )
+    return not (untouched and is_reply)
 
 
 def next_minute_after(moment: datetime) -> datetime:
@@ -571,6 +605,7 @@ __all__ = [
     "OPERATOR_CLEARABLE",
     "TransitionKind",
     "consumes_allowance",
+    "REPLY_LAPSED",
     "next_minute_after",
     "normalize_causes",
     "unavailable_causes",

@@ -553,3 +553,65 @@ export const setQuietTimeEvents = (
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ record }),
   }).then((res) => json(res));
+
+// ── 世界概览（只读）─────────────────────────────────────────────────────
+//
+// World History 这一层：客观记录，不是任何居民的经历或记忆。只有开着的世界才有。
+
+export type ResidentAvailability = 'available' | 'busy' | 'asleep';
+
+export interface OverviewResident {
+  id: string;
+  name: string;
+  /** 所属团的 unit id；内容包里已经没有这个角色时是 null。 */
+  unit: string | null;
+  /** 没有物理位置（只挂在频道上）时是 null。 */
+  location_id: string | null;
+  /** 模拟时钟，本地世界时间，无时区。 */
+  activity: { kind: string; since: string };
+  availability: ResidentAvailability;
+  /** 远程在场的频道。不是第二个物理位置。 */
+  channels: string[];
+}
+
+export interface OverviewLocation {
+  id: string;
+  name: string;
+  parent_id: string | null;
+}
+
+export interface OverviewChannel {
+  id: string;
+  name: string;
+}
+
+export interface OverviewEvent {
+  /** 在整份世界历史里的序号（含被略去的时间推进事件）。 */
+  seq: number;
+  event_id: string;
+  type: string;
+  at: string;
+  scope: string;
+  actor: string | null;
+  participants: string[];
+  location_id: string | null;
+  channel_id: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface WorldOverview {
+  world_id: string;
+  clock: string;
+  revision: number;
+  autonomy: WorldDriverStatus | null;
+  residents: OverviewResident[];
+  locations: OverviewLocation[];
+  channels: OverviewChannel[];
+  /** 最近的非时间推进事件，旧的在前。 */
+  events: OverviewEvent[];
+  total_events: number;
+  first_event_at: string | null;
+}
+
+export const fetchWorldOverview = (worldId: string, limit = 200): Promise<WorldOverview> =>
+  fetch(`${worldPath(worldId)}/overview?limit=${limit}`).then((res) => json(res));

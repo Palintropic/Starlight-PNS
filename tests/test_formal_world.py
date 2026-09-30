@@ -111,6 +111,22 @@ class LaunchClockTests(unittest.TestCase):
             YOAKE_MAE.launch_clock(datetime(2026, 9, 27, 10, 0))
 
 
+class MealTests(unittest.TestCase):
+    def test_mizuki_and_ena_keep_their_two_meals(self):
+        # 实机上见过的：作息里没有吃饭，"好饿"就只能靠嘴念一整个下午。
+        # 只钉已经决定的这两人；饭点是逐个角色的内容取舍，不是全体居民的
+        # 规范（奏的研究 #5 就不支持每天固定两顿）。
+        registry = BOUNDARY.active()
+        for character_id in ("mizuki", "ena"):
+            with self.subTest(character_id=character_id):
+                meals = [
+                    segment
+                    for segment in registry.rhythm(character_id).segments
+                    if segment.activity is ActivityKind.EATING
+                ]
+                self.assertGreaterEqual(len(meals), 2)
+
+
 class InitialStateTests(unittest.TestCase):
     def test_every_resident_starts_where_the_rhythm_puts_them_at_19(self):
         registry = BOUNDARY.active()
@@ -123,8 +139,9 @@ class InitialStateTests(unittest.TestCase):
                 self.assertEqual(world.location_of(character_id), segment.location_id)
                 self.assertIs(world.activity_of(character_id).kind, segment.activity)
                 self.assertEqual(world.activity_of(character_id).since, world.clock)
-        # 计划 §5.2 的清单：瑞希在家、绘名在夜间定时制；19:00 谁都不在 Nightcord。
-        self.assertEqual(world.location_of("mizuki"), "mizuki_home_room")
+        # 计划 §5.2 的清单：瑞希在家（19:00 正在吃晚饭）、绘名在夜间定时制；
+        # 19:00 谁都不在 Nightcord。
+        self.assertEqual(world.location_of("mizuki"), "mizuki_home")
         self.assertEqual(world.location_of("ena"), "kamiyama_high")
         self.assertEqual(world.channels_for("mizuki"), [])
         self.assertEqual(world.channels_for("ena"), [])
@@ -328,6 +345,42 @@ class BootstrapApiTests(PlaneTestCase):
         state = self.world().state
         self.assertEqual(state.world_state.metadata["origin"]["kind"], "formal_bootstrap")
         self.assertEqual(state.anchor.sim_epoch, state.world_state.clock)
+
+    def test_start_now_launches_at_the_tokyo_minute_it_was_pressed(self):
+        # 东京 2026-09-29 02:01:15：瑞希和绘名都在 25 時那一段里。
+        pressed = datetime(2026, 9, 28, 17, 1, 15, tzinfo=timezone.utc)
+        # 时钟 worker 的现实时间也停在按下那一刻：替身时刻和真实时刻差着几天，
+        # 不这样的话 worker 会以为世界落后了几天，一口气追上去。
+        with patch.dict(os.environ, {"PNS_FORMAL_START": "now"}), patch(
+            "pns.interfaces.composition.utc_now", return_value=pressed
+        ), patch(
+            "pns.runtime.autonomy.clock_worker.monotonic_wall",
+            return_value=lambda: pressed,
+        ):
+            response = self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        self.assertEqual(response.status_code, 201, response.text)
+        state = self.world().state
+        self.assertEqual(state.world_state.clock, datetime(2026, 9, 29, 2, 1))
+        self.assertEqual(state.world_state.metadata["origin"]["start"], "2026-09-29T02:01:00")
+        self.assertEqual(state.anchor.sim_epoch, datetime(2026, 9, 29, 2, 1))
+        # WEB-2 F5：现实端也是那一个整分，于是模拟的 02:02 就在现实的 02:02:00，
+        # 不是按下时刻带着的那 15 秒之后。
+        self.assertEqual(state.anchor.wall_epoch, pressed.replace(second=0))
+        self.assertEqual(
+            state.anchor.sim_at(datetime(2026, 9, 28, 17, 2, tzinfo=timezone.utc)),
+            datetime(2026, 9, 29, 2, 2),
+        )
+        self.assertEqual(
+            set(state.world_state.channel_participants("nightcord")), {"mizuki", "ena"}
+        )
+        self.assertEqual(len(state.events), 0, "开局不写世界事件")
+
+    def test_an_unknown_start_mode_is_refused_not_ignored(self):
+        with patch.dict(os.environ, {"PNS_FORMAL_START": "tonight"}):
+            response = self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["detail"]["category"], "invalid_content")
+        self.assertIsNone(self.plane.service.opened("yoake-mae"))
 
     def test_it_never_overwrites_an_existing_archive(self):
         self.assertEqual(

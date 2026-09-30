@@ -1385,11 +1385,11 @@ def _validate_cognition(state: "SessionState") -> None:
             raise SessionStateError(
                 f"Agency 记录 '{record.due_id}' 没有写明它所在的认知区间 {interval.index}"
             )
-        if interval.run_allowance is not None and consumes_allowance(record.outcome):
+        if interval.run_allowance is not None and consumes_allowance(record):
             used = sum(
                 1
                 for earlier in records[interval.allowance_since_log : position + 1]
-                if consumes_allowance(earlier.outcome)
+                if consumes_allowance(earlier)
             )
             if used > interval.run_allowance:
                 raise SessionStateError(
@@ -1410,7 +1410,7 @@ def _validate_cognition(state: "SessionState") -> None:
             continue
         previous = timeline.intervals[interval.index - 1]
         spent = [
-            consumes_allowance(record.outcome)
+            consumes_allowance(record)
             for record in records[previous.allowance_since_log : interval.from_log]
         ]
         if sum(spent) != previous.run_allowance or not spent or not spent[-1]:

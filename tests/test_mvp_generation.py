@@ -39,10 +39,17 @@ from pns.interfaces.composition import (  # noqa: E402
 )
 from pns.runtime.autonomy.clock_worker import ClockConfig  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
-from pns.models.activation import ActivationKind  # noqa: E402
+from pns.models.activation import ActivationKind, ScheduledActivation  # noqa: E402
 from pns.models.agency import AgencyOutcome  # noqa: E402
-from pns.models.event import EventType  # noqa: E402
+from pns.models.cognition import REPLY_LAPSED, consumes_allowance  # noqa: E402
+from pns.models.world_state import Availability  # noqa: E402
+from pns.models.event import Event, EventScope, EventType  # noqa: E402
+from pns.models.exposure import ExposureReason  # noqa: E402
+from pns.runtime.agency.engine import reply_activation_id  # noqa: E402
+from pns.runtime.event_commit import commit_session_event  # noqa: E402
+from pns.runtime.scheduler import SchedulerError  # noqa: E402
 from pns.models.memory import MemoryClass, MemoryRecord  # noqa: E402
+from pns.models.observation import Observation  # noqa: E402
 from pns.runtime.autonomy.context import (  # noqa: E402
     ActivationCue,
     GenerationContext,
@@ -226,6 +233,10 @@ class MvpTestCase(unittest.TestCase):
     needs_review = False
     # None = 用服务器默认（环境变量）那一份。要压节律或压预算的用例覆盖它。
     autonomy = None
+    # 回话机会的延迟（环境变量的值）。"0" = 关：多数用例钉的是固定节拍。
+    reply_delay = "0"
+    # 回话上限（环境变量的值）。None = 服务器默认。
+    reply_burst = None
 
     def setUp(self):
         self.registry = BOUNDARY.active()
@@ -236,7 +247,20 @@ class MvpTestCase(unittest.TestCase):
         )
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name) / "worlds"
-        self._env = patch.dict(os.environ, {self.registry.models.key_name: CANARY})
+        # 这些用例钉的是固定节拍与播种；回话机会（有人说话后在场者很快被问到）
+        # 有自己的用例，这里关掉它，免得两件事搅在一起。
+        self._env = patch.dict(
+            os.environ,
+            {
+                self.registry.models.key_name: CANARY,
+                "PNS_AUTONOMY_REPLY_DELAY_MINUTES": self.reply_delay,
+                **(
+                    {"PNS_AUTONOMY_REPLY_BURST_LINES": self.reply_burst}
+                    if self.reply_burst is not None
+                    else {}
+                ),
+            },
+        )
         self._env.start()
         self.provider = self.make_provider()
         self.plane = WorldControlPlane(
@@ -579,6 +603,76 @@ class PromptScopeTests(MvpTestCase):
         self.assertIn("【此刻与你同处一地的】宵崎奏", situation)
         self.assertIn("【此刻与你同一在线频道的】东云绘名", situation)
         self.assertNotIn("和你在一起", situation)
+        self.assertNotIn("【此刻你身边】", situation)
+
+    def test_heard_lines_say_when_where_and_whether_they_were_your_own(self):
+        """生产上见过的失败：下线后在自己房间里，接着对频道里的人说话。
+
+        不带时间与地点时，一小时前频道里的聊天和刚才房间里的自言自语在
+        模型眼里是同一场正在进行的对话。
+        """
+        now = datetime(2026, 8, 23, 5, 0)
+        base = _context("ena")
+        context = replace(
+            base,
+            now=now,
+            action_id=ActionId.SPEAK_HERE,
+            target_id=None,
+            location_id="ena_home_studio",
+            channel_ids=(),
+            observations=(
+                Observation(
+                    source_event_id="e1",
+                    observer_id="ena",
+                    reason=ExposureReason.CHANNEL_MEMBER,
+                    observed_at=now - timedelta(minutes=62),
+                    perceived={
+                        "type": "message.sent",
+                        "actor_id": "mizuki",
+                        "char_name": "晓山瑞希",
+                        "text": "明天大概又起不来吧",
+                        "channel_id": "nightcord",
+                    },
+                ),
+                Observation(
+                    source_event_id="e2",
+                    observer_id="ena",
+                    reason=ExposureReason.SELF_ACTION,
+                    observed_at=now - timedelta(minutes=15),
+                    perceived={
+                        "type": "dialogue.spoken",
+                        "actor_id": "ena",
+                        "char_name": "东云绘名",
+                        "text": "说啊。",
+                        "location_id": "ena_home_studio",
+                    },
+                ),
+            ),
+        )
+        situation = render_situation(
+            context, channels=self.registry.new_channel_registry()
+        )
+        self.assertIn("[1 小时前 · 「", situation)
+        self.assertIn("] 晓山瑞希：明天大概又起不来吧", situation)
+        self.assertIn("- [15 分钟前 · 你这里] 你：说啊。", situation)
+        self.assertNotIn("东云绘名：说啊", situation)
+        # 身边没人要明说，而且要说清楚频道里的人也听不见。
+        self.assertIn("【此刻你身边】没有别人", situation)
+        self.assertIn("刚才跟你在线上频道里聊天的人也不在这里", situation)
+        self.assertIn("你在这里说的话不会发到线上频道", situation)
+        self.assertIn("不要把你自己刚说过的意思换个说法再说一遍", situation)
+
+    def test_a_solo_speaker_is_not_told_they_are_alone_when_someone_is_there(self):
+        context = replace(
+            _context("mizuki"),
+            action_id=ActionId.SPEAK_HERE,
+            target_id=None,
+            co_located_characters=("ena",),
+        )
+        situation = render_situation(
+            context, channels=self.registry.new_channel_registry()
+        )
+        self.assertNotIn("【此刻你身边】", situation)
 
 
 # ── AC3/AC8 provider 侧的东西一个字节都不过边界 ─────────────────────────
@@ -673,6 +767,350 @@ class ProviderLeakTests(MvpTestCase):
                 character_ids=["mizuki", "akito"],
             )
         self.assertFalse((self.root / "notready").exists())
+
+
+# ── 回话机会：有人说话之后，在场的其他人很快被问到 ────────────────────────
+class ReplyTests(MvpTestCase):
+    reply_delay = "1"
+
+    def replies(self, world, character_id=None):
+        return [
+            a
+            for a in world.state.activations.pending()
+            if a.activation_id.startswith("reply.activation:")
+            and (character_id is None or a.character_id == character_id)
+        ]
+
+    def speakers(self, report):
+        return [r["character_id"] for r in report["results"]]
+
+    def test_a_line_in_the_channel_gets_the_other_member_asked_a_minute_later(self):
+        world = self.create()
+        start = world.state.world_state.clock
+        self.assertEqual(self.speakers(self.advance(world, 5)), ["mizuki"])
+        said = world.state.events.by_type(EventType.MESSAGE_SENT)[-1]
+        pending = self.replies(world, "ena")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].due_at, start + timedelta(minutes=6))
+        self.assertFalse(pending[0].is_recurring, "回话机会是一次性的")
+        self.assertEqual(pending[0].payload["reply_to"], said.event_id)
+        self.assertEqual(self.replies(world, "mizuki"), [], "不给说话的人自己排")
+        # 不用等到绘名自己的 +10：一分钟后她就被问到了，然后轮到瑞希。
+        self.assertEqual(self.speakers(self.advance(world, 1)), ["ena"])
+        self.assertEqual(self.speakers(self.advance(world, 1)), ["mizuki"])
+        self.assertEqual(len(world.state.events.by_type(EventType.MESSAGE_SENT)), 3)
+
+    def test_a_fired_reply_does_not_come_back(self):
+        world = self.create()
+        self.advance(world, 5)
+        first = self.replies(world, "ena")[0].activation_id
+        self.advance(world, 1)
+        ids = {a.activation_id for a in world.state.activations.pending()}
+        self.assertNotIn(first, ids)
+        for cid in CHARACTERS:
+            mine = [a for a in world.state.activations.pending() if a.character_id == cid]
+            self.assertLessEqual(len(mine), 2, "每人至多：自己的节拍 + 一次回话机会")
+
+    def test_someone_already_due_by_then_is_not_asked_twice(self):
+        world = self.create()
+        clock = world.state.world_state.clock
+        world.state.scheduler.schedule(
+            ScheduledActivation(
+                activation_id="manual:ena",
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=clock + timedelta(minutes=6),
+                character_id="ena",
+            )
+        )
+        self.advance(world, 5)
+        self.assertEqual(self.replies(world, "ena"), [])
+
+    def test_the_reply_is_rolled_back_with_a_failed_commit(self):
+        world = self.create()
+        with patch(
+            "pns.runtime.agency.engine.commit_session_event",
+            side_effect=RuntimeError("提交中途炸了"),
+        ) as broken:
+            self.advance(world, 5)
+        self.assertTrue(broken.called, "提交确实走到了、并且在事务里失败了")
+        self.assertEqual(world.state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertEqual(self.replies(world), [], "事件没落地，回话机会也不许留下")
+
+
+class ReplyGateTests(MvpTestCase):
+    """WEB-2 F1/F2/F4：回话机会到期时必须还是对那句话的回话。"""
+
+    reply_delay = "1"
+
+    def lapsed(self, world, character_id):
+        return [
+            r
+            for r in world.state.agency.records()
+            if r.character_id == character_id
+            and r.outcome is AgencyOutcome.REJECTED_STALE
+            and r.detail.get("reason") == REPLY_LAPSED
+        ]
+
+    def test_someone_who_left_the_channel_does_not_reply_anywhere_else(self):
+        # F1 的原样复现：瑞希在频道里说了一句，绘名在回话到期前离开了频道。
+        world = self.create()
+        self.advance(world, 5)
+        # 这一段里先有一条她自己的状态变更事件，作息就不会在下一分钟把她
+        # 放回频道（段内的决定优先于作息）。
+        self.plane.set_activity("nightcord", "ena", "drawing")
+        with world.state.atomic_commit():
+            world.state.world_state.leave_channel("ena", "nightcord")
+        generated = len(self.provider.generations)
+        self.advance(world, 1)
+        spoken_by_ena = [
+            e
+            for e in world.state.events
+            if e.actor_id == "ena"
+            and e.type in (EventType.MESSAGE_SENT, EventType.DIALOGUE_SPOKEN)
+        ]
+        self.assertEqual(spoken_by_ena, [], "回话不许换个媒介说出去")
+        [record] = self.lapsed(world, "ena")
+        self.assertEqual(record.detail["why"], "left_the_conversation")
+        self.assertEqual(len(self.provider.generations), generated, "失效的回话不调模型")
+        self.assertFalse(consumes_allowance(record), "失效的回话不花单次额度")
+
+    def test_someone_asleep_by_then_is_not_asked_and_spends_nothing(self):
+        # F4：排上之后睡着了。
+        world = self.create()
+        self.advance(world, 5)
+        with world.state.atomic_commit():
+            world.state.world_state.set_availability("ena", Availability.ASLEEP)
+        self.advance(world, 1)
+        [record] = self.lapsed(world, "ena")
+        self.assertEqual(record.detail["why"], "cannot_answer")
+        self.assertFalse(consumes_allowance(record))
+
+    def test_someone_already_asleep_is_not_scheduled_at_all(self):
+        # F4：说话那一刻就睡着的人，根本不排。
+        world = self.create()
+        with world.state.atomic_commit():
+            world.state.world_state.set_availability("ena", Availability.ASLEEP)
+        self.advance(world, 5)
+        self.assertTrue(world.state.events.by_type(EventType.MESSAGE_SENT))
+        self.assertFalse(
+            any(
+                a.activation_id.startswith("reply.activation:ena:")
+                for a in world.state.activations.pending()
+            )
+        )
+
+    def reply_lines(self, world):
+        return [
+            e
+            for e in world.state.events.by_type(EventType.MESSAGE_SENT)
+            if e.provenance.get("activation_id", "").startswith("reply.activation:")
+        ]
+
+    def test_a_talkative_pair_stops_being_asked_after_a_burst(self):
+        # F2 / R4：两个人都愿意一直接话。30 分钟窗口里由回话说出满 8 句之后
+        # 不再排回话，对话退回固定节拍，而不是一分钟一句直到额度烧完。
+        world = self.create()
+        self.advance(world, 30)
+        self.assertEqual(len(self.reply_lines(world)), 8)
+        self.assertFalse(
+            any(
+                a.activation_id.startswith("reply.activation:")
+                for a in world.state.activations.pending()
+            )
+        )
+
+
+class ReplyBurstTests(MvpTestCase):
+    """R4：上限只数回话，而且到期和提交时也要查，不只是排的时候。"""
+
+    reply_delay = "1"
+    reply_burst = "2"
+
+    def reply_lines(self, world):
+        return ReplyGateTests.reply_lines(self, world)
+
+    def test_fixed_beats_do_not_use_up_the_reply_allowance(self):
+        # 瑞希 02:05 按节拍开口 → 绘名 02:06 回 → 瑞希 02:07 回。节拍那句
+        # 不算，所以第二句回话还排得上。
+        world = self.create()
+        self.advance(world, 7)
+        speakers = [e.actor_id for e in world.state.events.by_type(EventType.MESSAGE_SENT)]
+        self.assertEqual(speakers, ["mizuki", "ena", "mizuki"])
+        self.assertEqual(len(self.reply_lines(world)), 2)
+
+    def test_replies_due_together_cannot_exceed_the_limit(self):
+        # 同一分钟一起到期的回话：排的时候都还有名额，到期时只剩够一句的。
+        world = self.create()
+        self.advance(world, 6)  # 瑞希 02:05 开口，绘名 02:06 回（第 1 句回话）
+        said = world.state.events.by_type(EventType.MESSAGE_SENT)
+        mizuki_line = said[0].event_id
+        ena_line = said[1].event_id
+        clock = world.state.world_state.clock
+        for cid, source in (("mizuki", ena_line), ("ena", mizuki_line)):
+            # 两次都是真的回话身份（_offer_replies 会排出的那种格式）。
+            if any(
+                a.activation_id == reply_activation_id(cid, source)
+                for a in world.state.activations.pending()
+            ):
+                continue
+            # 回话前缀是保留名，这里走引擎排回话的那个入口。
+            world.state.scheduler._schedule_reply(
+                ScheduledActivation(
+                    activation_id=reply_activation_id(cid, source),
+                    kind=ActivationKind.CHARACTER_ACTIVATION,
+                    due_at=clock + timedelta(minutes=1),
+                    character_id=cid,
+                    payload={"reply_to": source},
+                )
+            )
+        self.advance(world, 1)
+        self.assertEqual(len(self.reply_lines(world)), 2, "上限是 2，一句都不许多")
+        lapsed = [
+            r
+            for r in world.state.agency.records()
+            if r.detail.get("why") == "burst_full"
+        ]
+        self.assertEqual(len(lapsed), 1)
+
+    def test_nobody_but_the_engine_can_schedule_a_reply(self):
+        # R2 确认：用公开调度器拼一个回话格式的 ID，不管带不带 reply_to，
+        # 都排不进去 —— 于是既拿不到免单，也占不了回话名额。
+        world = self.create()
+        clock = world.state.world_state.clock
+        for payload in ({"reply_to": "missing-event"}, {}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(SchedulerError):
+                    world.state.scheduler.schedule(
+                        ScheduledActivation(
+                            activation_id="reply.activation:ena:missing-event",
+                            kind=ActivationKind.CHARACTER_ACTIVATION,
+                            due_at=clock + timedelta(minutes=1),
+                            character_id="ena",
+                            payload=payload,
+                        )
+                    )
+        self.assertFalse(
+            any(
+                a.activation_id.startswith("reply.activation:")
+                for a in world.state.activations.pending()
+            )
+        )
+
+    def test_only_an_untouched_reply_record_is_free(self):
+        # R2-B：免单的判据必须彼此印证，改一个理由拿不到它。
+        class _Record:
+            outcome = AgencyOutcome.REJECTED_STALE
+            character_id = "ena"
+            due_id = "reply.activation:ena:said@2026-09-30T02:06:00"
+            policy = ""
+            proposal = None
+
+            def __init__(self, **changes):
+                self.detail = {"reason": REPLY_LAPSED, "cognition_interval": 1}
+                for key, value in changes.items():
+                    setattr(self, key, value)
+
+        self.assertFalse(consumes_allowance(_Record()))
+        forged = {
+            "普通节拍改成失效回话": {"due_id": "seed.activation:ena@2026-09-30T02:10:00"},
+            "别人的回话身份": {"character_id": "mizuki"},
+            "问过策略": {"policy": "authored_line"},
+            "有判分凭据": {"detail": {"reason": REPLY_LAPSED, "audit": {}}},
+            "有策略说法": {"detail": {"reason": REPLY_LAPSED, "rationale": "model chose silence"}},
+            "提交期失效": {"detail": {"reason": "reply_went_stale"}},
+        }
+        for label, changes in forged.items():
+            with self.subTest(label):
+                self.assertTrue(consumes_allowance(_Record(**changes)))
+
+    def test_a_reply_to_in_an_ordinary_activation_is_just_an_activation(self):
+        # R2-A：任何排期都能带 reply_to。回话身份要由激活 ID 印证，否则按
+        # 普通激活处理，也就拿不到失效免单。
+        world = self.create()
+        world.state.scheduler.schedule(
+            ScheduledActivation(
+                activation_id="forged-ordinary-beat",
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=world.state.world_state.clock + timedelta(minutes=1),
+                character_id="ena",
+                payload={"reply_to": "missing-event"},
+            )
+        )
+        self.advance(world, 1)
+        [record] = [
+            r for r in world.state.agency.records() if r.due_id.startswith("forged-")
+        ]
+        self.assertNotEqual(record.detail.get("reason"), REPLY_LAPSED)
+        self.assertTrue(consumes_allowance(record))
+
+    def test_a_spoken_reply_is_refused_if_the_speaker_moved_while_it_was_written(self):
+        # R1：当面说话没有目标地点。生成期间换了房间，提交期的前置条件照样
+        # 全过；回话必须按来源重判，不能落在新房间里。
+        world = self.create()
+        ws = world.state.world_state
+        for cid in ("mizuki", "ena"):
+            # 先各有一条段内状态变更，作息就不会把她们放回原处。
+            self.plane.set_activity("nightcord", cid, "studying")
+        with world.state.atomic_commit():
+            for cid in ("mizuki", "ena"):
+                ws.leave_channel(cid, "nightcord")
+                ws.place_character(cid, "kamiyama_high")
+            commit_session_event(
+                world.state,
+                Event(
+                    event_id="said",
+                    type=EventType.DIALOGUE_SPOKEN,
+                    occurred_at=ws.clock,
+                    scope=EventScope.LOCATION,
+                    actor_id="mizuki",
+                    participants=("mizuki", "ena"),
+                    location_id="kamiyama_high",
+                    payload={"text": "在吗", "char_name": "晓山瑞希"},
+                ),
+            )
+        world.state.scheduler._schedule_reply(
+            ScheduledActivation(
+                activation_id=reply_activation_id("ena", "said"),
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=ws.clock + timedelta(minutes=1),
+                character_id="ena",
+                payload={"reply_to": "said"},
+            )
+        )
+
+        def walk_out(call):
+            with world.state.atomic_commit():
+                ws.place_character("ena", "kamiyama_high_gate")
+
+        self.provider._on_generate = walk_out
+        self.advance(world, 1)
+        spoken = [
+            e
+            for e in world.state.events.by_type(EventType.DIALOGUE_SPOKEN)
+            if e.actor_id == "ena"
+        ]
+        self.assertEqual(spoken, [], "回话不许落在新房间里")
+        [record] = [
+            r
+            for r in world.state.agency.records()
+            if r.due_id.startswith(reply_activation_id("ena", "said"))
+        ]
+        self.assertIs(record.outcome, AgencyOutcome.REJECTED_STALE)
+        self.assertEqual(record.detail["reason"], "reply_went_stale")
+        self.assertTrue(consumes_allowance(record), "模型已经调用过，这次要花额度")
+
+
+class RejectedLineReplyTests(MvpTestCase):
+    reply_delay = "1"
+    drift = 9.0
+
+    def test_a_rejected_line_asks_nobody(self):
+        world = self.create()
+        self.advance(world, 5)
+        self.assertEqual(world.state.events.by_type(EventType.MESSAGE_SENT), ())
+        self.assertFalse(
+            any(a.activation_id.startswith("reply.") for a in world.state.activations.pending())
+        )
 
 
 # ── AC3 判分是唯一通道 ───────────────────────────────────────────────────

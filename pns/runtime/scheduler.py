@@ -55,6 +55,12 @@ from pns.runtime.event_commit import commit_session_event
 _MINUTE = timedelta(minutes=1)
 
 
+# 回话机会的激活 ID 前缀。它是保留名：只有 Agency 引擎在提交一句话的事务里能用
+# 这个前缀排期（_schedule_reply），公开的 schedule() 一律拒绝。回话身份会带来
+# 免单和计入回话名额两项待遇，所以"ID 长得像回话"不能由任意调用方拼出来。
+REPLY_ACTIVATION_PREFIX = "reply.activation:"
+
+
 class SchedulerError(ValueError):
     """调度器拒绝了这次操作（排到过去、角色不存在、时间倒退、存档损坏等）。"""
 
@@ -181,6 +187,24 @@ class PersistentScheduler:
         全部校验都在任何状态变更之前完成：类型、是否排到了过去、角色在不在
         这个世界里、ID 有没有撞车。任何一条不过，队列一个字节都不动。
         """
+        if isinstance(activation, ScheduledActivation) and activation.activation_id.startswith(
+            REPLY_ACTIVATION_PREFIX
+        ):
+            raise SchedulerError(
+                f"'{REPLY_ACTIVATION_PREFIX}' 开头的激活 ID 保留给回话机会，只能由系统排入"
+            )
+        return self._append_checked(activation)
+
+    def _schedule_reply(self, activation: ScheduledActivation) -> int:
+        """Agency 引擎排回话机会的唯一入口（保留前缀只能从这里进队列）。"""
+        if not (
+            isinstance(activation, ScheduledActivation)
+            and activation.activation_id.startswith(REPLY_ACTIVATION_PREFIX)
+        ):
+            raise SchedulerError("_schedule_reply() 只排回话机会")
+        return self._append_checked(activation)
+
+    def _append_checked(self, activation: ScheduledActivation) -> int:
         self._state.require_writable()
         if not isinstance(activation, ScheduledActivation):
             raise SchedulerError("只能排入 ScheduledActivation")

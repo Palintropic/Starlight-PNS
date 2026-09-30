@@ -25,11 +25,11 @@
 # 归属跟调度器一样：审计日志归 SessionState 所有，引擎是它上面的服务，一个
 # 会话只能绑一个。存档里的 agency 段就是那份日志。
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Mapping, Optional, Tuple
 
-from pns.models.action import ActionProposal
-from pns.models.activation import ActivationDue
+from pns.models.action import ActionId, ActionProposal
+from pns.models.activation import ActivationDue, ActivationKind, ScheduledActivation
 from pns.models.authored import GenerationAudit
 from pns.models.agency import (
     AgencyBudget,
@@ -40,11 +40,13 @@ from pns.models.agency import (
 )
 from pns.models.activation_outbox import ActivationOutboxError
 from pns.models.cognition import (
+    REPLY_LAPSED,
     CognitionCause,
     consumes_allowance,
     unavailable_causes,
     wall_now,
 )
+from pns.models.event import EventType
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.agency.context import AgencyContext, build_agency_context
@@ -57,6 +59,69 @@ from pns.runtime.agency.policy import (
 )
 from pns.runtime.agency.preconditions import failed_preconditions
 from pns.runtime.event_commit import commit_session_event
+from pns.runtime.scheduler import REPLY_ACTIVATION_PREFIX
+
+
+# 回话机会的来源必须是一句话，而且回话只能回到那句话所在的媒介里。
+# 同一个媒介里，这段时间内**由回话说出的**句子达到 AgencyBudget.reply_burst_lines
+# 条之后，回话就停下，对话退回固定节拍。窗口按世界历史算，不按因果链：固定节拍
+# 在对话中途开口时会开一条新链，按链计数的上限因此永远到不了。固定节拍自己说的
+# 话不计入：否则人一多，节拍本身就能把名额占满，回话再也排不上。
+REPLY_BURST_WINDOW = timedelta(minutes=30)
+
+
+def _reply_medium(event) -> Optional[Tuple[str, str]]:
+    """一句话发生在哪个媒介：("channel", 频道) 或 ("location", 地点)。不是话返回 None。"""
+    if event.type is EventType.MESSAGE_SENT and event.channel_id:
+        return ("channel", event.channel_id)
+    if event.type is EventType.DIALOGUE_SPOKEN and event.location_id:
+        return ("location", event.location_id)
+    return None
+
+
+def _reply_action(medium: Tuple[str, str]) -> Tuple[ActionId, Optional[str]]:
+    kind, anchor = medium
+    if kind == "channel":
+        return ActionId.SEND_CHANNEL_MESSAGE, anchor
+    return ActionId.SPEAK_HERE, None
+
+
+def reply_activation_id(character_id: str, source_event_id: str) -> str:
+    """一次回话机会的激活 ID。它就是回话身份：只有 _offer_replies 用这个格式排。"""
+    return f"{REPLY_ACTIVATION_PREFIX}{character_id}:{source_event_id}"
+
+
+def _reply_source(due: ActivationDue) -> Optional[str]:
+    """这条到期是不是一次回话机会；是就返回它回的那条事件 ID。
+
+    payload 里有 reply_to 不算数：任何排期都能带一个。回话身份由激活 ID 与
+    reply_to 互相印证 —— 激活 ID 必须恰好是 _offer_replies 为这个人、这条
+    来源排出来的那个。
+    """
+    source = due.payload.get("reply_to")
+    if not isinstance(source, str) or not due.character_id:
+        return None
+    if due.activation_id != reply_activation_id(due.character_id, source):
+        return None
+    return source
+
+
+def _is_reply_line(event) -> bool:
+    """这句话是不是由一次回话机会说出来的（看它自己的 provenance）。"""
+    provenance = event.provenance or {}
+    activation_id = provenance.get("activation_id")
+    return (
+        provenance.get("kind") == "agency"
+        and isinstance(activation_id, str)
+        and activation_id.startswith(REPLY_ACTIVATION_PREFIX)
+    )
+
+
+def _still_in(world: WorldState, character_id: str, medium: Tuple[str, str]) -> bool:
+    kind, anchor = medium
+    if kind == "channel":
+        return anchor in world.channels_for(character_id)
+    return world.location_of(character_id) == anchor
 
 
 class AgencyEngineError(ValueError):
@@ -275,6 +340,16 @@ class AgencyEngine:
                 detail={"reason": "unknown_character", "character_id": character_id},
             )
 
+        reply_medium = None
+        if _reply_source(due) is not None:
+            reply_medium, lapse = self._reply_gate(due, character_id)
+            if lapse is not None:
+                # 在问策略之前收尾：没有生成、没有判分，也就不花单次额度
+                # （见 consumes_allowance）。策略名留空，记录自己说明"没问过策略"。
+                return replace(
+                    plan(AgencyOutcome.REJECTED_STALE, detail=lapse), policy=""
+                )
+
         committed = self._state.agency.committed_actions()
         if committed >= self._budget.max_committed_actions_per_session:
             return plan(
@@ -287,6 +362,18 @@ class AgencyEngine:
             )
 
         context = self.context_for(due)
+        if reply_medium is not None:
+            # 回话只能回到来源那句话的媒介里。收窄的是合法枚举本身，所以策略
+            # 选不出别的动作，提案期的 has_legal 检查也会拒绝任何别的动作。
+            action_id, target_id = _reply_action(reply_medium)
+            context = replace(
+                context,
+                legal_actions=tuple(
+                    legal
+                    for legal in context.legal_actions
+                    if legal.action_id is action_id and legal.target_id == target_id
+                ),
+            )
         try:
             decision = self._policy.decide(context)
         except AgencyPolicyError as e:
@@ -455,6 +542,7 @@ class AgencyEngine:
                 )
                 commit_session_event(state, event)
                 event_id = event.event_id
+                self._offer_replies(event)
 
             record = AgencyRecord(
                 due_id=due.due_id,
@@ -482,6 +570,97 @@ class AgencyEngine:
             # 插不进另一条提交（R4-3）。
             self._settle_cognition(record)
         return record
+
+    def _reply_gate(self, due: ActivationDue, character_id: str):
+        """回话机会到期时还成不成立。成立返回 (媒介, None)，否则 (None, 失效细节)。
+
+        来源从世界历史里按 reply_to 取，不信排期 payload 里的任何别的东西。成立
+        的条件：来源是一句话；回话的人此刻仍在那句话的媒介里（还在那个频道 /
+        还在那个地点）；而且在那里开口的前置条件此刻都满足（比如没睡着）。
+        """
+        source_id = _reply_source(due)
+        events = self._state.events
+        if source_id is None or not events.has(source_id):
+            return None, {"reason": REPLY_LAPSED, "why": "source_missing"}
+        medium = _reply_medium(events.get(source_id))
+        if medium is None:
+            return None, {"reason": REPLY_LAPSED, "why": "source_not_speech"}
+        if not _still_in(self.world, character_id, medium):
+            return None, {
+                "reason": REPLY_LAPSED,
+                "why": "left_the_conversation",
+                "medium": list(medium),
+            }
+        failed = failed_preconditions(self.world, character_id, *_reply_action(medium))
+        if failed:
+            return None, {
+                "reason": REPLY_LAPSED,
+                "why": "cannot_answer",
+                "failed": [precondition.value for precondition in failed],
+            }
+        if self._reply_burst_full(medium):
+            return None, {
+                "reason": REPLY_LAPSED,
+                "why": "burst_full",
+                "medium": list(medium),
+            }
+        return medium, None
+
+    def _reply_burst_full(self, medium: Tuple[str, str]) -> bool:
+        """这个媒介最近由回话说出的句子是否已经满额。
+
+        排回话、回话到期、回话提交三处都问它：只在排的时候问的话，同一句话
+        可以同时给好几个人排上，它们一起到期就把上限冲破了。提交这一问是
+        硬的 —— 满额之后没有一句回话能落地。
+        """
+        lines = sum(
+            1
+            for earlier in self._state.events.since(self.clock - REPLY_BURST_WINDOW)
+            if _reply_medium(earlier) == medium and _is_reply_line(earlier)
+        )
+        return lines >= self._budget.reply_burst_lines
+
+    def _offer_replies(self, event) -> None:
+        """给当时在场的其他人排一次一次性的回话机会（在提交事务之内）。
+
+        只有一句话（频道消息 / 当面说话）才会引来回话；上线、下线、移动不会。
+        在场名单取事件自己记下的 participants，不是会话名单；此刻就答不了话
+        的人（比如睡着了）不排。这个媒介最近说过的话已经够多时一个都不排，
+        对话退回固定节拍。已经有一次不晚于那一刻的排期的人不再加。排期跟触发
+        它的事件同生共死，事务回滚它也一起消失。
+        """
+        delay = self._budget.reply_delay_minutes
+        if delay is None or not event.participants:
+            return
+        medium = _reply_medium(event)
+        if medium is None:
+            return
+        scheduler = self._state.scheduler
+        if scheduler is None:
+            return
+        if self._reply_burst_full(medium):
+            return
+        action_id, target_id = _reply_action(medium)
+        due_at = self.clock + timedelta(minutes=delay)
+        for member in event.participants:
+            if member == event.actor_id:
+                continue
+            if failed_preconditions(self.world, member, action_id, target_id):
+                continue
+            if any(
+                pending.character_id == member and pending.due_at <= due_at
+                for pending in scheduler.pending()
+            ):
+                continue
+            scheduler._schedule_reply(
+                ScheduledActivation(
+                    activation_id=reply_activation_id(member, event.event_id),
+                    kind=ActivationKind.CHARACTER_ACTIVATION,
+                    due_at=due_at,
+                    character_id=member,
+                    payload={"reply_to": event.event_id},
+                )
+            )
 
     def _judge(self, plan: ProposalPlan):
         """在事务内给出这条计划最终的 (结论, 细节, 策略名)。调用方持着事务。"""
@@ -544,14 +723,14 @@ class AgencyEngine:
         current = timeline.current
         changed = False
         if (
-            consumes_allowance(record.outcome)
+            consumes_allowance(record)
             and current.run_allowance is not None
             and CognitionCause.RUN_BUDGET_EXHAUSTED not in current.causes
         ):
             used = sum(
                 1
                 for earlier in state.agency.records()[current.allowance_since_log :]
-                if consumes_allowance(earlier.outcome)
+                if consumes_allowance(earlier)
             )
             if used >= current.run_allowance:
                 timeline = timeline.run_budget_exhausted(
@@ -640,6 +819,19 @@ class AgencyEngine:
                 "target_id": proposal.target_id,
                 "failed": [precondition.value for precondition in failed],
             }
+        if _reply_source(plan.due) is not None:
+            # 回话在生成期间可能已经不成立了：当面说话没有目标地点，人换了房间
+            # 前置条件照样全过，话就会落在新房间里。所以提交时按来源重判一次。
+            # 理由不是 reply_lapsed：到这里模型已经调用过了，这次要花额度。
+            medium, lapse = self._reply_gate(plan.due, plan.character_id)
+            if lapse is not None:
+                return AgencyOutcome.REJECTED_STALE, {**lapse, "reason": "reply_went_stale"}
+            if (proposal.action_id, proposal.target_id) != _reply_action(medium):
+                return AgencyOutcome.REJECTED_STALE, {
+                    "reason": "reply_went_stale",
+                    "why": "medium_changed",
+                    "medium": list(medium),
+                }
         return None
 
     def _refuse_audit(self, plan: ProposalPlan, proposal: ActionProposal):

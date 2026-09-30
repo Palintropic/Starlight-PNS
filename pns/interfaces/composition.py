@@ -36,6 +36,7 @@
 #     全局引用，不是任何一份已经存在的 `WorldState`。
 #   * 所以重载只喂**将来**的冷构造：下一次 create 用新内容，已经在跑的世界
 #     的时钟、位置、频道成员、事件、观察和记忆一个字都不会被动。
+import dataclasses
 import os
 import threading
 from dataclasses import dataclass
@@ -99,7 +100,14 @@ STAGGER_ENV = "PNS_AUTONOMY_STAGGER_MINUTES"
 MAX_TOKENS_ENV = "PNS_AUTONOMY_MAX_TOKENS"
 TEMPERATURE_ENV = "PNS_AUTONOMY_TEMPERATURE"
 ACTIVATIONS_PER_RUN_ENV = "PNS_AUTONOMY_ACTIVATIONS_PER_RUN"
+# 有人当着别人说话之后，多少模拟分钟后给在场的其他人一次回话机会；0 = 关。
+REPLY_DELAY_ENV = "PNS_AUTONOMY_REPLY_DELAY_MINUTES"
+REPLY_BURST_ENV = "PNS_AUTONOMY_REPLY_BURST_LINES"
 WORLD_ACTION_CAP_ENV = "PNS_AUTONOMY_WORLD_ACTION_CAP"
+# 正式世界的开局时刻。不设 = 正式世界定义里写的时刻（夜明け前是东京 19:00）；
+# `now` = 按下开局的那一分钟，世界时间从第一分钟起就与现实对齐。认不出来的值
+# 让开局响亮失败，不悄悄回落。
+FORMAL_START_ENV = "PNS_FORMAL_START"
 
 # 一次生成能配到的 token 上限（配置的上界，不是默认值；默认 1024）。
 # 撞到这个上限**不会**变成一句被砍掉一半的台词：那种情况在
@@ -109,6 +117,10 @@ MAX_GENERATION_TOKENS = 8192
 # 一个世界**一生**能提交多少个动作的上界（配置的上界，不是默认值）。
 # 它跟单次 Start 的额度是两件事，见 AutonomySettings.world_action_cap。
 MAX_WORLD_ACTION_CAP = 10_000_000
+
+# 世界概览取一致快照时最多等多久。它跟提交事务抢同一把锁；一次只读的页面刷新
+# 不该在那里挂 30 秒（会话默认值），等不到就如实说"世界正忙"，让页面下次再拉。
+OVERVIEW_SNAPSHOT_TIMEOUT = 2.0
 
 
 class CompositionError(RuntimeError):
@@ -176,6 +188,10 @@ class AutonomySettings:
     # 到顶时认知以 world_action_cap 关闭、状态里写明原因（调高它，然后重新
     # 打开这个世界），不会让世界在没人看得出原因的情况下永远失声。
     world_action_cap: int = 100_000
+    # 回话机会的延迟（模拟分钟）。None = 关，只按固定节拍被考虑。
+    reply_delay_minutes: Optional[int] = 1
+    # 同一个频道 / 地点 30 分钟内说满这么多句，就不再给回话机会（见 AgencyBudget）。
+    reply_burst_lines: int = 8
     # 进程收尾时最多等每个时钟 worker 多少秒。比 clock.stop_timeout_seconds 短：
     # 停机不该被一次慢模型调用无限期拖住，而真正挡住"晚到的提交"的是 P11
     # 的终局 stop()，不是这次等待。
@@ -251,6 +267,8 @@ class AutonomySettings:
             max_tokens=_env_number(MAX_TOKENS_ENV, 1024, int),
             temperature=_env_number(TEMPERATURE_ENV, 0.85, float),
             world_action_cap=_env_number(WORLD_ACTION_CAP_ENV, 100_000, int),
+            reply_delay_minutes=_env_number(REPLY_DELAY_ENV, 1, int) or None,
+            reply_burst_lines=_env_number(REPLY_BURST_ENV, 8, int),
         )
 
     def agency_budget(self) -> AgencyBudget:
@@ -260,7 +278,11 @@ class AutonomySettings:
         判断的形状预算（一次激活最多几条提案、枚举多少合法动作、喂多少条
         观察），跟世界活多久没关系。
         """
-        return AgencyBudget(max_committed_actions_per_session=self.world_action_cap)
+        return AgencyBudget(
+            max_committed_actions_per_session=self.world_action_cap,
+            reply_delay_minutes=self.reply_delay_minutes,
+            reply_burst_lines=self.reply_burst_lines,
+        )
 
     def to_dict(self) -> Dict:
         return {
@@ -601,6 +623,13 @@ class WorldControlPlane:
         spec = formal_world(name)
         if spec is None:
             raise ContentUnavailable(f"'{name}' 不是已定义的正式世界")
+        start_mode = os.environ.get(FORMAL_START_ENV, "").strip()
+        if start_mode == "now":
+            spec = dataclasses.replace(spec, start=None)
+        elif start_mode:
+            raise ContentUnavailable(
+                f"{FORMAL_START_ENV} 只认 'now' 或不设，收到 {start_mode!r}"
+            )
         registry = self.registry()
 
         def seed(bound: SessionState) -> None:
@@ -612,12 +641,19 @@ class WorldControlPlane:
                 raise ContentUnavailable(f"这个世界的开局排期播不下去：{e}") from e
 
         adapters = self.build_adapters(registry, seed=seed)
+        # 开局状态和时钟锚点必须用**同一个**现实时刻。"now" 模式下模拟端是按下
+        # 那一分钟的整分，现实端也截到同一个整分：否则按在 02:01:15 的世界会
+        # 永远晚 15 秒走到每一分钟（WEB-2 F5）。"跟东京对齐"只在 1:1 时有意义；
+        # 别的倍率下截掉的那几秒会被放大成模拟里的几小时，所以不截。
+        pressed = utc_now()
+        aligned = spec.start is None and self._autonomy.clock.rate == 1
+        anchor_wall = pressed.replace(second=0, microsecond=0) if aligned else pressed
         try:
             state = formal_session_state(
                 spec,
                 registry,
                 session_id=_new_session_id(name),
-                wall=utc_now(),
+                wall=pressed,
                 operator=operator,
             )
         except FormalWorldError as e:
@@ -628,6 +664,7 @@ class WorldControlPlane:
             adapters=adapters,
             checkpoint_policy=self._policy,
             clock=self._autonomy.clock,
+            anchor_wall=anchor_wall,
         )
         return self._with_driver(world.status())
 
@@ -755,6 +792,89 @@ class WorldControlPlane:
         if world is None or world.clock_worker is None:
             return None
         return world.clock_worker.status()
+
+    # ── 世界概览（只读）─────────────────────────────────────────────────
+    #
+    # 给「世界」页看的：时钟、每位居民此刻的客观状态、最近的世界历史。它读的
+    # 是 World History 这一层（客观记录），**不是**任何居民的经历或记忆——
+    # 观察、曝光、记忆一概不读。provenance 也不透出：那是审计链路的内部结构。
+    def overview(self, world_id: str, limit: int = 200) -> Dict:
+        world = self._require_open(world_id)
+        registry = self.registry()
+
+        def resident_meta(character_id: str) -> Dict:
+            try:
+                meta = registry.character_metadata(character_id)
+            except ValueError:
+                # 内容包里已经没有这个角色：照实显示 ID，不猜名字。
+                meta = {}
+            name = str(meta.get("name") or character_id)
+            return {"name": name, "unit": meta.get("unit")}
+
+        with world.state.snapshot_boundary(timeout=OVERVIEW_SNAPSHOT_TIMEOUT) as state:
+            ws = state.world_state
+            residents = []
+            for character_id in ws.known_characters():
+                activity = ws.activity_of(character_id)
+                residents.append(
+                    {
+                        "id": character_id,
+                        **resident_meta(character_id),
+                        "location_id": ws.location_of(character_id),
+                        "activity": {
+                            "kind": activity.kind.value,
+                            "since": activity.since.isoformat(),
+                        },
+                        "availability": ws.availability_of(character_id).value,
+                        "channels": ws.channels_for(character_id),
+                    }
+                )
+            locations = [
+                {"id": loc.location_id, "name": loc.name, "parent_id": loc.parent_id}
+                for loc in ws.locations
+            ]
+            channels = [{"id": ch.channel_id, "name": ch.name} for ch in ws.channels]
+            # 从后往前取最近 limit 条非时间推进事件。时间推进会刷屏，而且"这段
+            # 时间没发生事"本来就能从相邻两条事件的间隔里看出来。
+            all_events = state.events.events()
+            recent = []
+            for seq in range(len(all_events) - 1, -1, -1):
+                event = all_events[seq]
+                if event.type is EventType.WORLD_TIME_ADVANCED:
+                    continue
+                recent.append(
+                    {
+                        "seq": seq,
+                        "event_id": event.event_id,
+                        "type": event.type.value,
+                        "at": event.occurred_at.isoformat(),
+                        "scope": event.scope.value,
+                        "actor": event.actor_id,
+                        "participants": list(event.participants),
+                        "location_id": event.location_id,
+                        "channel_id": event.channel_id,
+                        "payload": event.to_dict()["payload"],
+                    }
+                )
+                if len(recent) >= limit:
+                    break
+            recent.reverse()
+            clock = ws.clock.isoformat()
+            total_events = len(all_events)
+            first_event_at = all_events[0].occurred_at.isoformat() if all_events else None
+
+        return {
+            "world_id": world.world_id,
+            "clock": clock,
+            "revision": world.revision,
+            "autonomy": self.autonomy_status(world.world_id),
+            "residents": residents,
+            "locations": locations,
+            "channels": channels,
+            "events": recent,
+            "total_events": total_events,
+            "first_event_at": first_event_at,
+        }
 
     @staticmethod
     def _worker(world):

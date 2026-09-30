@@ -100,6 +100,14 @@ class AgencyBudget:
     max_observations: int = 64
     # 一个会话累计能提交的动作数。
     max_committed_actions_per_session: int = 128
+    # 有人当着别人说了话之后，隔多少模拟分钟给在场的其他人一次回话机会。None =
+    # 不给（只按固定节拍被考虑）。回不回仍由那个人自己的判断决定；这里只决定
+    # "多快被问到"，所以对话的密度由对话本身决定，而不是写死在某个时段上。
+    reply_delay_minutes: Optional[int] = None
+    # 同一个媒介（频道 / 地点）最近 30 分钟里说过这么多句之后，不再给回话机会，
+    # 对话退回固定节拍。它是"一段对话最多多快烧掉单次额度"的上界：没有它，
+    # 两个都愿意接话的人会一分钟一句，直到把整次 Start 的额度用完。
+    reply_burst_lines: int = 8
 
     # 这里**没有**"允许提交台词动作"的开关，而且不该有：需要台词的动作在本
     # 阶段没有提交路径（见 pns/models/action.py 的 _require_committable），
@@ -113,6 +121,7 @@ class AgencyBudget:
             "max_legal_actions",
             "max_observations",
             "max_committed_actions_per_session",
+            "reply_burst_lines",
         ):
             value = getattr(self, name)
             # bool 是 int 的子类：True 当成"上限 1"会让一个明显写错的配置跑起来。
@@ -120,6 +129,11 @@ class AgencyBudget:
                 raise AgencyError(f"{name} 必须是整数，收到 {value!r}")
             if value <= 0:
                 raise AgencyError(f"{name} 必须大于 0，收到 {value}")
+        delay = self.reply_delay_minutes
+        if delay is not None and (
+            isinstance(delay, bool) or not isinstance(delay, int) or not 1 <= delay <= 1440
+        ):
+            raise AgencyError(f"reply_delay_minutes 必须是 1–1440 的整数或不设，收到 {delay!r}")
 
     def to_dict(self) -> Dict:
         return {
@@ -129,6 +143,8 @@ class AgencyBudget:
             "max_committed_actions_per_session": (
                 self.max_committed_actions_per_session
             ),
+            "reply_delay_minutes": self.reply_delay_minutes,
+            "reply_burst_lines": self.reply_burst_lines,
         }
 
 

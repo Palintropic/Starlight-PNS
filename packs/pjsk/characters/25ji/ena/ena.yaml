@@ -32,7 +32,11 @@ daily_rhythm:
     activity: resting
     location_id: ena_home
     source: inferred
-  - at: "14:00"
+  - at: "14:00"        # 起床后的第一顿饭；时刻为推断
+    activity: eating
+    location_id: ena_home
+    source: inferred
+  - at: "14:40"
     activity: idle
     location_id: ena_home
     source: inferred
@@ -40,7 +44,11 @@ daily_rhythm:
     activity: studying
     location_id: kamiyama_high
     source: inferred
-  - at: "21:30"        # 25 時之前已到家
+  - at: "21:30"        # 25 時之前已到家；母亲会给她留饭（见 family），到家先吃，时刻为推断
+    activity: eating
+    location_id: ena_home
+    source: inferred
+  - at: "22:00"
     activity: idle
     location_id: ena_home
     source: inferred

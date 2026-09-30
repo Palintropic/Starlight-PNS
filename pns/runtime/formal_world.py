@@ -3,7 +3,8 @@
 # 1.x 的世界从一个遗留场景投影出来：场景写好几点、谁在哪、在做什么。正式世界
 # 不这样开局。它的身份和开局规则写在这里，初始状态**全部**由已校验的内容推出：
 #
-#   * 时钟：启动当天（按世界时区）的开局时刻，例如 Asia/Tokyo 19:00；
+#   * 时钟：启动当天（按世界时区）的开局时刻，例如 Asia/Tokyo 19:00；或者（`start`
+#     为 None）按下开局的那一分钟，世界时间从第一分钟起就与现实对齐；
 #   * 每个 resident：授予来自角色内容；位置、活动、频道在场取自作息表在开局
 #     那一刻所在的那一段——开局就与作息一致，不需要第一步去"纠正"它；
 #   * 来源：世界身份、时区、开局时刻、创建时刻（UTC）、内容版本与指纹、操作者，
@@ -12,7 +13,7 @@
 #   * 内容账本：记下开局采用的每人作息的指纹，之后内容包里的新版本要经项目
 #     所有者明确采用才生效（见 pns/models/content_ledger.py）。
 #
-# 开局不写任何世界事件，也不给角色写开场白：19:00 之前的事没有发生过，不能
+# 开局不写任何世界事件，也不给角色写开场白：开局之前的事没有发生过，不能
 # 伪造成 resident 的经历（计划 §4.1 第 4 条、§5.2）。
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -36,17 +37,21 @@ class FormalWorldSpec:
     # 世界时区相对 UTC 的偏移。日本没有夏令时，固定偏移就是 Asia/Tokyo 的全部
     # 规则；不依赖系统时区数据库（精简镜像里常常没有）。
     utc_offset: timedelta
-    start: time
+    # 开局时刻。None = 按下开局的那一分钟（世界与现实从一开始就对齐）；给定时刻 =
+    # 启动当天的那个时刻，此后世界与现实之间会一直差着按下时刻与它的距离。
+    start: Optional[time]
     residents: Tuple[str, ...]
 
     def tz(self) -> timezone:
         return timezone(self.utc_offset, self.timezone_name)
 
     def launch_clock(self, wall: datetime) -> datetime:
-        """wall 那一刻所在的"启动当天"的开局时刻（模拟时间，naive）。"""
+        """wall 那一刻对应的开局时刻（模拟时间，naive）。"""
         if wall.utcoffset() is None:
             raise FormalWorldError("开局的现实时刻必须带时区")
         local = wall.astimezone(self.tz())
+        if self.start is None:
+            return local.replace(second=0, microsecond=0, tzinfo=None)
         return datetime.combine(local.date(), self.start)
 
 
