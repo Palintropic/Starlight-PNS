@@ -556,24 +556,36 @@ def consumes_allowance(record) -> bool:
     "认知不可用"没有用到认知；到期时就已失效、没问过策略的回话机会也没有。
     其余结局——行动、弃权、各种拒绝——都是认知真的运行过之后给出的。
 
-    判据只读记录本身（结局码 + detail），所以引擎记账、存档加载复核和状态
-    报告三处算出来的永远是同一个数。传结局码也行（旧调用形状），那时只按
-    结局码判断。
+    回话免单的判据全部来自记录自己，而且彼此印证：到期身份是这个人的回话
+    机会（`reply.activation:<角色>:` 开头）；结局是 rejected_stale、理由是
+    reply_lapsed；策略名为空、没有提案、没有凭据、没有策略说法 —— 也就是
+    记录本身说明它没走到策略那一步。普通节拍改个理由拿不到它。引擎记账、
+    存档加载复核和状态报告三处调用的都是这一个函数。传结局码也行（旧调用
+    形状），那时只按结局码判断。
     """
     outcome = getattr(record, "outcome", record)
     value = getattr(outcome, "value", outcome)
     if value == "rejected_unavailable":
         return False
     detail = getattr(record, "detail", None)
-    if (
-        value == "rejected_stale"
-        and isinstance(detail, Mapping)
-        and detail.get("reason") == REPLY_LAPSED
-        # 判过分的记录一定调用过模型：带着凭据的记录不能借这个理由免单。
+    if value != "rejected_stale" or not isinstance(detail, Mapping):
+        return True
+    if detail.get("reason") != REPLY_LAPSED:
+        return True
+    character_id = getattr(record, "character_id", None)
+    due_id = getattr(record, "due_id", "")
+    untouched = (
+        getattr(record, "policy", None) == ""
+        and getattr(record, "proposal", None) is None
         and "audit" not in detail
-    ):
-        return False
-    return True
+        and "rationale" not in detail
+    )
+    is_reply = (
+        isinstance(character_id, str)
+        and isinstance(due_id, str)
+        and due_id.startswith(f"reply.activation:{character_id}:")
+    )
+    return not (untouched and is_reply)
 
 
 def next_minute_after(moment: datetime) -> datetime:

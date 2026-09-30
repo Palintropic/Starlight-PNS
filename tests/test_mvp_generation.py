@@ -43,7 +43,9 @@ from pns.models.activation import ActivationKind, ScheduledActivation  # noqa: E
 from pns.models.agency import AgencyOutcome  # noqa: E402
 from pns.models.cognition import REPLY_LAPSED, consumes_allowance  # noqa: E402
 from pns.models.world_state import Availability  # noqa: E402
-from pns.models.event import EventType  # noqa: E402
+from pns.models.event import Event, EventScope, EventType  # noqa: E402
+from pns.runtime.agency.engine import reply_activation_id  # noqa: E402
+from pns.runtime.event_commit import commit_session_event  # noqa: E402
 from pns.models.memory import MemoryClass, MemoryRecord  # noqa: E402
 from pns.runtime.autonomy.context import (  # noqa: E402
     ActivationCue,
@@ -836,13 +838,108 @@ class ReplyGateTests(MvpTestCase):
             len(world.state.events.by_type(EventType.MESSAGE_SENT)), 8 + 2
         )
 
-    def test_a_lapse_record_that_carries_an_audit_still_spends_allowance(self):
-        # 免单只给"没问过策略"的失效回话；带着判分凭据的记录不能借这个理由。
+    def test_only_an_untouched_reply_record_is_free(self):
+        # R2-B：免单的判据必须彼此印证，改一个理由拿不到它。
         class _Record:
             outcome = AgencyOutcome.REJECTED_STALE
-            detail = {"reason": REPLY_LAPSED, "audit": {}}
+            character_id = "ena"
+            due_id = "reply.activation:ena:said@2026-09-30T02:06:00"
+            policy = ""
+            proposal = None
 
-        self.assertTrue(consumes_allowance(_Record()))
+            def __init__(self, **changes):
+                self.detail = {"reason": REPLY_LAPSED, "cognition_interval": 1}
+                for key, value in changes.items():
+                    setattr(self, key, value)
+
+        self.assertFalse(consumes_allowance(_Record()))
+        forged = {
+            "普通节拍改成失效回话": {"due_id": "seed.activation:ena@2026-09-30T02:10:00"},
+            "别人的回话身份": {"character_id": "mizuki"},
+            "问过策略": {"policy": "authored_line"},
+            "有判分凭据": {"detail": {"reason": REPLY_LAPSED, "audit": {}}},
+            "有策略说法": {"detail": {"reason": REPLY_LAPSED, "rationale": "model chose silence"}},
+            "提交期失效": {"detail": {"reason": "reply_went_stale"}},
+        }
+        for label, changes in forged.items():
+            with self.subTest(label):
+                self.assertTrue(consumes_allowance(_Record(**changes)))
+
+    def test_a_reply_to_in_an_ordinary_activation_is_just_an_activation(self):
+        # R2-A：任何排期都能带 reply_to。回话身份要由激活 ID 印证，否则按
+        # 普通激活处理，也就拿不到失效免单。
+        world = self.create()
+        world.state.scheduler.schedule(
+            ScheduledActivation(
+                activation_id="forged-ordinary-beat",
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=world.state.world_state.clock + timedelta(minutes=1),
+                character_id="ena",
+                payload={"reply_to": "missing-event"},
+            )
+        )
+        self.advance(world, 1)
+        [record] = [
+            r for r in world.state.agency.records() if r.due_id.startswith("forged-")
+        ]
+        self.assertNotEqual(record.detail.get("reason"), REPLY_LAPSED)
+        self.assertTrue(consumes_allowance(record))
+
+    def test_a_spoken_reply_is_refused_if_the_speaker_moved_while_it_was_written(self):
+        # R1：当面说话没有目标地点。生成期间换了房间，提交期的前置条件照样
+        # 全过；回话必须按来源重判，不能落在新房间里。
+        world = self.create()
+        ws = world.state.world_state
+        for cid in ("mizuki", "ena"):
+            # 先各有一条段内状态变更，作息就不会把她们放回原处。
+            self.plane.set_activity("nightcord", cid, "studying")
+        with world.state.atomic_commit():
+            for cid in ("mizuki", "ena"):
+                ws.leave_channel(cid, "nightcord")
+                ws.place_character(cid, "kamiyama_high")
+            commit_session_event(
+                world.state,
+                Event(
+                    event_id="said",
+                    type=EventType.DIALOGUE_SPOKEN,
+                    occurred_at=ws.clock,
+                    scope=EventScope.LOCATION,
+                    actor_id="mizuki",
+                    participants=("mizuki", "ena"),
+                    location_id="kamiyama_high",
+                    payload={"text": "在吗", "char_name": "晓山瑞希"},
+                ),
+            )
+        world.state.scheduler.schedule(
+            ScheduledActivation(
+                activation_id=reply_activation_id("ena", "said"),
+                kind=ActivationKind.CHARACTER_ACTIVATION,
+                due_at=ws.clock + timedelta(minutes=1),
+                character_id="ena",
+                payload={"reply_to": "said"},
+            )
+        )
+
+        def walk_out(call):
+            with world.state.atomic_commit():
+                ws.place_character("ena", "kamiyama_high_gate")
+
+        self.provider._on_generate = walk_out
+        self.advance(world, 1)
+        spoken = [
+            e
+            for e in world.state.events.by_type(EventType.DIALOGUE_SPOKEN)
+            if e.actor_id == "ena"
+        ]
+        self.assertEqual(spoken, [], "回话不许落在新房间里")
+        [record] = [
+            r
+            for r in world.state.agency.records()
+            if r.due_id.startswith(reply_activation_id("ena", "said"))
+        ]
+        self.assertIs(record.outcome, AgencyOutcome.REJECTED_STALE)
+        self.assertEqual(record.detail["reason"], "reply_went_stale")
+        self.assertTrue(consumes_allowance(record), "模型已经调用过，这次要花额度")
 
 
 class RejectedLineReplyTests(MvpTestCase):

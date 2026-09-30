@@ -84,6 +84,26 @@ def _reply_action(medium: Tuple[str, str]) -> Tuple[ActionId, Optional[str]]:
     return ActionId.SPEAK_HERE, None
 
 
+def reply_activation_id(character_id: str, source_event_id: str) -> str:
+    """一次回话机会的激活 ID。它就是回话身份：只有 _offer_replies 用这个格式排。"""
+    return f"reply.activation:{character_id}:{source_event_id}"
+
+
+def _reply_source(due: ActivationDue) -> Optional[str]:
+    """这条到期是不是一次回话机会；是就返回它回的那条事件 ID。
+
+    payload 里有 reply_to 不算数：任何排期都能带一个。回话身份由激活 ID 与
+    reply_to 互相印证 —— 激活 ID 必须恰好是 _offer_replies 为这个人、这条
+    来源排出来的那个。
+    """
+    source = due.payload.get("reply_to")
+    if not isinstance(source, str) or not due.character_id:
+        return None
+    if due.activation_id != reply_activation_id(due.character_id, source):
+        return None
+    return source
+
+
 def _still_in(world: WorldState, character_id: str, medium: Tuple[str, str]) -> bool:
     kind, anchor = medium
     if kind == "channel":
@@ -308,12 +328,14 @@ class AgencyEngine:
             )
 
         reply_medium = None
-        if "reply_to" in due.payload:
+        if _reply_source(due) is not None:
             reply_medium, lapse = self._reply_gate(due, character_id)
             if lapse is not None:
                 # 在问策略之前收尾：没有生成、没有判分，也就不花单次额度
-                # （见 consumes_allowance）。
-                return plan(AgencyOutcome.REJECTED_STALE, detail=lapse)
+                # （见 consumes_allowance）。策略名留空，记录自己说明"没问过策略"。
+                return replace(
+                    plan(AgencyOutcome.REJECTED_STALE, detail=lapse), policy=""
+                )
 
         committed = self._state.agency.committed_actions()
         if committed >= self._budget.max_committed_actions_per_session:
@@ -543,9 +565,9 @@ class AgencyEngine:
         的条件：来源是一句话；回话的人此刻仍在那句话的媒介里（还在那个频道 /
         还在那个地点）；而且在那里开口的前置条件此刻都满足（比如没睡着）。
         """
-        source_id = due.payload.get("reply_to")
+        source_id = _reply_source(due)
         events = self._state.events
-        if not isinstance(source_id, str) or not events.has(source_id):
+        if source_id is None or not events.has(source_id):
             return None, {"reason": REPLY_LAPSED, "why": "source_missing"}
         medium = _reply_medium(events.get(source_id))
         if medium is None:
@@ -604,7 +626,7 @@ class AgencyEngine:
                 continue
             scheduler.schedule(
                 ScheduledActivation(
-                    activation_id=f"reply.activation:{member}:{event.event_id}",
+                    activation_id=reply_activation_id(member, event.event_id),
                     kind=ActivationKind.CHARACTER_ACTIVATION,
                     due_at=due_at,
                     character_id=member,
@@ -769,6 +791,19 @@ class AgencyEngine:
                 "target_id": proposal.target_id,
                 "failed": [precondition.value for precondition in failed],
             }
+        if _reply_source(plan.due) is not None:
+            # 回话在生成期间可能已经不成立了：当面说话没有目标地点，人换了房间
+            # 前置条件照样全过，话就会落在新房间里。所以提交时按来源重判一次。
+            # 理由不是 reply_lapsed：到这里模型已经调用过了，这次要花额度。
+            medium, lapse = self._reply_gate(plan.due, plan.character_id)
+            if lapse is not None:
+                return AgencyOutcome.REJECTED_STALE, {**lapse, "reason": "reply_went_stale"}
+            if (proposal.action_id, proposal.target_id) != _reply_action(medium):
+                return AgencyOutcome.REJECTED_STALE, {
+                    "reason": "reply_went_stale",
+                    "why": "medium_changed",
+                    "medium": list(medium),
+                }
         return None
 
     def _refuse_audit(self, plan: ProposalPlan, proposal: ActionProposal):
