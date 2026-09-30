@@ -232,6 +232,8 @@ class MvpTestCase(unittest.TestCase):
     autonomy = None
     # 回话机会的延迟（环境变量的值）。"0" = 关：多数用例钉的是固定节拍。
     reply_delay = "0"
+    # 回话上限（环境变量的值）。None = 服务器默认。
+    reply_burst = None
 
     def setUp(self):
         self.registry = BOUNDARY.active()
@@ -249,6 +251,11 @@ class MvpTestCase(unittest.TestCase):
             {
                 self.registry.models.key_name: CANARY,
                 "PNS_AUTONOMY_REPLY_DELAY_MINUTES": self.reply_delay,
+                **(
+                    {"PNS_AUTONOMY_REPLY_BURST_LINES": self.reply_burst}
+                    if self.reply_burst is not None
+                    else {}
+                ),
             },
         )
         self._env.start()
@@ -819,24 +826,77 @@ class ReplyGateTests(MvpTestCase):
             )
         )
 
+    def reply_lines(self, world):
+        return [
+            e
+            for e in world.state.events.by_type(EventType.MESSAGE_SENT)
+            if e.provenance.get("activation_id", "").startswith("reply.activation:")
+        ]
+
     def test_a_talkative_pair_stops_being_asked_after_a_burst(self):
-        # F2：两个人都愿意一直接话。30 分钟窗口里说满 8 句之后不再排回话，
-        # 对话退回固定节拍，而不是一分钟一句直到额度烧完。
+        # F2 / R4：两个人都愿意一直接话。30 分钟窗口里由回话说出满 8 句之后
+        # 不再排回话，对话退回固定节拍，而不是一分钟一句直到额度烧完。
         world = self.create()
-        self.advance(world, 15)
-        lines = world.state.events.by_type(EventType.MESSAGE_SENT)
-        self.assertEqual(len(lines), 8)
+        self.advance(world, 30)
+        self.assertEqual(len(self.reply_lines(world)), 8)
         self.assertFalse(
             any(
                 a.activation_id.startswith("reply.activation:")
                 for a in world.state.activations.pending()
             )
         )
-        # 固定节拍还在：窗口里已经满了，节拍开口也不再引来回话。
-        self.advance(world, 15)
-        self.assertLessEqual(
-            len(world.state.events.by_type(EventType.MESSAGE_SENT)), 8 + 2
-        )
+
+
+class ReplyBurstTests(MvpTestCase):
+    """R4：上限只数回话，而且到期和提交时也要查，不只是排的时候。"""
+
+    reply_delay = "1"
+    reply_burst = "2"
+
+    def reply_lines(self, world):
+        return ReplyGateTests.reply_lines(self, world)
+
+    def test_fixed_beats_do_not_use_up_the_reply_allowance(self):
+        # 瑞希 02:05 按节拍开口 → 绘名 02:06 回 → 瑞希 02:07 回。节拍那句
+        # 不算，所以第二句回话还排得上。
+        world = self.create()
+        self.advance(world, 7)
+        speakers = [e.actor_id for e in world.state.events.by_type(EventType.MESSAGE_SENT)]
+        self.assertEqual(speakers, ["mizuki", "ena", "mizuki"])
+        self.assertEqual(len(self.reply_lines(world)), 2)
+
+    def test_replies_due_together_cannot_exceed_the_limit(self):
+        # 同一分钟一起到期的回话：排的时候都还有名额，到期时只剩够一句的。
+        world = self.create()
+        self.advance(world, 6)  # 瑞希 02:05 开口，绘名 02:06 回（第 1 句回话）
+        said = world.state.events.by_type(EventType.MESSAGE_SENT)
+        mizuki_line = said[0].event_id
+        ena_line = said[1].event_id
+        clock = world.state.world_state.clock
+        for cid, source in (("mizuki", ena_line), ("ena", mizuki_line)):
+            # 两次都是真的回话身份（_offer_replies 会排出的那种格式）。
+            if any(
+                a.activation_id == reply_activation_id(cid, source)
+                for a in world.state.activations.pending()
+            ):
+                continue
+            world.state.scheduler.schedule(
+                ScheduledActivation(
+                    activation_id=reply_activation_id(cid, source),
+                    kind=ActivationKind.CHARACTER_ACTIVATION,
+                    due_at=clock + timedelta(minutes=1),
+                    character_id=cid,
+                    payload={"reply_to": source},
+                )
+            )
+        self.advance(world, 1)
+        self.assertEqual(len(self.reply_lines(world)), 2, "上限是 2，一句都不许多")
+        lapsed = [
+            r
+            for r in world.state.agency.records()
+            if r.detail.get("why") == "burst_full"
+        ]
+        self.assertEqual(len(lapsed), 1)
 
     def test_only_an_untouched_reply_record_is_free(self):
         # R2-B：免单的判据必须彼此印证，改一个理由拿不到它。

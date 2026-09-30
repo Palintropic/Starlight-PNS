@@ -62,9 +62,10 @@ from pns.runtime.event_commit import commit_session_event
 
 
 # 回话机会的来源必须是一句话，而且回话只能回到那句话所在的媒介里。
-# 同一个媒介里，这段时间内说过的话达到 AgencyBudget.reply_burst_lines 条之后，
-# 就不再给回话机会，对话退回固定节拍。窗口按世界历史算，不按因果链：固定节拍
-# 在对话中途开口时会开一条新链，按链计数的上限因此永远到不了。
+# 同一个媒介里，这段时间内**由回话说出的**句子达到 AgencyBudget.reply_burst_lines
+# 条之后，回话就停下，对话退回固定节拍。窗口按世界历史算，不按因果链：固定节拍
+# 在对话中途开口时会开一条新链，按链计数的上限因此永远到不了。固定节拍自己说的
+# 话不计入：否则人一多，节拍本身就能把名额占满，回话再也排不上。
 REPLY_BURST_WINDOW = timedelta(minutes=30)
 
 
@@ -102,6 +103,17 @@ def _reply_source(due: ActivationDue) -> Optional[str]:
     if due.activation_id != reply_activation_id(due.character_id, source):
         return None
     return source
+
+
+def _is_reply_line(event) -> bool:
+    """这句话是不是由一次回话机会说出来的（看它自己的 provenance）。"""
+    provenance = event.provenance or {}
+    activation_id = provenance.get("activation_id")
+    return (
+        provenance.get("kind") == "agency"
+        and isinstance(activation_id, str)
+        and activation_id.startswith("reply.activation:")
+    )
 
 
 def _still_in(world: WorldState, character_id: str, medium: Tuple[str, str]) -> bool:
@@ -585,7 +597,27 @@ class AgencyEngine:
                 "why": "cannot_answer",
                 "failed": [precondition.value for precondition in failed],
             }
+        if self._reply_burst_full(medium):
+            return None, {
+                "reason": REPLY_LAPSED,
+                "why": "burst_full",
+                "medium": list(medium),
+            }
         return medium, None
+
+    def _reply_burst_full(self, medium: Tuple[str, str]) -> bool:
+        """这个媒介最近由回话说出的句子是否已经满额。
+
+        排回话、回话到期、回话提交三处都问它：只在排的时候问的话，同一句话
+        可以同时给好几个人排上，它们一起到期就把上限冲破了。提交这一问是
+        硬的 —— 满额之后没有一句回话能落地。
+        """
+        lines = sum(
+            1
+            for earlier in self._state.events.since(self.clock - REPLY_BURST_WINDOW)
+            if _reply_medium(earlier) == medium and _is_reply_line(earlier)
+        )
+        return lines >= self._budget.reply_burst_lines
 
     def _offer_replies(self, event) -> None:
         """给当时在场的其他人排一次一次性的回话机会（在提交事务之内）。
@@ -605,12 +637,7 @@ class AgencyEngine:
         scheduler = self._state.scheduler
         if scheduler is None:
             return
-        recent = sum(
-            1
-            for earlier in self._state.events.since(self.clock - REPLY_BURST_WINDOW)
-            if _reply_medium(earlier) == medium
-        )
-        if recent >= self._budget.reply_burst_lines:
+        if self._reply_burst_full(medium):
             return
         action_id, target_id = _reply_action(medium)
         due_at = self.clock + timedelta(minutes=delay)
