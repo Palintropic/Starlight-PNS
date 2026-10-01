@@ -186,7 +186,7 @@ class ModelSettings:
             raise ConfigValidationError(
                 f"OOC_THRESHOLD 必须落在 0-10，实际是 {ooc_threshold}"
             )
-        model = env.get("MODEL", "mimo-v2.5-pro")
+        model = env.get("MODEL", "mimo-v2.6-pro")
         return cls(
             provider=env.get("PROVIDER", ""),
             api_format=api_format,
