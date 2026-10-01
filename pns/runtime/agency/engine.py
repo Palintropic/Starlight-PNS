@@ -28,7 +28,7 @@
 # 会话只能绑一个。存档里的 agency 段就是那份日志。
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Mapping, Optional, Set, Tuple
 
 from pns.models.action import ActionId, ActionProposal
 from pns.models.activation import ActivationDue, ActivationKind, ScheduledActivation
@@ -49,6 +49,7 @@ from pns.models.cognition import (
     wall_now,
 )
 from pns.models.event import EventType
+from pns.models.frozen import thaw_json_value
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.agency.context import AgencyContext, build_agency_context
@@ -79,6 +80,9 @@ REPLY_BURST_WINDOW = timedelta(minutes=30)
 
 # 角色已经不在世界里时的收尾理由。
 UNKNOWN_CHARACTER = "unknown_character"
+# 这条到期已经问过策略，之后才变成可以收尾的条件（睡着、冷却、回话失效、
+# 角色已不在）。认知真的发生过，所以它计费，不走免费收尾（实现复核 R4）。
+CLOSED_AFTER_COGNITION = "closed_after_cognition"
 
 
 def free_closure_kind(plan) -> Optional[str]:
@@ -303,12 +307,21 @@ class AgencyEngine:
         # detail 的副本都不是签发的那一个，哪怕字段全对、提交那一刻条件也恰好
         # 成立（PLAN-1 §9 D2、实现复核 R3）。它只活在进程里：进程没了，计划对象
         # 也没了，重新 propose() 就重新签发。
-        self._issued: Dict[str, ProposalPlan] = {}
+        # 每条签发记录连同签发时 detail 的快照一起存、一起取走：计划对象是
+        # frozen dataclass，但 detail 是普通字典，能被原地改写，身份对上之后
+        # 还要核对它没被动过。
+        self._issued: Dict[str, Tuple[ProposalPlan, object]] = {}
         # 同一条规矩用在走到策略那一步的前置门结论上：记录里的观察游标和规划
         # 理由，只认 propose() 发出去的那个 PlanProposal 对象。手拼一个更大的
         # 游标，等于让记录声称这次认知读过它没读过的观察。免费收尾的结论不在
         # 这里，它们随整份计划在签发表里核对。
         self._planned: Dict[str, PlanProposal] = {}
+        # 真的问过策略的到期（policy.decide() 调用之前那一刻登记）。"过了前置门"
+        # 不等于"问过策略"——动作上限满了时 propose() 在策略之前就返回。这张表
+        # 才是"这条到期发生过认知"的依据：问过的，之后不管变成什么收尾条件，
+        # 都不能再以"没问策略"的免费形状结案。只活在进程里（进程重启之后，
+        # 那次没提交成的认知本来也就没有记录可依）。
+        self._asked: Set[str] = set()
         # 绑定只允许一次。两个引擎会给同一条到期两个互相看不见的结论，
         # 而其中一个的审计记录会说"我处理过了"。
         try:
@@ -411,21 +424,22 @@ class AgencyEngine:
                 return record
         return None
 
-    def _closure(self, due: ActivationDue, character_id: str) -> Optional[ProposalPlan]:
+    def _closure(
+        self, due: ActivationDue, character_id: str, *, after_cognition: bool = False
+    ) -> Optional[ProposalPlan]:
         """此刻这条到期能不能不问策略就收尾；能就交回一份**未签发**的计划。纯读取。
 
-        三种收尾，按次序：
+        三种收尾，按次序：角色已不在世界里、前置门收尾（asleep / cooldown）、
+        回话已失效（来源、媒介、能不能开口、名额，见 _reply_gate()）。
 
-          角色已不在世界里   只在这条到期从没走到策略那一步时才是免费收尾；
-                             走到过（之前 propose() 发出过结论、问过策略）就交给
-                             propose() 带着那份结论计费结案，游标不丢。
-          前置门收尾         asleep / cooldown。
-          回话已失效         来源、媒介、能不能开口、名额，见 _reply_gate()。
+        这条到期已经问过策略时，一律不算免费收尾（返回 None），由 propose()
+        记一条计费的 closed_after_cognition。after_cognition=True 只用来问
+        "条件本身成不成立"。
         """
+        if due.due_id in self._asked and not after_cognition:
+            return None
         proposed_at = self.clock
         if character_id not in self.world.known_characters():
-            if due.due_id in self._planned:
-                return None
             return ProposalPlan(
                 due=due,
                 character_id=character_id,
@@ -460,9 +474,8 @@ class AgencyEngine:
         return None
 
     def _issue(self, plan: ProposalPlan) -> ProposalPlan:
-        # 免费收尾只进签发表，不进 _planned：_planned 只记走到了策略那一步的
-        # 结论，"这条到期问没问过策略"靠它回答（见 _closure 的未知角色分支）。
-        self._issued[plan.due.due_id] = plan
+        # 免费收尾只进签发表，不进 _planned：_planned 只记走到了策略路径的结论。
+        self._issued[plan.due.due_id] = (plan, thaw_json_value(plan.detail))
         return plan
 
     def closure_plan(self, due: ActivationDue) -> Optional[ProposalPlan]:
@@ -477,7 +490,8 @@ class AgencyEngine:
 
     def is_issued(self, plan: ProposalPlan) -> bool:
         """这份计划是不是本引擎此刻为它那条到期签发着的免费收尾。"""
-        return self._issued.get(plan.due.due_id) is plan
+        entry = self._issued.get(plan.due.due_id)
+        return entry is not None and entry[0] is plan
 
     # ── 提案 ────────────────────────────────────────────────────────────
     def propose(self, due: ActivationDue) -> ProposalPlan:
@@ -517,16 +531,20 @@ class AgencyEngine:
         # 这次不免费收尾：先前给这条到期签发过的（如果有）作废。
         self._issued.pop(due.due_id, None)
 
-        if character_id not in self.world.known_characters():
-            # 排期时角色还在，现在不在了。调度器刻意不替下游做这个判断
-            # （它宁可交出一条需要复核的记录），复核就在这里。这条到期之前已经
-            # 建出过上下文、发过前置门结论（_closure 才没有免费收尾它）：带着那份
-            # 结论结案，游标不丢。
-            planning = self._planned[due.due_id]
-            return plan(
-                AgencyOutcome.REJECTED_ILLEGAL,
-                detail={"reason": UNKNOWN_CHARACTER, "character_id": character_id},
-            )
+        if due.due_id in self._asked:
+            late = self._closure(due, character_id, after_cognition=True)
+            if late is not None:
+                # 这条到期之前问过策略（那次没提交成），现在才变成收尾条件：
+                # 认知已经发生过，计费结案，带着那次的结论与游标。
+                planning = self._planned.get(due.due_id)
+                return plan(
+                    AgencyOutcome.REJECTED_STALE,
+                    detail={
+                        "reason": CLOSED_AFTER_COGNITION,
+                        "closure": free_closure_kind(late),
+                        "closure_reason": late.detail.get("reason"),
+                    },
+                )
 
         context = self.context_for(due)
         planning = self._plan(due, character_id, context)
@@ -560,6 +578,7 @@ class AgencyEngine:
                 ),
             )
         try:
+            self._asked.add(due.due_id)
             decision = self._policy.decide(context)
         except AgencyPolicyError as e:
             return plan(
@@ -932,19 +951,26 @@ class AgencyEngine:
         """
         due_id = getattr(plan.due, "due_id", None)
         outbox = self._state.activation_outbox
-        for stale in [
-            key
-            for key in self._planned
-            if not outbox.has(key) or outbox.is_acknowledged(key)
-        ]:
-            del self._planned[stale]
-        issued = self._issued.pop(due_id, None)
+        for table in (self._planned, self._asked):
+            for stale in [
+                key
+                for key in table
+                if not outbox.has(key) or outbox.is_acknowledged(key)
+            ]:
+                table.discard(stale) if isinstance(table, set) else table.pop(stale)
+        issued, issued_detail = self._issued.pop(due_id, (None, None))
         planned = self._planned.get(due_id)
         if plan.verdict is AgencyOutcome.REJECTED_UNAVAILABLE:
             # 不可用由认知时间线在事务里判，跟前置门无关；时间线说可用时 _judge 拒绝。
             return
         if issued is not None and plan is issued:
-            # 整份签发出去的免费收尾：身份已经核过，条件在事务内重判。
+            # 整份签发出去的免费收尾：身份已经核过，条件在事务内重判。detail 是
+            # 可变字典，原地改过的签发对象身份照样对得上，所以再核一次快照。
+            if (
+                thaw_json_value(plan.detail) != issued_detail
+                or free_closure_kind(plan) is None
+            ):
+                raise AgencyEngineError("签发出去的免费收尾被改过：detail 与签发时不一致")
             return
         kind = free_closure_kind(plan)
         if kind is not None:
