@@ -365,7 +365,7 @@ Run `python3 scripts/oobe.py` to choose either the official pay-as-you-go API or
 
 Pay-as-you-go keys normally start with `sk-`; Token Plan keys start with `tp-`, and the two credential types are not interchangeable. Token Plan users must select the cluster shown in their console.
 
-The default text-model list contains the generally available `mimo-v2.5-pro` and `mimo-v2.5`; permission-gated UltraSpeed variants remain available through manual input.
+The default text-model list contains the generally available `mimo-v2.6-pro` and `mimo-v2.6-flash`; permission-gated UltraSpeed variants remain available through manual input.
 
 ---
 

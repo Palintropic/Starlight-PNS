@@ -5,7 +5,7 @@
 api:
   provider: "mimo"              # mimo / gemini
   base_url: "https://api.mimoai.com/v1"
-  model: "mimo-v2.5-pro"
+  model: "mimo-v2.6-pro"
   timeout: 30
   max_retries: 3
 
