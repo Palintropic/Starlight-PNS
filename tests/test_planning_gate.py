@@ -631,6 +631,77 @@ class IssuanceTests(unittest.TestCase):
             engine.commit(replace(plan, planning=None))
         self.assertEqual(_fingerprint(state), before)
 
+    def test_unknown_character_after_a_proposal_keeps_the_cursor(self):
+        # 复核 R3-F2（此前已提案）：带着那份结论计费结案，旧观察不会再算新。
+        state, scheduler, engine, policy = _engine_rig()
+        _other_says_and_leaves(state, "早", "old-line")
+        due = _due_at(scheduler, "t0", 0)
+        first = engine.propose(due)
+        self.assertEqual(first.planning.reason, PlanningReason.NEW_OBSERVATION)
+        state.world_state.remove_character("mizuki")
+        again = engine.propose(due)
+        self.assertIs(again.planning, first.planning)
+        record = engine.commit(again)
+        self.assertEqual(record.detail["reason"], "unknown_character")
+        self.assertIn("observation_cursor", record.detail)
+        self.assertTrue(consumes_allowance(record))
+        # 改成"从没建出上下文"的免费形状：不是签发的那一份。
+        state.world_state.place_character("mizuki", ROOM)
+        record = engine.commit(engine.propose(_due_at(scheduler, "t15", 15)))
+        self.assertIs(record.outcome, AgencyOutcome.QUIET)
+        self.assertEqual(record.detail["reason"], "cooldown")
+        self.assertEqual(policy.calls, 1)
+
+    def test_unknown_character_without_a_context_is_free_and_issued(self):
+        # 复核 R3-F2（从没建出上下文）：没问策略，不计费；形状不能自证。
+        state, scheduler, engine, policy = _engine_rig()
+        due = _due_at(scheduler, "t0", 0)
+        state.world_state.remove_character("mizuki")  # 到期时人已经不在：建不出上下文
+        plan = engine.propose(due)
+        self.assertEqual(plan.policy, "")
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(replace(plan))
+        self.assertEqual(_fingerprint(state), before)
+        record = engine.commit(engine.propose(due))
+        self.assertEqual(record.detail["reason"], "unknown_character")
+        self.assertFalse(consumes_allowance(record))
+        self.assertEqual(policy.calls, 0)
+
+    def test_a_free_closure_never_counts_as_having_asked_the_policy(self):
+        # 签过一份免费收尾（这里是 QUIET）又没提交成；角色随后不在世界里：
+        # 这条到期从没问过策略，未知角色的收尾也必须免费。
+        state, scheduler, engine, policy = _engine_rig()
+        _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep")
+        due = _due_at(scheduler, "t1", 1)
+        self.assertIs(engine.propose(due).verdict, AgencyOutcome.QUIET)
+        state.world_state.remove_character("mizuki")
+        record = engine.commit(engine.propose(due))
+        self.assertEqual(record.detail["reason"], "unknown_character")
+        self.assertFalse(consumes_allowance(record))
+        self.assertEqual(policy.calls, 0)
+
+    def test_without_a_gate_a_free_closure_still_cannot_change_verdict(self):
+        # 没开前置门的引擎（研究会话）也签发免费收尾；签过之后改成计费结论照样拒绝。
+        state, scheduler, engine, policy = _engine_rig(cooldown=None)
+        due = _due_at(scheduler, "t0", 0)
+        state.world_state.remove_character("mizuki")
+        free = engine.propose(due)
+        self.assertTrue(engine.is_issued(free))
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(replace(free, verdict=AgencyOutcome.ABSTAINED, policy="abstain", detail={}))
+        self.assertEqual(policy.calls, 0)
+
+    def test_a_charged_unknown_cannot_pose_as_the_free_one(self):
+        state, scheduler, engine, _ = _engine_rig()
+        due = _due_at(scheduler, "t0", 0)
+        engine.propose(due)
+        state.world_state.remove_character("mizuki")
+        charged = engine.propose(due)
+        self.assertNotEqual(charged.policy, "")
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(replace(charged, policy="", planning=None))
+
     def test_without_a_gate_no_quiet_can_be_committed(self):
         state, scheduler, engine, policy = _engine_rig(cooldown=None)
         _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep")
@@ -790,23 +861,37 @@ class CoordinatorQuietTests(unittest.TestCase):
         due = _due_at(self.scheduler, "t15", 15)
         world = self.state.world_state
         agency = self.runtime.agency
-        original_quiet_plan = agency.quiet_plan
+        original_quiet_plan = agency.closure_plan
         calls = {"n": 0}
 
-        def quiet_plan(d):
+        def closure_plan(d):
             calls["n"] += 1
             if calls["n"] == 2:
                 # 提交失败之后、兜底之前有人来了：门不再收尾。
                 world.place_character("ena", ROOM)
             return original_quiet_plan(d)
 
-        with self._flaky_ack(), patch.object(agency, "quiet_plan", side_effect=quiet_plan):
+        with self._flaky_ack(), patch.object(agency, "closure_plan", side_effect=closure_plan):
             result = self.runtime.process_due(due)
         self.assertEqual(calls["n"], 2)
         self.assertIs(result.outcome, ActivationOutcome.FAILED_RETRYABLE)
         self.assertFalse(self.state.agency.has(due.due_id))
         self.assertFalse(self.state.activation_outbox.is_acknowledged(due.due_id))
         self.assertEqual(_charged(self.state), 1)
+
+    def test_a_stuck_quiet_is_reported_as_still_pending(self):
+        # 复核 R3-F3：兜底也没写成 = 没有记录、没有确认，不能报 terminal。
+        self.runtime.process_due(_due_at(self.scheduler, "t0", 0))
+        self.runtime._retry = type(self.runtime._retry)(max_attempts=1)
+        due = _due_at(self.scheduler, "t15", 15)
+        outbox = self.state.activation_outbox
+        with patch.object(outbox, "_acknowledge", side_effect=RuntimeError("一直断电")):
+            result = self.runtime.process_due(due)
+        self.assertIs(result.outcome, ActivationOutcome.FAILED_RETRYABLE)
+        self.assertFalse(result.terminal)
+        self.assertTrue(result.detail["still_pending"])
+        self.assertFalse(self.state.agency.has(due.due_id))
+        self.assertFalse(outbox.is_acknowledged(due.due_id))
 
     def test_the_outcome_map_covers_quiet(self):
         self.assertIs(outcome_for(AgencyOutcome.QUIET), ActivationOutcome.QUIET)
@@ -831,6 +916,91 @@ class CoordinatorQuietTests(unittest.TestCase):
             with self.assertRaises(OutcomeError):
                 self.runtime.process_due(due)
         self.assertTrue(self.state.activation_outbox.is_acknowledged(due.due_id))
+
+
+class ReplyClosureTests(unittest.TestCase):
+    """复核 R3-F1 / R3-F4：失效回话是免费收尾，同样只能由引擎签发。"""
+
+    def setUp(self):
+        world = _world()
+        world.place_character("ena", ROOM)
+        self.state = _session(world)
+        self.scheduler = PersistentScheduler(self.state)
+        self.generations = 0
+
+        def speak(context):
+            self.generations += 1
+            return "嗯"
+
+        self.runtime = AutonomousRuntime(
+            self.state,
+            policy=AuthoredLinePolicy(
+                ScriptedLineGenerator({"mizuki": speak, "ena": speak}),
+                recall=MemoryRecall(self.state),
+            ),
+            auditor=ScriptedAuditor(),
+            budget=AgencyBudget(quiet_cooldown_minutes=COOLDOWN, reply_delay_minutes=1),
+        )
+        self.runtime.start()
+        spoken = self.runtime.process_due(_due_at(self.scheduler, "t0", 0, character_id="mizuki"))
+        self.assertIs(spoken.outcome, ActivationOutcome.ACTED)
+        [self.reply] = [
+            due
+            for due in self.scheduler.advance_by(1).due
+            if due.activation_id.startswith("reply.activation:ena:")
+        ]
+
+    def test_a_live_reply_cannot_be_relabelled_as_lapsed(self):
+        engine = self.runtime.agency
+        plan = engine.propose(self.reply)
+        self.assertIs(plan.verdict, AgencyOutcome.ACTED)
+        self.assertEqual(self.generations, 2)  # 瑞希一句 + 绘名这次
+        forged = replace(
+            plan,
+            verdict=AgencyOutcome.REJECTED_STALE,
+            policy="",
+            proposal=None,
+            rationale="",
+            detail={"reason": "reply_lapsed", "why": "left_the_conversation"},
+        )
+        before = _fingerprint(self.state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(forged)
+        self.assertEqual(_fingerprint(self.state), before)
+
+    def test_a_lapsed_reply_cannot_be_relabelled_as_charged(self):
+        self.state.world_state.place_character("ena", "ena_home_studio")
+        engine = self.runtime.agency
+        lapsed = engine.propose(self.reply)
+        self.assertTrue(engine.is_issued(lapsed))
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(replace(lapsed, verdict=AgencyOutcome.ABSTAINED, policy="x", detail={}))
+        record = engine.commit(engine.propose(self.reply))
+        self.assertEqual(record.detail["reason"], "reply_lapsed")
+        self.assertFalse(consumes_allowance(record))
+
+    def test_a_lapsed_reply_that_fails_to_commit_stays_free(self):
+        self.state.world_state.place_character("ena", "ena_home_studio")  # 回话到期前走开
+        self.runtime._retry = type(self.runtime._retry)(max_attempts=1)
+        outbox = self.state.activation_outbox
+        original = outbox._acknowledge
+        calls = {"n": 0}
+
+        def flaky(due_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("提交途中断电")
+            return original(due_id)
+
+        with patch.object(outbox, "_acknowledge", side_effect=flaky):
+            result = self.runtime.process_due(self.reply)
+        self.assertTrue(result.terminal)
+        self.assertIs(result.agency_outcome, AgencyOutcome.REJECTED_STALE)
+        record = self.state.agency.get(self.reply.due_id)
+        self.assertEqual(record.detail["reason"], "reply_lapsed")
+        self.assertFalse(consumes_allowance(record))
+        self.assertTrue(outbox.is_acknowledged(self.reply.due_id))
+        self.assertEqual(self.generations, 1)
 
 
 # ── D3 resting ⇒ ASLEEP，显式睡眠锁 ─────────────────────────────────────

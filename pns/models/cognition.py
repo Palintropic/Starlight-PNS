@@ -563,7 +563,8 @@ def consumes_allowance(record) -> bool:
     """一条 Agency 记录是否用掉了认知（从而消耗单次额度）。
 
     "认知不可用"没有用到认知；到期时就已失效、没问过策略的回话机会也没有；
-    前置门收尾（quiet）也没有。其余结局——行动、弃权、各种拒绝——都是认知
+    前置门收尾（quiet）也没有；角色已不在世界里、从没建出上下文的那种收尾
+    也没有。其余结局——行动、弃权、各种拒绝——都是认知
     真的运行过之后给出的。
 
     quiet 免单同样看记录自己的形状：理由在闭集里、策略名为空、没有提案、
@@ -585,6 +586,15 @@ def consumes_allowance(record) -> bool:
     detail = getattr(record, "detail", None)
     character_id = getattr(record, "character_id", None)
     due_id = getattr(record, "due_id", "")
+    if value == "rejected_illegal":
+        # 角色已不在世界里、从没建出过上下文：策略没被问过。带着前置门结论（有
+        # 游标）的那种是之前问过的，照常计费。
+        return not (
+            isinstance(detail, Mapping)
+            and detail.get("reason") == "unknown_character"
+            and "observation_cursor" not in detail
+            and _untouched(record, detail)
+        )
     if value == "quiet":
         return not (
             isinstance(detail, Mapping)

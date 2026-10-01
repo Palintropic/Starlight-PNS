@@ -55,7 +55,12 @@ from pns.models.event import Event, EventType
 from pns.models.session import SessionState
 from pns.models.time_events import QuietTime, quiet_time_report
 from pns.models.world_state import WorldState
-from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
+from pns.runtime.agency.engine import (
+    AgencyEngine,
+    AgencyEngineError,
+    ProposalPlan,
+    free_closure_kind,
+)
 from pns.runtime.autonomy.audit import AuditError, AuditRequest
 from pns.runtime.autonomy.context import DIALOGUE_OUTPUT_RULES
 from pns.runtime.autonomy.outcome import (
@@ -467,13 +472,14 @@ class AutonomousRuntime:
                             attempt,
                         )
                     )
-                # ── 前置门：没什么可想的就当场收尾（PLAN-1） ─────────────
-                # 同一个理由放在闸门里：门条件（同处者、观察、作息）也只经
-                # 闸门改变，签发与事务内重算之间插不进别的写入。
+                # ── 免费收尾：不问策略就能结案的当场结案（PLAN-1） ───────
+                # 前置门收尾、失效回话、角色已不在。同一个理由放在闸门里：这些
+                # 条件（同处者、观察、作息、对话媒介）也只经闸门改变，签发与
+                # 事务内重判之间插不进别的写入。
                 if self._running:
-                    quiet = self._agency.quiet_plan(due)
-                    if quiet is not None:
-                        return self._record(self._commit_admitted(due, quiet, attempt))
+                    closure = self._agency.closure_plan(due)
+                    if closure is not None:
+                        return self._record(self._commit_admitted(due, closure, attempt))
 
             # ── 提案（含生成，纯的） ───────────────────────────────────
             plan = self._agency.propose(due)
@@ -485,17 +491,17 @@ class AutonomousRuntime:
                 # 白跑一趟判分。真正挡住提交的是闸门里那次加锁判断（见 _commit），
                 # 因为"查完"到"进事务"之间永远有一段窗口。
                 return self._record(self._stopped_result(due, attempt=attempt - 1))
-            if plan.verdict is not AgencyOutcome.QUIET:
+            if not self._agency.is_issued(plan):
                 break
-            # 放开闸门之后门条件变了，propose() 签发了 QUIET。它是在闸门外签的，
-            # 回到闸门里重判，而不是拿它去赌提交时的重算。
+            # 放开闸门之后条件变了，propose() 签发了一份免费收尾。它是在闸门外
+            # 签的，回到闸门里重判，而不是拿它去赌提交时的重判。
         else:
             return self._record(
                 self._retry_result(
                     due,
                     self._agency._require_character(due),
                     attempt,
-                    "前置门的结论在闸门内外反复变化",
+                    "免费收尾的结论在闸门内外反复变化",
                 )
             )
 
@@ -1266,11 +1272,13 @@ class AutonomousRuntime:
         # 预算用完了，而且失败的正是提交路径本身。再试一次**最小**的那条：
         # 一条不产出事件、不碰记忆的终局失败记录。它成了，这条到期就有了
         # 耐久的交代；它也没成，那就如实报告"卡住了"，绝不静默丢弃。
-        if plan.verdict is AgencyOutcome.QUIET:
-            # 前置门收尾本来就是最小的那条，而且这一刻没有发生认知：终局失败
-            # 记录（计费）会把没发生的认知记成发生过。所以最小出口是在闸门里
-            # 重签一份 QUIET 再提交一次；门已经变了就交回待处理，下次按新的门判。
-            minimal = self._agency.quiet_plan(due)
+        closed = free_closure_kind(plan) is not None
+        if closed:
+            # 免费收尾（前置门、失效回话、角色已不在）本来就是最小的那条，而且
+            # 这一刻没有发生认知：终局失败记录（计费）会把没发生的认知记成发生
+            # 过。所以最小出口是在闸门里重签一份免费收尾再提交一次；条件已经变了
+            # 就交回待处理，下次按新的条件判。
+            minimal = self._agency.closure_plan(due)
             if minimal is None:
                 return self._retry_result(due, plan.character_id, attempt, message)
         else:
@@ -1289,10 +1297,12 @@ class AutonomousRuntime:
         except BaseException as second:
             with self._gate:
                 self._attempts[due.due_id] = attempt
+            # 连最小的那条也没写成：没有记录、没有确认，到期仍待处理。对外就必须
+            # 说"还没完"，不能报一个 terminal 的结局让调用方停止重试。
             return ActivationResult(
                 due_id=due.due_id,
                 character_id=plan.character_id,
-                outcome=ActivationOutcome.FAILED_TERMINAL,
+                outcome=ActivationOutcome.FAILED_RETRYABLE,
                 attempt=attempt,
                 at=self.clock,
                 detail={
@@ -1308,9 +1318,7 @@ class AutonomousRuntime:
             due_id=due.due_id,
             character_id=record.character_id,
             outcome=(
-                ActivationOutcome.QUIET
-                if record.outcome is AgencyOutcome.QUIET
-                else ActivationOutcome.FAILED_TERMINAL
+                outcome_for(record.outcome) if closed else ActivationOutcome.FAILED_TERMINAL
             ),
             attempt=attempt,
             at=record.decided_at,
@@ -1320,7 +1328,7 @@ class AutonomousRuntime:
                 **_plain(record.detail),
                 **(
                     {"after_commit_failure": message, "attempts": attempt}
-                    if record.outcome is AgencyOutcome.QUIET
+                    if closed
                     else {}
                 ),
             },

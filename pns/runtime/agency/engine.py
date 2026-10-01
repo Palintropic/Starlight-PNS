@@ -77,6 +77,33 @@ from pns.runtime.scheduler import REPLY_ACTIVATION_PREFIX
 REPLY_BURST_WINDOW = timedelta(minutes=30)
 
 
+# 角色已经不在世界里时的收尾理由。
+UNKNOWN_CHARACTER = "unknown_character"
+
+
+def free_closure_kind(plan) -> Optional[str]:
+    """这份计划的形状是不是一条"没问策略"的免费收尾；是就返回种类，否则 None。
+
+    三种：前置门收尾（quiet）、到期时已失效的回话（reply_lapsed）、从没建出
+    上下文的角色已不在世界里（unknown_character，策略名为空）。形状只用来认出
+    "这份计划声称自己没问过策略"；声称成不成立，由引擎的签发表与事务内重判
+    决定（PLAN-1 实现复核 R3）。
+    """
+    verdict = plan.verdict
+    if verdict is AgencyOutcome.QUIET:
+        return "quiet"
+    reason = plan.detail.get("reason") if isinstance(plan.detail, Mapping) else None
+    if verdict is AgencyOutcome.REJECTED_STALE and reason == REPLY_LAPSED:
+        return REPLY_LAPSED
+    if (
+        verdict is AgencyOutcome.REJECTED_ILLEGAL
+        and reason == UNKNOWN_CHARACTER
+        and plan.policy == ""
+    ):
+        return UNKNOWN_CHARACTER
+    return None
+
+
 def _cursor_of(record: AgencyRecord) -> int:
     """记录写下的观察游标。旧记录没有 → 0（全部观察都算新，只会多放行一次）。"""
     cursor = record.detail.get("observation_cursor", 0)
@@ -271,14 +298,16 @@ class AgencyEngine:
         self._state = state
         self._policy = policy
         self._budget = budget
-        # 前置门签发出去的 QUIET 计划，按 due_id 存**对象本身**。commit() 用 `is`
-        # 比对：手拼的、replace() 出来的、改过 detail 的副本都不是签发的那一个，
-        # 哪怕字段全对、提交那一刻门条件也恰好成立（PLAN-1 §9 D2）。它只活在
-        # 进程里：进程没了，计划对象也没了，重新 propose() 就重新签发。
+        # 引擎签发出去的免费收尾计划（QUIET、失效回话、角色已不在），按 due_id
+        # 存**对象本身**。commit() 用 `is` 比对：手拼的、replace() 出来的、改过
+        # detail 的副本都不是签发的那一个，哪怕字段全对、提交那一刻条件也恰好
+        # 成立（PLAN-1 §9 D2、实现复核 R3）。它只活在进程里：进程没了，计划对象
+        # 也没了，重新 propose() 就重新签发。
         self._issued: Dict[str, ProposalPlan] = {}
-        # 同一条规矩用在每一份前置门结论上：记录里的观察游标和规划理由，只认
-        # propose() 发出去的那个 PlanProposal 对象。手拼一个更大的游标，等于让
-        # 记录声称这次认知读过它没读过的观察。
+        # 同一条规矩用在走到策略那一步的前置门结论上：记录里的观察游标和规划
+        # 理由，只认 propose() 发出去的那个 PlanProposal 对象。手拼一个更大的
+        # 游标，等于让记录声称这次认知读过它没读过的观察。免费收尾的结论不在
+        # 这里，它们随整份计划在签发表里核对。
         self._planned: Dict[str, PlanProposal] = {}
         # 绑定只允许一次。两个引擎会给同一条到期两个互相看不见的结论，
         # 而其中一个的审计记录会说"我处理过了"。
@@ -382,37 +411,73 @@ class AgencyEngine:
                 return record
         return None
 
-    def _issue_quiet(
-        self, due: ActivationDue, planning: PlanProposal, proposed_at: datetime
-    ) -> ProposalPlan:
-        quiet = ProposalPlan(
-            due=due,
-            character_id=planning.character_id,
-            policy="",
-            proposed_at=proposed_at,
-            verdict=AgencyOutcome.QUIET,
-            detail={"reason": planning.reason.value},
-            planning=planning,
-        )
-        self._issued[due.due_id] = quiet
-        self._planned[due.due_id] = planning
-        return quiet
+    def _closure(self, due: ActivationDue, character_id: str) -> Optional[ProposalPlan]:
+        """此刻这条到期能不能不问策略就收尾；能就交回一份**未签发**的计划。纯读取。
 
-    def quiet_plan(self, due: ActivationDue) -> Optional[ProposalPlan]:
-        """只过前置门：此刻该收尾就签发并交回 QUIET 计划，否则返回 None。
+        三种收尾，按次序：
 
-        不问策略。协调器在提交闸门里调它，判定与提交之间插不进别的写入。
+          角色已不在世界里   只在这条到期从没走到策略那一步时才是免费收尾；
+                             走到过（之前 propose() 发出过结论、问过策略）就交给
+                             propose() 带着那份结论计费结案，游标不丢。
+          前置门收尾         asleep / cooldown。
+          回话已失效         来源、媒介、能不能开口、名额，见 _reply_gate()。
+        """
+        proposed_at = self.clock
+        if character_id not in self.world.known_characters():
+            if due.due_id in self._planned:
+                return None
+            return ProposalPlan(
+                due=due,
+                character_id=character_id,
+                policy="",
+                proposed_at=proposed_at,
+                verdict=AgencyOutcome.REJECTED_ILLEGAL,
+                detail={"reason": UNKNOWN_CHARACTER, "character_id": character_id},
+            )
+        planning = self._plan(due, character_id, self.context_for(due))
+        if planning.quiet:
+            return ProposalPlan(
+                due=due,
+                character_id=character_id,
+                policy="",
+                proposed_at=proposed_at,
+                verdict=AgencyOutcome.QUIET,
+                detail={"reason": planning.reason.value},
+                planning=planning,
+            )
+        if _reply_source(due) is not None:
+            _, lapse = self._reply_gate(due, character_id)
+            if lapse is not None:
+                return ProposalPlan(
+                    due=due,
+                    character_id=character_id,
+                    policy="",
+                    proposed_at=proposed_at,
+                    verdict=AgencyOutcome.REJECTED_STALE,
+                    detail=lapse,
+                    planning=planning,
+                )
+        return None
+
+    def _issue(self, plan: ProposalPlan) -> ProposalPlan:
+        # 免费收尾只进签发表，不进 _planned：_planned 只记走到了策略那一步的
+        # 结论，"这条到期问没问过策略"靠它回答（见 _closure 的未知角色分支）。
+        self._issued[plan.due.due_id] = plan
+        return plan
+
+    def closure_plan(self, due: ActivationDue) -> Optional[ProposalPlan]:
+        """只看免费收尾：此刻能不问策略就收尾，就签发并交回那份计划，否则 None。
+
+        协调器在提交闸门里调它，判定与提交之间插不进别的写入；终局兜底也用它
+        重签，这样提交故障之后记下的仍然是"没问策略"，而不是一条计费的失败。
         """
         self._require_handoff(due)
-        character_id = self._require_character(due)
-        if character_id not in self.world.known_characters():
-            return None
-        if _reply_source(due) is not None:
-            return None
-        planning = self._plan(due, character_id, self.context_for(due))
-        if not planning.quiet:
-            return None
-        return self._issue_quiet(due, planning, self.clock)
+        closure = self._closure(due, self._require_character(due))
+        return self._issue(closure) if closure is not None else None
+
+    def is_issued(self, plan: ProposalPlan) -> bool:
+        """这份计划是不是本引擎此刻为它那条到期签发着的免费收尾。"""
+        return self._issued.get(plan.due.due_id) is plan
 
     # ── 提案 ────────────────────────────────────────────────────────────
     def propose(self, due: ActivationDue) -> ProposalPlan:
@@ -422,9 +487,9 @@ class AgencyEngine:
         "评估过，结论是不动"是正常结果，值得被记下来。只有"这次评估的前提
         不成立"（到期记录不是本会话的、已经处理过了）才抛 AgencyEngineError。
 
-        前置门在策略之前：命中就交回一条签发过的 QUIET 计划，策略（以及策略
-        里的生成）一次都不调。这是 propose() 唯一会写的东西 —— 引擎进程内的
-        签发表，不是世界状态。
+        免费收尾（角色已不在、前置门收尾、回话已失效）在策略之前：命中就交回
+        一份签发过的计划，策略（以及策略里的生成）一次都不调。propose() 唯一
+        会写的东西是引擎进程内的签发表，不是世界状态。
         """
         self._require_handoff(due)
         character_id = self._require_character(due)
@@ -444,34 +509,32 @@ class AgencyEngine:
                 planning=planning,
             )
 
+        closure = self._closure(due, character_id)
+        if closure is not None:
+            # 在问策略之前收尾：没有生成、没有判分，也就不花单次额度
+            # （见 consumes_allowance）。策略名留空，记录自己说明"没问过策略"。
+            return self._issue(closure)
+        # 这次不免费收尾：先前给这条到期签发过的（如果有）作废。
+        self._issued.pop(due.due_id, None)
+
         if character_id not in self.world.known_characters():
             # 排期时角色还在，现在不在了。调度器刻意不替下游做这个判断
-            # （它宁可交出一条需要复核的记录），复核就在这里。建不出上下文，也就
-            # 没有前置门结论：先前给这条到期发过的（如果有）一并作废。
-            self._issued.pop(due.due_id, None)
-            self._planned.pop(due.due_id, None)
+            # （它宁可交出一条需要复核的记录），复核就在这里。这条到期之前已经
+            # 建出过上下文、发过前置门结论（_closure 才没有免费收尾它）：带着那份
+            # 结论结案，游标不丢。
+            planning = self._planned[due.due_id]
             return plan(
                 AgencyOutcome.REJECTED_ILLEGAL,
-                detail={"reason": "unknown_character", "character_id": character_id},
+                detail={"reason": UNKNOWN_CHARACTER, "character_id": character_id},
             )
 
         context = self.context_for(due)
         planning = self._plan(due, character_id, context)
-        if planning.quiet:
-            return self._issue_quiet(due, planning, proposed_at)
-        # 这次不收尾：先前给这条到期签发过的 QUIET（如果有）作废。
-        self._issued.pop(due.due_id, None)
         self._planned[due.due_id] = planning
 
         reply_medium = None
         if _reply_source(due) is not None:
-            reply_medium, lapse = self._reply_gate(due, character_id)
-            if lapse is not None:
-                # 在问策略之前收尾：没有生成、没有判分，也就不花单次额度
-                # （见 consumes_allowance）。策略名留空，记录自己说明"没问过策略"。
-                return replace(
-                    plan(AgencyOutcome.REJECTED_STALE, detail=lapse), policy=""
-                )
+            reply_medium, _ = self._reply_gate(due, character_id)
 
         committed = self._state.agency.committed_actions()
         if committed >= self._budget.max_committed_actions_per_session:
@@ -807,8 +870,8 @@ class AgencyEngine:
             raise AgencyEngineError(
                 "认知此刻可用（或这个会话不区分认知可用），不能把这条到期记成不可用"
             )
-        if plan.verdict is AgencyOutcome.QUIET:
-            self._require_still_quiet(plan)
+        if free_closure_kind(plan) is not None:
+            self._require_still_closed(plan)
 
         verdict = plan.verdict
         detail = dict(plan.detail)
@@ -858,17 +921,14 @@ class AgencyEngine:
           QUIET 签发    任何一次提交尝试都取走，成败不论。一个签发对象至多被
                         提交一次；这次没提交成，到期仍待处理，重新 propose()
                         重新签发。
-          前置门结论    留到这条到期被确认为止。协调器在重试用完时会拿同一份
-                        结论再提交一条终局失败记录，它必须还认得出来。
+          前置门结论    只记走到策略那一步的，留到这条到期被确认为止。协调器
+                        在重试用完时会拿同一份结论再提交一条终局失败记录，它
+                        必须还认得出来。
 
         开了前置门的引擎，普通到期必须带着本引擎发出的那份结论：把 planning
-        设成 None 退回旧调用形状，等于让记录不带游标、旧观察下次又算新。唯一
-        的例外是这条到期从没发过结论（角色不在世界里时 propose() 建不出上下文）；
-        例外看的是"发没发过"，不看提交那一刻角色在不在。
-
-        前置门判了收尾（asleep / cooldown）的结论只能以 QUIET 结案。签发失败
-        之后结论还留着，但它说的仍然是"这一刻没什么可想的"：拿它去提交一条
-        弃权或别的计费结局，就是把没发生的认知记成发生过。
+        设成 None 退回旧调用形状，等于让记录不带游标、旧观察下次又算新。没问
+        策略的免费收尾（前置门、失效回话、从没建出上下文的未知角色）不走这条，
+        它们整份计划在签发表里核对；签过之后改成别的结论一律拒绝。
         """
         due_id = getattr(plan.due, "due_id", None)
         outbox = self._state.activation_outbox
@@ -883,44 +943,51 @@ class AgencyEngine:
         if plan.verdict is AgencyOutcome.REJECTED_UNAVAILABLE:
             # 不可用由认知时间线在事务里判，跟前置门无关；时间线说可用时 _judge 拒绝。
             return
-        if plan.verdict is AgencyOutcome.QUIET and issued is not plan:
+        if issued is not None and plan is issued:
+            # 整份签发出去的免费收尾：身份已经核过，条件在事务内重判。
+            return
+        kind = free_closure_kind(plan)
+        if kind is not None:
             raise AgencyEngineError(
-                "QUIET 只能由本引擎的前置门签发：这个计划不是签发出去的那一个"
+                f"{kind}：没问策略的免费收尾只能由本引擎签发，这个计划不是签发出去的那一个"
+            )
+        if issued is not None:
+            raise AgencyEngineError(
+                "这条到期签发的是免费收尾：不能改成别的结论提交"
             )
         if plan.planning is not planned:
+            # 也挡住"签发失败之后，拿留着的收尾结论去配一个计费结论"：免费收尾
+            # 的结论从不进 _planned。
             raise AgencyEngineError(
                 "计划上的前置门结论不是本引擎为这条到期发出的那一个"
             )
-        if (
-            planned is None
-            and self._budget.quiet_cooldown_minutes is not None
-            and plan.character_id in self.world.known_characters()
-        ):
+        if planned is None and self._budget.quiet_cooldown_minutes is not None:
             raise AgencyEngineError(
                 "开了前置门的引擎只提交经过 propose() 的计划"
             )
-        if planned is not None and planned.quiet and plan.verdict is not AgencyOutcome.QUIET:
-            raise AgencyEngineError(
-                "前置门判了收尾的到期只能以 QUIET 结案"
-            )
 
-    def _require_still_quiet(self, plan: ProposalPlan) -> None:
-        """签发过的 QUIET 在事务内按当前状态再判一次前置门。
+    def _require_still_closed(self, plan: ProposalPlan) -> None:
+        """签发过的免费收尾在事务内按当前状态再判一次。
 
         不成立就抛错、不落记录，到期仍待处理：这个计划从没走到策略，把它
         改判成任何一条计费记录都是假记录。
         """
         if self.clock != plan.proposed_at:
             raise AgencyEngineError(
-                f"QUIET 计划判定于 {plan.proposed_at.isoformat()}，"
+                f"免费收尾判定于 {plan.proposed_at.isoformat()}，"
                 f"时钟已到 {self.clock.isoformat()}"
             )
-        current = self._plan(plan.due, plan.character_id, self.context_for(plan.due))
-        if plan.planning is None or current.reason is not plan.planning.reason:
+        kind = free_closure_kind(plan)
+        current = self._closure(plan.due, plan.character_id)
+        current_kind = free_closure_kind(current) if current is not None else None
+        if current_kind != kind or (
+            kind == "quiet" and current.planning.reason is not plan.planning.reason
+        ):
             raise AgencyEngineError(
-                f"前置门条件已经变了：签发时是 "
-                f"{plan.planning.reason.value if plan.planning else None}，"
-                f"现在是 {current.reason.value}"
+                f"收尾条件已经变了：签发时是 {kind}"
+                f"{'/' + plan.planning.reason.value if kind == 'quiet' else ''}，"
+                f"现在是 {current_kind}"
+                f"{'/' + current.planning.reason.value if current_kind == 'quiet' else ''}"
             )
 
     def _settle_cognition(self, record: AgencyRecord) -> None:
