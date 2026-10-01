@@ -502,8 +502,10 @@ class FormalWorldTests(PlaneTestCase):
             )
         self.assertTrue(others, "作息边界照走")
         self.assertLessEqual(others, reached_at, "作息事件的那一刻必须有时间事件走到")
+        # 推到 02:00：真冬已下线，另外三人还在。
         self.assertEqual(
-            set(world.state.world_state.channel_participants("nightcord")), {"mizuki", "ena"}
+            set(world.state.world_state.channel_participants("nightcord")),
+            {"mizuki", "ena", "kanade"},
         )
         close = self.client.post("/api/persistent-worlds/yoake-mae/close")
         self.assertEqual(close.status_code, 200, close.text)

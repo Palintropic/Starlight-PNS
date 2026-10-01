@@ -197,7 +197,7 @@ class BuildEntryPointTests(BoundaryTestBase):
         self.assertEqual(
             registry.rhythm("mizuki").character_id, "mizuki"
         )
-        self.assertIsNone(registry.rhythm("kanade"), "没写作息表是正常的")
+        self.assertIsNone(registry.rhythm("ichika"), "没写作息表是正常的")
 
     def test_a_broken_rhythm_fails_the_whole_build(self):
         """作息表写错了，整份配置作废 —— 而不是那个角色悄悄少一张表。

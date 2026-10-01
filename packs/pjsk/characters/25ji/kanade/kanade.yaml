@@ -11,6 +11,55 @@ grade: null
 class: null
 class_note: "不套用神山高校/宫益坂女子学院的班级号体系，无对应班级号"
 
+# 结构化日常作息（CONTENT-2）。写法同 mizuki.yaml：每段从 at 起管到下一段开始，最后一段
+# 跨零点接回第一段；地点变化时 at 是到达时刻，出发时刻按路程倒推。
+# 官方只给粗粒度事实：通信制、课程全在线（不建模到校）；在家作曲、作曲压过睡眠与吃饭；
+# 25 時集合；真冬离家后暂住宵崎家。每一个精确时刻都是推断。
+daily_rhythm:
+  - at: "01:00"        # 25時上线是官方的；此刻在哪个房间是推断
+    activity: online_chatting
+    location_id: kanade_home_room
+    channel_id: nightcord
+    source: inferred
+  - at: "02:00"        # 真冬这时下线在房里睡；奏挪到公共区域继续挂着，不对着睡着的人说话
+    activity: online_chatting
+    location_id: kanade_home
+    channel_id: nightcord
+    source: inferred
+  - at: "04:00"        # 真冬下线后奏还会继续一会（研究 #12）；之后接着作曲
+    activity: composing
+    location_id: kanade_home
+    source: inferred
+  - at: "08:00"        # 真冬出门上学之后，奏回房间
+    activity: composing
+    location_id: kanade_home_room
+    source: inferred
+  - at: "09:00"        # 补眠（研究 #4：作曲压过睡眠，没有固定起止）
+    activity: resting
+    location_id: kanade_home_room
+    source: inferred
+  - at: "14:00"        # 研究 #5 不支持固定饭点，醒来直接作曲
+    activity: composing
+    location_id: kanade_home_room
+    source: inferred
+  - at: "19:00"        # 和暂住的真冬一起吃晚饭；建模上的让步，不是官方习惯
+    activity: eating
+    location_id: kanade_home
+    source: inferred
+  - at: "19:40"
+    activity: composing
+    location_id: kanade_home_room
+    source: inferred
+
+access_grants:
+  locations:
+    - location_id: kanade_home
+      role: household
+    - location_id: kanade_home_room
+      role: household
+  channels:
+    - nightcord
+
 status: ready
 sample_coverage: 1.0  # 三件套齐全时的占位值，评分口径未最终确定，后续可能重新定义
 

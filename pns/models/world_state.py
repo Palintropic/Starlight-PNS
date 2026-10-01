@@ -56,6 +56,8 @@ class ActivityKind(str, Enum):
     DRAWING = "drawing"
     COMPOSING = "composing"
     EDITING_VIDEO = "editing_video"
+    # 作词：与 composing（作曲）分开，词和曲在 25 時是不同的人负责（CONTENT-2）。
+    WRITING_LYRICS = "writing_lyrics"
     ONLINE_CHATTING = "online_chatting"
     # 在路上：作息行程从出发到到达之间的活动（WORLD-1）。
     COMMUTING = "commuting"

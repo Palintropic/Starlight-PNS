@@ -10,6 +10,57 @@ grade: 3
 class: "3-B"
 class_history: "2-B（进级前）→ 3-B（进级后，现状）"
 
+# 结构化日常作息（CONTENT-2）。只建模 NOW：离家后暂住宵崎家，仍在宫益坂女子学园正常通学。
+# PAST 的朝比奈家、门禁、没收设备都不进这张表。官方只给粗粒度事实：正常上学；弓道社、
+# 委员会、辅导班占用放学后（不是每天三项都有，这里粗粒度合进同一段 studying）；
+# 25 時是通常的集合时间（可以缺席），下线时刻不固定，有一晚因第二天上学先下线；
+# 在奏的房间创作和休息（研究 #8，地点依据）。真冬是作词担当（上面的 role），作词段由此而来。
+# 地点变化时 at 是到达时刻，出发时刻按路程倒推。
+# 每一个精确时刻都是推断。这是一张每天重复的表，是试运行的明确简化：每晚 01:00 必到、
+# 每天到校、02:00–07:19 约 5 小时 19 分的休息，都是"单表 + 固定集合 + 早上到校"的结构结果，
+# 不是官方的生活规律。缺席、周末、模考等要等日历或可缺席机制（TODO §五 16、17）。
+daily_rhythm:
+  - at: "01:00"        # 25時是通常集合（研究 #12），每晚必到是试运行简化；在奏的房间是推断
+    activity: online_chatting
+    location_id: kanade_home_room
+    channel_id: nightcord
+    source: inferred
+  - at: "02:00"        # 四人里最早下线：研究 #12 只有一晚因第二天上学先下线（04:00），不是规律；时刻推断
+    activity: resting
+    location_id: kanade_home_room
+    source: inferred
+  - at: "07:20"        # 早饭后出门（PAST 有吃完早饭上学的场景，NOW 沿用）
+    activity: eating
+    location_id: kanade_home
+    source: inferred
+  - at: "08:10"        # 宫益坂女子学园 3-B 到校；课、社团、委员会、辅导班粗粒度合成一段
+    activity: studying
+    location_id: miyamasuzaka_girls
+    source: inferred
+  - at: "19:00"        # 放学后回宵崎家，和奏一起吃晚饭（出发时刻按路程倒推）
+    activity: eating
+    location_id: kanade_home
+    source: inferred
+  - at: "19:40"        # 学业负担（研究 #9）；在奏的房间
+    activity: studying
+    location_id: kanade_home_room
+    source: inferred
+  - at: "22:30"        # 地点：研究 #8 在奏的房间创作；类型：作词担当；每天 22:30 起、到 01:00 都是推断
+    activity: writing_lyrics
+    location_id: kanade_home_room
+    source: inferred
+
+access_grants:
+  locations:
+    - location_id: kanade_home          # 暂住，与奏同属 household
+      role: household
+    - location_id: kanade_home_room
+      role: household
+    - location_id: miyamasuzaka_girls   # 宫益坂女子学园 3-B
+      role: student
+  channels:
+    - nightcord
+
 status: ready
 sample_coverage: 1.0  # 三件套齐全时的占位值，评分口径未最终确定，后续可能重新定义
 

@@ -57,11 +57,16 @@ SCENE_WORLD_MAP: Dict[str, SceneWorldMapping] = {
         character_locations={
             "ena": "ena_home_studio",
             "mizuki": "mizuki_home_room",
+            # 真冬离家后暂住宵崎家，在奏的房间里创作和休息。
+            "kanade": "kanade_home_room",
+            "mafuyu": "kanade_home_room",
         },
         channel_ids=("nightcord",),
         character_activities={
             "ena": ActivityKind.ONLINE_CHATTING,
             "mizuki": ActivityKind.ONLINE_CHATTING,
+            "kanade": ActivityKind.ONLINE_CHATTING,
+            "mafuyu": ActivityKind.ONLINE_CHATTING,
         },
         guest_locations=("private_residence",),
     ),

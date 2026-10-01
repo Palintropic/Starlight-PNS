@@ -151,7 +151,9 @@ class InitialStateTests(unittest.TestCase):
         spec = dataclasses.replace(YOAKE_MAE, start=time(1, 30))
         state = formal_session_state(spec, BOUNDARY.active(), session_id="s", wall=WALL)
         world = state.world_state
-        self.assertEqual(set(world.channel_participants("nightcord")), {"mizuki", "ena"})
+        self.assertEqual(
+            set(world.channel_participants("nightcord")), {"mizuki", "ena", "kanade", "mafuyu"}
+        )
 
     def test_nothing_happened_before_19(self):
         state = _state()
@@ -370,9 +372,11 @@ class BootstrapApiTests(PlaneTestCase):
             state.anchor.sim_at(datetime(2026, 9, 28, 17, 2, tzinfo=timezone.utc)),
             datetime(2026, 9, 29, 2, 2),
         )
+        # 02:01：真冬已下线去睡，奏挪到客厅还挂着。
         self.assertEqual(
-            set(state.world_state.channel_participants("nightcord")), {"mizuki", "ena"}
+            set(state.world_state.channel_participants("nightcord")), {"mizuki", "ena", "kanade"}
         )
+        self.assertEqual(state.world_state.location_of("kanade"), "kanade_home")
         self.assertEqual(len(state.events), 0, "开局不写世界事件")
 
     def test_an_unknown_start_mode_is_refused_not_ignored(self):
@@ -414,12 +418,21 @@ class TwentyFiveOClockTests(PlaneTestCase):
             is ActivityKind.EDITING_VIDEO,
             what="21:00 瑞希开始做 MV",
         )
+        # 真冬只在 01:00–02:00 在线，这个时钟一秒走一小时，窗口太窄不适合轮询：
+        # 等另外三人都在，再从事件里核对四个人都在 01:00 进了频道。
         wait_for(
             lambda: set(world.state.world_state.channel_participants("nightcord"))
-            == {"mizuki", "ena"},
+            >= {"mizuki", "ena", "kanade"},
             timeout=15.0,
-            what="25 時两人都在 Nightcord",
+            what="25 時瑞希、绘名、奏都在 Nightcord",
         )
+        joined = {
+            event.actor_id: event.occurred_at
+            for event in world.state.events.events()
+            if event.type.value == "presence.joined_channel"
+        }
+        self.assertEqual(set(joined), {"mizuki", "ena", "kanade", "mafuyu"})
+        self.assertEqual({at.time() for at in joined.values()}, {time(1, 0)})
         launch = datetime.fromisoformat(world.state.world_state.metadata["origin"]["start"])
         self.assertGreaterEqual(
             world.state.world_state.clock, launch + timedelta(hours=6), "跨过了零点到 01:00"
@@ -452,8 +465,8 @@ class ContentGateTests(PlaneTestCase):
         (conflict,) = world.state.content.pending()
         self.assertEqual(conflict.subject, "rhythm:mizuki")
         self.assertEqual(conflict.registry_revision, changed.revision)
-        # 新版不生效：瑞希不受作息驱动，绘名照常。
-        self.assertEqual(world.runtime.rhythm.characters(), ("ena",))
+        # 新版不生效：瑞希不受作息驱动，其他人照常。
+        self.assertEqual(world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu"))
 
         # 再打开一次不重复记。
         plane.close("yoake-mae")
@@ -463,11 +476,15 @@ class ContentGateTests(PlaneTestCase):
 
         # 项目所有者明确采用：下次打开才生效。
         plane.decide_content_conflict("yoake-mae", conflict.conflict_id, "adopted")
-        self.assertEqual(world.runtime.rhythm.characters(), ("ena",), "本次打开不变")
+        self.assertEqual(
+            world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu"), "本次打开不变"
+        )
         plane.close("yoake-mae")
         plane.restore("yoake-mae")
         world = plane.service.opened("yoake-mae")
-        self.assertEqual(world.runtime.rhythm.characters(), ("ena", "mizuki"))
+        self.assertEqual(
+            world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu", "mizuki")
+        )
         self.assertEqual(world.state.content.pending(), ())
         self.assertTrue(
             world.state.content.accepts(
@@ -481,7 +498,7 @@ class ContentGateTests(PlaneTestCase):
         rhythms.pop("mizuki")
         with state.atomic_commit():
             accepted = gated_rhythms(state, rhythms, registry_revision=2, wall="w")
-        self.assertEqual(sorted(accepted), ["ena"])
+        self.assertEqual(sorted(accepted), ["ena", "kanade", "mafuyu"])
         (conflict,) = state.content.pending()
         self.assertEqual(conflict.subject, "rhythm:mizuki")
         self.assertEqual(conflict.offered_fingerprint, ABSENT)
@@ -498,7 +515,7 @@ class ContentGateTests(PlaneTestCase):
         plane.close("yoake-mae")
         plane.restore("yoake-mae")
         world = plane.service.opened("yoake-mae")
-        self.assertEqual(world.runtime.rhythm.characters(), ("mizuki",))
+        self.assertEqual(world.runtime.rhythm.characters(), ("kanade", "mafuyu", "mizuki"))
         self.assertEqual(world.state.content.pending(), ())
 
 
@@ -523,7 +540,7 @@ class AdoptionChainTests(unittest.TestCase):
         changed = _with_rhythm(BOUNDARY.active(), "mizuki", ActivityKind.DRAWING)
         with state.atomic_commit():
             accepted = gated_rhythms(state, changed.rhythms(), registry_revision=2, wall="w")
-        self.assertEqual(sorted(accepted), ["ena"], "新版仍被内容门挡住")
+        self.assertEqual(sorted(accepted), ["ena", "kanade", "mafuyu"], "新版仍被内容门挡住")
 
     def test_an_archive_with_a_swapped_adopted_version_is_refused(self):
         state = _state()

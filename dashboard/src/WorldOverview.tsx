@@ -23,6 +23,7 @@ const ACTIVITY_LABEL: Record<string, string> = {
   drawing: '画画',
   composing: '作曲',
   editing_video: '剪视频',
+  writing_lyrics: '作词',
   online_chatting: '线上聊天',
   commuting: '在路上',
 };
