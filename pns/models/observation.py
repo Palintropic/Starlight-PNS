@@ -161,6 +161,20 @@ class ObservationLog:
         """某个角色按感知顺序看到的一切 —— 后续记忆管线的唯一入口。"""
         return tuple(o for o in self._observations if o.observer_id == character_id)
 
+    def for_character_since(
+        self, character_id: str, position: int
+    ) -> Tuple[Observation, ...]:
+        """某个角色在日志位置 position（含）之后感知到的一切。
+
+        位置是全局日志下标：日志只追加、不分卷、不压缩，所以同一分钟里的先后
+        在存档往返之后仍然可以重建，不用拿分钟精度的 observed_at 去比。
+        """
+        if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+            raise ObservationError(f"观察日志位置必须是非负整数，收到 {position!r}")
+        return tuple(
+            o for o in self._observations[position:] if o.observer_id == character_id
+        )
+
     def for_event(self, event_id: str) -> Tuple[Observation, ...]:
         return tuple(o for o in self._observations if o.source_event_id == event_id)
 

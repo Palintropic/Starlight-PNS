@@ -204,7 +204,9 @@ the duration of a session:
 - channel membership, independent of physical location
 - character availability (`available` / `busy` / `asleep`), a minimal precursor
   to `AgentState` holding only what exposure needs; only non-default entries are
-  stored
+  stored. `availability_of()` also reports `asleep` while the character's activity
+  is `resting`; that derived value is never stored. A stored `asleep` is an explicit
+  sleep lock: leaving `resting` does not clear it, only `set_availability()` does
 - per-location environment state
 - the session's `LocationGraph` and `ChannelRegistry`
 - metadata, including the provenance of the legacy scene it was built from
@@ -702,9 +704,13 @@ after time has moved would execute an old decision the character never had a
 chance to revisit.
 
 Outcomes are a closed set — `acted`, `abstained`, `rejected_illegal`,
-`rejected_stale`, `rejected_budget`, `rejected_policy_error` — and every rejection
-has identical consequences for the world: no event, no observation, no partial
-state. They are distinguished so that *why* nothing happened is a fact that can
+`rejected_stale`, `rejected_budget`, `rejected_policy_error`,
+`rejected_unavailable`, `quiet` — and every rejection has identical consequences
+for the world: no event, no observation, no partial state. `quiet` means the
+planning gate closed the activation before the policy was asked (the character is
+asleep, or alone with nothing new observed since the last charged cognition and
+still inside the cooldown); only the engine can issue it, and it does not spend
+the run allowance. They are distinguished so that *why* nothing happened is a fact that can
 be looked up. "Do nothing" is `abstained`: a valid outcome, not an error and not
 a fabricated line. It is recorded, because "evaluated and chose not to act" and
 "never evaluated" are different facts for everything downstream.
@@ -1122,8 +1128,9 @@ handoff is single-use, so duplication is refused by construction rather than by 
 guard.
 
 **Every due activation gets an answer.** The outcome codes are `acted`,
-`abstained`, `rejected`, `failed_retryable`, `failed_terminal` and `stopped`. The
-first four of those are terminal; the durable form of a terminal outcome is not
+`abstained`, `rejected`, `failed_retryable`, `failed_terminal`, `stopped` and
+`quiet`. `acted`, `abstained`, `rejected`, `failed_terminal` and `quiet` are
+terminal; the durable form of a terminal outcome is not
 the result object but the session itself — an agency record exists for that due
 and the outbox has acknowledged it. `failed_retryable` and `stopped` are exactly
 the absence of both, so in an archive they appear as "still pending" and are

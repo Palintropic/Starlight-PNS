@@ -22,7 +22,12 @@ from enum import Enum
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 from pns.models.action import ActionError, ActionProposal
-from pns.models.cognition import CognitionCauseError, normalize_causes
+from pns.models.cognition import (
+    QUIET_REASONS,
+    REPLY_ACTIVATION_PREFIX,
+    CognitionCauseError,
+    normalize_causes,
+)
 from pns.models.frozen import freeze_json_value, thaw_json_value
 
 
@@ -47,9 +52,13 @@ class AgencyOutcome(str, Enum):
       REJECTED_UNAVAILABLE    到期时认知不可用（未 Start、暂停、额度用完、停机、
                               故障……）。世界照常发生，这一刻的决定没有发生；
                               原因在 detail 里，见 pns/models/cognition.py。
+      QUIET                   前置门判定此刻没什么可想的（睡着了，或者独处、
+                              没有新的外部观察、离上次计费认知不到冷却时长），
+                              **策略没被问过**。只有引擎能签发（PLAN-1 §9 D2）。
 
     五个 REJECTED_* 的共同后果完全一样：不产出事件，不产出观察，不留下任何
-    半截世界状态。区分它们是为了让"为什么没动"是可查的事实。
+    半截世界状态。区分它们是为了让"为什么没动"是可查的事实。QUIET 也不产出
+    任何世界状态，但它不是"评估过、结论是不行"：根本没评估。
     """
 
     ACTED = "acted"
@@ -59,6 +68,7 @@ class AgencyOutcome(str, Enum):
     REJECTED_BUDGET = "rejected_budget"
     REJECTED_POLICY_ERROR = "rejected_policy_error"
     REJECTED_UNAVAILABLE = "rejected_unavailable"
+    QUIET = "quiet"
 
     @property
     def acted(self) -> bool:
@@ -108,6 +118,10 @@ class AgencyBudget:
     # 对话退回固定节拍。它是"一段对话最多多快烧掉单次额度"的上界：没有它，
     # 两个都愿意接话的人会一分钟一句，直到把整次 Start 的额度用完。
     reply_burst_lines: int = 8
+    # 前置门的冷却（模拟分钟，PLAN-1 §3）。醒着、独处、自上次计费认知以来没有
+    # 新的外部观察时，最多每这么多分钟想一次；睡着时一次都不想。None = 不设
+    # 前置门（研究会话与旧调用方的行为）。
+    quiet_cooldown_minutes: Optional[int] = None
 
     # 这里**没有**"允许提交台词动作"的开关，而且不该有：需要台词的动作在本
     # 阶段没有提交路径（见 pns/models/action.py 的 _require_committable），
@@ -134,6 +148,15 @@ class AgencyBudget:
             isinstance(delay, bool) or not isinstance(delay, int) or not 1 <= delay <= 1440
         ):
             raise AgencyError(f"reply_delay_minutes 必须是 1–1440 的整数或不设，收到 {delay!r}")
+        cooldown = self.quiet_cooldown_minutes
+        if cooldown is not None and (
+            isinstance(cooldown, bool)
+            or not isinstance(cooldown, int)
+            or not 1 <= cooldown <= 1440
+        ):
+            raise AgencyError(
+                f"quiet_cooldown_minutes 必须是 1–1440 的整数或不设，收到 {cooldown!r}"
+            )
 
     def to_dict(self) -> Dict:
         return {
@@ -145,6 +168,7 @@ class AgencyBudget:
             ),
             "reply_delay_minutes": self.reply_delay_minutes,
             "reply_burst_lines": self.reply_burst_lines,
+            "quiet_cooldown_minutes": self.quiet_cooldown_minutes,
         }
 
 
@@ -232,6 +256,29 @@ class AgencyRecord:
         )
         if self.outcome is AgencyOutcome.REJECTED_UNAVAILABLE:
             self._require_unavailable_detail()
+        if self.outcome is AgencyOutcome.QUIET:
+            self._require_quiet_detail()
+
+    def _require_quiet_detail(self) -> None:
+        """前置门收尾的记录必须说明理由，而且形状上就证明它没走到策略那一步。
+
+        存档恢复也走这里。它挡的是"记录自己不自洽"；"这条记录真是引擎签发的"
+        在运行时由签发表与事务内重算保证，改写整份存档的操作者不在这层的
+        防御范围内（PLAN-1 §9 D2）。
+        """
+        if self.policy:
+            raise AgencyError("quiet 记录不能带策略名：没有策略被询问")
+        detail = self.detail
+        if detail.get("reason") not in QUIET_REASONS:
+            raise AgencyError(
+                f"quiet 记录的 reason 必须是 {sorted(QUIET_REASONS)} 之一，"
+                f"收到 {detail.get('reason')!r}"
+            )
+        if "audit" in detail or "rationale" in detail:
+            raise AgencyError("quiet 记录不能带判分凭据或策略说法")
+        if self.due_id.startswith(REPLY_ACTIVATION_PREFIX):
+            # 回话机会有自己的免单路径（reply_lapsed），不走前置门。
+            raise AgencyError("回话机会不能被前置门收尾")
 
     def _require_unavailable_detail(self) -> None:
         """认知不可用的记录必须说清楚为什么，而且不能声称问过策略。

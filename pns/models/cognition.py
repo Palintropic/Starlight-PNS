@@ -545,6 +545,15 @@ def wall_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# 回话机会的激活 ID 前缀。调度器的公开排期入口拒绝它，只有引擎的回话路径
+# 能排；免单判据和记录校验都靠它认出回话机会。
+REPLY_ACTIVATION_PREFIX = "reply.activation:"
+
+# 前置门收尾（quiet）的理由闭集（PLAN-1 §3）。
+QUIET_ASLEEP = "asleep"
+QUIET_COOLDOWN = "cooldown"
+QUIET_REASONS = frozenset({QUIET_ASLEEP, QUIET_COOLDOWN})
+
 # 回话机会到期时已经不成立（对方离开了那段对话、睡着了、来源不是一句话）。
 # 引擎在问策略**之前**就把它收尾成 rejected_stale，于是它没有用到认知。
 REPLY_LAPSED = "reply_lapsed"
@@ -553,39 +562,67 @@ REPLY_LAPSED = "reply_lapsed"
 def consumes_allowance(record) -> bool:
     """一条 Agency 记录是否用掉了认知（从而消耗单次额度）。
 
-    "认知不可用"没有用到认知；到期时就已失效、没问过策略的回话机会也没有。
-    其余结局——行动、弃权、各种拒绝——都是认知真的运行过之后给出的。
+    "认知不可用"没有用到认知；到期时就已失效、没问过策略的回话机会也没有；
+    前置门收尾（quiet）也没有；角色已不在世界里、从没建出上下文的那种收尾
+    也没有。其余结局——行动、弃权、各种拒绝——都是认知
+    真的运行过之后给出的。
+
+    quiet 免单同样看记录自己的形状：理由在闭集里、策略名为空、没有提案、
+    凭据和策略说法，而且不是回话机会。"这条 quiet 真是引擎签发的"由引擎
+    的签发表和事务内重算保证，不由这个函数保证。
 
     回话免单的判据全部来自记录自己，而且彼此印证：到期身份是这个人的回话
     机会（`reply.activation:<角色>:` 开头）；结局是 rejected_stale、理由是
     reply_lapsed；策略名为空、没有提案、没有凭据、没有策略说法 —— 也就是
     记录本身说明它没走到策略那一步。普通节拍改个理由拿不到它。引擎记账、
     存档加载复核和状态报告三处调用的都是这一个函数。传结局码也行（旧调用
-    形状），那时只按结局码判断。
+    形状），那时只按结局码判断；只给结局码的 quiet 证明不了自己没走到策略，
+    按计费回答。
     """
     outcome = getattr(record, "outcome", record)
     value = getattr(outcome, "value", outcome)
     if value == "rejected_unavailable":
         return False
     detail = getattr(record, "detail", None)
+    character_id = getattr(record, "character_id", None)
+    due_id = getattr(record, "due_id", "")
+    if value == "rejected_illegal":
+        # 角色已不在世界里、从没建出过上下文：策略没被问过。带着前置门结论（有
+        # 游标）的那种是之前问过的，照常计费。
+        return not (
+            isinstance(detail, Mapping)
+            and detail.get("reason") == "unknown_character"
+            and "observation_cursor" not in detail
+            and _untouched(record, detail)
+        )
+    if value == "quiet":
+        return not (
+            isinstance(detail, Mapping)
+            and detail.get("reason") in QUIET_REASONS
+            and _untouched(record, detail)
+            and isinstance(due_id, str)
+            and not due_id.startswith(REPLY_ACTIVATION_PREFIX)
+        )
     if value != "rejected_stale" or not isinstance(detail, Mapping):
         return True
     if detail.get("reason") != REPLY_LAPSED:
         return True
-    character_id = getattr(record, "character_id", None)
-    due_id = getattr(record, "due_id", "")
-    untouched = (
+    is_reply = (
+        isinstance(character_id, str)
+        and isinstance(due_id, str)
+        and due_id.startswith(f"{REPLY_ACTIVATION_PREFIX}{character_id}:")
+    )
+    return not (_untouched(record, detail) and is_reply)
+
+
+def _untouched(record, detail: Mapping) -> bool:
+    """记录本身说明它没走到策略那一步：没策略名、没提案、没凭据、没策略说法。"""
+    return (
         getattr(record, "policy", None) == ""
         and getattr(record, "proposal", None) is None
         and "audit" not in detail
         and "rationale" not in detail
     )
-    is_reply = (
-        isinstance(character_id, str)
-        and isinstance(due_id, str)
-        and due_id.startswith(f"reply.activation:{character_id}:")
-    )
-    return not (untouched and is_reply)
 
 
 def next_minute_after(moment: datetime) -> datetime:
@@ -605,6 +642,10 @@ __all__ = [
     "OPERATOR_CLEARABLE",
     "TransitionKind",
     "consumes_allowance",
+    "QUIET_ASLEEP",
+    "QUIET_COOLDOWN",
+    "QUIET_REASONS",
+    "REPLY_ACTIVATION_PREFIX",
     "REPLY_LAPSED",
     "next_minute_after",
     "normalize_causes",

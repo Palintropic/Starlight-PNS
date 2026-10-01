@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Mapping, Optional, Tuple
 
+from pns.models.cognition import REPLY_ACTIVATION_PREFIX
 from pns.models.time_events import QuietTime
 from pns.models.activation import (
     ActivationDue,
@@ -58,7 +59,7 @@ _MINUTE = timedelta(minutes=1)
 # 回话机会的激活 ID 前缀。它是保留名：只有 Agency 引擎在提交一句话的事务里能用
 # 这个前缀排期（_schedule_reply），公开的 schedule() 一律拒绝。回话身份会带来
 # 免单和计入回话名额两项待遇，所以"ID 长得像回话"不能由任意调用方拼出来。
-REPLY_ACTIVATION_PREFIX = "reply.activation:"
+# 定义在 pns.models.cognition：免单判据和 Agency 记录校验也要认它。
 
 
 class SchedulerError(ValueError):
