@@ -108,6 +108,14 @@ def free_closure_kind(plan) -> Optional[str]:
     return None
 
 
+def _is_closed_after_cognition(plan) -> bool:
+    return (
+        plan.verdict is AgencyOutcome.REJECTED_STALE
+        and isinstance(plan.detail, Mapping)
+        and plan.detail.get("reason") == CLOSED_AFTER_COGNITION
+    )
+
+
 def _cursor_of(record: AgencyRecord) -> int:
     """记录写下的观察游标。旧记录没有 → 0（全部观察都算新，只会多放行一次）。"""
     cursor = record.detail.get("observation_cursor", 0)
@@ -891,6 +899,8 @@ class AgencyEngine:
             )
         if free_closure_kind(plan) is not None:
             self._require_still_closed(plan)
+        elif _is_closed_after_cognition(plan):
+            self._require_still_closed_after_cognition(plan)
 
         verdict = plan.verdict
         detail = dict(plan.detail)
@@ -991,6 +1001,11 @@ class AgencyEngine:
             raise AgencyEngineError(
                 "开了前置门的引擎只提交经过 propose() 的计划"
             )
+        if _is_closed_after_cognition(plan) and due_id not in self._asked:
+            # _planned 只证明过了前置门；"问过策略"只认 _asked（复核 R5-F1）。
+            raise AgencyEngineError(
+                "closed_after_cognition 只给本引擎问过策略的到期：这条到期没问过"
+            )
 
     def _require_still_closed(self, plan: ProposalPlan) -> None:
         """签发过的免费收尾在事务内按当前状态再判一次。
@@ -1014,6 +1029,25 @@ class AgencyEngine:
                 f"{'/' + plan.planning.reason.value if kind == 'quiet' else ''}，"
                 f"现在是 {current_kind}"
                 f"{'/' + current.planning.reason.value if current_kind == 'quiet' else ''}"
+            )
+
+    def _require_still_closed_after_cognition(self, plan: ProposalPlan) -> None:
+        """问过策略之后的收尾，在事务内确认记录写的收尾条件此刻仍然成立。
+
+        不成立（比如提交前又醒了）就抛错、不落记录，到期留给下一次提案决定。
+        """
+        if self.clock != plan.proposed_at:
+            raise AgencyEngineError(
+                f"收尾判定于 {plan.proposed_at.isoformat()}，时钟已到 {self.clock.isoformat()}"
+            )
+        late = self._closure(plan.due, plan.character_id, after_cognition=True)
+        claimed = (plan.detail.get("closure"), plan.detail.get("closure_reason"))
+        current = (
+            (free_closure_kind(late), late.detail.get("reason")) if late is not None else None
+        )
+        if current != claimed:
+            raise AgencyEngineError(
+                f"收尾条件已经变了：计划写的是 {claimed}，现在是 {current}"
             )
 
     def _settle_cognition(self, record: AgencyRecord) -> None:

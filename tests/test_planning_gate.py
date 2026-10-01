@@ -735,6 +735,56 @@ class IssuanceTests(unittest.TestCase):
         self.assertFalse(consumes_allowance(record))
         self.assertEqual(CountingFirstLegal.calls, 1)
 
+    def test_closed_after_cognition_needs_the_policy_to_have_been_asked(self):
+        # 复核 R5-F1：过了前置门、在动作上限处被拒（没问策略）的计划，不能冒充
+        # "问过策略之后收尾"。
+        state = _session(_world())
+        scheduler = PersistentScheduler(state)
+        engine = AgencyEngine(
+            state,
+            policy=FirstLegalActionPolicy(),
+            budget=AgencyBudget(
+                quiet_cooldown_minutes=COOLDOWN, max_committed_actions_per_session=1
+            ),
+        )
+        engine.commit(engine.propose(_due_at(scheduler, "t0", 0)))
+        world = state.world_state
+        world.place_character("ena", world.location_of("mizuki"))
+        refused = engine.propose(_due_at(scheduler, "t15", 15))
+        self.assertIs(refused.verdict, AgencyOutcome.REJECTED_BUDGET)
+        # 同一分钟她真睡着了：伪造的说法此刻成立，挡它的只能是"没问过策略"。
+        _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep")
+        forged = replace(
+            refused,
+            verdict=AgencyOutcome.REJECTED_STALE,
+            detail={
+                "reason": "closed_after_cognition",
+                "closure": "quiet",
+                "closure_reason": "asleep",
+            },
+        )
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(forged)
+        self.assertEqual(_fingerprint(state), before)
+
+    def test_closed_after_cognition_is_re_judged_inside_the_transaction(self):
+        # 复核 R5-F1：问过策略后入睡，提交前又醒了：旧计划不能再提交。
+        state, scheduler, engine, policy = _engine_rig()
+        due = _due_at(scheduler, "t0", 0)
+        engine.propose(due)  # 问了策略，没提交
+        self.assertEqual(policy.calls, 1)
+        _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep")
+        late = engine.propose(due)
+        self.assertEqual(late.detail["reason"], "closed_after_cognition")
+        _set_activity(state, "mizuki", ActivityKind.IDLE, "wake")
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(late)
+        self.assertEqual(_fingerprint(state), before)
+        record = engine.commit(engine.propose(due))  # 下一次提案决定
+        self.assertIs(record.outcome, AgencyOutcome.ABSTAINED)
+
     def test_an_issued_closure_edited_in_place_is_refused(self):
         # 复核 R4-F2：签发对象的 detail 原地改写，身份照样对得上。
         state, scheduler, engine, _ = _engine_rig()
