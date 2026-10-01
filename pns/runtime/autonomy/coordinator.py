@@ -72,6 +72,9 @@ from pns.runtime.scheduler import PersistentScheduler
 
 # 状态投影里默认回看多少条。
 _RECENT = 20
+# 前置门在闸门内外的结论不一致时，最多回到闸门里重判几次。每次都不调模型；
+# 超过就按一次可重试的失败交回，到期仍待处理（不落任何记录）。
+_QUIET_RECHECKS = 3
 _AUDIT_RECENT_LINES = 12
 
 
@@ -445,35 +448,56 @@ class AutonomousRuntime:
     def _process(self, due: ActivationDue, attempt: int) -> ActivationResult:
         """一条到期资格的实际处理。慢调用都在这里，而且都在闸门之外。"""
 
-        # ── 认知不可用：不问策略、不调模型，当场收尾（设计 §5.2） ────────
-        # 判定与提交在同一次持锁里：时间线的转换也走这把闸门，查完到写入之间
-        # 它变不了。
-        with self._gate:
-            if self._running and self._agency.unavailable_causes_for(due):
-                return self._record(
-                    self._commit_admitted(
-                        due,
-                        ProposalPlan(
-                            due=due,
-                            character_id=self._agency._require_character(due),
-                            policy="",
-                            proposed_at=self.clock,
-                            verdict=AgencyOutcome.REJECTED_UNAVAILABLE,
-                        ),
-                        attempt,
+        for _ in range(_QUIET_RECHECKS):
+            # ── 认知不可用：不问策略、不调模型，当场收尾（设计 §5.2） ────
+            # 判定与提交在同一次持锁里：时间线的转换也走这把闸门，查完到写入
+            # 之间它变不了。
+            with self._gate:
+                if self._running and self._agency.unavailable_causes_for(due):
+                    return self._record(
+                        self._commit_admitted(
+                            due,
+                            ProposalPlan(
+                                due=due,
+                                character_id=self._agency._require_character(due),
+                                policy="",
+                                proposed_at=self.clock,
+                                verdict=AgencyOutcome.REJECTED_UNAVAILABLE,
+                            ),
+                            attempt,
+                        )
                     )
-                )
+                # ── 前置门：没什么可想的就当场收尾（PLAN-1） ─────────────
+                # 同一个理由放在闸门里：门条件（同处者、观察、作息）也只经
+                # 闸门改变，签发与事务内重算之间插不进别的写入。
+                if self._running:
+                    quiet = self._agency.quiet_plan(due)
+                    if quiet is not None:
+                        return self._record(self._commit_admitted(due, quiet, attempt))
 
-        # ── 提案（含生成，纯的） ───────────────────────────────────────
-        plan = self._agency.propose(due)
-        if not self._running:
-            # 生成期间被要求停止。模型回来晚了，这句话就不算数 —— 不提交、
-            # 不确认、不消耗重试预算。
-            #
-            # 这次检查是**省事**，不是保证：它让一条注定提交不了的提案不必再
-            # 白跑一趟判分。真正挡住提交的是闸门里那次加锁判断（见 _commit），
-            # 因为"查完"到"进事务"之间永远有一段窗口。
-            return self._record(self._stopped_result(due, attempt=attempt - 1))
+            # ── 提案（含生成，纯的） ───────────────────────────────────
+            plan = self._agency.propose(due)
+            if not self._running:
+                # 生成期间被要求停止。模型回来晚了，这句话就不算数 —— 不提交、
+                # 不确认、不消耗重试预算。
+                #
+                # 这次检查是**省事**，不是保证：它让一条注定提交不了的提案不必再
+                # 白跑一趟判分。真正挡住提交的是闸门里那次加锁判断（见 _commit），
+                # 因为"查完"到"进事务"之间永远有一段窗口。
+                return self._record(self._stopped_result(due, attempt=attempt - 1))
+            if plan.verdict is not AgencyOutcome.QUIET:
+                break
+            # 放开闸门之后门条件变了，propose() 签发了 QUIET。它是在闸门外签的，
+            # 回到闸门里重判，而不是拿它去赌提交时的重算。
+        else:
+            return self._record(
+                self._retry_result(
+                    due,
+                    self._agency._require_character(due),
+                    attempt,
+                    "前置门的结论在闸门内外反复变化",
+                )
+            )
 
         retryable = self._retryable_policy_failure(plan)
         if retryable is not None and not self._retry.exhausted(attempt):

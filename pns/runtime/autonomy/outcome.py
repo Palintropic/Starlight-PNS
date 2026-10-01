@@ -8,6 +8,9 @@
 #
 #   ACTED             提案通过判分与校验并已提交，世界历史里有对应事件。
 #   ABSTAINED         显式不动。合法结果，不是错误。
+#   QUIET             前置门判定此刻没什么可想的（睡着了 / 独处冷却中），
+#                     策略根本没被问过。不是 ABSTAINED：弃权是想过之后选择
+#                     不动；也不是 REJECTED：没有任何东西被评估过（PLAN-1）。
 #   REJECTED          评估过，结论是不行（Router 判它 OOC、输出是垃圾、
 #                     动作不合法、过期、超预算）。
 #   FAILED_RETRYABLE  基础设施性的失败（模型不可用、判分器不可用、提交事务
@@ -15,8 +18,8 @@
 #   FAILED_TERMINAL   重试预算用完了，或者失败本身说明这条到期没救。
 #   STOPPED           运行时被要求停止，这次处理在安全边界上放手了。
 #
-# 前五个是边界点名要求的那五个；STOPPED 是第六个，刻意单列而不是塞进
-# FAILED_RETRYABLE：一次主动停机不是一次失败，把两者混成一个码会让状态面板
+# ACTED / ABSTAINED / REJECTED / FAILED_* 是边界点名要求的那五个；STOPPED 刻意
+# 单列而不是塞进 FAILED_RETRYABLE：一次主动停机不是一次失败，把两者混成一个码会让状态面板
 # 说谎，也会让"停机期间攒了多少条待处理"这个问题没法回答。
 #
 # **耐久性归属**：这些结果对象本身是给调用方看的投影，不是权威存储。权威的
@@ -48,6 +51,7 @@ class ActivationOutcome(str, Enum):
     FAILED_RETRYABLE = "failed_retryable"
     FAILED_TERMINAL = "failed_terminal"
     STOPPED = "stopped"
+    QUIET = "quiet"
 
     @property
     def terminal(self) -> bool:
@@ -69,6 +73,7 @@ _TERMINAL = frozenset(
         ActivationOutcome.ABSTAINED,
         ActivationOutcome.REJECTED,
         ActivationOutcome.FAILED_TERMINAL,
+        ActivationOutcome.QUIET,
     }
 )
 
@@ -83,6 +88,7 @@ _FROM_AGENCY = {
     AgencyOutcome.REJECTED_BUDGET: ActivationOutcome.REJECTED,
     AgencyOutcome.REJECTED_POLICY_ERROR: ActivationOutcome.REJECTED,
     AgencyOutcome.REJECTED_UNAVAILABLE: ActivationOutcome.REJECTED,
+    AgencyOutcome.QUIET: ActivationOutcome.QUIET,
 }
 
 

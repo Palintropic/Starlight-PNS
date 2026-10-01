@@ -380,6 +380,12 @@ class WorldState:
 
     # ── 可用性 ──────────────────────────────────────────────────────────
     def set_availability(self, character_id: str, availability) -> None:
+        """写存下的那一档可用性。读到的值见 availability_of()。
+
+        当前活动是 resting 时，读到的一律是 ASLEEP：睡眠期间写入 BUSY /
+        AVAILABLE 只在离开 resting 之后才看得见。写入 ASLEEP 是一把显式睡眠锁，
+        作息离开 resting 不会解开它，只有再调一次这个 setter 才行（PLAN-1 §10）。
+        """
         self._check_writable()
         self._require_character_id(character_id)
         availability = Availability(availability)
@@ -389,7 +395,25 @@ class WorldState:
             self.character_availability[character_id] = availability
 
     def availability_of(self, character_id: str) -> Availability:
-        return self.character_availability.get(character_id, Availability.AVAILABLE)
+        """这个角色此刻的可用性。P6 曝光、Agency 前置条件、状态面都读这里。
+
+        两个来源，取或：
+
+          存下的值是 ASLEEP      → ASLEEP（显式睡眠锁，只由 set_availability 解除）
+          当前活动是 resting     → ASLEEP（作息睡眠，跟着活动走）
+          否则                   → 存下的值（AVAILABLE / BUSY）
+
+        resting 推导出的 ASLEEP 不落盘：活动的状态效果改活动的那一刻，可用性
+        就跟着变了，开局、恢复存档、HTTP 改活动全都经过这一处。作息只改活动，
+        从不写也不清存下的值。
+        """
+        stored = self.character_availability.get(character_id, Availability.AVAILABLE)
+        if stored is Availability.ASLEEP:
+            return stored
+        activity = self.character_activities.get(character_id)
+        if activity is not None and activity.kind is ActivityKind.RESTING:
+            return Availability.ASLEEP
+        return stored
 
     # ── 当前活动 ────────────────────────────────────────────────────────
     def set_activity(self, character_id: str, activity) -> CharacterActivity:
