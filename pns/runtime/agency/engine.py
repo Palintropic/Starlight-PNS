@@ -446,7 +446,10 @@ class AgencyEngine:
 
         if character_id not in self.world.known_characters():
             # 排期时角色还在，现在不在了。调度器刻意不替下游做这个判断
-            # （它宁可交出一条需要复核的记录），复核就在这里。
+            # （它宁可交出一条需要复核的记录），复核就在这里。建不出上下文，也就
+            # 没有前置门结论：先前给这条到期发过的（如果有）一并作废。
+            self._issued.pop(due.due_id, None)
+            self._planned.pop(due.due_id, None)
             return plan(
                 AgencyOutcome.REJECTED_ILLEGAL,
                 detail={"reason": "unknown_character", "character_id": character_id},
@@ -854,15 +857,18 @@ class AgencyEngine:
 
           QUIET 签发    任何一次提交尝试都取走，成败不论。一个签发对象至多被
                         提交一次；这次没提交成，到期仍待处理，重新 propose()
-                        重新签发。签过 QUIET 的到期，除了时间线判定的不可用，
-                        只接受那一份整的 QUIET 计划 —— 改成别的结论（比如计费
-                        的弃权）就是把"没想"记成"想过"。
+                        重新签发。
           前置门结论    留到这条到期被确认为止。协调器在重试用完时会拿同一份
                         结论再提交一条终局失败记录，它必须还认得出来。
 
         开了前置门的引擎，普通到期必须带着本引擎发出的那份结论：把 planning
         设成 None 退回旧调用形状，等于让记录不带游标、旧观察下次又算新。唯一
-        的例外是"角色已经不在世界里"—— 那时连上下文都建不出来。
+        的例外是这条到期从没发过结论（角色不在世界里时 propose() 建不出上下文）；
+        例外看的是"发没发过"，不看提交那一刻角色在不在。
+
+        前置门判了收尾（asleep / cooldown）的结论只能以 QUIET 结案。签发失败
+        之后结论还留着，但它说的仍然是"这一刻没什么可想的"：拿它去提交一条
+        弃权或别的计费结局，就是把没发生的认知记成发生过。
         """
         due_id = getattr(plan.due, "due_id", None)
         outbox = self._state.activation_outbox
@@ -881,21 +887,21 @@ class AgencyEngine:
             raise AgencyEngineError(
                 "QUIET 只能由本引擎的前置门签发：这个计划不是签发出去的那一个"
             )
-        if issued is not None and plan is not issued:
-            raise AgencyEngineError(
-                "这条到期签发的是 QUIET：不能改成别的结论提交"
-            )
-        if plan.planning is not None and plan.planning is not planned:
+        if plan.planning is not planned:
             raise AgencyEngineError(
                 "计划上的前置门结论不是本引擎为这条到期发出的那一个"
             )
         if (
-            plan.planning is None
+            planned is None
             and self._budget.quiet_cooldown_minutes is not None
             and plan.character_id in self.world.known_characters()
         ):
             raise AgencyEngineError(
-                "开了前置门的引擎只提交带着本引擎前置门结论的计划"
+                "开了前置门的引擎只提交经过 propose() 的计划"
+            )
+        if planned is not None and planned.quiet and plan.verdict is not AgencyOutcome.QUIET:
+            raise AgencyEngineError(
+                "前置门判了收尾的到期只能以 QUIET 结案"
             )
 
     def _require_still_quiet(self, plan: ProposalPlan) -> None:

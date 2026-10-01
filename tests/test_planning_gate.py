@@ -26,7 +26,7 @@ from pns.models.event import Event, EventScope, EventType
 from pns.models.exposure import ExposureReason
 from pns.models.session import SessionState, SessionStateError
 from pns.models.world_state import ActivityKind, Availability, WorldState
-from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError
+from pns.runtime.agency.engine import AgencyEngine, AgencyEngineError, ProposalPlan
 from pns.runtime.agency.planning import (
     PlanningReason,
     PlanProposal,
@@ -581,6 +581,56 @@ class IssuanceTests(unittest.TestCase):
         self.assertEqual(record.detail["reason"], "cooldown")
         self.assertEqual(policy.calls, 1)
 
+    def test_a_failed_quiet_cannot_be_relabelled_with_its_kept_planning(self):
+        # 复核 R2-F1：签发失败之后结论还留着，但它只能以 QUIET 结案。
+        state, scheduler, engine, policy = _engine_rig()
+        _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep")
+        due = _due_at(scheduler, "t1", 1)
+        signed = engine.propose(due)
+        self.assertIs(signed.verdict, AgencyOutcome.QUIET)
+        _set_activity(state, "mizuki", ActivityKind.IDLE, "wake")
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(signed)  # 事务内重判：门已经变了
+        _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep-again")
+        relabelled = replace(
+            signed, verdict=AgencyOutcome.ABSTAINED, policy="abstain", detail={}
+        )
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(relabelled)
+        self.assertEqual(_fingerprint(state), before)
+        self.assertEqual(policy.calls, 0)
+        record = engine.commit(engine.propose(due))
+        self.assertIs(record.outcome, AgencyOutcome.QUIET)
+
+    def test_a_never_proposed_plan_cannot_skip_the_gate(self):
+        # 开了前置门：没经过 propose() 的计划不带游标，旧观察下次会被当成新的。
+        state, scheduler, engine, _ = _engine_rig()
+        due = _due_at(scheduler, "t0", 0)
+        hand_built = ProposalPlan(
+            due=due,
+            character_id="mizuki",
+            policy="abstain",
+            proposed_at=state.world_state.clock,
+            verdict=AgencyOutcome.ABSTAINED,
+        )
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(hand_built)
+        self.assertEqual(_fingerprint(state), before)
+
+    def test_the_unknown_character_exemption_cannot_erase_an_issued_cursor(self):
+        # 复核 R2-F2：例外看"发没发过结论"，不看提交那一刻角色在不在。
+        state, scheduler, engine, _ = _engine_rig()
+        _other_says_and_leaves(state, "早", "old-line")
+        plan = engine.propose(_due_at(scheduler, "t0", 0))
+        self.assertIsNotNone(plan.planning)
+        state.world_state.remove_character("mizuki")
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(replace(plan, planning=None))
+        self.assertEqual(_fingerprint(state), before)
+
     def test_without_a_gate_no_quiet_can_be_committed(self):
         state, scheduler, engine, policy = _engine_rig(cooldown=None)
         _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep")
@@ -701,6 +751,62 @@ class CoordinatorQuietTests(unittest.TestCase):
         record = self.state.agency.get(due.due_id)
         self.assertIs(record.outcome, AgencyOutcome.REJECTED_POLICY_ERROR)
         self.assertIn("observation_cursor", record.detail)
+
+    def _flaky_ack(self, *, on_failure=None):
+        outbox = self.state.activation_outbox
+        original = outbox._acknowledge
+        calls = {"n": 0}
+
+        def flaky(due_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                if on_failure is not None:
+                    on_failure()
+                raise RuntimeError("提交途中断电")
+            return original(due_id)
+
+        return patch.object(outbox, "_acknowledge", side_effect=flaky)
+
+    def test_a_quiet_that_fails_to_commit_ends_quiet_not_charged(self):
+        # 复核 R2-F1：终局兜底不能把没发生的认知记成计费的失败。
+        self.runtime.process_due(_due_at(self.scheduler, "t0", 0))  # 计费的一句
+        self.runtime._retry = type(self.runtime._retry)(max_attempts=1)
+        counts = self._counts()
+        due = _due_at(self.scheduler, "t15", 15)
+        with self._flaky_ack():
+            result = self.runtime.process_due(due)
+        self.assertIs(result.outcome, ActivationOutcome.QUIET)
+        self.assertTrue(result.terminal)
+        record = self.state.agency.get(due.due_id)
+        self.assertIs(record.outcome, AgencyOutcome.QUIET)
+        self.assertFalse(consumes_allowance(record))
+        self.assertTrue(self.state.activation_outbox.is_acknowledged(due.due_id))
+        self.assertEqual(self._counts(), counts)
+        self.assertEqual(_charged(self.state), 1)
+
+    def test_a_failed_quiet_whose_gate_opened_stays_pending(self):
+        self.runtime.process_due(_due_at(self.scheduler, "t0", 0))
+        self.runtime._retry = type(self.runtime._retry)(max_attempts=1)
+        due = _due_at(self.scheduler, "t15", 15)
+        world = self.state.world_state
+        agency = self.runtime.agency
+        original_quiet_plan = agency.quiet_plan
+        calls = {"n": 0}
+
+        def quiet_plan(d):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                # 提交失败之后、兜底之前有人来了：门不再收尾。
+                world.place_character("ena", ROOM)
+            return original_quiet_plan(d)
+
+        with self._flaky_ack(), patch.object(agency, "quiet_plan", side_effect=quiet_plan):
+            result = self.runtime.process_due(due)
+        self.assertEqual(calls["n"], 2)
+        self.assertIs(result.outcome, ActivationOutcome.FAILED_RETRYABLE)
+        self.assertFalse(self.state.agency.has(due.due_id))
+        self.assertFalse(self.state.activation_outbox.is_acknowledged(due.due_id))
+        self.assertEqual(_charged(self.state), 1)
 
     def test_the_outcome_map_covers_quiet(self):
         self.assertIs(outcome_for(AgencyOutcome.QUIET), ActivationOutcome.QUIET)
@@ -901,7 +1007,7 @@ class QuietRecordShapeTests(unittest.TestCase):
         archive = state.to_dict()
         SessionState.from_dict(deepcopy(archive))
         detail = archive["agency"]["log"]["records"][0]["detail"]
-        for bad in (1_000_000, -1, True, "3", len(state.observations)):
+        for bad in (1_000_000, -1, True, "3", None, len(state.observations)):
             tampered = deepcopy(archive)
             tampered["agency"]["log"]["records"][0]["detail"]["observation_cursor"] = bad
             if bad == len(state.observations):

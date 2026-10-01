@@ -1266,13 +1266,21 @@ class AutonomousRuntime:
         # 预算用完了，而且失败的正是提交路径本身。再试一次**最小**的那条：
         # 一条不产出事件、不碰记忆的终局失败记录。它成了，这条到期就有了
         # 耐久的交代；它也没成，那就如实报告"卡住了"，绝不静默丢弃。
-        minimal = plan.refused(
-            AgencyOutcome.REJECTED_POLICY_ERROR,
-            reason="commit_failed",
-            error=message,
-            retry_budget_exhausted=True,
-            attempts=attempt,
-        )
+        if plan.verdict is AgencyOutcome.QUIET:
+            # 前置门收尾本来就是最小的那条，而且这一刻没有发生认知：终局失败
+            # 记录（计费）会把没发生的认知记成发生过。所以最小出口是在闸门里
+            # 重签一份 QUIET 再提交一次；门已经变了就交回待处理，下次按新的门判。
+            minimal = self._agency.quiet_plan(due)
+            if minimal is None:
+                return self._retry_result(due, plan.character_id, attempt, message)
+        else:
+            minimal = plan.refused(
+                AgencyOutcome.REJECTED_POLICY_ERROR,
+                reason="commit_failed",
+                error=message,
+                retry_budget_exhausted=True,
+                attempts=attempt,
+            )
         try:
             with self._state.atomic_commit():
                 record = self._agency.commit(minimal)
@@ -1299,11 +1307,23 @@ class AutonomousRuntime:
         return ActivationResult(
             due_id=due.due_id,
             character_id=record.character_id,
-            outcome=ActivationOutcome.FAILED_TERMINAL,
+            outcome=(
+                ActivationOutcome.QUIET
+                if record.outcome is AgencyOutcome.QUIET
+                else ActivationOutcome.FAILED_TERMINAL
+            ),
             attempt=attempt,
             at=record.decided_at,
             agency_outcome=record.outcome,
-            detail={"policy": record.policy, **_plain(record.detail)},
+            detail={
+                "policy": record.policy,
+                **_plain(record.detail),
+                **(
+                    {"after_commit_failure": message, "attempts": attempt}
+                    if record.outcome is AgencyOutcome.QUIET
+                    else {}
+                ),
+            },
         )
 
     def _retry_result(

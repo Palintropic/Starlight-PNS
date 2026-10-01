@@ -1620,9 +1620,9 @@ def _require_observation_cursor(observed, record) -> None:
     还有晚于这次决定的观察，都不是一次认知能读到的东西；放过它，前置门会把
     之后的新观察当成已经读过。旧记录没有游标，按 0 兼容。
     """
-    cursor = record.detail.get("observation_cursor")
-    if cursor is None:
+    if "observation_cursor" not in record.detail:
         return
+    cursor = record.detail["observation_cursor"]
     if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
         raise SessionStateError(
             f"Agency 记录 '{record.due_id}' 的观察游标必须是非负整数，收到 {cursor!r}"
