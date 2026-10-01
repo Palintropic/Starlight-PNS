@@ -1542,6 +1542,7 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
             raise SessionStateError(
                 f"到期资格 '{due_id}' 已被确认，却没有任何 Agency 记录说明它的结局"
             )
+    observed = state.observations.observations()
     for record in log.records():
         if record.decided_at > clock:
             raise SessionStateError(
@@ -1558,6 +1559,7 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
                 f"到期资格 '{record.due_id}' 有 Agency 记录却没有被确认"
             )
         due = outbox.get(record.due_id)
+        _require_observation_cursor(observed, record)
         if record.decided_at < due.fired_at:
             # 在这条资格到期之前就"决定"过它 —— 那不是一个更早的决定，
             # 那是两段来自不同时刻的状态被拼在了一起。
@@ -1609,6 +1611,31 @@ def _validate_agency_against_session(state: "SessionState", log, clock) -> None:
             )
         except ActionEventMismatch as e:
             raise SessionStateError(str(e)) from e
+
+
+def _require_observation_cursor(observed, record) -> None:
+    """记录写下的观察游标必须指在这份存档的观察日志里（PLAN-1）。
+
+    游标说的是"这次认知读到了观察日志的哪里"。超过日志长度、或者游标之前
+    还有晚于这次决定的观察，都不是一次认知能读到的东西；放过它，前置门会把
+    之后的新观察当成已经读过。旧记录没有游标，按 0 兼容。
+    """
+    cursor = record.detail.get("observation_cursor")
+    if cursor is None:
+        return
+    if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+        raise SessionStateError(
+            f"Agency 记录 '{record.due_id}' 的观察游标必须是非负整数，收到 {cursor!r}"
+        )
+    if cursor > len(observed):
+        raise SessionStateError(
+            f"Agency 记录 '{record.due_id}' 的观察游标 {cursor} 超过了观察日志长度 "
+            f"{len(observed)}"
+        )
+    if cursor and observed[cursor - 1].observed_at > record.decided_at:
+        raise SessionStateError(
+            f"Agency 记录 '{record.due_id}' 的观察游标指到了晚于这次决定的观察"
+        )
 
 
 def _validate_memories_against_session(

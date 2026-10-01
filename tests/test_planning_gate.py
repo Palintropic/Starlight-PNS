@@ -469,6 +469,30 @@ class IssuanceTests(unittest.TestCase):
         record = engine.commit(engine.propose(due))
         self.assertIs(record.outcome, AgencyOutcome.REJECTED_UNAVAILABLE)
 
+    def test_a_passed_plan_relabelled_quiet_is_not_downgraded_either(self):
+        # 只有 QUIET 那一道检查挡得住：前置门结论是引擎发出的那一份、这条到期也
+        # 没签过 QUIET，只把结论改成 QUIET。认知不可用时它不能落成免费的不可用记录。
+        state, scheduler, engine, _ = _engine_rig()
+        with state.atomic_commit():
+            state.set_cognition(
+                CognitionTimeline.open(log_length=len(state.agency), sim=CLOCK, wall="w")
+            )
+        state.world_state.place_character("ena", ROOM)
+        due = _due_at(scheduler, "t1", 1)
+        plan = engine.propose(due)
+        self.assertIs(plan.verdict, AgencyOutcome.ABSTAINED)
+        relabelled = replace(
+            plan,
+            verdict=AgencyOutcome.QUIET,
+            policy="",
+            rationale="",
+            detail={"reason": "cooldown"},
+        )
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(relabelled)
+        self.assertEqual(_fingerprint(state), before)
+
     def test_a_failed_commit_takes_the_signature_and_re_proposing_works(self):
         state, scheduler, engine, _ = _engine_rig()
         engine.commit(engine.propose(_due_at(scheduler, "t0", 0)))
@@ -514,6 +538,48 @@ class IssuanceTests(unittest.TestCase):
         self.assertEqual(_fingerprint(state), before)
         record = engine.commit(engine.propose(plan.due))
         self.assertIs(record.outcome, AgencyOutcome.ABSTAINED)
+
+    def test_a_signed_quiet_cannot_be_turned_into_a_charged_abstention(self):
+        # 实现审查 F1：签过 QUIET 的到期，改成别的结论提交 = 把"没想"记成"想过"。
+        state, scheduler, engine, policy = _engine_rig()
+        _set_activity(state, "mizuki", ActivityKind.RESTING, "sleep")
+        due = _due_at(scheduler, "t1", 1)
+        for forged in (
+            dict(planning=None),  # 退回旧调用形状
+            dict(),  # 保留签发出去的那份前置门结论
+        ):
+            signed = engine.propose(due)
+            self.assertIs(signed.verdict, AgencyOutcome.QUIET)
+            relabelled = replace(
+                signed,
+                verdict=AgencyOutcome.ABSTAINED,
+                policy="abstain",
+                detail={},
+                **forged,
+            )
+            before = _fingerprint(state)
+            with self.assertRaises(AgencyEngineError, msg=forged):
+                engine.commit(relabelled)
+            self.assertEqual(_fingerprint(state), before)
+        self.assertEqual(policy.calls, 0)
+        record = engine.commit(engine.propose(due))
+        self.assertIs(record.outcome, AgencyOutcome.QUIET)
+        self.assertFalse(consumes_allowance(record))
+
+    def test_a_charged_plan_cannot_drop_its_planning(self):
+        # 实现审查 F1：没有游标的计费记录，下一次会把旧观察又算成新刺激。
+        state, scheduler, engine, policy = _engine_rig()
+        _other_says_and_leaves(state, "早", "old-line")
+        plan = engine.propose(_due_at(scheduler, "t0", 0))
+        before = _fingerprint(state)
+        with self.assertRaises(AgencyEngineError):
+            engine.commit(replace(plan, planning=None))
+        self.assertEqual(_fingerprint(state), before)
+        engine.commit(plan)  # 原件仍认得
+        record = engine.commit(engine.propose(_due_at(scheduler, "t15", 15)))
+        self.assertIs(record.outcome, AgencyOutcome.QUIET)
+        self.assertEqual(record.detail["reason"], "cooldown")
+        self.assertEqual(policy.calls, 1)
 
     def test_without_a_gate_no_quiet_can_be_committed(self):
         state, scheduler, engine, policy = _engine_rig(cooldown=None)
@@ -613,6 +679,28 @@ class CoordinatorQuietTests(unittest.TestCase):
         self.assertEqual(result.detail["reason"], "asleep")
         self.assertEqual(self._counts()[:3], (0, 0, 0))
         self.assertFalse(consumes_allowance(self.state.agency.get(due.due_id)))
+
+    def test_the_terminal_failure_record_still_recognises_the_planning(self):
+        # 重试用完时，协调器拿同一份前置门结论再提交一条终局失败记录。
+        runtime = self.runtime
+        runtime._retry = type(runtime._retry)(max_attempts=1)
+        outbox = self.state.activation_outbox
+        original = outbox._acknowledge
+        calls = {"n": 0}
+
+        def flaky(due_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("提交途中断电")
+            return original(due_id)
+
+        due = _due_at(self.scheduler, "t0", 0)
+        with patch.object(outbox, "_acknowledge", side_effect=flaky):
+            result = runtime.process_due(due)
+        self.assertIs(result.outcome, ActivationOutcome.FAILED_TERMINAL)
+        record = self.state.agency.get(due.due_id)
+        self.assertIs(record.outcome, AgencyOutcome.REJECTED_POLICY_ERROR)
+        self.assertIn("observation_cursor", record.detail)
 
     def test_the_outcome_map_covers_quiet(self):
         self.assertIs(outcome_for(AgencyOutcome.QUIET), ActivationOutcome.QUIET)
@@ -802,6 +890,25 @@ class QuietRecordShapeTests(unittest.TestCase):
         with self.assertRaises(SessionStateError):
             SessionState.from_dict(tampered)
         SessionState.from_dict(archive)
+
+    def test_an_out_of_range_cursor_does_not_load(self):
+        # 实现审查 F2：超界游标会让之后的新观察一直被吞，加载时就拒绝。
+        state, scheduler, engine, _ = _engine_rig()
+        _other_says_and_leaves(state, "早", "old-line")
+        engine.commit(engine.propose(_due_at(scheduler, "t0", 0)))
+        scheduler.advance_by(5)  # 分钟精度：同一分钟里的先后只有日志位置分得出
+        _other_says_and_leaves(state, "还在吗", "later-line")
+        archive = state.to_dict()
+        SessionState.from_dict(deepcopy(archive))
+        detail = archive["agency"]["log"]["records"][0]["detail"]
+        for bad in (1_000_000, -1, True, "3", len(state.observations)):
+            tampered = deepcopy(archive)
+            tampered["agency"]["log"]["records"][0]["detail"]["observation_cursor"] = bad
+            if bad == len(state.observations):
+                # 不超长度，但指到了这次决定之后才听见的那句。
+                self.assertGreater(bad, detail["observation_cursor"])
+            with self.assertRaises(SessionStateError, msg=bad):
+                SessionState.from_dict(tampered)
 
 
 if __name__ == "__main__":

@@ -354,12 +354,18 @@ class AgencyEngine:
         cursor = len(observations)
         last = self._last_charged(character_id)
         since = _cursor_of(last) if last is not None else 0
+        if since > cursor:
+            # 提交时核对过、存档加载也核对过；走到这里说明有人绕过了两者。不截断：
+            # 截断会让游标一直追着日志长度，之后的新观察全被吞掉。
+            raise AgencyEngineError(
+                f"记录 '{last.due_id}' 的观察游标 {since} 超过了观察日志长度 {cursor}"
+            )
         planning_context = build_planning_context(
             context,
             reply=_reply_source(due) is not None,
             observation_cursor=cursor,
             observations_since_charged=observations.for_character_since(
-                character_id, min(since, cursor)
+                character_id, since
             ),
             last_charged_at=last.decided_at if last is not None else None,
         )
@@ -446,6 +452,14 @@ class AgencyEngine:
                 detail={"reason": "unknown_character", "character_id": character_id},
             )
 
+        context = self.context_for(due)
+        planning = self._plan(due, character_id, context)
+        if planning.quiet:
+            return self._issue_quiet(due, planning, proposed_at)
+        # 这次不收尾：先前给这条到期签发过的 QUIET（如果有）作废。
+        self._issued.pop(due.due_id, None)
+        self._planned[due.due_id] = planning
+
         reply_medium = None
         if _reply_source(due) is not None:
             reply_medium, lapse = self._reply_gate(due, character_id)
@@ -455,14 +469,6 @@ class AgencyEngine:
                 return replace(
                     plan(AgencyOutcome.REJECTED_STALE, detail=lapse), policy=""
                 )
-
-        context = self.context_for(due)
-        planning = self._plan(due, character_id, context)
-        if planning.quiet:
-            return self._issue_quiet(due, planning, proposed_at)
-        # 这次不收尾：先前给这条到期签发过的 QUIET（如果有）作废。
-        self._issued.pop(due.due_id, None)
-        self._planned[due.due_id] = planning
 
         committed = self._state.agency.committed_actions()
         if committed >= self._budget.max_committed_actions_per_session:
@@ -634,21 +640,7 @@ class AgencyEngine:
         """
         if not isinstance(plan, ProposalPlan):
             raise AgencyEngineError("只能提交 propose() 产出的计划")
-        # 签发条目在任何一次提交尝试时取走，成败不论：一个签发对象至多被提交
-        # 一次；这次没提交成（事务被打断、门条件变了），到期仍待处理，重新
-        # propose() 重新签发。比对放在一切判定之前 —— 尤其在"认知不可用"的
-        # 改判之前，未签发的 QUIET 不能被降格成一条免费的不可用记录。
-        due_id = getattr(plan.due, "due_id", None)
-        issued = self._issued.pop(due_id, None)
-        planned = self._planned.pop(due_id, None)
-        if plan.verdict is AgencyOutcome.QUIET and issued is not plan:
-            raise AgencyEngineError(
-                "QUIET 只能由本引擎的前置门签发：这个计划不是签发出去的那一个"
-            )
-        if plan.planning is not None and plan.planning is not planned:
-            raise AgencyEngineError(
-                "计划上的前置门结论不是本引擎为这条到期发出的那一个"
-            )
+        self._require_issued(plan)
         due = plan.due
         self._require_handoff(due)
         self._require_plan_integrity(plan)
@@ -851,6 +843,60 @@ class AgencyEngine:
             # 每条记录都写明它是在哪个认知区间里判定的，存档加载据此复核。
             detail["cognition_interval"] = interval.index
         return verdict, detail, plan.policy
+
+    def _require_issued(self, plan: ProposalPlan) -> None:
+        """这份计划的前置门身份是不是本引擎发出去的那一份（PLAN-1 §9 D2）。
+
+        比对放在一切判定之前 —— 尤其在"认知不可用"的改判之前，未签发的
+        QUIET 不能被降格成一条免费的不可用记录。
+
+        两张表的生命周期不同：
+
+          QUIET 签发    任何一次提交尝试都取走，成败不论。一个签发对象至多被
+                        提交一次；这次没提交成，到期仍待处理，重新 propose()
+                        重新签发。签过 QUIET 的到期，除了时间线判定的不可用，
+                        只接受那一份整的 QUIET 计划 —— 改成别的结论（比如计费
+                        的弃权）就是把"没想"记成"想过"。
+          前置门结论    留到这条到期被确认为止。协调器在重试用完时会拿同一份
+                        结论再提交一条终局失败记录，它必须还认得出来。
+
+        开了前置门的引擎，普通到期必须带着本引擎发出的那份结论：把 planning
+        设成 None 退回旧调用形状，等于让记录不带游标、旧观察下次又算新。唯一
+        的例外是"角色已经不在世界里"—— 那时连上下文都建不出来。
+        """
+        due_id = getattr(plan.due, "due_id", None)
+        outbox = self._state.activation_outbox
+        for stale in [
+            key
+            for key in self._planned
+            if not outbox.has(key) or outbox.is_acknowledged(key)
+        ]:
+            del self._planned[stale]
+        issued = self._issued.pop(due_id, None)
+        planned = self._planned.get(due_id)
+        if plan.verdict is AgencyOutcome.REJECTED_UNAVAILABLE:
+            # 不可用由认知时间线在事务里判，跟前置门无关；时间线说可用时 _judge 拒绝。
+            return
+        if plan.verdict is AgencyOutcome.QUIET and issued is not plan:
+            raise AgencyEngineError(
+                "QUIET 只能由本引擎的前置门签发：这个计划不是签发出去的那一个"
+            )
+        if issued is not None and plan is not issued:
+            raise AgencyEngineError(
+                "这条到期签发的是 QUIET：不能改成别的结论提交"
+            )
+        if plan.planning is not None and plan.planning is not planned:
+            raise AgencyEngineError(
+                "计划上的前置门结论不是本引擎为这条到期发出的那一个"
+            )
+        if (
+            plan.planning is None
+            and self._budget.quiet_cooldown_minutes is not None
+            and plan.character_id in self.world.known_characters()
+        ):
+            raise AgencyEngineError(
+                "开了前置门的引擎只提交带着本引擎前置门结论的计划"
+            )
 
     def _require_still_quiet(self, plan: ProposalPlan) -> None:
         """签发过的 QUIET 在事务内按当前状态再判一次前置门。
