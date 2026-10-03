@@ -176,35 +176,152 @@ def formal_session_state(
     return state
 
 
-def gated_rhythms(state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str):
-    """这个世界此刻能生效的作息表；新版本记一条待决，不生效。
+@dataclass(frozen=True)
+class RhythmGateSubject:
+    """一位登记过作息的居民，此刻为什么能或不能被作息驱动。
 
-    调用方持有事务（恢复路径的组装阶段）。返回过滤之后的作息表字典。没有内容
-    账本的会话（1.x 场景世界）不设门，原样返回。
+    `reason` 按固定顺序判定（CONTENT-4 过渡设计 v2 修订 R2 · U5）：
+
+      1. 内容包里有定义、指纹等于已采用版本 → `ok`（历史上的驳回 / 暂缓不影响）；
+      2. 内容包里没有定义：已采用版本就是 ABSENT → `adopted_absent`；否则
+         `missing_definition`，`conflict_id` / `conflict_status` 指向针对此刻已采用
+         版本、提议 ABSENT 的那条记录；
+      3. 有定义但没被采用 → 针对此刻已采用版本、提议正是当前定义的那条记录，
+         原因取它的状态（pending / declined / deferred）。
+
+    `conflict_id` 只给"针对此刻已采用版本"的记录：针对过期版本的旧记录拿去决定
+    会被账本拒绝，报给操作者没有意义。
+    """
+
+    subject: str
+    character_id: str
+    reason: str
+    conflict_id: Optional[str] = None
+    conflict_status: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.reason == "ok"
+
+    def to_dict(self) -> Dict:
+        return {
+            "subject": self.subject,
+            "character_id": self.character_id,
+            "reason": self.reason,
+            "conflict_id": self.conflict_id,
+            "conflict_status": self.conflict_status,
+        }
+
+
+@dataclass(frozen=True)
+class RhythmGate:
+    """作息门的结果：生效的作息表，以及账本里每个作息主体的判定。
+
+    门齐的唯一判据是**每个**登记主体都是 `ok`。不看 `pending()` 是否为空，也不看
+    生效的表是否非空：驳回、暂缓、作息消失都不是 pending，却同样没有表可用。
+    """
+
+    accepted: Mapping
+    subjects: Tuple[RhythmGateSubject, ...]
+
+    @property
+    def complete(self) -> bool:
+        return all(subject.ok for subject in self.subjects)
+
+    def blocked(self) -> Tuple[RhythmGateSubject, ...]:
+        return tuple(subject for subject in self.subjects if not subject.ok)
+
+    def to_dict(self) -> Dict:
+        return {
+            "complete": self.complete,
+            "subjects": [subject.to_dict() for subject in self.subjects],
+        }
+
+
+def _current_conflict(ledger: ContentLedger, subject: str, offered: str):
+    """针对此刻已采用版本、提议为 `offered` 的那条记录（至多一条，见 offered()）。"""
+    adopted = ledger.adopted_fingerprint(subject)
+    for conflict in ledger.conflicts:
+        if (
+            conflict.subject == subject
+            and conflict.adopted_fingerprint == adopted
+            and conflict.offered_fingerprint == offered
+        ):
+            return conflict
+    return None
+
+
+def rhythm_gate(
+    state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str
+) -> RhythmGate:
+    """这个世界此刻能生效的作息表，以及每个登记主体为什么生效或不生效。
+
+    新版本记一条待决、不生效。调用方持有事务（恢复路径的组装阶段）。先记下
+    提议再出报告，所以报告里引用的记录一定已经在账本里。没有内容账本的会话
+    （1.x 场景世界）不设门：原样返回，没有登记主体，门视为齐。
     """
     ledger = state.content
     if ledger is None:
-        return dict(rhythms)
-    accepted = {}
+        return RhythmGate(accepted=dict(rhythms), subjects=())
     residents = {
         subject[len("rhythm:"):]
         for subject, _ in ledger.adopted
         if subject.startswith("rhythm:")
     }
+    offers = {}
     for character_id in sorted(residents):
         subject = rhythm_subject(character_id)
         rhythm = rhythms.get(character_id)
         # 作息表从内容里消失了也是"新的一版"：同样要明确采用才生效，不能因为
         # 少了一个键就悄悄让这个人不再受作息驱动。
         fingerprint = rhythm_fingerprint(rhythm) if rhythm is not None else ABSENT
+        offers[character_id] = (subject, rhythm, fingerprint)
         ledger = ledger.offered(
             subject, fingerprint, registry_revision=registry_revision, wall=wall
         )
-        if rhythm is not None and ledger.accepts(subject, fingerprint):
-            accepted[character_id] = rhythm
     if ledger is not state.content:
         state.set_content(ledger)
-    return accepted
+
+    accepted = {}
+    subjects = []
+    for character_id in sorted(residents):
+        subject, rhythm, fingerprint = offers[character_id]
+        adopted = ledger.adopted_fingerprint(subject)
+        if rhythm is not None and fingerprint == adopted:
+            accepted[character_id] = rhythm
+            subjects.append(RhythmGateSubject(subject, character_id, "ok"))
+            continue
+        if rhythm is None and adopted == ABSENT:
+            subjects.append(RhythmGateSubject(subject, character_id, "adopted_absent"))
+            continue
+        conflict = _current_conflict(ledger, subject, fingerprint)
+        status = conflict.status.value if conflict is not None else None
+        conflict_id = conflict.conflict_id if conflict is not None else None
+        if rhythm is None:
+            reason = "missing_definition"
+        else:
+            # offered() 刚针对此刻已采用版本记过这一版，所以记录一定在。
+            reason = status
+        subjects.append(
+            RhythmGateSubject(
+                subject,
+                character_id,
+                reason,
+                conflict_id=conflict_id,
+                conflict_status=status,
+            )
+        )
+    return RhythmGate(accepted=accepted, subjects=tuple(subjects))
+
+
+def gated_rhythms(state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str):
+    """这个世界此刻能生效的作息表；新版本记一条待决，不生效。
+
+    `rhythm_gate` 的简写：只要生效的表，不要逐主体的判定。
+    """
+    return dict(
+        rhythm_gate(state, rhythms, registry_revision=registry_revision, wall=wall).accepted
+    )
 
 
 __all__ = [
@@ -214,7 +331,10 @@ __all__ = [
     "FormalWorldSpec",
     "formal_session_state",
     "formal_world",
+    "RhythmGate",
+    "RhythmGateSubject",
     "gated_rhythms",
+    "rhythm_gate",
     "rhythm_fingerprint",
     "rhythm_subject",
 ]

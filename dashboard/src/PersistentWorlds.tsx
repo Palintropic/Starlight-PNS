@@ -78,6 +78,11 @@ const describe = (e: unknown, fallback: string): string =>
 /** 一句给人看的状态。只由服务器字段推出来，不掺本地记忆。 */
 function summarize(world: PersistentWorldStatus): { label: string; tone: string } {
   if (world.owned && world.running) return { label: '运行中', tone: 'ok' };
+  if (world.owned && world.held) {
+    // 作息内容待决，运行时已终局停止：它不会再运行，只能关闭。
+    const who = world.held.subjects.map((s) => `${s.subject}（${s.reason}）`).join('、');
+    return { label: `搁置：内容待决${who ? `：${who}` : ''}`, tone: 'warn' };
+  }
   if (world.owned) {
     return { label: world.stop_reason ? `已停：${world.stop_reason}` : '已停', tone: 'warn' };
   }

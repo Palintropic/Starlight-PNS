@@ -30,6 +30,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from pns.interfaces.app import create_app  # noqa: E402
 from pns.interfaces.composition import AutonomySettings, WorldControlPlane  # noqa: E402
+from pns.interfaces.content_maintenance import (  # noqa: E402
+    read_conflicts,
+    run_content_decisions,
+)
 from pns.models.content_ledger import (  # noqa: E402
     ConflictStatus,
     ContentLedger,
@@ -49,6 +53,7 @@ from pns.runtime.formal_world import (  # noqa: E402
     rhythm_fingerprint,
     rhythm_subject,
 )
+from pns.runtime.persistence import ContentNotAdopted  # noqa: E402
 from pns.runtime.persistence.lifecycle import _fingerprint  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.runtime.scheduler import SchedulerError  # noqa: E402
@@ -467,28 +472,28 @@ class ContentGateTests(PlaneTestCase):
         changed = _with_rhythm(self.registry, "mizuki", ActivityKind.DRAWING)
         plane = self.make_plane(registry_provider=lambda: changed)
         self.addCleanup(plane.service.release_all)
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
-        (conflict,) = world.state.content.pending()
-        self.assertEqual(conflict.subject, "rhythm:mizuki")
-        self.assertEqual(conflict.registry_revision, changed.revision)
-        # 新版不生效：瑞希不受作息驱动，其他人照常。
-        self.assertEqual(world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu"))
+        # 新版待决：不运行一个残缺的作息集合（CONTENT-4 过渡设计 v2）。冲突已经
+        # 存盘，世界已经关闭、所有权已经释放。
+        with self.assertRaises(ContentNotAdopted) as caught:
+            plane.restore("yoake-mae")
+        (blocked,) = caught.exception.gate.blocked()
+        self.assertEqual((blocked.subject, blocked.reason), ("rhythm:mizuki", "pending"))
+        self.assertIsNone(plane.service.opened("yoake-mae"))
+        (view,) = read_conflicts(plane, "yoake-mae")
+        self.assertEqual((view.conflict_id, view.status), (blocked.conflict_id, "pending"))
 
         # 再打开一次不重复记。
-        plane.close("yoake-mae")
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
-        self.assertEqual(len(world.state.content.conflicts), 1)
+        with self.assertRaises(ContentNotAdopted):
+            plane.restore("yoake-mae")
+        self.assertEqual(len(read_conflicts(plane, "yoake-mae")), 1)
 
-        # 项目所有者明确采用：下次打开才生效。
-        plane.decide_content_conflict("yoake-mae", conflict.conflict_id, "adopted")
-        self.assertEqual(
-            world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu"), "本次打开不变"
-        )
-        plane.close("yoake-mae")
+        # 项目所有者明确采用（冷维护），下一次打开才生效。
+        report = run_content_decisions(plane, "yoake-mae", [(view.conflict_id, "adopted")])
+        self.assertEqual(report.errors, [])
+        self.assertTrue(report.on_disk)
         plane.restore("yoake-mae")
         world = plane.service.opened("yoake-mae")
+        self.assertIsNone(world.held)
         self.assertEqual(
             world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu", "mizuki")
         )
@@ -516,14 +521,18 @@ class ContentGateTests(PlaneTestCase):
         changed = _with_rhythm(self.registry, "ena", ActivityKind.RESTING)
         plane = self.make_plane(registry_provider=lambda: changed)
         self.addCleanup(plane.service.release_all)
-        plane.restore("yoake-mae")
-        conflict = plane.service.opened("yoake-mae").state.content.pending()[0]
-        plane.decide_content_conflict("yoake-mae", conflict.conflict_id, "declined")
-        plane.close("yoake-mae")
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
-        self.assertEqual(world.runtime.rhythm.characters(), ("kanade", "mafuyu", "mizuki"))
-        self.assertEqual(world.state.content.pending(), ())
+        with self.assertRaises(ContentNotAdopted) as caught:
+            plane.restore("yoake-mae")
+        (blocked,) = caught.exception.gate.blocked()
+        report = run_content_decisions(plane, "yoake-mae", [(blocked.conflict_id, "declined")])
+        self.assertEqual(report.errors, [])
+        # 驳回之后内容包里仍然只有新版：绘名没有可用的表，世界继续被挡住，
+        # 而不是悄悄跑另外三个人。
+        with self.assertRaises(ContentNotAdopted) as again:
+            plane.restore("yoake-mae")
+        (still,) = again.exception.gate.blocked()
+        self.assertEqual((still.subject, still.reason), ("rhythm:ena", "declined"))
+        self.assertIsNone(plane.service.opened("yoake-mae"))
 
 
 class AdoptionChainTests(unittest.TestCase):
@@ -804,8 +813,13 @@ class RestoreConflictDurabilityTests(PlaneTestCase):
         changed = _with_rhythm(self.registry, "mizuki", ActivityKind.DRAWING)
         plane = self.make_plane(registry_provider=lambda: changed)
         self.addCleanup(plane.service.release_all)
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
+        # 冷维护打开：冲突的存盘在返回之前。
+        world = plane.service.restore(
+            "yoake-mae",
+            adapters=plane.build_adapters(changed),
+            checkpoint_policy=plane.checkpoint_policy,
+            clock=None,
+        )
         self.assertEqual(len(world.state.content.pending()), 1)
         self.assertEqual(world.status()["last_checkpoint_reason"], "restore_content_conflict")
         # 模拟没来得及再存一次就退出。
@@ -846,9 +860,10 @@ class RestoreConflictDurabilityTests(PlaneTestCase):
                 plane.restore("yoake-mae")
         self.assertEqual(path.read_bytes(), before, "失败的恢复不许写盘")
         self.assertIsNone(plane.service.opened("yoake-mae"))
-        # 原来的存档仍然能正常恢复。
-        plane.restore("yoake-mae")
-        self.assertEqual(len(plane.service.opened("yoake-mae").state.content.pending()), 1)
+        # 原来的存档仍然能正常恢复到"冲突存盘、拒绝运行"。
+        with self.assertRaises(ContentNotAdopted):
+            plane.restore("yoake-mae")
+        self.assertEqual([v.status for v in read_conflicts(plane, "yoake-mae")], ["pending"])
 
     def test_a_create_that_fails_assembly_leaves_no_archive(self):
         with patch.object(

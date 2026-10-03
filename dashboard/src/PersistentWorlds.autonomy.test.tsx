@@ -101,6 +101,7 @@ const world = (
   residue: [],
   running: true,
   stop_reason: null,
+  held: null,
   clock: '2026-08-23T02:05:00',
   archive_path: `/tmp/worlds/${world_id}/world.json`,
   boundaries_since_checkpoint: 0,
