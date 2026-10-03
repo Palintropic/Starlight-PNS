@@ -2,15 +2,20 @@ import type { OverviewEvent } from './api';
 
 // Where a spoken or sent line happened, read only from what the event itself recorded.
 //
-// `participants` on a speech event is who occupied the same location node (or was in the
-// channel) when the line was committed. It is not who the line was addressed to, and not who
-// heard it: hearing is decided later by exposure, which this view does not see. So the labels
-// below only ever claim co-presence.
+// Only two scopes say anything about company. In `location` scope, `participants` is who was on
+// the same location node when the line was committed; in `channel` scope, who was in the channel.
+// In the other scopes it lists who was addressed, which says nothing about who was present.
+// None of them says who the line was addressed to or who heard it: hearing is decided later by
+// exposure, which this view does not see. So the labels below only ever claim co-presence.
+//
+// A list is only known to be complete if the backend checked it at commit time. The overview
+// reports the first event sequence number from which that check applied
+// (`speech_occupancy_checked_from`); lines before it carry a list nobody verified.
 export type SpeechSetting =
   | { kind: 'alone' }
   | { kind: 'together'; others: string[] }
-  // `others` is null when the channel record does not list the speaker, so who else was online
-  // is unknown; the medium itself is still certain from the channel id.
+  // `others` is null when the channel list was not checked, so who else was online is unknown;
+  // the medium itself is still certain from the channel scope.
   | { kind: 'online'; others: string[] | null }
   // The record does not support any of the claims above; show the line without a setting.
   | { kind: 'unknown' };
@@ -23,18 +28,24 @@ export function isSpeech(event: OverviewEvent): boolean {
 
 /**
  * Classify a speech event. `notTogether` holds location ids where sharing the id does not mean
- * being together (the city, open streets, everyone's separate homes).
+ * being together (the city, open streets, everyone's separate homes). `checkedFrom` is the
+ * overview's `speech_occupancy_checked_from`.
  */
-export function speechSetting(event: OverviewEvent, notTogether: ReadonlySet<string>): SpeechSetting {
+export function speechSetting(
+  event: OverviewEvent,
+  notTogether: ReadonlySet<string>,
+  checkedFrom: number | null,
+): SpeechSetting {
   const actor = event.actor;
   if (!isSpeech(event) || actor === null) return { kind: 'unknown' };
+  const checked = checkedFrom !== null && event.seq >= checkedFrom && event.participants.includes(actor);
   const others = event.participants.filter((id) => id !== actor);
-  // Committed speech always lists its speaker among those present. A record without the speaker
-  // was not written that way, so it cannot tell us who else was there either.
-  const recorded = event.participants.includes(actor);
-  if (event.channel_id !== null) return { kind: 'online', others: recorded ? others : null };
-  if (event.location_id === null) return { kind: 'unknown' };
-  if (!recorded) return { kind: 'unknown' };
+  if (event.scope === 'channel') {
+    if (event.channel_id === null) return { kind: 'unknown' };
+    return { kind: 'online', others: checked ? others : null };
+  }
+  if (event.scope !== 'location') return { kind: 'unknown' };
+  if (event.location_id === null || event.channel_id !== null || !checked) return { kind: 'unknown' };
   if (others.length === 0) return { kind: 'alone' };
   if (notTogether.has(event.location_id)) return { kind: 'unknown' };
   return { kind: 'together', others };

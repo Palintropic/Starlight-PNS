@@ -63,7 +63,7 @@ from pns.runtime.autonomy.seeding import (
 )
 from pns.runtime.content_registry import ContentRegistry
 from pns.models.clock_anchor import utc_now
-from pns.runtime.event_commit import EventCommitError
+from pns.runtime.event_commit import SPEECH_OCCUPANCY_CHECKED_FROM, EventCommitError
 from pns.runtime.formal_world import (
     FormalWorldError,
     formal_session_state,
@@ -1004,6 +1004,7 @@ class WorldControlPlane:
             clock = ws.clock.isoformat()
             total_events = len(all_events)
             first_event_at = all_events[0].occurred_at.isoformat() if all_events else None
+            occupancy_checked_from = ws.metadata.get(SPEECH_OCCUPANCY_CHECKED_FROM)
 
         return {
             "world_id": world.world_id,
@@ -1016,6 +1017,8 @@ class WorldControlPlane:
             "events": recent,
             "total_events": total_events,
             "first_event_at": first_event_at,
+            # 从这个序号（含）起的台词，在场名单在提交时核对过；之前的没有。None = 从未核对。
+            "speech_occupancy_checked_from": occupancy_checked_from,
         }
 
     @staticmethod
