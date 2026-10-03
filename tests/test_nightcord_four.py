@@ -54,7 +54,7 @@ class LyricsTests(unittest.TestCase):
     def test_mafuyu_writes_lyrics_in_kanades_room(self):
         segments = [
             segment
-            for segment in BOUNDARY.active().rhythm("mafuyu").segments
+            for segment in BOUNDARY.active().rhythm("mafuyu").all_segments
             if segment.activity is ActivityKind.WRITING_LYRICS
         ]
         self.assertTrue(segments, "真冬的一天里没有作词")

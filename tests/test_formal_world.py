@@ -116,15 +116,13 @@ class MealTests(unittest.TestCase):
         # 实机上见过的：作息里没有吃饭，"好饿"就只能靠嘴念一整个下午。
         # 只钉已经决定的这两人；饭点是逐个角色的内容取舍，不是全体居民的
         # 规范（奏的研究 #5 就不支持每天固定两顿）。
+        # 平日表、休息日表各自都要有两顿：休息日不能把饭一起省掉。
         registry = BOUNDARY.active()
         for character_id in ("mizuki", "ena"):
-            with self.subTest(character_id=character_id):
-                meals = [
-                    segment
-                    for segment in registry.rhythm(character_id).segments
-                    if segment.activity is ActivityKind.EATING
-                ]
-                self.assertGreaterEqual(len(meals), 2)
+            for table in registry.rhythm(character_id).tables:
+                with self.subTest(character_id=character_id, first=table[0].label, size=len(table)):
+                    meals = [segment for segment in table if segment.activity is ActivityKind.EATING]
+                    self.assertGreaterEqual(len(meals), 2)
 
 
 class InitialStateTests(unittest.TestCase):
@@ -139,12 +137,20 @@ class InitialStateTests(unittest.TestCase):
                 self.assertEqual(world.location_of(character_id), segment.location_id)
                 self.assertIs(world.activity_of(character_id).kind, segment.activity)
                 self.assertEqual(world.activity_of(character_id).since, world.clock)
-        # 计划 §5.2 的清单：瑞希在家（19:00 正在吃晚饭）、绘名在夜间定时制；
-        # 19:00 谁都不在 Nightcord。
+        # 计划 §5.2 的清单：瑞希在家（19:00 正在吃晚饭）；19:00 谁都不在 Nightcord。
+        # WALL 是 2026-09-27 周日：休息日没有夜间定时制，绘名在画室。
         self.assertEqual(world.location_of("mizuki"), "mizuki_home")
-        self.assertEqual(world.location_of("ena"), "kamiyama_high")
+        self.assertEqual(world.location_of("ena"), "ena_home_studio")
         self.assertEqual(world.channels_for("mizuki"), [])
         self.assertEqual(world.channels_for("ena"), [])
+
+    def test_a_weekday_launch_puts_ena_at_night_school(self):
+        # 同一时刻换成平日（2026-09-28 周一）：绘名在夜间定时制。
+        monday = datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc)
+        world = _state(BOUNDARY.active(), wall=monday).world_state
+        self.assertEqual(world.clock, datetime(2026, 9, 28, 19, 0))
+        self.assertEqual(world.location_of("ena"), "kamiyama_high")
+        self.assertEqual(world.location_of("mafuyu"), "kanade_home")
 
     def test_a_launch_inside_a_channel_segment_starts_in_the_channel(self):
         # 开局那一段若声明了频道，开局就在频道里（例如在 25 時里开局）。
@@ -438,9 +444,10 @@ class TwentyFiveOClockTests(PlaneTestCase):
             world.state.world_state.clock, launch + timedelta(hours=6), "跨过了零点到 01:00"
         )
         self.assertEqual(self.provider.generations, [], "没按 Start，不调模型")
-        # 绘名从学校回家、再去工作室，都是走过去的：没有一跳是瞬移。
+        # 绘名的每一次换地方都是走过去的：没有一跳是瞬移。开局在哪取决于开局那天
+        # 是平日（夜间定时制）还是休息日（画室），从作息表读，不写死。
         graph = world.state.world_state.locations
-        position = "kamiyama_high"
+        position = self.registry.rhythm("ena").segment_at(launch).location_id
         for event in world.state.events.events():
             if event.actor_id == "ena" and event.type.value == "character.location_changed":
                 self.assertIsNotNone(

@@ -132,7 +132,7 @@ def require_rhythm_is_enterable(rhythm, grants, locations) -> None:
     """
     if rhythm is None:
         return
-    for segment in rhythm.segments:
+    for segment in rhythm.all_segments:
         if segment.location_id is None:
             continue
         if not may_enter(grants, locations.get(segment.location_id)):
@@ -151,7 +151,7 @@ def require_rhythm_channels_joinable(rhythm, grants) -> None:
     if rhythm is None:
         return
     members = grants.channels if grants is not None else frozenset()
-    for segment in rhythm.segments:
+    for segment in rhythm.all_segments:
         if segment.channel_id is not None and segment.channel_id not in members:
             raise GrantError(
                 f"角色 '{rhythm.character_id}' 的作息表 {segment.label} 那一段在频道 "
@@ -160,32 +160,46 @@ def require_rhythm_channels_joinable(rhythm, grants) -> None:
 
 
 def require_rhythm_trips_fit(rhythm, grants, locations) -> None:
-    """一整天（含最后一段接回次日第一段）的每一次换地方，路都走得通、时间也排得下。
+    """每一次换地方（含跨零点接回次日第一段），路都走得通、时间也排得下。
 
     没写地点的段沿用上一段的地点。相邻两段地点不同，就必须有一条只经过可进入
     地点的路线，而且路上的时间不超过两段起点之差：否则按时出发的行程会跟上一
     个行程重叠（R2-9）。按时运行的作息因此不会出现两个同时进行的行程。
+
+    有休息日表时，平日接休息日、休息日接平日的那几次换地方同样要检查：把"前一天、
+    这一天、后一天"各取哪张表的每一种组合都走一遍，前一天只用来确定这一天第一段
+    沿用的地点。
     """
     if rhythm is None:
         return
-    segments = rhythm.segments
-    located = [segment for segment in segments if segment.location_id is not None]
-    if not located:
+    if not any(segment.location_id is not None for segment in rhythm.all_segments):
         return
-    # 每一段"实际所在的地点"：没写的沿用前一段；第一段没写就沿用跨零点的最后一个。
+    tables = rhythm.tables
+    for before in tables:
+        for today in tables:
+            for after in tables:
+                _check_day_trips(rhythm.character_id, before, today, after, grants, locations)
+
+
+def _check_day_trips(character_id, before, today, after, grants, locations) -> None:
+    # 前一天的最后一个已知地点，是这一天第一段没写地点时沿用的地点。
+    last = None
+    for segment in before:
+        if segment.location_id is not None:
+            last = segment.location_id
+    timeline = [(segment.at, segment) for segment in today]
+    timeline.append((MINUTES_PER_DAY + after[0].at, after[0]))
     where = []
-    last = located[-1].location_id
-    for segment in segments:
+    for _, segment in timeline:
         if segment.location_id is not None:
             last = segment.location_id
         where.append(last)
-    count = len(segments)
-    for index in range(count):
-        here, there = where[index], where[(index + 1) % count]
-        if here == there:
+    for index in range(len(today)):
+        here, there = where[index], where[index + 1]
+        if here is None or there is None or here == there:
             continue
-        current, following = segments[index], segments[(index + 1) % count]
-        gap = (following.at - current.at) % MINUTES_PER_DAY or MINUTES_PER_DAY
+        (start, current), (end, following) = timeline[index], timeline[index + 1]
+        gap = end - start
         route = plan_route(
             locations,
             lambda location_id: may_enter(grants, locations.get(location_id)),
@@ -194,12 +208,12 @@ def require_rhythm_trips_fit(rhythm, grants, locations) -> None:
         )
         if route is None:
             raise GrantError(
-                f"角色 '{rhythm.character_id}' 的作息表从 {current.label} 的 '{here}' 到 "
+                f"角色 '{character_id}' 的作息表从 {current.label} 的 '{here}' 到 "
                 f"{following.label} 的 '{there}' 没有它走得通的路"
             )
         if route.total_minutes > gap:
             raise GrantError(
-                f"角色 '{rhythm.character_id}' 的作息表从 {current.label} 到 {following.label} "
+                f"角色 '{character_id}' 的作息表从 {current.label} 到 {following.label} "
                 f"只有 {gap} 分钟，路上却要 {route.total_minutes} 分钟"
             )
 

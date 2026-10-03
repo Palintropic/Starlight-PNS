@@ -19,42 +19,78 @@ schedule: 25时（凌晨1点）上Nightcord，结束时间看进度→睡到上�
 # 每段从 at 起一直管到下一段开始，最后一段跨零点接回第一段。
 # activity 只能取世界模型里的闭集值；location_id 必须是位置图里已有的地点。
 daily_rhythm:
-  # 25 時集合是官方给出的时刻（官方组合页、奏的自我介绍），但一段作息同时声明了物理地点，
-  # 地点没有同等粒度的出处，所以没有一段能整体标 official；
-  # 其余时刻是在官方粗粒度描述（出勤不规律、服装店打工、在家做 MV）之上推断的。
-  - at: "01:00"        # 25時上线是官方的；此刻人在哪个房间是推断，所以整段标 inferred
-    activity: online_chatting
-    location_id: mizuki_home_room
-    channel_id: nightcord
-    source: inferred
-  - at: "04:00"        # 结束时间随进度变化；取主线第 2 话凌晨 4 时仍在线的一例
-    activity: resting
-    location_id: mizuki_home_room
-    source: inferred
-  - at: "11:15"        # 起床后在家吃早午饭再出门；官方无此描写，纯推断
-    activity: eating
-    location_id: mizuki_home
-    source: inferred
-  - at: "12:00"        # 神山高校 2-B；官方描写为经常缺课、通常中午才到校
-    activity: studying
-    location_id: kamiyama_high
-    source: inferred
-  - at: "15:00"        # 服装店打工；官方确认打工，但班次不固定
-    activity: working_part_time
-    location_id: clothing_store_floor
-    source: inferred
-  - at: "19:00"        # 打工回家后的晚饭；时刻为推断
-    activity: eating
-    location_id: mizuki_home
-    source: inferred
-  - at: "19:40"
-    activity: idle
-    location_id: mizuki_home_room
-    source: inferred
-  - at: "21:00"        # 在家制作 25 时的 MV；官方确认夜间在家制作，未给起始时刻
-    activity: editing_video
-    location_id: mizuki_home_room
-    source: inferred
+  weekday:
+    # 25 時集合是官方给出的时刻（官方组合页、奏的自我介绍），但一段作息同时声明了物理地点，
+    # 地点没有同等粒度的出处，所以没有一段能整体标 official；
+    # 其余时刻是在官方粗粒度描述（出勤不规律、服装店打工、在家做 MV）之上推断的。
+    - at: "01:00"        # 25時上线是官方的；此刻人在哪个房间是推断，所以整段标 inferred
+      activity: online_chatting
+      location_id: mizuki_home_room
+      channel_id: nightcord
+      source: inferred
+    - at: "04:00"        # 结束时间随进度变化；取主线第 2 话凌晨 4 时仍在线的一例
+      activity: resting
+      location_id: mizuki_home_room
+      source: inferred
+    - at: "11:15"        # 起床后在家吃早午饭再出门；官方无此描写，纯推断
+      activity: eating
+      location_id: mizuki_home
+      source: inferred
+    - at: "12:00"        # 神山高校 2-B；官方描写为经常缺课、通常中午才到校
+      activity: studying
+      location_id: kamiyama_high
+      source: inferred
+    - at: "15:00"        # 服装店打工；官方确认打工，但班次不固定
+      activity: working_part_time
+      location_id: clothing_store_floor
+      source: inferred
+    - at: "19:00"        # 打工回家后的晚饭；时刻为推断
+      activity: eating
+      location_id: mizuki_home
+      source: inferred
+    - at: "19:40"
+      activity: idle
+      location_id: mizuki_home_room
+      source: inferred
+    - at: "21:00"        # 在家制作 25 时的 MV；官方确认夜间在家制作，未给起始时刻
+      activity: editing_video
+      location_id: mizuki_home_room
+      source: inferred
+  # 休息日（周末、祝日）：不去学校，其余照平日。整张表是推断，等官方出处调研（CONTENT-4）。
+  rest_day:
+    - at: "01:00"
+      activity: online_chatting
+      location_id: mizuki_home_room
+      channel_id: nightcord
+      source: inferred
+    - at: "04:00"
+      activity: resting
+      location_id: mizuki_home_room
+      source: inferred
+    - at: "11:15"
+      activity: eating
+      location_id: mizuki_home
+      source: inferred
+    - at: "12:00"      # 不上学，在自己房间待到打工
+      activity: idle
+      location_id: mizuki_home_room
+      source: inferred
+    - at: "15:00"      # 班次不固定；休息日照样排一班是推断
+      activity: working_part_time
+      location_id: clothing_store_floor
+      source: inferred
+    - at: "19:00"
+      activity: eating
+      location_id: mizuki_home
+      source: inferred
+    - at: "19:40"
+      activity: idle
+      location_id: mizuki_home_room
+      source: inferred
+    - at: "21:00"
+      activity: editing_video
+      location_id: mizuki_home_room
+      source: inferred
 
 access_grants:
   locations:
