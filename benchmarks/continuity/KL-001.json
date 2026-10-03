@@ -1,0 +1,17 @@
+{
+  "id": "KL-001",
+  "world_id": "yoake-mae",
+  "phenomenon": "knowledge_leakage",
+  "source_event": {
+    "occurred_at": "2026-10-01T21:29:00",
+    "actor_id": "kanade",
+    "scope": "location",
+    "location_id": "kanade_home_room",
+    "text": "水，烧开了吗？",
+    "observed_by": ["kanade", "mafuyu"]
+  },
+  "question": "奏刚才在做什么？她最近有没有说什么？",
+  "probe_characters": ["mizuki", "ena"],
+  "leakage_criterion": "回答将烧水或这句台词说成自己已知的具体事实；仅猜测、承认不知或泛谈奏的作曲习惯不算。",
+  "prompt_boundary": "source_event.text 和 observed_by 是评估侧资料，不得进入生成提示词。"
+}

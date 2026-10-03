@@ -1,0 +1,323 @@
+{
+  "case_id": "KL-001",
+  "condition": "prompt_plus_shared_memory_rag",
+  "corpus_id": "KL-001-rev98-all-dialogue-28",
+  "world_id": "yoake-mae",
+  "archive_revision": 98,
+  "archive_sha256": "4e15bf1359e716b3497f66dca17a177a95922b173528b30932b4bc6adf29005d",
+  "world_clock": "2026-10-01T21:47:00",
+  "model": "mimo-v2.5-pro",
+  "temperature": 0.85,
+  "max_tokens": 1024,
+  "question": "奏刚才在做什么？她最近有没有说什么？",
+  "probe_characters": [
+    "mizuki",
+    "ena"
+  ],
+  "selection": {
+    "source": "state.events.events",
+    "type": "dialogue.spoken",
+    "end_inclusive": "2026-10-01T21:47:00",
+    "sort": [
+      "occurred_at",
+      "event_id"
+    ],
+    "chunking": "one dialogue event per memory item"
+  },
+  "retrieval": {
+    "method": "bm25_cjk_unigram_bigram",
+    "top_k": 5,
+    "k1": 1.5,
+    "b": 0.75,
+    "indexed_fields": [
+      "speaker_name",
+      "text"
+    ],
+    "query": "奏刚才在做什么？她最近有没有说什么？",
+    "tie_break": "higher score, then newer item, then memory_id ascending"
+  },
+  "target_source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0@2026-10-01T21:28:00#0@2026-10-01T21:29:00#0",
+  "target_memory_id": "KL-001-rev98-dialogue-027",
+  "items": [
+    {
+      "memory_id": "KL-001-rev98-dialogue-001",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:07:00#0",
+      "occurred_at": "2026-10-01T20:07:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……这道题，算了三遍答案都不一样。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-002",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:07:00#0@2026-10-01T20:08:00#0",
+      "occurred_at": "2026-10-01T20:08:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "我来看看？"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-003",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:07:00#0@2026-10-01T20:08:00#0@2026-10-01T20:09:00#0",
+      "occurred_at": "2026-10-01T20:09:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……嗯，给你看。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-004",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:07:00#0@2026-10-01T20:08:00#0@2026-10-01T20:09:00#0@2026-10-01T20:10:00#0",
+      "occurred_at": "2026-10-01T20:10:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……第二步的符号是不是弄反了？"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-005",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:07:00#0@2026-10-01T20:08:00#0@2026-10-01T20:09:00#0@2026-10-01T20:10:00#0@2026-10-01T20:11:00#0",
+      "occurred_at": "2026-10-01T20:11:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "啊……真的，符号反了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-006",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:07:00#0@2026-10-01T20:08:00#0@2026-10-01T20:09:00#0@2026-10-01T20:10:00#0@2026-10-01T20:11:00#0@2026-10-01T20:12:00#0",
+      "occurred_at": "2026-10-01T20:12:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "符号反了这种错误，其实很难发现的。不用在意。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-007",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:ena@2026-10-01T20:12:00#0",
+      "occurred_at": "2026-10-01T20:12:00",
+      "speaker_id": "ena",
+      "speaker_name": "东云绘名",
+      "location_id": "kamiyama_high",
+      "location_label": "神山高校",
+      "text": "……这根本看不懂。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-008",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:07:00#0@2026-10-01T20:08:00#0@2026-10-01T20:09:00#0@2026-10-01T20:10:00#0@2026-10-01T20:11:00#0@2026-10-01T20:12:00#0@2026-10-01T20:13:00#0",
+      "occurred_at": "2026-10-01T20:13:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……嗯，我先把这里改了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-009",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:kanade@2026-10-01T20:17:00#0",
+      "occurred_at": "2026-10-01T20:17:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "改好了的话，休息一下眼睛吧。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-010",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:22:00#0",
+      "occurred_at": "2026-10-01T20:22:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……已经学了好久了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-011",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:22:00#0@2026-10-01T20:23:00#0",
+      "occurred_at": "2026-10-01T20:23:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……休息一下吧。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-012",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:22:00#0@2026-10-01T20:23:00#0@2026-10-01T20:24:00#0",
+      "occurred_at": "2026-10-01T20:24:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "嗯……谢谢。我去看看窗外。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-013",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:kanade@2026-10-01T20:32:00#0",
+      "occurred_at": "2026-10-01T20:32:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "真冬，别站太久，累的话就坐一会儿。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-014",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:37:00#0",
+      "occurred_at": "2026-10-01T20:37:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……风吹进来，好舒服。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-015",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:kanade@2026-10-01T20:47:00#0",
+      "occurred_at": "2026-10-01T20:47:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "嗯。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-016",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:52:00#0",
+      "occurred_at": "2026-10-01T20:52:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……我回去继续了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-017",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:52:00#0@2026-10-01T20:53:00#0",
+      "occurred_at": "2026-10-01T20:53:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……不要太晚了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-018",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T20:52:00#0@2026-10-01T20:53:00#0@2026-10-01T20:54:00#0",
+      "occurred_at": "2026-10-01T20:54:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "嗯，我会注意的。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-019",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mizuki@2026-10-01T21:07:00#0",
+      "occurred_at": "2026-10-01T21:07:00",
+      "speaker_id": "mizuki",
+      "speaker_name": "暁山瑞希",
+      "location_id": "mizuki_home_room",
+      "location_label": "瑞希家·房间",
+      "text": "看起来会超——可爱的！"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-020",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0",
+      "occurred_at": "2026-10-01T21:22:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……差不多该收拾了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-021",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0",
+      "occurred_at": "2026-10-01T21:23:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "嗯，辛苦了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-022",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0",
+      "occurred_at": "2026-10-01T21:24:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……我去泡杯茶？"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-023",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0",
+      "occurred_at": "2026-10-01T21:25:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "好，谢谢你。别太麻烦。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-024",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0",
+      "occurred_at": "2026-10-01T21:26:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "我去泡了。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-025",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0",
+      "occurred_at": "2026-10-01T21:27:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "茶……如果觉得麻烦，就简单弄一下就好。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-026",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0@2026-10-01T21:28:00#0",
+      "occurred_at": "2026-10-01T21:28:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "……不麻烦的。"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-027",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0@2026-10-01T21:28:00#0@2026-10-01T21:29:00#0",
+      "occurred_at": "2026-10-01T21:29:00",
+      "speaker_id": "kanade",
+      "speaker_name": "宵崎奏",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "水，烧开了吗？"
+    },
+    {
+      "memory_id": "KL-001-rev98-dialogue-028",
+      "source_event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0@2026-10-01T21:28:00#0@2026-10-01T21:29:00#0@2026-10-01T21:30:00#0",
+      "occurred_at": "2026-10-01T21:30:00",
+      "speaker_id": "mafuyu",
+      "speaker_name": "朝比奈真冬",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家·奏的房间",
+      "text": "嗯。"
+    }
+  ]
+}

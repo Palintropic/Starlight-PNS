@@ -1,0 +1,119 @@
+{
+  "case_id": "KL-001",
+  "condition": "prompt_only_global_transcript",
+  "fixture_id": "KL-001-global-transcript-30m-rev98",
+  "world_id": "yoake-mae",
+  "archive_revision": 98,
+  "archive_sha256": "4e15bf1359e716b3497f66dca17a177a95922b173528b30932b4bc6adf29005d",
+  "world_clock": "2026-10-01T21:47:00",
+  "model": "mimo-v2.5-pro",
+  "temperature": 0.85,
+  "max_tokens": 1024,
+  "selection": {
+    "source": "state.events.events",
+    "type": "dialogue.spoken",
+    "interval_start_inclusive": "2026-10-01T21:17:00",
+    "interval_end_exclusive": "2026-10-01T21:47:00",
+    "sort": [
+      "occurred_at",
+      "event_id"
+    ]
+  },
+  "probe_characters": [
+    "mizuki",
+    "ena"
+  ],
+  "question": "奏刚才在做什么？她最近有没有说什么？",
+  "events": [
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:22:00",
+      "scope": "location",
+      "actor_id": "mafuyu",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "……差不多该收拾了。"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:23:00",
+      "scope": "location",
+      "actor_id": "kanade",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "嗯，辛苦了。"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:24:00",
+      "scope": "location",
+      "actor_id": "mafuyu",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "……我去泡杯茶？"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:25:00",
+      "scope": "location",
+      "actor_id": "kanade",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "好，谢谢你。别太麻烦。"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:26:00",
+      "scope": "location",
+      "actor_id": "mafuyu",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "我去泡了。"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:27:00",
+      "scope": "location",
+      "actor_id": "kanade",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "茶……如果觉得麻烦，就简单弄一下就好。"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0@2026-10-01T21:28:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:28:00",
+      "scope": "location",
+      "actor_id": "mafuyu",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "……不麻烦的。"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0@2026-10-01T21:28:00#0@2026-10-01T21:29:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:29:00",
+      "scope": "location",
+      "actor_id": "kanade",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "水，烧开了吗？"
+    },
+    {
+      "event_id": "yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:mafuyu:yoake-mae_20261001_104758_180a2c401dc4:agency:reply.activation:kanade:yoake-mae_20261001_104758_180a2c401dc4:agency:seed.activation:mafuyu@2026-10-01T21:22:00#0@2026-10-01T21:23:00#0@2026-10-01T21:24:00#0@2026-10-01T21:25:00#0@2026-10-01T21:26:00#0@2026-10-01T21:27:00#0@2026-10-01T21:28:00#0@2026-10-01T21:29:00#0@2026-10-01T21:30:00#0",
+      "type": "dialogue.spoken",
+      "occurred_at": "2026-10-01T21:30:00",
+      "scope": "location",
+      "actor_id": "mafuyu",
+      "location_id": "kanade_home_room",
+      "location_label": "宵崎家・奏的房间",
+      "text": "嗯。"
+    }
+  ]
+}

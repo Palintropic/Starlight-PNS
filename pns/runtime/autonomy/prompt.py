@@ -216,6 +216,7 @@ def render_situation(
     names: Optional[Mapping[str, str]] = None,
     max_observed: int = MAX_OBSERVED_LINES,
     max_recalled: int = MAX_RECALLED_LINES,
+    benchmark_question: Optional[str] = None,
 ) -> str:
     """把这一刻交给模型的情境渲染成一段文本。
 
@@ -229,6 +230,10 @@ def render_situation(
     """
     if not isinstance(context, GenerationContext):
         raise GenerationError("render_situation() 需要一个 GenerationContext")
+    if benchmark_question is not None and (
+        not isinstance(benchmark_question, str) or not benchmark_question.strip()
+    ):
+        raise GenerationError("benchmark_question 必须是非空字符串")
     if view is None:
         view = build_world_view(context, channels=channels)
 
@@ -313,17 +318,26 @@ def render_situation(
         # ActivationCue.from_due() 那道白名单就已经被挡在外面了。
         parts.append(f"【此刻你心里的事】{cue}")
 
-    parts.append(_action_line(context, channels))
+    if benchmark_question is None:
+        parts.append(_action_line(context, channels))
+    else:
+        parts.append("【外部提问】" + benchmark_question.strip())
     parts.append(
         "【输出语言与事实边界】\n"
         + "\n".join(f"- {rule}" for rule in DIALOGUE_OUTPUT_RULES)
     )
-    parts.append(
-        "不要把你自己刚说过的意思换个说法再说一遍。一个人待着的时候，大多数时刻"
-        "人是不出声的。如果这一刻没有自然开口的必要，或者想说的跟刚才差不多，"
-        "只输出 <ABSTAIN>。否则只输出你要说的那一句话本身：不要旁白、不要动作"
-        "描写、不要加你自己的名字前缀，也不要解释你为什么这么说。"
-    )
+    if benchmark_question is None:
+        parts.append(
+            "不要把你自己刚说过的意思换个说法再说一遍。一个人待着的时候，大多数时刻"
+            "人是不出声的。如果这一刻没有自然开口的必要，或者想说的跟刚才差不多，"
+            "只输出 <ABSTAIN>。否则只输出你要说的那一句话本身：不要旁白、不要动作"
+            "描写、不要加你自己的名字前缀，也不要解释你为什么这么说。"
+        )
+    else:
+        parts.append(
+            "只根据你亲自看到、听到或记得的内容回答。没有依据的具体事情请直说不清楚。"
+            "只输出回答本身，不要旁白、动作描写或名字前缀。"
+        )
     return "\n\n".join(parts)
 
 
@@ -410,12 +424,22 @@ class PromptedLineGenerator(LineGenerator):
             self.name = name
 
     def generate(self, context: GenerationContext) -> object:
+        return self._generate(context, benchmark_question=None)
+
+    def ask(self, context: GenerationContext, question: str) -> object:
+        """只读外部问答；复用生产生成调用，不构造或提交世界动作。"""
+        return self._generate(context, benchmark_question=question)
+
+    def _generate(
+        self, context: GenerationContext, *, benchmark_question: Optional[str]
+    ) -> object:
         try:
             view = build_world_view(
                 context, locations=self._locations, channels=self._channels
             )
             situation = render_situation(
-                context, view=view, channels=self._channels, names=self._names
+                context, view=view, channels=self._channels, names=self._names,
+                benchmark_question=benchmark_question,
             )
         except GenerationError:
             raise
