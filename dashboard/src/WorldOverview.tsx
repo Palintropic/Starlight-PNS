@@ -9,6 +9,7 @@ import {
   type ResidentAvailability,
   type WorldOverview as WorldOverviewData,
 } from './api';
+import { isSpeech, speechSetting } from './speechSetting';
 import './worldOverview.css';
 import { UsageAlert } from './UsagePanel';
 
@@ -60,6 +61,8 @@ const QUIET_GAP_MINUTES = 60;
 // Nodes where sharing a location id does not mean being together: the city itself, open
 // streets, and `private_residence`, which stands for everyone's separate homes.
 const NOT_TOGETHER = new Set(['tokyo', 'city_streets', 'private_residence']);
+
+const SPEECH_TAG = { alone: '独自', together: '当面', online: '线上' } as const;
 
 // How often the page re-reads the world. The clock runs on its own; this only refreshes the view.
 const POLL_MS = 5000;
@@ -245,7 +248,40 @@ export default function WorldOverview() {
   );
   const activityText = (r: OverviewResident) => `${activityLabel(r.activity.kind)}（${timeText(r.activity.since)} 起）`;
 
+  const names = (ids: string[]) => ids.map(nameOf).join('、');
+
+  // A line's setting comes only from its own record: who shared the place or channel when it was
+  // committed. That is co-presence, not who it was addressed to or who heard it.
+  const renderSpeech = (e: OverviewEvent) => {
+    const setting = speechSetting(e, NOT_TOGETHER);
+    const where = e.channel_id ? channelName(e.channel_id) : locationName(e.location_id);
+    const company =
+      setting.kind === 'together'
+        ? `在场：${names(setting.others)}`
+        : setting.kind === 'online' && setting.others !== null
+          ? setting.others.length
+            ? `在线：${names(setting.others)}`
+            : '频道里只有自己'
+          : null;
+    return (
+      <>
+        {setting.kind !== 'unknown' ? (
+          <span className={`wo-speech-tag ${setting.kind}`}>{SPEECH_TAG[setting.kind]}</span>
+        ) : null}
+        <strong>{nameOf(e.actor)}</strong> 在 {where} {e.type === 'message.sent' ? '发了消息' : '说'}
+        {company ? (
+          <span className="wo-speech-company">
+            <span className="wo-speech-sep"> · </span>
+            {company}
+          </span>
+        ) : null}
+        <span className="wo-quote">{textOf(e)}</span>
+      </>
+    );
+  };
+
   const renderEvent = (e: OverviewEvent) => {
+    if (isSpeech(e)) return renderSpeech(e);
     const who = <strong>{nameOf(e.actor)}</strong>;
     switch (e.type) {
       case 'character.location_changed':
@@ -256,20 +292,6 @@ export default function WorldOverview() {
         return <>{who} 进入 {channelName(e.channel_id)}</>;
       case 'presence.left_channel':
         return <>{who} 离开 {channelName(e.channel_id)}</>;
-      case 'message.sent':
-        return (
-          <>
-            {who} 在 {channelName(e.channel_id)}
-            <span className="wo-quote">{textOf(e)}</span>
-          </>
-        );
-      case 'dialogue.spoken':
-        return (
-          <>
-            {who} 在 {e.channel_id ? channelName(e.channel_id) : locationName(e.location_id)} 说
-            <span className="wo-quote">{textOf(e)}</span>
-          </>
-        );
       default:
         return <>{who} · {e.type}</>;
     }
