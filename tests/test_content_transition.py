@@ -706,6 +706,39 @@ class MaintenanceTests(PlaneTestCase):
         )
         self.assertEqual(self.adopt_all().still_blocked, [])
 
+    def test_adopting_a_missing_rhythm_does_not_claim_the_gate_is_complete(self):
+        # ena REREVIEW-F1：采用"作息消失"之后，人照样没有作息，门照样不齐。
+        import dataclasses
+
+        gone = dataclasses.replace(
+            self.registry,
+            characters={
+                **dict(self.registry.characters),
+                "mafuyu": dataclasses.replace(self.registry.character("mafuyu"), rhythm=None),
+            },
+        )
+        plane = self.make_plane(registry_provider=lambda: gone)
+        # setUp 已经记下了三条新版的冲突；先把它们驳回，好只看真冬的 ABSENT。
+        run_content_decisions(self.cold, "yoake-mae", [(i, "declined") for i in self.ids])
+        with self.assertRaises(ContentNotAdopted) as caught:
+            plane.restore("yoake-mae")
+        (absent,) = [s for s in caught.exception.gate.blocked() if s.character_id == "mafuyu"]
+        self.assertEqual(absent.reason, "missing_definition")
+        for attempt in ("first", "rerun"):
+            with self.subTest(attempt=attempt):
+                report = run_content_decisions(plane, "yoake-mae", [(absent.conflict_id, "adopted")])
+                self.assertTrue(report.complete, report.to_dict())
+                self.assertEqual(
+                    [(s["subject"], s["reason"], s["conflict_id"]) for s in report.still_blocked],
+                    [("rhythm:mafuyu", "adopted_absent", None)],
+                )
+        with self.assertRaises(ContentNotAdopted) as again:
+            plane.restore("yoake-mae")
+        self.assertEqual(
+            [(s.reason, s.conflict_id) for s in again.exception.gate.blocked()],
+            [("adopted_absent", None)],
+        )
+
     def test_an_interrupted_run_resumes_from_disk(self):
         # 进程在决定与 checkpoint 之间死掉：只能依赖最后一次成功的 checkpoint。
         # 这里用"不关闭、直接放掉所有权"模拟进程退出时内核释放锁。
@@ -817,6 +850,38 @@ class MaintenanceScriptTests(PlaneTestCase):
 
         body = json.loads(again.stdout)
         self.assertEqual({o["result"] for o in body["outcomes"]}, {"already"})
+
+    def test_the_script_does_not_say_the_gate_is_complete_after_adopting_a_missing_rhythm(self):
+        import dataclasses
+
+        gone = dataclasses.replace(
+            self.registry,
+            characters={
+                **dict(self.registry.characters),
+                "mafuyu": dataclasses.replace(self.registry.character("mafuyu"), rhythm=None),
+            },
+        )
+        plane = self.make_plane(registry_provider=lambda: gone)
+        with self.assertRaises(ContentNotAdopted) as caught:
+            plane.restore("yoake-mae")
+        (absent,) = caught.exception.gate.blocked()
+        hook = "\n".join(
+            [
+                "import dataclasses",
+                "def _gone():",
+                "    r = _original()",
+                "    chars = dict(r.characters)",
+                "    chars['mafuyu'] = dataclasses.replace(r.character('mafuyu'), rhythm=None)",
+                "    return dataclasses.replace(r, characters=chars)",
+                "BOUNDARY.active = _gone",
+            ]
+        )
+        for attempt in ("first", "rerun"):
+            with self.subTest(attempt=attempt):
+                result = self.run_with(None, "--adopt", absent.conflict_id, hook=hook)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("作息门齐了", result.stdout)
+                self.assertIn("adopted_absent", result.stdout)
 
     def test_the_script_reports_an_ownership_failure_with_the_disk_state(self):
         changed, ids = self.make_pending()

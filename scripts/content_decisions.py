@@ -122,10 +122,13 @@ def main(argv=None) -> int:
     )
     if report.complete:
         print("完成：决定都在磁盘上，关闭 clean、耐久、目录同步有证据。")
-        if report.still_blocked:
+        if report.still_blocked is None:
+            print("作息门的状态没算出来（见上面的读回错误），先不要恢复。")
+        elif report.still_blocked:
             print("但作息门还不齐，恢复之后仍会被挡住：")
             for subject in report.still_blocked:
-                print(f"  - {subject['subject']}（{subject['reason']}，{subject['conflict_id']}）")
+                target = subject["conflict_id"] or "没有可决定的记录，要改内容才能解除"
+                print(f"  - {subject['subject']}（{subject['reason']}，{target}）")
         else:
             print("作息门齐了，可以回 dashboard 恢复世界。")
     else:

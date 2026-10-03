@@ -13,7 +13,9 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from pns.models.clock_anchor import utc_now
 from pns.models.content_ledger import ConflictStatus, ContentLedger
+from pns.runtime.formal_world import evaluate_rhythm_gate
 from pns.runtime.persistence import CheckpointPolicy
 
 from .composition import WorldControlPlane
@@ -74,22 +76,10 @@ class MaintenanceReport:
     close: Optional[Dict] = None
     # 关闭之后从磁盘重新读出来的冲突记录。读不出来是 None。
     disk: Optional[Tuple[ConflictView, ...]] = None
-    # 打开时作息门挡住的主体（按当前内容包）。门本来就齐是空列表。
-    blocked_at_open: List[Dict] = field(default_factory=list)
-
-    @property
-    def still_blocked(self) -> List[Dict]:
-        """打开时挡门、而这次没有被采用（含"磁盘上本来就已采用"）的主体。
-
-        非空说明即使这次完成了，下一次恢复仍然会被挡住。它不参与退出码：退出码
-        回答的是"要求的决定落没落盘"，这一条回答"门会不会齐"。
-        """
-        adopted = {
-            outcome.conflict_id
-            for outcome in self.outcomes
-            if outcome.requested == "adopted" and outcome.result in ("recorded", "already")
-        }
-        return [s for s in self.blocked_at_open if s.get("conflict_id") not in adopted]
+    # 关闭之后，按重新读出的磁盘账本和这次的内容包重新算一遍作息门，挡住的主体。
+    # 空列表 = 门齐；None = 没算出来（读回失败）。不从"这次采用了哪些 id"倒推：
+    # 采用了"作息消失"这一版，人照样没有作息（adopted_absent），门照样不齐。
+    still_blocked: Optional[List[Dict]] = None
 
     def disk_status(self, conflict_id: str) -> Optional[str]:
         for view in self.disk or ():
@@ -159,13 +149,17 @@ def _views(ledger: Optional[ContentLedger]) -> Tuple[ConflictView, ...]:
     )
 
 
-def read_conflicts(plane: WorldControlPlane, world_id: str) -> Tuple[ConflictView, ...]:
-    """只读：磁盘上这个世界的冲突记录。不拿所有权、不写任何东西。"""
+def _read_ledger(plane: WorldControlPlane, world_id: str) -> ContentLedger:
     archive = plane.store.load(world_id, history=False)
     payload = archive.state.get("content")
     if payload is None:
         raise MaintenanceError(f"世界 '{world_id}' 没有内容账本（不是正式世界）")
-    return _views(ContentLedger.from_dict(payload))
+    return ContentLedger.from_dict(payload)
+
+
+def read_conflicts(plane: WorldControlPlane, world_id: str) -> Tuple[ConflictView, ...]:
+    """只读：磁盘上这个世界的冲突记录。不拿所有权、不写任何东西。"""
+    return _views(_read_ledger(plane, world_id))
 
 
 def _parse(decisions: Sequence[Tuple[str, str]]) -> List[DecisionOutcome]:
@@ -204,8 +198,6 @@ def run_content_decisions(
         start=False,
     )
     try:
-        held = world.held
-        report.blocked_at_open = list(held["subjects"]) if held is not None else []
         ledger = world.state.content
         if ledger is None:
             report.errors.append(f"世界 '{world_id}' 没有内容账本（不是正式世界）")
@@ -221,10 +213,29 @@ def run_content_decisions(
         except Exception as e:
             report.errors.append(f"关闭失败: {type(e).__name__}: {e}")
     try:
-        report.disk = read_conflicts(plane, world_id)
+        ledger = _read_ledger(plane, world_id)
+        report.disk = _views(ledger)
+        report.still_blocked = _blocked_after(ledger, adapters)
     except Exception as e:
         report.errors.append(f"关闭之后从磁盘读回失败: {type(e).__name__}: {e}")
     return report
+
+
+def _blocked_after(ledger: ContentLedger, adapters) -> List[Dict]:
+    """用和恢复路径同一套判据，对磁盘上的账本和这次的内容包算门。"""
+    director = adapters.rhythm
+    rhythms = (
+        {cid: director.rhythm_for(cid) for cid in director.characters()}
+        if director is not None
+        else {}
+    )
+    _, gate = evaluate_rhythm_gate(
+        ledger,
+        rhythms,
+        registry_revision=adapters.content_revision,
+        wall=utc_now().isoformat(),
+    )
+    return [subject.to_dict() for subject in gate.blocked()]
 
 
 def _decide_all(world, report: MaintenanceReport) -> None:

@@ -238,18 +238,14 @@ class RhythmGate:
         }
 
 
-def rhythm_gate(
-    state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str
-) -> RhythmGate:
-    """这个世界此刻能生效的作息表，以及每个登记主体为什么生效或不生效。
+def evaluate_rhythm_gate(
+    ledger: ContentLedger, rhythms: Mapping, *, registry_revision: int, wall: str
+) -> Tuple[ContentLedger, RhythmGate]:
+    """纯函数：对这份账本和这份内容算门。返回记下新提议之后的账本，以及门的结果。
 
-    新版本记一条待决、不生效。调用方持有事务（恢复路径的组装阶段）。先记下
-    提议再出报告，所以报告里引用的记录一定已经在账本里。没有内容账本的会话
-    （1.x 场景世界）不设门：原样返回，没有登记主体，门视为齐。
+    不碰任何会话状态。恢复路径（`rhythm_gate`）和冷维护的事后核对用的是同一套
+    判据，所以"维护报告说门齐了"和"恢复时门真的齐了"不会是两种算法。
     """
-    ledger = state.content
-    if ledger is None:
-        return RhythmGate(accepted=dict(rhythms), subjects=())
     residents = {
         subject[len("rhythm:"):]
         for subject, _ in ledger.adopted
@@ -266,8 +262,6 @@ def rhythm_gate(
         ledger = ledger.offered(
             subject, fingerprint, registry_revision=registry_revision, wall=wall
         )
-    if ledger is not state.content:
-        state.set_content(ledger)
 
     accepted = {}
     subjects = []
@@ -298,7 +292,26 @@ def rhythm_gate(
                 conflict_status=status,
             )
         )
-    return RhythmGate(accepted=accepted, subjects=tuple(subjects))
+    return ledger, RhythmGate(accepted=accepted, subjects=tuple(subjects))
+
+
+def rhythm_gate(
+    state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str
+) -> RhythmGate:
+    """这个世界此刻能生效的作息表，以及每个登记主体为什么生效或不生效。
+
+    新版本记一条待决、不生效。调用方持有事务（恢复路径的组装阶段）。先记下
+    提议再出报告，所以报告里引用的记录一定已经在账本里。没有内容账本的会话
+    （1.x 场景世界）不设门：原样返回，没有登记主体，门视为齐。
+    """
+    if state.content is None:
+        return RhythmGate(accepted=dict(rhythms), subjects=())
+    ledger, gate = evaluate_rhythm_gate(
+        state.content, rhythms, registry_revision=registry_revision, wall=wall
+    )
+    if ledger is not state.content:
+        state.set_content(ledger)
+    return gate
 
 
 def gated_rhythms(state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str):
@@ -320,6 +333,7 @@ __all__ = [
     "formal_world",
     "RhythmGate",
     "RhythmGateSubject",
+    "evaluate_rhythm_gate",
     "gated_rhythms",
     "rhythm_gate",
     "rhythm_fingerprint",
