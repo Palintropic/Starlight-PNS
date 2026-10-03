@@ -415,6 +415,14 @@ class WorldOverviewTests(WorldApiTestCase):
         self.assertEqual(before["revision"], after["revision"])
         self.assertEqual(before["dirty"], after["dirty"])
 
+    def test_a_new_world_says_its_speech_occupancy_is_checked_from_the_start(self):
+        # 世界页靠这个序号判断哪些台词的在场名单经过了提交核对（WEB-3 审查 F2）。
+        self.open_world()
+        self.assertEqual(self.overview().json()["speech_occupancy_checked_from"], 0)
+        self.client.post("/api/persistent-worlds/nightcord/close")
+        self.client.post("/api/persistent-worlds/nightcord/restore")
+        self.assertEqual(self.overview().json()["speech_occupancy_checked_from"], 0)
+
 
 class CreateAndRestoreRefusalTests(WorldApiTestCase):
     def test_create_never_overwrites_an_existing_archive(self):

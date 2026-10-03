@@ -1306,8 +1306,20 @@ class ReloadCannotTouchMemoryTests(RuntimeSessionTestBase, unittest.TestCase):
         self.runtime = self._create(registry=self.boundary.active())
         self.encoder = MemoryEncoder(self.runtime.state)
         state = self.runtime.state
+        # 这个会话里没人在 Nightcord：用绘名此刻所在地点的一句台词（在场名单取权威状态）。
+        world = state.world_state
+        here = world.location_of("ena")
         self.encoder.commit_and_encode(
-            _message(state, "熬夜写歌。", event_id="mem-e1")
+            Event(
+                event_id="mem-e1",
+                type=EventType.DIALOGUE_SPOKEN,
+                occurred_at=world.clock,
+                scope=EventScope.LOCATION,
+                actor_id="ena",
+                participants=world.characters_at(here),
+                location_id=here,
+                payload={"text": "熬夜写歌。", "char_name": "ena"},
+            )
         )
         self.before = state.memories.to_dict()
 

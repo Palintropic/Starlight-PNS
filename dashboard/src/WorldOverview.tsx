@@ -244,10 +244,10 @@ export default function WorldOverview() {
 
   const names = (ids: string[]) => ids.map(nameOf).join('、');
 
-  // A line's setting comes only from its own record: who shared the place or channel when it was
-  // committed. That is co-presence, not who it was addressed to or who heard it.
+  // A line's setting comes only from its own record, and only when the backend checked that record's
+  // presence list at commit time. That is co-presence, not who it was addressed to or who heard it.
   const renderSpeech = (e: OverviewEvent) => {
-    const setting = speechSetting(e, NOT_TOGETHER);
+    const setting = speechSetting(e, NOT_TOGETHER, data?.speech_occupancy_checked_from ?? null);
     const where = e.channel_id ? channelName(e.channel_id) : locationName(e.location_id);
     const company =
       setting.kind === 'together'

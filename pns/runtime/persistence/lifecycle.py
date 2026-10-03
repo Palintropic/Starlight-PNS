@@ -62,6 +62,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 from pns.models.clock_anchor import ClockAnchor, utc_now
 from pns.models.session import SessionState, TransactionBoundaryError
+from pns.runtime.event_commit import SPEECH_OCCUPANCY_CHECKED_FROM
 from pns.runtime.agency.engine import AgencyEngine
 from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
@@ -156,6 +157,13 @@ class RuntimeAdapters:
             # 作息世界的时钟只归协调器的时钟步推。在把调度器交给 seed /
             # policy_factory 之前就声明，绑定期间也没有旁路（复审 R3-F1）。
             state.scheduler.claim_clock_for_rhythm()
+        # 台词在场名单的提交核对是后来加的（WEB-3）。第一次在有这条核对的代码下
+        # 打开这个世界时，记下从第几条事件起受核对；之后不再改。新世界从 0 起。
+        # 已知边界：如果之后又用没有这条核对的旧版本打开并提交，这个记号不会知道。
+        world = state.world_state
+        if world is not None and SPEECH_OCCUPANCY_CHECKED_FROM not in world.metadata:
+            with state.atomic_commit():
+                world.metadata[SPEECH_OCCUPANCY_CHECKED_FROM] = len(state.events)
         if self.seed is not None:
             # 新世界的初始排期。它在第一份存档之前落进队列，所以要么这个世界
             # 带着排期诞生，要么它根本没诞生 —— 没有第三种结果。

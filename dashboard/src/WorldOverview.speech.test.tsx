@@ -33,7 +33,7 @@ const line = (overrides: Partial<OverviewEvent>): OverviewEvent => ({
   ...overrides,
 });
 
-const overview = (events: OverviewEvent[]): WorldOverviewData => ({
+const overview = (events: OverviewEvent[], checkedFrom: number | null = 0): WorldOverviewData => ({
   world_id: 'yoake-mae',
   clock: '2026-10-03T21:50:00',
   revision: 7,
@@ -56,6 +56,7 @@ const overview = (events: OverviewEvent[]): WorldOverviewData => ({
   events,
   total_events: events.length,
   first_event_at: events[0]?.at ?? null,
+  speech_occupancy_checked_from: checkedFrom,
 });
 
 const timelineRow = (quote: string) => screen.getByText(quote).closest('li') as HTMLElement;
@@ -121,5 +122,52 @@ describe('World tab speech settings', () => {
 
     const unrecorded = timelineRow('没有在场记录的一句');
     expect(unrecorded.querySelector('.wo-speech-tag')).toBeNull();
+  });
+
+  it('labels nothing about company for lines committed before the presence check', async () => {
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [{ world_id: 'yoake-mae', owned: true } as api.PersistentWorldStatus],
+    });
+    vi.spyOn(api, 'fetchWorldOverview').mockResolvedValue(
+      overview(
+        [
+          line({
+            seq: 10,
+            actor: 'mizuki',
+            participants: ['mizuki'],
+            location_id: 'mizuki_home_room',
+            payload: { text: '检查之前的一句' },
+          }),
+          line({
+            seq: 11,
+            type: 'message.sent',
+            scope: 'channel',
+            actor: 'ena',
+            participants: ['ena'],
+            location_id: 'ena_home_studio',
+            channel_id: 'nightcord',
+            payload: { text: '检查之前的消息' },
+          }),
+          line({
+            seq: 12,
+            actor: 'mizuki',
+            participants: ['mizuki'],
+            location_id: 'mizuki_home_room',
+            payload: { text: '检查之后的一句' },
+          }),
+        ],
+        12,
+      ),
+    );
+
+    render(<WorldOverview />);
+    await screen.findByText('检查之后的一句');
+
+    expect(timelineRow('检查之前的一句').querySelector('.wo-speech-tag')).toBeNull();
+    const message = timelineRow('检查之前的消息');
+    expect(message.querySelector('.wo-speech-tag')?.textContent).toBe('线上');
+    expect(message.textContent).not.toContain('在线：');
+    expect(message.textContent).not.toContain('频道里只有自己');
+    expect(timelineRow('检查之后的一句').querySelector('.wo-speech-tag')?.textContent).toBe('独自');
   });
 });
