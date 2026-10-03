@@ -96,6 +96,14 @@ def main(argv=None) -> int:
     except MaintenanceError as e:
         print(f"没有执行：{e}", file=sys.stderr)
         return 2
+    except Exception as e:
+        # 走到这里说明世界根本没有被打开（打开之后的失败都在报告里）：恢复路径
+        # 失败会自己归还所有权。什么都没改，也没有核对磁盘。
+        print(
+            f"没有执行（世界没有打开，磁盘没有核对）：{type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
@@ -113,7 +121,13 @@ def main(argv=None) -> int:
         + ", ".join(f"{key}={close.get(key)}" for key in ("clean", "durable", "directory_synced"))
     )
     if report.complete:
-        print("完成：决定都在磁盘上，关闭 clean、耐久、目录同步有证据。可以回 dashboard 恢复世界。")
+        print("完成：决定都在磁盘上，关闭 clean、耐久、目录同步有证据。")
+        if report.still_blocked:
+            print("但作息门还不齐，恢复之后仍会被挡住：")
+            for subject in report.still_blocked:
+                print(f"  - {subject['subject']}（{subject['reason']}，{subject['conflict_id']}）")
+        else:
+            print("作息门齐了，可以回 dashboard 恢复世界。")
     else:
         if report.errors:
             print("本次有操作失败过：")

@@ -205,6 +205,43 @@ class GateReportTests(unittest.TestCase):
         _decide(state, new_a.conflict_id, "adopted")  # 报告给的 id 能被真的采用
         self.assertTrue(_gate(state, a).complete)
 
+    def test_an_adopted_version_can_come_back_and_be_adopted_again(self):
+        # ena IMPL-F1：原版 A → 采用 B → 采用 A → 再出现 B，必须有一条新的、能决定的
+        # pending；再绕一圈也一样。同一个周期里重复打开不多记。
+        a = self.registry
+        first = a.rhythm("mizuki").segments[0].activity
+        b = _first_weekday_segment_as(
+            a, "mizuki", next(k for k in ActivityKind if k not in (first, ActivityKind.UNSPECIFIED))
+        )
+        state = _state()
+        seen = set()
+        for target in (b, a, b, a):
+            (offer,) = _gate(state, target).blocked()
+            self.assertEqual(offer.reason, "pending")
+            self.assertNotIn(offer.conflict_id, seen, "每一轮都是一条新记录")
+            seen.add(offer.conflict_id)
+            count = len(state.content.conflicts)
+            _gate(state, target)
+            self.assertEqual(len(state.content.conflicts), count, "同一轮重复打开不多记")
+            _decide(state, offer.conflict_id, "adopted")
+            self.assertTrue(_gate(state, target).complete)
+            self.assertEqual(
+                state.content.adopted_fingerprint("rhythm:mizuki"),
+                rhythm_fingerprint(target.rhythm("mizuki")),
+            )
+
+    def test_a_declined_version_stays_declined_within_its_cycle(self):
+        a = self.registry
+        first = a.rhythm("mizuki").segments[0].activity
+        b = _first_weekday_segment_as(
+            a, "mizuki", next(k for k in ActivityKind if k not in (first, ActivityKind.UNSPECIFIED))
+        )
+        state = _state()
+        (offer,) = _gate(state, b).blocked()
+        _decide(state, offer.conflict_id, "declined")
+        (again,) = _gate(state, b).blocked()
+        self.assertEqual((again.reason, again.conflict_id), ("declined", offer.conflict_id))
+
     def test_a_world_without_a_ledger_has_no_gate(self):
         from pns.models.session import SessionState
 
@@ -610,6 +647,65 @@ class MaintenanceTests(PlaneTestCase):
         self.assertEqual(report.outcomes[0].result, "failed")
         self.assertEqual(report.disk_status(self.ids[0]), "declined")
 
+    def test_an_ownership_failure_after_a_decision_still_reports_the_disk(self):
+        # ena IMPL-F2：决定之后的 checkpoint 抛 OwnershipError，不能逃出报告。
+        from pns.runtime.persistence.lifecycle import PersistentWorld
+
+        real = PersistentWorld.checkpoint
+
+        def checkpoint(world, reason="manual"):
+            if reason == "content_decision":
+                raise OwnershipError("锁不见了")
+            return real(world, reason)
+
+        with patch.object(PersistentWorld, "checkpoint", checkpoint):
+            report = self.adopt_all()
+        self.assertNotEqual(report.exit_code, 0)
+        self.assertTrue(any("OwnershipError" in error for error in report.errors), report.errors)
+        self.assertEqual(
+            [o.result for o in report.outcomes], ["failed", "not_attempted", "not_attempted"]
+        )
+        self.assertIsNotNone(report.close, "照常关闭")
+        self.assertIsNotNone(report.disk, "照常从磁盘读回")
+        self.assertEqual(report.disk_status(self.ids[0]), "adopted", "关闭把内存里的决定存下了")
+        self.assertEqual(report.disk_status(self.ids[1]), "pending", "后面的决定没有执行")
+        self.assertIsNone(self.cold.service.opened("yoake-mae"))
+
+    def test_a_historical_record_is_not_this_rounds_decision(self):
+        # ena IMPL-F1 的维护面：采用 B → 采用回原版 A → B 再出现。拿第一轮 B 的旧 id
+        # 来"采用"不能报"已是此状态"；新一轮给的是新 id，用它才能让门齐。
+        self.assertTrue(self.adopt_all().complete)
+        back = self.make_plane(registry_provider=lambda: self.registry)
+        with self.assertRaises(ContentNotAdopted) as to_a:
+            back.restore("yoake-mae")
+        ids_a = [s.conflict_id for s in to_a.exception.gate.blocked()]
+        self.assertTrue(
+            run_content_decisions(back, "yoake-mae", [(i, "adopted") for i in ids_a]).complete
+        )
+        with self.assertRaises(ContentNotAdopted) as to_b:
+            self.cold.restore("yoake-mae")
+        new_ids = [s.conflict_id for s in to_b.exception.gate.blocked()]
+        self.assertEqual({s.reason for s in to_b.exception.gate.blocked()}, {"pending"})
+        self.assertFalse(set(new_ids) & set(self.ids), "新一轮是新记录")
+
+        stale = run_content_decisions(self.cold, "yoake-mae", [(self.ids[0], "adopted")])
+        self.assertNotEqual(stale.exit_code, 0)
+        self.assertEqual(stale.outcomes[0].result, "failed")
+        self.assertIn("历史记录", stale.outcomes[0].error)
+
+        fresh = run_content_decisions(self.cold, "yoake-mae", [(i, "adopted") for i in new_ids])
+        self.assertTrue(fresh.complete, fresh.to_dict())
+        self.assertEqual(fresh.still_blocked, [])
+        self.assertTrue(self.cold.restore("yoake-mae")["running"])
+
+    def test_the_report_says_when_the_gate_is_still_blocked(self):
+        report = run_content_decisions(self.cold, "yoake-mae", [(self.ids[0], "adopted")])
+        self.assertTrue(report.complete)
+        self.assertEqual(
+            sorted(s["conflict_id"] for s in report.still_blocked), sorted(self.ids[1:])
+        )
+        self.assertEqual(self.adopt_all().still_blocked, [])
+
     def test_an_interrupted_run_resumes_from_disk(self):
         # 进程在决定与 checkpoint 之间死掉：只能依赖最后一次成功的 checkpoint。
         # 这里用"不关闭、直接放掉所有权"模拟进程退出时内核释放锁。
@@ -663,6 +759,93 @@ class MaintenanceScriptTests(PlaneTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("没有内容冲突记录", result.stdout)
         self.assertEqual(path.read_bytes(), before)
+
+    def make_pending(self):
+        changed = _changed(self.registry)
+        cold = self.make_plane(registry_provider=lambda: changed)
+        with self.assertRaises(ContentNotAdopted) as caught:
+            cold.restore("yoake-mae")
+        return changed, [s.conflict_id for s in caught.exception.gate.blocked()]
+
+    def run_with(self, changed, *args, hook=None):
+        """子进程里的内容包换成 `_changed(原内容)`（与 make_pending 相同、确定性的）。
+
+        用 sitecustomize 在解释器启动时换掉 BOUNDARY.active，可选再装一个故障钩子。
+        """
+        import tempfile
+
+        del changed  # 子进程自己按同一个确定性函数重建，不跨进程传对象
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        site = [
+            "from pns.runtime.reload import BOUNDARY",
+            "_original = BOUNDARY.active",
+            "_cache = []",
+            "def _active():",
+            "    if not _cache:",
+            "        from tests.test_content_transition import _changed",
+            "        _cache.append(_changed(_original()))",
+            "    return _cache[0]",
+            "BOUNDARY.active = _active",
+        ]
+        if hook:
+            site.append(hook)
+        with open(os.path.join(tmp.name, "sitecustomize.py"), "w") as handle:
+            handle.write("\n".join(site) + "\n")
+        env = dict(os.environ)
+        env[WORLD_ROOT_ENV] = str(self.root)
+        env[self.registry.models.key_name] = CANARY
+        env["PYTHONPATH"] = os.pathsep.join(
+            [tmp.name, str(REPO_ROOT), str(REPO_ROOT / "scripts")]
+        )
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "content_decisions.py"), "yoake-mae", *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+
+    def test_the_script_records_decisions_and_says_the_gate_is_complete(self):
+        changed, ids = self.make_pending()
+        result = self.run_with(changed, "--adopt", *ids)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("作息门齐了", result.stdout)
+        again = self.run_with(changed, "--json", "--adopt", *ids)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        import json
+
+        body = json.loads(again.stdout)
+        self.assertEqual({o["result"] for o in body["outcomes"]}, {"already"})
+
+    def test_the_script_reports_an_ownership_failure_with_the_disk_state(self):
+        changed, ids = self.make_pending()
+        hook = "\n".join(
+            [
+                "from pns.runtime.persistence.lifecycle import PersistentWorld",
+                "from pns.runtime.persistence import OwnershipError",
+                "_real = PersistentWorld.checkpoint",
+                "def _cp(world, reason='manual'):",
+                "    if reason == 'content_decision':",
+                "        raise OwnershipError('injected')",
+                "    return _real(world, reason)",
+                "PersistentWorld.checkpoint = _cp",
+            ]
+        )
+        result = self.run_with(changed, "--json", "--adopt", *ids, hook=hook)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        import json
+
+        body = json.loads(result.stdout)
+        self.assertFalse(body["complete"])
+        self.assertTrue(any("OwnershipError" in e for e in body["errors"]))
+        self.assertEqual(
+            [o["result"] for o in body["outcomes"]], ["failed", "not_attempted", "not_attempted"]
+        )
+        self.assertTrue(body["close"]["clean"])
+        statuses = {d["conflict_id"]: d["status"] for d in body["disk"]}
+        self.assertEqual(statuses[ids[0]], "adopted")
+        self.assertEqual(statuses[ids[1]], "pending")
 
     def test_the_script_refuses_while_the_world_is_open(self):
         self.plane.restore("yoake-mae")

@@ -189,8 +189,8 @@ class RhythmGateSubject:
       3. 有定义但没被采用 → 针对此刻已采用版本、提议正是当前定义的那条记录，
          原因取它的状态（pending / declined / deferred）。
 
-    `conflict_id` 只给"针对此刻已采用版本"的记录：针对过期版本的旧记录拿去决定
-    会被账本拒绝，报给操作者没有意义。
+    `conflict_id` 只给此刻这个采用周期里的记录（见 ContentLedger.current_offer）：
+    旧周期的记录要么针对过期版本，要么已经决定过，拿去决定都会被账本拒绝。
     """
 
     subject: str
@@ -238,19 +238,6 @@ class RhythmGate:
         }
 
 
-def _current_conflict(ledger: ContentLedger, subject: str, offered: str):
-    """针对此刻已采用版本、提议为 `offered` 的那条记录（至多一条，见 offered()）。"""
-    adopted = ledger.adopted_fingerprint(subject)
-    for conflict in ledger.conflicts:
-        if (
-            conflict.subject == subject
-            and conflict.adopted_fingerprint == adopted
-            and conflict.offered_fingerprint == offered
-        ):
-            return conflict
-    return None
-
-
 def rhythm_gate(
     state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str
 ) -> RhythmGate:
@@ -294,13 +281,13 @@ def rhythm_gate(
         if rhythm is None and adopted == ABSENT:
             subjects.append(RhythmGateSubject(subject, character_id, "adopted_absent"))
             continue
-        conflict = _current_conflict(ledger, subject, fingerprint)
+        conflict = ledger.current_offer(subject, fingerprint)
         status = conflict.status.value if conflict is not None else None
         conflict_id = conflict.conflict_id if conflict is not None else None
         if rhythm is None:
             reason = "missing_definition"
         else:
-            # offered() 刚针对此刻已采用版本记过这一版，所以记录一定在。
+            # offered() 刚在此刻这个周期里记过这一版，所以记录一定在。
             reason = status
         subjects.append(
             RhythmGateSubject(

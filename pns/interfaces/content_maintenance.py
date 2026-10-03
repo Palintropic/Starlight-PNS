@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from pns.models.content_ledger import ConflictStatus, ContentLedger
-from pns.runtime.persistence import CheckpointError, CheckpointPolicy
+from pns.runtime.persistence import CheckpointPolicy
 
 from .composition import WorldControlPlane
 
@@ -74,6 +74,22 @@ class MaintenanceReport:
     close: Optional[Dict] = None
     # 关闭之后从磁盘重新读出来的冲突记录。读不出来是 None。
     disk: Optional[Tuple[ConflictView, ...]] = None
+    # 打开时作息门挡住的主体（按当前内容包）。门本来就齐是空列表。
+    blocked_at_open: List[Dict] = field(default_factory=list)
+
+    @property
+    def still_blocked(self) -> List[Dict]:
+        """打开时挡门、而这次没有被采用（含"磁盘上本来就已采用"）的主体。
+
+        非空说明即使这次完成了，下一次恢复仍然会被挡住。它不参与退出码：退出码
+        回答的是"要求的决定落没落盘"，这一条回答"门会不会齐"。
+        """
+        adopted = {
+            outcome.conflict_id
+            for outcome in self.outcomes
+            if outcome.requested == "adopted" and outcome.result in ("recorded", "already")
+        }
+        return [s for s in self.blocked_at_open if s.get("conflict_id") not in adopted]
 
     def disk_status(self, conflict_id: str) -> Optional[str]:
         for view in self.disk or ():
@@ -124,6 +140,7 @@ class MaintenanceReport:
                 for key in ("closed", "clean", "durable", "directory_synced", "revision")
             },
             "disk": None if self.disk is None else [view.to_dict() for view in self.disk],
+            "still_blocked": self.still_blocked,
         }
 
 
@@ -187,11 +204,17 @@ def run_content_decisions(
         start=False,
     )
     try:
+        held = world.held
+        report.blocked_at_open = list(held["subjects"]) if held is not None else []
         ledger = world.state.content
         if ledger is None:
             report.errors.append(f"世界 '{world_id}' 没有内容账本（不是正式世界）")
         else:
             _decide_all(world, report)
+    except Exception as e:
+        # 任何意料之外的失败都进报告，然后照常关闭、读回磁盘：调用方要的是
+        # "最终磁盘是什么样"和"这次哪一步失败过"，两样都不能因为一个异常丢掉。
+        report.errors.append(f"维护中途失败: {type(e).__name__}: {e}")
     finally:
         try:
             report.close = world.close("content_maintenance")
@@ -216,13 +239,18 @@ def _decide_all(world, report: MaintenanceReport) -> None:
             report.errors.append(f"{outcome.conflict_id}: 没有这条冲突记录")
             return
         if current.status is not ConflictStatus.PENDING:
-            if current.status.value == outcome.requested:
+            if current.status.value == outcome.requested and _in_current_cycle(ledger, current):
                 # 磁盘上已经是这个决定（这次打开时从磁盘读出来的，不是上一个进程
                 # 的内存）。不再记一次。
                 outcome.result = "already"
                 continue
             outcome.result = "failed"
-            outcome.error = f"已经被决定为 {current.status.value}，不会覆盖"
+            if current.status.value == outcome.requested:
+                outcome.error = (
+                    "这是一条历史记录，不是此刻这一轮的提议；用列表里此刻待决的那条 id"
+                )
+            else:
+                outcome.error = f"已经被决定为 {current.status.value}，不会覆盖"
             report.errors.append(f"{outcome.conflict_id}: {outcome.error}")
             return
         try:
@@ -234,14 +262,27 @@ def _decide_all(world, report: MaintenanceReport) -> None:
             return
         try:
             world.checkpoint("content_decision")
-        except CheckpointError as e:
+        except Exception as e:
             # 决定已经在内存里，可能还没（或者已经、但未经证实地）写下去。后面
-            # 的一条都不再记；关闭时会再存一次，结果以关闭后的磁盘为准。
+            # 的一条都不再记；关闭时会再存一次，结果以关闭后的磁盘为准。存储失败、
+            # 耐久未证实、所有权失败都走这里，保留各自的类别。
             outcome.result = "failed"
-            outcome.error = f"决定之后保存失败: {e}"
+            outcome.error = f"决定之后保存失败: {type(e).__name__}: {e}"
             report.errors.append(f"{outcome.conflict_id}: {outcome.error}")
             return
         outcome.result = "recorded"
+
+
+def _in_current_cycle(ledger: ContentLedger, conflict) -> bool:
+    """一条已决记录是不是此刻这一轮的结果（重跑时才能算"已是此状态"）。
+
+    采用：它就是定下此刻已采用版本的那一次。驳回 / 暂缓：它是此刻这个采用周期
+    里的提议。更早周期的记录哪怕状态相同，也不是这一次要做的决定。
+    """
+    start = ledger.adoption_seq(conflict.subject)
+    if conflict.status is ConflictStatus.ADOPTED:
+        return conflict.decided_seq == start
+    return conflict.offered_seq > start
 
 
 __all__ = [
