@@ -511,7 +511,11 @@ PUBLIC_PATHS = frozenset(
 # ——这一点由"密钥不进构建"那条边界保证，不由这份清单保证。
 # /avatars/ 是角色头像（dashboard/public/avatars/），和 /assets/ 一样属于构建
 # 产物里的前端外壳，内容只有公开的角色图。
-PUBLIC_STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.svg", "/icons.svg"})
+PUBLIC_STATIC_PATHS = frozenset({
+    "/", "/index.html", "/icons.svg",
+    # 网页图标：登录前的页面也要显示，所以必须公开。
+    "/pns-icon-v2.svg", "/favicon-v2-32.png", "/favicon-v2-16.png", "/apple-touch-icon-v2.png",
+})
 PUBLIC_STATIC_PREFIXES = ("/assets/", "/avatars/")
 
 _SAFE_METHODS = frozenset({"GET", "HEAD"})
