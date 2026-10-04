@@ -267,7 +267,10 @@ describe('认知开关与世界时钟', () => {
       toggle.click();
     });
     expect(screen.getByText(text)).toBeTruthy();
-    expect(screen.getByText('今天的额度')).toBeTruthy();
+    // 彩蛋：悬停在「今天的额度」上才看得到。
+    expect(screen.getByText('今天的额度').getAttribute('title')).toBe(
+      '阿戈摩托之眼：每个世界日，额度被拨回同一个起点',
+    );
   });
 
   it('不限额的授权说不限额，不显示成 0 / N', async () => {
@@ -310,7 +313,7 @@ describe('认知开关与世界时钟', () => {
     await act(async () => {
       toggle.click();
     });
-    expect(screen.getByText('本轮额度')).toBeTruthy();
+    expect(screen.getByText('本轮额度').getAttribute('title')).toBeNull();
     expect(screen.getByText(/再按一次「开始认知」就是新的一轮/)).toBeTruthy();
   });
 
