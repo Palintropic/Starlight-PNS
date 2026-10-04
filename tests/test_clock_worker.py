@@ -46,6 +46,7 @@ from pns.runtime.autonomy.clock_worker import (
     CLOCK_HEALTHY,
     OPAQUE_ERROR,
     ClockConfig,
+    MAX_ACTIVATIONS_PER_RUN,
     ClockWorker,
     ClockWorkerError,
 )
@@ -230,6 +231,27 @@ class RunBudgetStatusTests(WorkerTestCase):
         self.assertEqual((budget["limit"], budget["used"], budget["remaining"]), (None, None, None))
         worker.stop_cognition()
         self.assertIsNone(worker.status()["run_budget"]["limit"])
+
+
+    def test_start_takes_the_operators_allowance_over_the_configured_one(self):
+        world = self.open()
+        worker = world.clock_worker
+        worker.start_cognition(37)
+        budget = worker.status()["run_budget"]
+        self.assertEqual((budget["limit"], budget["used"], budget["remaining"]), (37, 0, 37))
+        self.assertEqual(world.state.cognition.current.run_allowance, 37)
+
+    def test_a_bad_allowance_is_refused_and_starts_nothing(self):
+        world = self.open()
+        worker = world.clock_worker
+        for bad in (0, -1, 1.5, True, "300", MAX_ACTIVATIONS_PER_RUN + 1):
+            with self.subTest(allowance=bad):
+                with self.assertRaises(ClockWorkerError):
+                    worker.start_cognition(bad)
+                self.assertEqual(worker.status()["cognition_causes"], ["not_started"])
+                self.assertEqual(
+                    worker.status()["run_budget"]["limit"], FAST.max_activations_per_run
+                )
 
 
 class OwnershipAndStartupTests(WorkerTestCase):

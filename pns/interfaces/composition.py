@@ -780,10 +780,13 @@ class WorldControlPlane:
     # Start/Stop 跟生命周期是**两件事**：P12 的 `running` 说的是"这个世界的
     # 运行时还接不接受写入"，`autonomy.state` 说的是"服务器会不会替这些角色
     # 花模型调用"。时间不归它们管——世界开着，时钟 worker 就一直在推。
-    def start_autonomy(self, world_id: str) -> Dict:
-        """认知从下一个完整模拟分钟起可用。这是**唯一**会让服务器花 API 额度的入口。"""
+    def start_autonomy(self, world_id: str, allowance: Optional[int] = None) -> Dict:
+        """认知从下一个完整模拟分钟起可用。这是**唯一**会让服务器花 API 额度的入口。
+
+        `allowance` 是这次 Start 的额度 N；None 时用配置的默认值。
+        """
         world = self._require_open(world_id)
-        self._worker(world).start_cognition()
+        self._worker(world).start_cognition(allowance)
         return self._with_driver(world.status())
 
     def stop_autonomy(self, world_id: str, reason: str = "operator") -> Dict:

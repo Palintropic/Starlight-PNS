@@ -34,12 +34,12 @@ from contextlib import contextmanager
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from pns.runtime.agency.policy import AgencyPolicyError
 from pns.runtime.autonomy.audit import AuditError
 from pns.runtime.autonomy.coordinator import AutonomyError
-from pns.runtime.autonomy.clock_worker import ClockWorkerError
+from pns.runtime.autonomy.clock_worker import MAX_ACTIVATIONS_PER_RUN, ClockWorkerError
 from pns.runtime.event_commit import EventCommitError
 from pns.models.session import SessionFencedError, TransactionBoundaryError
 from pns.models.world_state import ActivityKind
@@ -219,6 +219,12 @@ class QuietTimeEventsModel(BaseModel):
 class QuietTimeEventsRequest(BaseModel):
     # 严格布尔：一个拨了就影响整份世界历史的开关，不接受 "no" / 0 这类猜测。
     record: StrictBool
+
+
+class AutonomyStartRequest(BaseModel):
+    # 这次 Start 的额度 N。不给就用服务器配置的默认值。严格整数：一个决定花多少钱的
+    # 数字，不接受 "300" / 300.5 / true 这类猜测。
+    allowance: Optional[StrictInt] = Field(default=None, ge=1, le=MAX_ACTIVATIONS_PER_RUN)
 
 
 class HeldSubjectModel(BaseModel):
@@ -653,9 +659,14 @@ def set_quiet_time_events(
 
 @router.post("/{world_id}/autonomy/start", response_model=WorldStatusModel)
 def start_world_autonomy(
-    world_id: str, plane: WorldControlPlane = Depends(get_control_plane)
+    world_id: str,
+    payload: Optional[AutonomyStartRequest] = None,
+    plane: WorldControlPlane = Depends(get_control_plane),
 ):
     """让认知从下一个完整模拟分钟起可用，并装满单次额度。
+
+    请求体可选：`{"allowance": N}` 指定这次 Start 的额度，不给就用服务器配置的
+    默认值。带续额策略的世界之后每天续满的也是这个 N。
 
     这是**唯一**一个会让服务器自己开始花 API 额度的入口，所以它是显式的：
     建世界、恢复世界、重启进程都不会替操作者按下它。时间不归它管——世界
@@ -665,7 +676,8 @@ def start_world_autonomy(
     如实报告认知仍不可用及原因（`cognition_causes`）。
     """
     with _translated(plane, "autonomy_start", world_id):
-        return _status(plane.start_autonomy(world_id))
+        allowance = payload.allowance if payload is not None else None
+        return _status(plane.start_autonomy(world_id, allowance=allowance))
 
 
 @router.post("/{world_id}/autonomy/stop", response_model=WorldStatusModel)

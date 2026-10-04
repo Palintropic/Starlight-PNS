@@ -409,6 +409,38 @@ class BootstrapApiTests(PlaneTestCase):
         self.assertIsNone(stopped["run_budget"]["renews_at"])
         self.assertEqual(stopped["stop_reason"], "operator")
 
+    def test_start_takes_an_allowance_from_the_operator(self):
+        # 操作员在 Start 时自己写 N；续额策略照旧，之后每天续满的就是这个 N。
+        url = "/api/persistent-worlds/yoake-mae"
+        self.assertEqual(self.client.post(f"{url}/bootstrap").status_code, 201)
+        started = self.client.post(f"{url}/autonomy/start", json={"allowance": 300})
+        self.assertEqual(started.status_code, 200, started.text)
+        budget = started.json()["autonomy"]["run_budget"]
+        self.assertEqual((budget["limit"], budget["remaining"]), (300, 300))
+        self.assertEqual(budget["renewal"], "world-day-0500")
+        self.assertIsNotNone(budget["renews_at"])
+
+    def test_a_bad_allowance_is_refused_before_anything_starts(self):
+        url = "/api/persistent-worlds/yoake-mae"
+        self.assertEqual(self.client.post(f"{url}/bootstrap").status_code, 201)
+        for bad in (0, -5, 2.5, "300", True, 100_001):
+            with self.subTest(allowance=bad):
+                response = self.client.post(f"{url}/autonomy/start", json={"allowance": bad})
+                self.assertEqual(response.status_code, 422, response.text)
+        status = self.client.get(url).json()["autonomy"]
+        self.assertEqual(status["cognition_causes"], ["not_started"])
+
+    def test_no_body_or_a_null_allowance_uses_the_configured_one(self):
+        url = "/api/persistent-worlds/yoake-mae"
+        self.assertEqual(self.client.post(f"{url}/bootstrap").status_code, 201)
+        configured = self.client.get(url).json()["autonomy"]["run_budget"]["limit"]
+        for kwargs in ({}, {"json": {}}, {"json": {"allowance": None}}):
+            with self.subTest(**{"request": repr(kwargs)}):
+                response = self.client.post(f"{url}/autonomy/start", **kwargs)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["autonomy"]["run_budget"]["limit"], configured)
+                self.client.post(f"{url}/autonomy/stop")
+
     def test_an_unknown_start_mode_is_refused_not_ignored(self):
         with patch.dict(os.environ, {"PNS_FORMAL_START": "tonight"}):
             response = self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")

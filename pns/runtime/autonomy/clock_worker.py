@@ -224,16 +224,18 @@ class ClockWorker:
         return not thread.is_alive()
 
     # ── 操作员 ──────────────────────────────────────────────────────────
-    def start_cognition(self) -> Dict:
+    def start_cognition(self, allowance: Optional[int] = None) -> Dict:
         """操作员 Start：认知从下一个完整模拟分钟起可用，装满单次额度。
 
-        额度 N 取自创建这个 worker 时的配置，记进时间线；带续额策略的世界之后
-        每天续满的也是这个记下来的 N，不在边界上重读配置。
+        额度 N 由操作员这次给出；没给就取创建这个 worker 时的配置。N 记进时间线，
+        带续额策略的世界之后每天续满的也是这个记下来的 N，不在边界上重读配置。
         """
+        if allowance is None:
+            allowance = self._config.max_activations_per_run
+        else:
+            _number(allowance, "allowance", 1, MAX_ACTIVATIONS_PER_RUN, integer=True)
         self._require_open()
-        self._world.runtime.start_cognition(
-            self._config.max_activations_per_run, wall=self._wall_now()
-        )
+        self._world.runtime.start_cognition(allowance, wall=self._wall_now())
         return self.status()
 
     def stop_cognition(self) -> Dict:
