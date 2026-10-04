@@ -128,6 +128,8 @@ const CLOCK_STATE_TEXT: Record<string, string> = {
   faulted: '故障（退避重试中）',
 };
 
+const AGAMOTTO = '阿戈摩托之眼：每个世界日，额度被拨回同一个起点';
+
 /** 模拟时刻（ISO，无时区）给人看的形状：月-日 时:分。 */
 const simMinute = (iso: string): string => iso.slice(5, 16).replace('T', ' ');
 
@@ -749,7 +751,12 @@ export default function PersistentWorlds() {
                       </dd>
                     </div>
                     <div>
-                      <dt>{driver?.run_budget.renewal ? '今天的额度' : '本轮额度'}</dt>
+                      {driver?.run_budget.renewal ? (
+                        // 续额板块的代号 Agamotto（阿戈摩托之眼）：悬停才看得到的一句。
+                        <dt title={AGAMOTTO}>今天的额度</dt>
+                      ) : (
+                        <dt>本轮额度</dt>
+                      )}
                       <dd>{driver === null ? '—' : describeBudget(driver, world.clock)}</dd>
                     </div>
                     <div>
