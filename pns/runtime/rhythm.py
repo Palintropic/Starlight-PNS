@@ -36,7 +36,7 @@ from pns.models.event import Event, EventScope, EventType
 from pns.models.event_store import EventStore
 from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.event_commit import RHYTHM_PROVENANCE_KIND
-from pns.world.rhythm import MINUTES_PER_DAY, DailyRhythm, format_day_minute
+from pns.world.rhythm import DailyRhythm, format_day_minute
 from pns.world.routing import plan_route
 
 # 作息表认作"这一段已经有人做过决定了"的那几种事件。两条都要算：只看活动的话，
@@ -195,12 +195,10 @@ class RhythmDirector:
         """
         rhythm = self._rhythms[character_id]
         clock = world.clock
-        current = rhythm.segment_at(clock)
-        current_start = rhythm.segment_started_at(clock)
-        following = _following(rhythm, current)
-        next_start = current_start + timedelta(
-            minutes=(following.at - current.at) % MINUTES_PER_DAY or MINUTES_PER_DAY
-        )
+        current, current_start = rhythm.occurrence_at(clock)
+        # 下一段可能在第二天、而第二天可能换了表（平日 / 休息日），所以下一段与它的
+        # 开始时刻都由作息表按日期给出，不在这里按"同一张表的下一项"推算。
+        following, next_start = rhythm.next_after(current_start)
 
         effective, effective_start, departure = current, current_start, None
         here = world.location_of(character_id)
@@ -460,16 +458,10 @@ def segment_key(character_id: str, segment, segment_start: datetime) -> str:
     return f"{character_id}:{format_day_minute(segment.at)}@{segment_start.isoformat()}"
 
 
-def _following(rhythm: DailyRhythm, segment):
-    segments = rhythm.segments
-    index = segments.index(segment)
-    return segments[(index + 1) % len(segments)]
-
-
 def _managed_channels(rhythm: DailyRhythm) -> frozenset:
-    """作息表管理的频道：它的某一段声明过的那些。别的频道作息一概不碰。"""
+    """作息表管理的频道：它任何一张表的某一段声明过的那些。别的频道作息一概不碰。"""
     return frozenset(
-        segment.channel_id for segment in rhythm.segments if segment.channel_id is not None
+        segment.channel_id for segment in rhythm.all_segments if segment.channel_id is not None
     )
 
 

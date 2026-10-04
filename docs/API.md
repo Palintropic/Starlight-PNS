@@ -384,7 +384,7 @@ scope 决定，非安全方法默认要求 `operate`。既没配管理凭据、�
 当前行动角色自己的活动。
 
 角色包里写了 `daily_rhythm` 的角色，还会在模拟时间推进时被作息表对齐到当前时段
-（见 ARCHITECTURE 的 Authored daily rhythm）。操作者在一个时段之内做的改动不会
+（见 ARCHITECTURE 的 Authored daily rhythm）；分了平日表与休息日表的角色，周末和日本法定节假日按休息日表过。操作者在一个时段之内做的改动不会
 被当次推进覆盖掉：作息表要等下一段开始才重新接手。世界状态投影里
 `autonomy.rhythm_characters` 列出这个世界由作息表管着的角色。
 

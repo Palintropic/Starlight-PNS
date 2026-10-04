@@ -1,8 +1,8 @@
 # scripts/server.py — PNS Web 服务入口
 # 路由/业务逻辑都在 pns/interfaces/（挂路由 + SPA 兜底）和 pns/logic/simulation.py
-# （角色调用、判分、归档）里；这里只做进程启动前必须最先发生的三件事——
+# （角色调用、判分、归档）里；这里先做进程启动前必须最先发生的三件事——
 # 把仓库根目录和本目录加入 sys.path、加载 .env、把 stdout/stderr 换成会遮蔽
-# 凭据的版本——然后组装并运行 app。
+# 凭据的版本（见 process_setup.py，维护脚本共用同一份）——然后组装并运行 app。
 #
 # 遮蔽为什么必须在 create_app() 之前：装配过程本身就可能失败并打印异常，而
 # 那条异常路径正是最容易把凭据带出去的地方。
@@ -11,39 +11,12 @@ import sys
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-for _p in (ROOT_DIR, ROOT_DIR / "scripts"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(ROOT_DIR / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR / "scripts"))
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from process_setup import prepare, secret_env_names  # noqa: E402,F401
 
-from oobe import PROVIDERS
-from pns.interfaces import redaction
-from pns.interfaces.security import ENV_ADMIN_TOKEN, ENV_BOOTSTRAP_PASSWORD_HASH
-
-
-def secret_env_names():
-    """哪些环境变量的**值**不许出现在日志里。
-
-    provider 的 key 变量名从 oobe 的 provider 表里取，不写死：新增一个
-    provider 就自动进入遮蔽范围，不需要有人记得回来改这里。
-    """
-    names = [
-        ENV_ADMIN_TOKEN,
-        # bootstrap 哈希不是明文密码，但它是一份可以拿去离线猜的凭据材料，
-        # 没有理由让它出现在任何一条日志里。
-        ENV_BOOTSTRAP_PASSWORD_HASH,
-        os.environ.get("PNS_API_KEY_NAME", "MIMO_API_KEY"),
-    ]
-    names.extend(provider["key_name"] for provider in PROVIDERS.values())
-    return names
-
-
-redaction.install(secret_env_names())
+prepare()
 
 from pns.interfaces import create_app
 

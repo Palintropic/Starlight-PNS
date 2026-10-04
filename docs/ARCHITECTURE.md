@@ -1414,6 +1414,18 @@ rejects the whole build rather than surfacing at 3am as a failed commit. Segment
 carry no prose, and `unspecified` is not a legal segment: declaring “no fact” is
 the same as not authoring that segment.
 
+A rhythm is either one table used every day, or two tables keyed `weekday` and
+`rest_day`. Which table a date uses comes from `pns/world/calendar.py`: Saturdays,
+Sundays and the Japanese national holidays published by the Cabinet Office are
+rest days. The holiday list is copied verbatim from the official
+`syukujitsu.csv` and covers a fixed range (`HOLIDAYS_KNOWN_FROM` to
+`HOLIDAYS_KNOWN_UNTIL`); outside it only weekends count, and the list is extended
+when the next year's holidays are published. The segment that crosses midnight
+belongs to the day it started, so Friday night runs until the first segment of
+Saturday's rest-day table. Content validation checks trips across every
+weekday/rest-day changeover, not only within each table. A single-table rhythm
+serializes exactly as before, so its content-ledger fingerprint is unchanged.
+
 The rhythm proposes; it never writes. `RhythmDirector.plan()` is a pure function
 of the authoritative `WorldState`, and the coordinator commits its output through
 the existing `character.location_changed` / `character.activity_changed` events in

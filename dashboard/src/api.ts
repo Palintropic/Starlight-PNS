@@ -481,6 +481,22 @@ export interface ArchiveFootprint {
   active_events: number;
 }
 
+/** 一个登记过作息、此刻不能被作息驱动的居民（CONTENT-4）。 */
+export interface HeldSubject {
+  subject: string;
+  character_id: string;
+  /** pending / declined / deferred / missing_definition / adopted_absent */
+  reason: string;
+  conflict_id: string | null;
+  conflict_status: string | null;
+}
+
+/** 世界打开着、却因为作息内容待决而不运行。 */
+export interface WorldHeld {
+  reason: string;
+  subjects: HeldSubject[];
+}
+
 export interface PersistentWorldStatus {
   world_id: string;
   session_id: string | null;
@@ -503,6 +519,8 @@ export interface PersistentWorldStatus {
   residue: string[];
   running: boolean | null;
   stop_reason: string | null;
+  /** 作息内容待决、运行时已终局停止。正常世界和没开着的世界都是 null。 */
+  held: WorldHeld | null;
   clock: string | null;
   archive_path: string | null;
   boundaries_since_checkpoint: number | null;

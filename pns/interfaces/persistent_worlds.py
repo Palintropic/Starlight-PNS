@@ -49,6 +49,7 @@ from pns.runtime.persistence import (
     ArchiveNotDurable,
     ArchiveNotFound,
     CheckpointError,
+    ContentNotAdopted,
     LifecycleError,
     OwnershipError,
     OwnershipUnsupported,
@@ -220,6 +221,25 @@ class QuietTimeEventsRequest(BaseModel):
     record: StrictBool
 
 
+class HeldSubjectModel(BaseModel):
+    """一个登记过作息、此刻不能被作息驱动的居民，以及原因。"""
+
+    subject: str
+    character_id: str
+    # pending / declined / deferred / missing_definition / adopted_absent
+    reason: str
+    # 针对此刻已采用版本的那条冲突记录。adopted_absent 没有可决定的记录。
+    conflict_id: Optional[str] = None
+    conflict_status: Optional[str] = None
+
+
+class HeldModel(BaseModel):
+    """世界打开着、却因为作息内容待决而不运行（CONTENT-4 过渡设计 v2）。"""
+
+    reason: str
+    subjects: List[HeldSubjectModel] = Field(default_factory=list)
+
+
 class WorldStatusModel(BaseModel):
     """一个世界此刻的样子。字段含义与 P12 `PersistentWorld.status()` 一致。
 
@@ -253,6 +273,8 @@ class WorldStatusModel(BaseModel):
     residue: List[str] = Field(default_factory=list)
     running: Optional[bool] = None
     stop_reason: Optional[str] = None
+    # 作息内容待决、运行时已终局停止。正常世界和没开着的世界都是 null。
+    held: Optional[HeldModel] = None
     clock: Optional[str] = None
     archive_path: Optional[str] = None
     boundaries_since_checkpoint: Optional[int] = None
@@ -398,6 +420,17 @@ def _translate(
         return _error(400, "invalid_world_id", e)
     if isinstance(e, ContentUnavailable):
         return _error(400, "invalid_content", e)
+    if isinstance(e, ContentNotAdopted):
+        # 一个确定的结果，不是故障：冲突已经存盘、世界已经关闭并释放。逐主体的
+        # 原因随错误一起给出，操作者照着它去记决定。
+        return HTTPException(
+            409,
+            {
+                "category": "content_not_adopted",
+                "message": _safe(e),
+                "subjects": [subject.to_dict() for subject in e.gate.blocked()],
+            },
+        )
     if isinstance(e, AdaptersUnavailable):
         return _error(503, "adapters_unavailable", e)
     if isinstance(e, ClockWorkerError):

@@ -203,27 +203,53 @@ class ContentLedger:
         """这一版内容此刻能不能生效：只有已采用的那一版能。"""
         return self.adopted_fingerprint(subject) == fingerprint
 
+    def adoption_seq(self, subject: str) -> int:
+        """此刻的已采用版本是哪一次采用定下的（那次决定的序号）。开局以来没换过是 -1。
+
+        它划出"此刻这一个采用周期"：序号在它之后的记录，针对的都是此刻的已采用
+        版本。已采用版本可以绕回一个用过的指纹（A → B → A），所以只看指纹分不出
+        周期，要看序号。
+        """
+        return max(
+            (
+                c.decided_seq
+                for c in self.conflicts
+                if c.subject == subject and c.status is ConflictStatus.ADOPTED
+            ),
+            default=-1,
+        )
+
+    def current_offer(self, subject: str, fingerprint: str) -> Optional[ContentConflict]:
+        """此刻这一个采用周期里，提议 `fingerprint` 的那条记录（至多一条）。"""
+        start = self.adoption_seq(subject)
+        adopted = self.adopted_fingerprint(subject)
+        for conflict in self.conflicts:
+            if (
+                conflict.subject == subject
+                and conflict.offered_seq > start
+                and conflict.adopted_fingerprint == adopted
+                and conflict.offered_fingerprint == fingerprint
+            ):
+                return conflict
+        return None
+
     # ── 转换 ────────────────────────────────────────────────────────────
     def offered(
         self, subject: str, fingerprint: str, *, registry_revision: int, wall: str
     ) -> "ContentLedger":
-        """内容包里此刻是这一版。与已采用版本不同、又没针对此刻版本记过，就记一条 pending。
+        """内容包里此刻是这一版。与已采用版本不同、又没在此刻这个采用周期里记过，就记一条 pending。
 
-        "记过"按（这一项，这一版，针对的版本）判断：已采用版本变了之后，同一版
-        再出现就是针对新版本的一个新提议，要重新记，否则它永远没有能被决定的记录。
+        "记过"按（这一项，这一版，此刻的采用周期）判断：已采用版本变了之后，同一版
+        再出现就是一个新提议，要重新记，否则它永远没有能被决定的记录。已采用版本
+        绕回一个用过的指纹（A → B → A）也是一个新的周期，旧周期里的记录不算数。
         """
         adopted = self.adopted_fingerprint(subject)
         if adopted is None:
             raise ContentLedgerError(f"'{subject}' 不是这个世界采用过的内容")
         if adopted == fingerprint:
             return self
-        if any(
-            c.subject == subject
-            and c.offered_fingerprint == fingerprint
-            and c.adopted_fingerprint == adopted
-            for c in self.conflicts
-        ):
-            return self  # 针对此刻版本已经记过（无论决定了没有），不重复记
+        if self.current_offer(subject, fingerprint) is not None:
+            return self  # 此刻这个周期里已经记过（无论决定了没有），不重复记
         return ContentLedger(
             self.adopted,
             self.conflicts

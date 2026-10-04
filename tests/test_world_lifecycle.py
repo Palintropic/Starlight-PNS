@@ -2272,6 +2272,8 @@ class ResearchSessionIsUntouchedTests(unittest.TestCase):
     # 不是顺手加的。允许清单是精确的 —— 多一个少一个都要在这里被看见。
     PERSISTENCE_IMPORTERS = (
         "pns/interfaces/composition.py",
+        # CONTENT-4 的冷维护：独占打开世界记内容决定，本来就要拿世界锁。
+        "pns/interfaces/content_maintenance.py",
         "pns/interfaces/persistent_worlds.py",
     )
 
@@ -2299,7 +2301,7 @@ class ResearchSessionIsUntouchedTests(unittest.TestCase):
         self.assertEqual(sorted(set(offenders)), sorted(self.PERSISTENCE_IMPORTERS))
 
     def test_the_research_and_domain_layers_stay_out_of_the_allow_list(self):
-        """允许清单只覆盖接口层的那两个文件，别的一律不许溜进来。
+        """允许清单只覆盖接口层的那几个文件，别的一律不许溜进来。
 
         尤其是 /ws/run 那条路：`pns/interfaces/simulate.py` 和
         `pns/runtime/session_runtime.py` 进了清单，就等于研究会话可以去拿

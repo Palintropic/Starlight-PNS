@@ -16,46 +16,86 @@ schedule: 昼夜颠倒，25时（凌晨1点）上Nightcord，结束时间看进�
 # 每段从 at 起一直管到下一段开始，最后一段跨零点接回第一段。
 # activity 只能取世界模型里的闭集值；location_id 必须是位置图里已有的地点。
 daily_rhythm:
-  # 25 時集合是官方给出的时刻（官方组合页、奏的自我介绍），但一段作息同时声明了物理地点，
-  # 地点没有同等粒度的出处，所以没有一段能整体标 official；
-  # 夜间定时制、夜型作息、通宵画画是官方的，其余精确时刻均为推断。
-  - at: "01:00"        # 25時上线是官方的；此刻人在哪个房间是推断，所以整段标 inferred
-    activity: online_chatting
-    location_id: ena_home_studio
-    channel_id: nightcord
-    source: inferred
-  - at: "04:00"        # 结束时间随进度变化；取主线第 2 话凌晨 4 时仍在线的一例。之后继续画
-    activity: drawing
-    location_id: ena_home_studio
-    source: inferred
-  - at: "07:00"        # 天亮后才睡（主线有画到约 9 时的例子）
-    activity: resting
-    location_id: ena_home
-    source: inferred
-  - at: "14:00"        # 起床后的第一顿饭；时刻为推断
-    activity: eating
-    location_id: ena_home
-    source: inferred
-  - at: "14:40"
-    activity: idle
-    location_id: ena_home
-    source: inferred
-  - at: "17:30"        # 神山高校夜间定时制 3-D；官方为傍晚到校，未给时刻
-    activity: studying
-    location_id: kamiyama_high
-    source: inferred
-  - at: "21:30"        # 25 時之前已到家；母亲会给她留饭（见 family），到家先吃，时刻为推断
-    activity: eating
-    location_id: ena_home
-    source: inferred
-  - at: "22:00"
-    activity: idle
-    location_id: ena_home
-    source: inferred
-  - at: "23:00"
-    activity: drawing
-    location_id: ena_home_studio
-    source: inferred
+  weekday:
+    # 25 時集合是官方给出的时刻（官方组合页、奏的自我介绍），但一段作息同时声明了物理地点，
+    # 地点没有同等粒度的出处，所以没有一段能整体标 official；
+    # 夜间定时制、夜型作息、通宵画画是官方的，其余精确时刻均为推断。
+    - at: "01:00"        # 25時上线是官方的；此刻人在哪个房间是推断，所以整段标 inferred
+      activity: online_chatting
+      location_id: ena_home_studio
+      channel_id: nightcord
+      source: inferred
+    - at: "04:00"        # 结束时间随进度变化；取主线第 2 话凌晨 4 时仍在线的一例。之后继续画
+      activity: drawing
+      location_id: ena_home_studio
+      source: inferred
+    - at: "07:00"        # 天亮后才睡（主线有画到约 9 时的例子）
+      activity: resting
+      location_id: ena_home
+      source: inferred
+    - at: "14:00"        # 起床后的第一顿饭；时刻为推断
+      activity: eating
+      location_id: ena_home
+      source: inferred
+    - at: "14:40"
+      activity: idle
+      location_id: ena_home
+      source: inferred
+    - at: "17:30"        # 神山高校夜间定时制 3-D；官方为傍晚到校，未给时刻
+      activity: studying
+      location_id: kamiyama_high
+      source: inferred
+    - at: "21:30"        # 25 時之前已到家；母亲会给她留饭（见 family），到家先吃，时刻为推断
+      activity: eating
+      location_id: ena_home
+      source: inferred
+    - at: "22:00"
+      activity: idle
+      location_id: ena_home
+      source: inferred
+    - at: "23:00"
+      activity: drawing
+      location_id: ena_home_studio
+      source: inferred
+  # 休息日（周末、祝日）：夜间定时制不上课，傍晚那段改在画室画画。整张表是推断，等官方出处调研（CONTENT-4）。
+  rest_day:
+    - at: "01:00"
+      activity: online_chatting
+      location_id: ena_home_studio
+      channel_id: nightcord
+      source: inferred
+    - at: "04:00"
+      activity: drawing
+      location_id: ena_home_studio
+      source: inferred
+    - at: "07:00"
+      activity: resting
+      location_id: ena_home
+      source: inferred
+    - at: "14:00"
+      activity: eating
+      location_id: ena_home
+      source: inferred
+    - at: "14:40"
+      activity: idle
+      location_id: ena_home
+      source: inferred
+    - at: "17:30"      # 平日这时去夜间定时制
+      activity: drawing
+      location_id: ena_home_studio
+      source: inferred
+    - at: "21:30"
+      activity: eating
+      location_id: ena_home
+      source: inferred
+    - at: "22:00"
+      activity: idle
+      location_id: ena_home
+      source: inferred
+    - at: "23:00"
+      activity: drawing
+      location_id: ena_home_studio
+      source: inferred
 
 access_grants:
   locations:

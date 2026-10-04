@@ -66,7 +66,7 @@ from pns.models.session import SessionState, TransactionBoundaryError
 from pns.runtime.agency.engine import AgencyEngine
 from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
 from pns.runtime.autonomy.coordinator import AutonomousRuntime, AutonomyError
-from pns.runtime.formal_world import gated_rhythms
+from pns.runtime.formal_world import RhythmGate, rhythm_gate
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.models.time_events import TimeEventPolicy, TimeEventPolicyError, quiet_time_report
 from pns.runtime.persistence.archive import ArchiveError, EventSegment, WorldArchive
@@ -92,6 +92,26 @@ class LifecycleError(RuntimeError):
 
 class CheckpointError(LifecycleError):
     """这次 checkpoint 没有落地。磁盘上仍然是上一份完整存档。"""
+
+
+class ContentNotAdopted(LifecycleError):
+    """作息门不齐，这次恢复没有让世界运行（CONTENT-4 过渡设计 v2）。
+
+    抛出它的时候，事情已经全部办完：新的内容冲突已经落盘，世界已经正常关闭、
+    所有权已经释放。所以它不是"恢复失败、状态未知"，而是一个确定的结果：世界
+    停在关闭状态，一分钟也没走，等项目所有者对 `gate` 里的阻断项做出决定。
+    """
+
+    def __init__(self, world_id: str, gate: RhythmGate) -> None:
+        self.world_id = world_id
+        self.gate = gate
+        blocked = "、".join(
+            f"{subject.subject}（{subject.reason}）" for subject in gate.blocked()
+        )
+        super().__init__(
+            f"世界 '{world_id}' 的作息内容待决，未恢复运行：{blocked}。"
+            "冲突已经存盘，世界已关闭；用内容维护脚本记下决定后再恢复"
+        )
 
 
 @dataclass(frozen=True)
@@ -152,6 +172,16 @@ class RuntimeAdapters:
         四步都写出来，不靠任何一层"没有就顺手建一个"的默认行为：读代码的人
         应该一眼看见这个世界有哪几个服务，以及它们绑的是同一份状态。
         """
+        runtime, _ = self.bind_gated(state)
+        return runtime
+
+    def bind_gated(
+        self, state: SessionState
+    ) -> Tuple[AutonomousRuntime, Optional[RhythmGate]]:
+        """同 `bind`，另外交出作息门的结果。
+
+        门的结果是 None 表示这个世界不设作息门（没有作息、或不是正式世界）。
+        """
         if not isinstance(state, SessionState):
             raise LifecycleError("只能把服务绑在 SessionState 上")
         # 持久世界的时钟只归调度器推：在任何回调拿到这份状态之前声明。
@@ -177,18 +207,19 @@ class RuntimeAdapters:
         if state.memory_encoder is None:
             MemoryEncoder(state, self.memory_budget)
         rhythm = self.rhythm
+        gate = None
         if rhythm is not None and state.content is not None:
             # 正式世界：只有这个世界明确采用过的那一版作息才生效。内容包里出现
             # 新的一版，记一条待决、不生效，等项目所有者决定（WORLD-1 §4.3）。
             with state.atomic_commit():
-                accepted = gated_rhythms(
+                gate = rhythm_gate(
                     state,
                     {cid: rhythm.rhythm_for(cid) for cid in rhythm.characters()},
                     registry_revision=self.content_revision,
                     wall=utc_now().isoformat(),
                 )
-            rhythm = RhythmDirector(accepted)
-        return AutonomousRuntime(
+            rhythm = RhythmDirector(gate.accepted)
+        runtime = AutonomousRuntime(
             state,
             auditor=self.auditor,
             retry=self.retry,
@@ -197,6 +228,7 @@ class RuntimeAdapters:
             allowance_renewal=self.allowance_renewal,
             name=self.name,
         )
+        return runtime, gate
 
 
 @dataclass(frozen=True)
@@ -252,6 +284,16 @@ class CheckpointPolicy:
             "min_interval_seconds": self.min_interval_seconds,
             "on_close": self.on_close,
         }
+
+
+def _held_report(gate: Optional[RhythmGate]) -> Optional[Dict]:
+    """搁置报告：为什么这个世界打开着却不运行。每次返回全新的结构。"""
+    if gate is None:
+        return None
+    return {
+        "reason": "content_pending",
+        "subjects": [subject.to_dict() for subject in gate.blocked()],
+    }
 
 
 def _fingerprint(state: SessionState) -> Optional[Tuple]:
@@ -389,6 +431,9 @@ class PersistentWorld:
         # 磁盘上那一版的分卷清单（存档版本 3）。只随成功写下去的一版改变；
         # checkpoint 的快照只序列化清单之后的事件。
         self._segments: Tuple[EventSegment, ...] = tuple(segments)
+        # 作息门不齐时的搁置报告（CONTENT-4 过渡设计 v2）。只由恢复路径在登记
+        # 之前设置；设置时运行时已经终局停止，这个世界不会再运行。
+        self._held: Optional[RhythmGate] = None
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -415,6 +460,11 @@ class PersistentWorld:
     @property
     def clock_worker(self) -> Optional[ClockWorker]:
         return self._clock_worker
+
+    @property
+    def held(self) -> Optional[Dict]:
+        """作息门不齐、运行时已终局停止时的报告；正常世界是 None。"""
+        return _held_report(self._held)
 
     # ── checkpoint ──────────────────────────────────────────────────────
     def checkpoint(self, reason: str = "manual") -> Dict:
@@ -689,6 +739,7 @@ class PersistentWorld:
             "residue": list(self._store.residue(self._world_id, self._segments)),
             "running": self._runtime.running,
             "stop_reason": self._runtime.stop_reason,
+            "held": _held_report(self._held),
             "clock": self._state.world_state.clock.isoformat(),
             "archive_path": str(self._store.archive_path(self._world_id)),
             "boundaries_since_checkpoint": self._boundaries,
@@ -870,6 +921,14 @@ class WorldLifecycleService:
 
         任何一步失败都会把所有权还回去：损坏的存档、不认识的版本、对不上的
         身份、起不来的适配器 —— 一次失败的恢复不该让世界永久锁死。
+
+        作息门不齐（CONTENT-4 过渡设计 v2）时，新冲突照样先落盘，然后运行时
+        终局停止，不碰时钟、不起 worker：
+          * 带 `clock`（服务器的正常恢复）：登记、正常关闭，成功之后抛
+            `ContentNotAdopted`。关闭失败就原样抛出关闭的错误，世界留在登记表里，
+            仍是搁置状态，可以再关一次。
+          * 不带 `clock`（冷维护）：返回一个打开着、不运行的世界，`held` 写着
+            原因。`start` 在这里不起作用。
         """
         name = validate_world_id(world_id)
         adapters = self._require_adapters(adapters)
@@ -894,8 +953,16 @@ class WorldLifecycleService:
             baseline = _fingerprint(state)
             content_on_disk = state.content
             # 服务在后：调用方的冷适配器显式绑定，存档里一个活对象都没有。
-            runtime = adapters.bind(state)
-            if clock is not None:
+            runtime, gate = adapters.bind_gated(state)
+            held = gate is not None and not gate.complete
+            if held:
+                # 作息门不齐（CONTENT-4 过渡设计 v2）：在**任何**时钟操作之前终局
+                # 停止。协调器对被要求停止过的运行时拒绝 start()，哪怕它从没启动
+                # 过，所以之后无论谁拿到这个句柄都推不动它；内容账本的决定不经过
+                # 运行准入，照样能记。时钟不恢复、不重新锚定，离线时间原样留给
+                # 门齐之后的那次恢复补跑。
+                runtime.stop("content_pending")
+            if clock is not None and not held:
                 if state.anchor is None:
                     raise LifecycleError(
                         f"世界 '{name}' 的存档没有时钟锚点，不能按现实时间恢复"
@@ -926,13 +993,26 @@ class WorldLifecycleService:
                 # 真的落盘。存不下去就是恢复失败（下面的 except 归还所有权）。
                 with world._lock:
                     world._checkpoint_locked("restore_content_conflict")
-            if start:
+            if held:
+                # 登记之前就标明原因：登记之后它对外可见，不能有一刻看起来只是
+                # "没启动"。
+                world._held = gate
+            elif start:
                 runtime.start()
         except BaseException:
             _abandon(state)
             handle.release()
             raise
         self._remember(name, world, handle)
+        if held:
+            if clock is None:
+                # 冷维护：世界开着、不运行，留给调用方记决定再关闭。
+                return world
+            # 服务器的正常恢复：从这里起它是一个已登记、可管理的世界，不再属于
+            # "失败的恢复"。正常关闭；关不掉就原样抛出（世界留在登记表里、仍是
+            # 搁置状态，可以再关一次），不自动 force、不自动释放。
+            world.close("content_pending")
+            raise ContentNotAdopted(name, gate)
         if clock is not None:
             self._spawn_clock(world, clock, wall_clock)
         return world
@@ -994,6 +1074,7 @@ class WorldLifecycleService:
             "residue": [],
             "running": None,
             "stop_reason": None,
+            "held": None,
             "clock": None,
             "archive_path": None,
             "boundaries_since_checkpoint": None,

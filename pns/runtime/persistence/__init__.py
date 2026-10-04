@@ -21,6 +21,7 @@ from pns.runtime.persistence.archive import (
 )
 from pns.runtime.persistence.lifecycle import (
     CheckpointError,
+    ContentNotAdopted,
     CheckpointPolicy,
     LifecycleError,
     PersistentWorld,
@@ -58,6 +59,7 @@ __all__ = [
     "ArchiveNotDurable",
     "ArchiveNotFound",
     "CheckpointError",
+    "ContentNotAdopted",
     "CheckpointPolicy",
     "FileWorldStore",
     "LifecycleError",

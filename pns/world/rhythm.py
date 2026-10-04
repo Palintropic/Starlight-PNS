@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from pns.models.world_state import ActivityKind
+from pns.world.calendar import DayKind, day_kind
 
 MINUTES_PER_DAY = 24 * 60
 
@@ -158,9 +159,57 @@ class RhythmSegment:
         }
 
 
+def _validated_table(character_id: str, segments, label: str) -> Tuple[RhythmSegment, ...]:
+    """一张表（平日或休息日）的校验：非空、有上界、同一分钟不重复、相邻两段不完全相同。"""
+    segments = tuple(segments)
+    if not segments:
+        raise RhythmError(f"角色 '{character_id}' 的{label}作息表不能是空的")
+    if len(segments) > MAX_SEGMENTS:
+        raise RhythmError(
+            f"角色 '{character_id}' 的{label}作息表最多 {MAX_SEGMENTS} 段，"
+            f"收到 {len(segments)}"
+        )
+    for segment in segments:
+        if not isinstance(segment, RhythmSegment):
+            raise RhythmError("作息表里只能放 RhythmSegment")
+    segments = tuple(sorted(segments, key=lambda item: item.at))
+    for previous, current in zip(segments, segments[1:]):
+        if previous.at == current.at:
+            # 同一分钟两段，等于"此刻属于哪一段"有两个答案。排序也解决不了，
+            # 因为两个答案都合法 —— 所以拒绝，不静默取其一。
+            if previous == current:
+                raise RhythmError(
+                    f"角色 '{character_id}' 的{label}作息表里 "
+                    f"{format_day_minute(current.at)} 有重复的段"
+                )
+            raise RhythmError(
+                f"角色 '{character_id}' 的{label}作息表里 "
+                f"{format_day_minute(current.at)} 有两段互相冲突的安排"
+            )
+        if (previous.activity, previous.location_id, previous.channel_id) == (
+            current.activity,
+            current.location_id,
+            current.channel_id,
+        ):
+            # 相邻两段完全一样，中间那道边界什么都不会发生。它不是错误的
+            # 世界，但它是一条写错了的内容（多半是想改却漏改了一项），
+            # 所以在这里就说出来，而不是让作者以为世界在那一刻变了。
+            raise RhythmError(
+                f"角色 '{character_id}' 的{label}作息表里 "
+                f"{format_day_minute(previous.at)} 与 "
+                f"{format_day_minute(current.at)} 两段完全相同，应当合并"
+            )
+    return segments
+
+
 @dataclass(frozen=True)
 class DailyRhythm:
     """一个角色被作者写下来的一天。
+
+    `segments` 是平日的表；`rest_day_segments` 是休息日（周末与祝日，见
+    pns/world/calendar.py）的表，没写就是天天都按 `segments` 过。哪一天用哪张表由
+    那一天的日期决定；跨零点的那一段属于它开始的那一天，所以周五夜里那一段一直
+    管到周六休息日表的第一段开始。
 
     时间口径跟 WorldState.clock 完全一致：timezone-naive 的模拟时间。带时区的
     时钟一律拒绝 —— 两种口径混着算"这一段是什么时候开始的"，要么抛 TypeError，
@@ -169,79 +218,89 @@ class DailyRhythm:
 
     character_id: str
     segments: Tuple[RhythmSegment, ...]
+    rest_day_segments: Optional[Tuple[RhythmSegment, ...]] = None
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
         if not isinstance(self.character_id, str) or not self.character_id:
             raise RhythmError("character_id 必须是非空字符串")
-        segments = tuple(self.segments)
-        if not segments:
-            raise RhythmError(f"角色 '{self.character_id}' 的作息表不能是空的")
-        if len(segments) > MAX_SEGMENTS:
-            raise RhythmError(
-                f"角色 '{self.character_id}' 的作息表最多 {MAX_SEGMENTS} 段，"
-                f"收到 {len(segments)}"
-            )
-        for segment in segments:
-            if not isinstance(segment, RhythmSegment):
-                raise RhythmError("作息表里只能放 RhythmSegment")
-        segments = tuple(sorted(segments, key=lambda item: item.at))
-        for previous, current in zip(segments, segments[1:]):
-            if previous.at == current.at:
-                # 同一分钟两段，等于"此刻属于哪一段"有两个答案。排序也解决不了，
-                # 因为两个答案都合法 —— 所以拒绝，不静默取其一。
-                if previous == current:
-                    raise RhythmError(
-                        f"角色 '{self.character_id}' 的作息表里 "
-                        f"{format_day_minute(current.at)} 有重复的段"
-                    )
+        label = "平日" if self.rest_day_segments is not None else ""
+        set_(self, "segments", _validated_table(self.character_id, self.segments, label))
+        if self.rest_day_segments is not None:
+            rest = _validated_table(self.character_id, self.rest_day_segments, "休息日")
+            if rest == self.segments:
+                # 两张一样的表等于没写休息日表；那就别写，免得以为休息日不同。
                 raise RhythmError(
-                    f"角色 '{self.character_id}' 的作息表里 "
-                    f"{format_day_minute(current.at)} 有两段互相冲突的安排"
+                    f"角色 '{self.character_id}' 的休息日作息表与平日完全相同，应当省略"
                 )
-            if (previous.activity, previous.location_id, previous.channel_id) == (
-                current.activity,
-                current.location_id,
-                current.channel_id,
-            ):
-                # 相邻两段完全一样，中间那道边界什么都不会发生。它不是错误的
-                # 世界，但它是一条写错了的内容（多半是想改却漏改了一项），
-                # 所以在这里就说出来，而不是让作者以为世界在那一刻变了。
-                raise RhythmError(
-                    f"角色 '{self.character_id}' 的作息表里 "
-                    f"{format_day_minute(previous.at)} 与 "
-                    f"{format_day_minute(current.at)} 两段完全相同，应当合并"
-                )
-        set_(self, "segments", segments)
+            set_(self, "rest_day_segments", rest)
+
+    # ── 表 ──────────────────────────────────────────────────────────────
+    @property
+    def tables(self) -> Tuple[Tuple[RhythmSegment, ...], ...]:
+        """这份作息里所有不同的表（一张或两张）。"""
+        if self.rest_day_segments is None:
+            return (self.segments,)
+        return (self.segments, self.rest_day_segments)
+
+    @property
+    def all_segments(self) -> Tuple[RhythmSegment, ...]:
+        """所有表里的全部段，按表的顺序。校验地点、频道时用。"""
+        return tuple(segment for table in self.tables for segment in table)
+
+    def table_for(self, day: date) -> Tuple[RhythmSegment, ...]:
+        """这一天用哪张表。"""
+        if self.rest_day_segments is not None and day_kind(day) is DayKind.REST_DAY:
+            return self.rest_day_segments
+        return self.segments
 
     # ── 查询 ────────────────────────────────────────────────────────────
-    def segment_at(self, clock: datetime) -> RhythmSegment:
-        """此刻属于哪一段。恒有答案 —— 一天被完全覆盖。"""
+    def occurrence_at(self, clock: datetime) -> Tuple[RhythmSegment, datetime]:
+        """此刻属于哪一段，以及这一段的**绝对**开始时刻。恒有答案。
+
+        今天的表里还没有一段开始，就属于昨天那张表的最后一段，起点在昨天 ——
+        不减一天的话，"当前活动是不是这一段开始之后才设的"会在每天零点到第一段
+        之间恒成立，于是作息表在那段时间里永远不敢说话。
+        """
         minute = self._day_minute(clock)
-        current = self.segments[-1]  # 第一段之前属于跨零点的最后一段
-        for segment in self.segments:
+        today = clock.date()
+        table = self.table_for(today)
+        current = None
+        for segment in table:
             if segment.at <= minute:
                 current = segment
             else:
                 break
-        return current
+        if current is not None:
+            return current, _start_of(today, current)
+        yesterday = today - timedelta(days=1)
+        last = self.table_for(yesterday)[-1]
+        return last, _start_of(yesterday, last)
+
+    def next_after(self, start: datetime) -> Tuple[RhythmSegment, datetime]:
+        """从 `start` 开始的那一段之后，下一段是哪一段、绝对几点开始。
+
+        `start` 必须是某一段的开始时刻（`occurrence_at` 给出的那个）。同一天的表里
+        还有后一段就是它；没有就是第二天那张表的第一段——第二天可能换了表。
+        """
+        segment, _ = self.occurrence_at(start)
+        day = start.date()
+        table = self.table_for(day)
+        index = table.index(segment)
+        if index + 1 < len(table):
+            following = table[index + 1]
+            return following, _start_of(day, following)
+        tomorrow = day + timedelta(days=1)
+        following = self.table_for(tomorrow)[0]
+        return following, _start_of(tomorrow, following)
+
+    def segment_at(self, clock: datetime) -> RhythmSegment:
+        """此刻属于哪一段。恒有答案 —— 一天被完全覆盖。"""
+        return self.occurrence_at(clock)[0]
 
     def segment_started_at(self, clock: datetime) -> datetime:
-        """此刻这一段是从哪个**绝对**时刻开始的。
-
-        跨零点那一段的起点在昨天，所以这里要减一天 —— 不减的话，"当前活动是不是
-        这一段开始之后才设的"会在每天零点到第一段之间恒成立，于是作息表在那段
-        时间里永远不敢说话。
-        """
-        segment = self.segment_at(clock)
-        minute = self._day_minute(clock)
-        day: date = clock.date()
-        start = datetime.combine(day, datetime.min.time()) + timedelta(
-            minutes=segment.at
-        )
-        if segment.at > minute:
-            start -= timedelta(days=1)
-        return start
+        """此刻这一段是从哪个**绝对**时刻开始的（跨零点那一段的起点在昨天）。"""
+        return self.occurrence_at(clock)[1]
 
     def _day_minute(self, clock: datetime) -> int:
         if not isinstance(clock, datetime):
@@ -253,10 +312,21 @@ class DailyRhythm:
         return clock.hour * 60 + clock.minute
 
     def to_dict(self) -> Dict:
-        return {
+        payload = {
             "character_id": self.character_id,
             "segments": [segment.to_dict() for segment in self.segments],
         }
+        # 没有休息日表时不写这个键：只写一张表的作息，指纹与引入休息日之前一致，
+        # 已采用它的世界不会因为这次格式扩展而多出一条内容冲突。
+        if self.rest_day_segments is not None:
+            payload["rest_day_segments"] = [
+                segment.to_dict() for segment in self.rest_day_segments
+            ]
+        return payload
+
+
+def _start_of(day: date, segment: RhythmSegment) -> datetime:
+    return datetime.combine(day, datetime.min.time()) + timedelta(minutes=segment.at)
 
 
 # 作息表条目里允许出现的键。白名单 —— 多写一个键就是拒绝，因为多出来的那个
@@ -282,28 +352,57 @@ def parse_daily_rhythm(
     """
     if payload is None:
         return None
+    if isinstance(payload, Mapping):
+        # 分表写法：平日一张、休息日一张，两张都必须写。只写一张就用列表写法。
+        keys = set(payload)
+        if keys != set(_TABLE_KEYS):
+            raise RhythmError(
+                f"角色 '{character_id}' 的 daily_rhythm 分表写法只接受且必须同时写 "
+                f"{'、'.join(_TABLE_KEYS)}，收到 {'、'.join(sorted(map(str, keys))) or '空'}"
+            )
+        return DailyRhythm(
+            character_id=character_id,
+            segments=_parse_table(
+                payload["weekday"], character_id, "weekday", locations, channels
+            ),
+            rest_day_segments=_parse_table(
+                payload["rest_day"], character_id, "rest_day", locations, channels
+            ),
+        )
+    return DailyRhythm(
+        character_id=character_id,
+        segments=_parse_table(payload, character_id, None, locations, channels),
+    )
+
+
+# daily_rhythm 分表写法的两个键。休息日 = 周末与祝日（pns/world/calendar.py）。
+_TABLE_KEYS = ("weekday", "rest_day")
+
+
+def _parse_table(payload, character_id, table, locations, channels) -> Tuple[RhythmSegment, ...]:
+    where = "daily_rhythm" if table is None else f"daily_rhythm.{table}"
     if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
         raise RhythmError(
-            f"角色 '{character_id}' 的 daily_rhythm 必须是一组时间段"
+            f"角色 '{character_id}' 的 {where} 必须是一组时间段"
         )
 
     segments = []
     for index, entry in enumerate(payload):
         if not isinstance(entry, Mapping):
             raise RhythmError(
-                f"角色 '{character_id}' 的 daily_rhythm 第 {index + 1} 项必须是字典"
+                f"角色 '{character_id}' 的 {where} 第 {index + 1} 项必须是字典"
             )
         unknown = sorted(set(entry) - _SEGMENT_KEYS)
         if unknown:
             raise RhythmError(
-                f"角色 '{character_id}' 的 daily_rhythm 第 {index + 1} 项有多余字段："
+                f"角色 '{character_id}' 的 {where} 第 {index + 1} 项有多余字段："
                 f"{'、'.join(unknown)}（只接受 {'、'.join(sorted(_SEGMENT_KEYS))}）"
             )
         missing = [key for key in ("at", "activity", "source") if key not in entry]
         if missing:
             # source 也是必填：作者不写出处，就等于让缺省值替他声明一次。
             raise RhythmError(
-                f"角色 '{character_id}' 的 daily_rhythm 第 {index + 1} 项缺少 "
+                f"角色 '{character_id}' 的 {where} 第 {index + 1} 项缺少 "
                 f"{'、'.join(missing)}"
             )
         channel_id = entry.get("channel_id")
@@ -330,7 +429,7 @@ def parse_daily_rhythm(
                 source=entry["source"],
             )
         )
-    return DailyRhythm(character_id=character_id, segments=tuple(segments))
+    return tuple(segments)
 
 
 __all__ = [

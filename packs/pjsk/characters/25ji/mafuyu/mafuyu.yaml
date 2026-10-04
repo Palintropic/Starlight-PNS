@@ -16,39 +16,86 @@ class_history: "2-B（进级前）→ 3-B（进级后，现状）"
 # 25 時是通常的集合时间（可以缺席），下线时刻不固定，有一晚因第二天上学先下线；
 # 在奏的房间创作和休息（研究 #8，地点依据）。真冬是作词担当（上面的 role），作词段由此而来。
 # 地点变化时 at 是到达时刻，出发时刻按路程倒推。
-# 每一个精确时刻都是推断。这是一张每天重复的表，是试运行的明确简化：每晚 01:00 必到、
+# 每一个精确时刻都是推断。平日这张表是试运行的明确简化：每晚 01:00 必到、
 # 每天到校、02:00–07:19 约 5 小时 19 分的休息，都是"单表 + 固定集合 + 早上到校"的结构结果，
-# 不是官方的生活规律。缺席、周末、模考等要等日历或可缺席机制（TODO §五 16、17）。
+# 不是官方的生活规律。周末与祝日按下面的休息日表；缺席、模考等仍要等可缺席机制（TODO §五 16、17）。
 daily_rhythm:
-  - at: "01:00"        # 25時是通常集合（研究 #12），每晚必到是试运行简化；在奏的房间是推断
-    activity: online_chatting
-    location_id: kanade_home_room
-    channel_id: nightcord
-    source: inferred
-  - at: "02:00"        # 四人里最早下线：研究 #12 只有一晚因第二天上学先下线（04:00），不是规律；时刻推断
-    activity: resting
-    location_id: kanade_home_room
-    source: inferred
-  - at: "07:20"        # 早饭后出门（PAST 有吃完早饭上学的场景，NOW 沿用）
-    activity: eating
-    location_id: kanade_home
-    source: inferred
-  - at: "08:10"        # 宫益坂女子学园 3-B 到校；课、社团、委员会、辅导班粗粒度合成一段
-    activity: studying
-    location_id: miyamasuzaka_girls
-    source: inferred
-  - at: "19:00"        # 放学后回宵崎家，和奏一起吃晚饭（出发时刻按路程倒推）
-    activity: eating
-    location_id: kanade_home
-    source: inferred
-  - at: "19:40"        # 学业负担（研究 #9）；在奏的房间
-    activity: studying
-    location_id: kanade_home_room
-    source: inferred
-  - at: "22:30"        # 地点：研究 #8 在奏的房间创作；类型：作词担当；每天 22:30 起、到 01:00 都是推断
-    activity: writing_lyrics
-    location_id: kanade_home_room
-    source: inferred
+  weekday:
+    - at: "01:00"        # 25時是通常集合（研究 #12），每晚必到是试运行简化；在奏的房间是推断
+      activity: online_chatting
+      location_id: kanade_home_room
+      channel_id: nightcord
+      source: inferred
+    - at: "02:00"        # 四人里最早下线：研究 #12 只有一晚因第二天上学先下线（04:00），不是规律；时刻推断
+      activity: resting
+      location_id: kanade_home_room
+      source: inferred
+    - at: "07:20"        # 早饭后出门（PAST 有吃完早饭上学的场景，NOW 沿用）
+      activity: eating
+      location_id: kanade_home
+      source: inferred
+    - at: "08:10"        # 宫益坂女子学园 3-B 到校；课、社团、委员会、辅导班粗粒度合成一段
+      activity: studying
+      location_id: miyamasuzaka_girls
+      source: inferred
+    - at: "19:00"        # 放学后回宵崎家，和奏一起吃晚饭（出发时刻按路程倒推）
+      activity: eating
+      location_id: kanade_home
+      source: inferred
+    - at: "19:40"        # 学业负担（研究 #9）；在奏的房间
+      activity: studying
+      location_id: kanade_home_room
+      source: inferred
+    - at: "22:30"        # 地点：研究 #8 在奏的房间创作；类型：作词担当；每天 22:30 起、到 01:00 都是推断
+      activity: writing_lyrics
+      location_id: kanade_home_room
+      source: inferred
+  # 休息日（周末、祝日）：不去学校，在家学习（研究 #9 学业负担；#14 的周末模考只是实例，不是每周
+  # 规律）。奏 08:00 回房间、09:00–14:00 在房里补眠，所以真冬 08:00 前起床、上午在公共区域学，
+  # 奏醒了再回房间：谁睡着的时候另一个人都不在那个房间（ena 审查 CONTENT-2 §3 疑点 3）。
+  # 整张表是推断，等官方出处调研（CONTENT-4）。
+  rest_day:
+    - at: "01:00"
+      activity: online_chatting
+      location_id: kanade_home_room
+      channel_id: nightcord
+      source: inferred
+    - at: "02:00"
+      activity: resting
+      location_id: kanade_home_room
+      source: inferred
+    - at: "07:40"
+      activity: eating
+      location_id: kanade_home
+      source: inferred
+    - at: "08:20"
+      activity: studying
+      location_id: kanade_home
+      source: inferred
+    - at: "12:30"
+      activity: eating
+      location_id: kanade_home
+      source: inferred
+    - at: "13:10"
+      activity: studying
+      location_id: kanade_home
+      source: inferred
+    - at: "14:10"
+      activity: studying
+      location_id: kanade_home_room
+      source: inferred
+    - at: "19:00"
+      activity: eating
+      location_id: kanade_home
+      source: inferred
+    - at: "19:40"
+      activity: studying
+      location_id: kanade_home_room
+      source: inferred
+    - at: "22:30"
+      activity: writing_lyrics
+      location_id: kanade_home_room
+      source: inferred
 
 access_grants:
   locations:

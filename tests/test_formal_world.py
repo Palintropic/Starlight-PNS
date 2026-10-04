@@ -30,6 +30,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from pns.interfaces.app import create_app  # noqa: E402
 from pns.interfaces.composition import AutonomySettings, WorldControlPlane  # noqa: E402
+from pns.interfaces.content_maintenance import (  # noqa: E402
+    read_conflicts,
+    run_content_decisions,
+)
 from pns.models.content_ledger import (  # noqa: E402
     ConflictStatus,
     ContentLedger,
@@ -49,6 +53,7 @@ from pns.runtime.formal_world import (  # noqa: E402
     rhythm_fingerprint,
     rhythm_subject,
 )
+from pns.runtime.persistence import ContentNotAdopted  # noqa: E402
 from pns.runtime.persistence.lifecycle import _fingerprint  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.runtime.scheduler import SchedulerError  # noqa: E402
@@ -116,15 +121,13 @@ class MealTests(unittest.TestCase):
         # 实机上见过的：作息里没有吃饭，"好饿"就只能靠嘴念一整个下午。
         # 只钉已经决定的这两人；饭点是逐个角色的内容取舍，不是全体居民的
         # 规范（奏的研究 #5 就不支持每天固定两顿）。
+        # 平日表、休息日表各自都要有两顿：休息日不能把饭一起省掉。
         registry = BOUNDARY.active()
         for character_id in ("mizuki", "ena"):
-            with self.subTest(character_id=character_id):
-                meals = [
-                    segment
-                    for segment in registry.rhythm(character_id).segments
-                    if segment.activity is ActivityKind.EATING
-                ]
-                self.assertGreaterEqual(len(meals), 2)
+            for table in registry.rhythm(character_id).tables:
+                with self.subTest(character_id=character_id, first=table[0].label, size=len(table)):
+                    meals = [segment for segment in table if segment.activity is ActivityKind.EATING]
+                    self.assertGreaterEqual(len(meals), 2)
 
 
 class InitialStateTests(unittest.TestCase):
@@ -139,12 +142,20 @@ class InitialStateTests(unittest.TestCase):
                 self.assertEqual(world.location_of(character_id), segment.location_id)
                 self.assertIs(world.activity_of(character_id).kind, segment.activity)
                 self.assertEqual(world.activity_of(character_id).since, world.clock)
-        # 计划 §5.2 的清单：瑞希在家（19:00 正在吃晚饭）、绘名在夜间定时制；
-        # 19:00 谁都不在 Nightcord。
+        # 计划 §5.2 的清单：瑞希在家（19:00 正在吃晚饭）；19:00 谁都不在 Nightcord。
+        # WALL 是 2026-09-27 周日：休息日没有夜间定时制，绘名在画室。
         self.assertEqual(world.location_of("mizuki"), "mizuki_home")
-        self.assertEqual(world.location_of("ena"), "kamiyama_high")
+        self.assertEqual(world.location_of("ena"), "ena_home_studio")
         self.assertEqual(world.channels_for("mizuki"), [])
         self.assertEqual(world.channels_for("ena"), [])
+
+    def test_a_weekday_launch_puts_ena_at_night_school(self):
+        # 同一时刻换成平日（2026-09-28 周一）：绘名在夜间定时制。
+        monday = datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc)
+        world = _state(BOUNDARY.active(), wall=monday).world_state
+        self.assertEqual(world.clock, datetime(2026, 9, 28, 19, 0))
+        self.assertEqual(world.location_of("ena"), "kamiyama_high")
+        self.assertEqual(world.location_of("mafuyu"), "kanade_home")
 
     def test_a_launch_inside_a_channel_segment_starts_in_the_channel(self):
         # 开局那一段若声明了频道，开局就在频道里（例如在 25 時里开局）。
@@ -457,9 +468,10 @@ class TwentyFiveOClockTests(PlaneTestCase):
             world.state.world_state.clock, launch + timedelta(hours=6), "跨过了零点到 01:00"
         )
         self.assertEqual(self.provider.generations, [], "没按 Start，不调模型")
-        # 绘名从学校回家、再去工作室，都是走过去的：没有一跳是瞬移。
+        # 绘名的每一次换地方都是走过去的：没有一跳是瞬移。开局在哪取决于开局那天
+        # 是平日（夜间定时制）还是休息日（画室），从作息表读，不写死。
         graph = world.state.world_state.locations
-        position = "kamiyama_high"
+        position = self.registry.rhythm("ena").segment_at(launch).location_id
         for event in world.state.events.events():
             if event.actor_id == "ena" and event.type.value == "character.location_changed":
                 self.assertIsNotNone(
@@ -479,28 +491,28 @@ class ContentGateTests(PlaneTestCase):
         changed = _with_rhythm(self.registry, "mizuki", ActivityKind.DRAWING)
         plane = self.make_plane(registry_provider=lambda: changed)
         self.addCleanup(plane.service.release_all)
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
-        (conflict,) = world.state.content.pending()
-        self.assertEqual(conflict.subject, "rhythm:mizuki")
-        self.assertEqual(conflict.registry_revision, changed.revision)
-        # 新版不生效：瑞希不受作息驱动，其他人照常。
-        self.assertEqual(world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu"))
+        # 新版待决：不运行一个残缺的作息集合（CONTENT-4 过渡设计 v2）。冲突已经
+        # 存盘，世界已经关闭、所有权已经释放。
+        with self.assertRaises(ContentNotAdopted) as caught:
+            plane.restore("yoake-mae")
+        (blocked,) = caught.exception.gate.blocked()
+        self.assertEqual((blocked.subject, blocked.reason), ("rhythm:mizuki", "pending"))
+        self.assertIsNone(plane.service.opened("yoake-mae"))
+        (view,) = read_conflicts(plane, "yoake-mae")
+        self.assertEqual((view.conflict_id, view.status), (blocked.conflict_id, "pending"))
 
         # 再打开一次不重复记。
-        plane.close("yoake-mae")
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
-        self.assertEqual(len(world.state.content.conflicts), 1)
+        with self.assertRaises(ContentNotAdopted):
+            plane.restore("yoake-mae")
+        self.assertEqual(len(read_conflicts(plane, "yoake-mae")), 1)
 
-        # 项目所有者明确采用：下次打开才生效。
-        plane.decide_content_conflict("yoake-mae", conflict.conflict_id, "adopted")
-        self.assertEqual(
-            world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu"), "本次打开不变"
-        )
-        plane.close("yoake-mae")
+        # 项目所有者明确采用（冷维护），下一次打开才生效。
+        report = run_content_decisions(plane, "yoake-mae", [(view.conflict_id, "adopted")])
+        self.assertEqual(report.errors, [])
+        self.assertTrue(report.on_disk)
         plane.restore("yoake-mae")
         world = plane.service.opened("yoake-mae")
+        self.assertIsNone(world.held)
         self.assertEqual(
             world.runtime.rhythm.characters(), ("ena", "kanade", "mafuyu", "mizuki")
         )
@@ -528,14 +540,18 @@ class ContentGateTests(PlaneTestCase):
         changed = _with_rhythm(self.registry, "ena", ActivityKind.RESTING)
         plane = self.make_plane(registry_provider=lambda: changed)
         self.addCleanup(plane.service.release_all)
-        plane.restore("yoake-mae")
-        conflict = plane.service.opened("yoake-mae").state.content.pending()[0]
-        plane.decide_content_conflict("yoake-mae", conflict.conflict_id, "declined")
-        plane.close("yoake-mae")
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
-        self.assertEqual(world.runtime.rhythm.characters(), ("kanade", "mafuyu", "mizuki"))
-        self.assertEqual(world.state.content.pending(), ())
+        with self.assertRaises(ContentNotAdopted) as caught:
+            plane.restore("yoake-mae")
+        (blocked,) = caught.exception.gate.blocked()
+        report = run_content_decisions(plane, "yoake-mae", [(blocked.conflict_id, "declined")])
+        self.assertEqual(report.errors, [])
+        # 驳回之后内容包里仍然只有新版：绘名没有可用的表，世界继续被挡住，
+        # 而不是悄悄跑另外三个人。
+        with self.assertRaises(ContentNotAdopted) as again:
+            plane.restore("yoake-mae")
+        (still,) = again.exception.gate.blocked()
+        self.assertEqual((still.subject, still.reason), ("rhythm:ena", "declined"))
+        self.assertIsNone(plane.service.opened("yoake-mae"))
 
 
 class AdoptionChainTests(unittest.TestCase):
@@ -816,8 +832,13 @@ class RestoreConflictDurabilityTests(PlaneTestCase):
         changed = _with_rhythm(self.registry, "mizuki", ActivityKind.DRAWING)
         plane = self.make_plane(registry_provider=lambda: changed)
         self.addCleanup(plane.service.release_all)
-        plane.restore("yoake-mae")
-        world = plane.service.opened("yoake-mae")
+        # 冷维护打开：冲突的存盘在返回之前。
+        world = plane.service.restore(
+            "yoake-mae",
+            adapters=plane.build_adapters(changed),
+            checkpoint_policy=plane.checkpoint_policy,
+            clock=None,
+        )
         self.assertEqual(len(world.state.content.pending()), 1)
         self.assertEqual(world.status()["last_checkpoint_reason"], "restore_content_conflict")
         # 模拟没来得及再存一次就退出。
@@ -858,9 +879,10 @@ class RestoreConflictDurabilityTests(PlaneTestCase):
                 plane.restore("yoake-mae")
         self.assertEqual(path.read_bytes(), before, "失败的恢复不许写盘")
         self.assertIsNone(plane.service.opened("yoake-mae"))
-        # 原来的存档仍然能正常恢复。
-        plane.restore("yoake-mae")
-        self.assertEqual(len(plane.service.opened("yoake-mae").state.content.pending()), 1)
+        # 原来的存档仍然能正常恢复到"冲突存盘、拒绝运行"。
+        with self.assertRaises(ContentNotAdopted):
+            plane.restore("yoake-mae")
+        self.assertEqual([v.status for v in read_conflicts(plane, "yoake-mae")], ["pending"])
 
     def test_a_create_that_fails_assembly_leaves_no_archive(self):
         with patch.object(
