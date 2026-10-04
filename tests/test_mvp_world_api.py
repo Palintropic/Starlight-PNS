@@ -290,6 +290,13 @@ class StartStopContractTests(WorldApiTestCase):
         self.assertEqual(second.json()["autonomy"]["state"], "running")
         self.assertEqual(len(set(clock_threads()) - self.before), 1)
 
+    def test_a_legacy_world_start_does_not_renew(self):
+        # 续额策略只来自代码里的正式世界定义（COG-1 §5）：普通世界一次 Start 一份。
+        self.create()
+        budget = self.start().json()["autonomy"]["run_budget"]
+        self.assertIsNone(budget["renewal"])
+        self.assertIsNone(budget["renews_at"])
+
     def test_stopping_twice_is_idempotent(self):
         self.create()
         self.start()

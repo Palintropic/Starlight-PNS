@@ -435,6 +435,7 @@ class WorldControlPlane:
         registry: ContentRegistry,
         *,
         seed: Optional[Callable[[SessionState], None]] = None,
+        allowance_renewal: Optional[str] = None,
     ) -> RuntimeAdapters:
         """造这个世界跑起来需要、但存档里没有的那些东西。
 
@@ -572,6 +573,7 @@ class WorldControlPlane:
             rhythm=RhythmDirector(registry.rhythms()),
             content_revision=registry.revision,
             seed=seed,
+            allowance_renewal=allowance_renewal,
         )
 
     # ── 生命周期操作 ────────────────────────────────────────────────────
@@ -648,7 +650,10 @@ class WorldControlPlane:
             except SeedingError as e:
                 raise ContentUnavailable(f"这个世界的开局排期播不下去：{e}") from e
 
-        adapters = self.build_adapters(registry, seed=seed)
+        # 续额策略来自代码里的正式世界定义（COG-1 §5），不来自存档。
+        adapters = self.build_adapters(
+            registry, seed=seed, allowance_renewal=spec.allowance_renewal
+        )
         # 开局状态和时钟锚点必须用**同一个**现实时刻。"now" 模式下模拟端是按下
         # 那一分钟的整分，现实端也截到同一个整分：否则按在 02:01:15 的世界会
         # 永远晚 15 秒走到每一分钟（WEB-2 F5）。"跟东京对齐"只在 1:1 时有意义；
@@ -688,8 +693,13 @@ class WorldControlPlane:
 
     def restore(self, world_id: str) -> Dict:
         name = validate_world_id(world_id)
-        # 恢复不带播种器：存档里已经有这个世界自己的排期队列了。
-        adapters = self.build_adapters(self.registry())
+        # 恢复不带播种器：存档里已经有这个世界自己的排期队列了。续额策略按世界
+        # 名查代码里的正式世界定义，旧存档在下一次 Start 起续额（COG-1 §5）。
+        spec = formal_world(name)
+        adapters = self.build_adapters(
+            self.registry(),
+            allowance_renewal=spec.allowance_renewal if spec is not None else None,
+        )
         world = self._service.restore(
             name,
             adapters=adapters,

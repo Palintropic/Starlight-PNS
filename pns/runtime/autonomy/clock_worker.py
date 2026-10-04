@@ -225,7 +225,11 @@ class ClockWorker:
 
     # ── 操作员 ──────────────────────────────────────────────────────────
     def start_cognition(self) -> Dict:
-        """操作员 Start：认知从下一个完整模拟分钟起可用，装满单次额度。"""
+        """操作员 Start：认知从下一个完整模拟分钟起可用，装满单次额度。
+
+        额度 N 取自创建这个 worker 时的配置，记进时间线；带续额策略的世界之后
+        每天续满的也是这个记下来的 N，不在边界上重读配置。
+        """
         self._require_open()
         self._world.runtime.start_cognition(
             self._config.max_activations_per_run, wall=self._wall_now()
@@ -427,6 +431,9 @@ class ClockWorker:
                     "limit": limit,
                     "used": (limit - remaining) if remaining is not None else 0,
                     "remaining": remaining if remaining is not None else limit,
+                    "renewal": cognition.get("renewal"),
+                    "renews_at": cognition.get("renews_at"),
+                    "day_start": cognition.get("day_start"),
                 },
                 "world_actions": self._world_actions(runtime),
                 # 时钟（设计 §7.1）

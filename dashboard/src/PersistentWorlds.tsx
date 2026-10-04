@@ -95,9 +95,16 @@ function describeDriver(driver: WorldDriverStatus | null): { label: string; tone
       ? { label: '认知运行中', tone: 'ok' }
       : { label: '认知暂不可用', tone: 'warn' };
   }
-  // 两种"花完了"必须分开说：一种再按一次 Start 就好，另一种按多少次都没用。
+  // 操作者按过 Stop 就先说"已停"：耗尽仍是并列原因，exit_reason 可能还是
+  // run_budget_exhausted，但授权已经收回，不会再续，也不该催人"再按 Start"。
+  if (driver.cognition_causes.includes('operator_paused')) {
+    return { label: '已停', tone: 'dim' };
+  }
+  // 两种"花完了"必须分开说：一种再按一次 Start（或等续额）就好，另一种按多少次都没用。
   if (driver.exit_reason === 'run_budget_exhausted') {
-    return { label: '本轮额度用完', tone: 'warn' };
+    return driver.run_budget.renews_at
+      ? { label: `今天的额度用完了，${simMinute(driver.run_budget.renews_at)} 续`, tone: 'warn' }
+      : { label: '本轮额度用完', tone: 'warn' };
   }
   if (driver.exit_reason === 'world_action_cap') {
     return { label: '已达世界动作上限', tone: 'ooc' };
@@ -108,7 +115,7 @@ function describeDriver(driver: WorldDriverStatus | null): { label: string; tone
 const CAUSE_TEXT: Record<string, string> = {
   not_started: '还没 Start',
   operator_paused: '操作者已停止',
-  run_budget_exhausted: '本轮额度用完',
+  run_budget_exhausted: '额度用完',
   world_action_cap: '世界动作上限',
   process_stopped: '停机期间',
   fault: '时钟故障',
@@ -120,6 +127,34 @@ const CLOCK_STATE_TEXT: Record<string, string> = {
   healthy: '与现实同步',
   faulted: '故障（退避重试中）',
 };
+
+/** 模拟时刻（ISO，无时区）给人看的形状：月-日 时:分。 */
+const simMinute = (iso: string): string => iso.slice(5, 16).replace('T', ' ');
+
+/** 额度那一格。续额只在 renews_at 有值时承诺；故障、世界上限照样由"认知"那一格并列说。 */
+function describeBudget(driver: WorldDriverStatus, clock: string | null): string {
+  const budget = driver.run_budget;
+  const exhausted = driver.exit_reason === 'run_budget_exhausted';
+  if (budget.renewal) {
+    if (!budget.renews_at) {
+      // Stop 了：授权收回，不写续额时刻。
+      return `每天 ${budget.limit} 次，今天用了 ${budget.used}（已停，不再续）`;
+    }
+    const when =
+      clock !== null && budget.renews_at === clock
+        ? '本分钟处理完后续'
+        : `${simMinute(budget.renews_at)} 续`;
+    return exhausted
+      ? `今天的额度用完了，${when}`
+      : `每天 ${budget.limit} 次，今天还剩 ${budget.remaining}，${when}`;
+  }
+  return (
+    `${budget.used} / ${budget.limit} 条激活` +
+    (exhausted && !driver.cognition_causes.includes('operator_paused')
+      ? '（已用完；再按一次「开始认知」就是新的一轮）'
+      : '')
+  );
+}
 
 const causesText = (causes: string[]): string =>
   causes.map((cause) => CAUSE_TEXT[cause] ?? cause).join('、');
@@ -517,7 +552,10 @@ export default function PersistentWorlds() {
             const busy = (action: Action) => pending[`${world.world_id}:${action}`] !== undefined;
             const driver = world.autonomy;
             const driverState = describeDriver(driver);
-            const driving = driver !== null && driver.running;
+            // 额度用完、等续额的授权也算开着：它到边界会自己续满接着花，所以
+            // 这时给的必须是「停止认知」，否则操作者没有地方收回它（COG-1 §4）。
+            const driving =
+              driver !== null && (driver.running || Boolean(driver.run_budget.renews_at));
             return (
               <li key={world.world_id} className="worlds-item">
                 <div className="worlds-item-head">
@@ -711,15 +749,8 @@ export default function PersistentWorlds() {
                       </dd>
                     </div>
                     <div>
-                      <dt>本轮额度</dt>
-                      <dd>
-                        {driver === null
-                          ? '—'
-                          : `${driver.run_budget.used} / ${driver.run_budget.limit} 条激活` +
-                            (driver.exit_reason === 'run_budget_exhausted'
-                              ? '（已用完；再按一次「开始认知」就是新的一轮）'
-                              : '')}
-                      </dd>
+                      <dt>{driver?.run_budget.renewal ? '今天的额度' : '本轮额度'}</dt>
+                      <dd>{driver === null ? '—' : describeBudget(driver, world.clock)}</dd>
                     </div>
                     <div>
                       <dt>世界一生的动作</dt>

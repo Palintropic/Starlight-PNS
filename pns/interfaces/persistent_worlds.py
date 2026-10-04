@@ -98,15 +98,24 @@ class DriverCadenceModel(BaseModel):
 
 
 class RunBudgetModel(BaseModel):
-    """**这一轮** Start 的额度。用完了 worker 自己停下，再按一次 Start 重置。
+    """**这一份**授权的额度。不续额时一次 Start 一份，用完再按 Start。
 
-    它活在进程里，所以它跟"这个世界一生做过多少"是两件事 —— 后者是
-    `world_actions`，跨重启、跨恢复都成立。
+    带续额策略（`renewal` 非空）时是"每个世界日最多 limit 次"：`used` /
+    `remaining` 是这一天的，`renews_at` 到了续满，直到 Stop 或重启（COG-1）。
+    它跟"这个世界一生做过多少"是两件事 —— 后者是 `world_actions`，跨重启、
+    跨恢复都成立。
     """
 
     limit: int
     used: int
     remaining: int
+    # 续额策略 id；null = 这份额度不续。
+    renewal: Optional[str] = None
+    # 下一次续满的模拟时刻。Stop / 还没 Start / 不续额时为 null。有值不承诺
+    # 到时候能调用模型：故障、世界上限续额后仍在。
+    renews_at: Optional[str] = None
+    # 这一天额度的起点（Start 或上一次续额）。
+    day_start: Optional[str] = None
 
 
 class WorldActionsModel(BaseModel):

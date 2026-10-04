@@ -318,11 +318,17 @@ class PersistentScheduler:
         rhythm_driven = self._rhythm_owned or (
             autonomy is not None and autonomy.rhythm is not None
         )
+        # 带续额策略的授权同理：续额在协调器的时钟步里做，从这里推会越过续额
+        # 边界而不续（COG-1 §3）。正式世界本来就挂作息，这是兜底。
+        cognition = self._state.cognition
+        renewing = cognition is not None and cognition.current.renewal is not None
         # 默认拒绝：作息驱动的会话里，协调器还没挂上时谁都不能推时钟。
-        if rhythm_driven and not (autonomy is not None and autonomy._owns_clock_step()):
+        if (rhythm_driven or renewing) and not (
+            autonomy is not None and autonomy._owns_clock_step()
+        ):
             raise SchedulerError(
-                "这个世界由作息驱动：时间只能经由运行时推进（runtime.advance() 或时钟 "
-                "worker），直接推调度器会跳过作息、行程与频道的后果"
+                "这个世界由作息或续额授权驱动：时间只能经由运行时推进（runtime.advance() "
+                "或时钟 worker），直接推调度器会跳过作息、行程、频道与续额的后果"
             )
 
     def _tick(self, target: datetime, minutes: int, *, record: bool = True) -> TickResult:

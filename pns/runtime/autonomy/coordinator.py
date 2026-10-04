@@ -47,7 +47,8 @@ from pns.models.agency import AgencyBudget, AgencyOutcome
 from pns.models.authored import GenerationAudit
 from pns.models.clock_anchor import ClockAnchor, utc_now
 from pns.models.cognition import (
-    OPERATOR_CLEARABLE,
+    RENEWAL_POLICIES,
+    CognitionCause,
     CognitionTimeline,
     consumes_allowance,
 )
@@ -74,6 +75,9 @@ from pns.runtime.memory.recall import MemoryRecall
 from pns.runtime.event_commit import _commit_rhythm_event, commit_session_event
 from pns.runtime.rhythm import RhythmDirector
 from pns.runtime.scheduler import PersistentScheduler
+
+# 已经是这些原因时 Stop 什么都不写：授权本来就没开，或已经关了。
+_STOP_IS_NOOP = frozenset({CognitionCause.NOT_STARTED, CognitionCause.OPERATOR_PAUSED})
 
 # 状态投影里默认回看多少条。
 _RECENT = 20
@@ -113,6 +117,7 @@ class AutonomousRuntime:
         retry: Optional[RetryPolicy] = None,
         recall_budget=None,
         rhythm: Optional[RhythmDirector] = None,
+        allowance_renewal: Optional[str] = None,
         name: str = "autonomy",
     ) -> None:
         if not isinstance(state, SessionState):
@@ -133,6 +138,11 @@ class AutonomousRuntime:
         if rhythm is not None and not isinstance(rhythm, RhythmDirector):
             raise AutonomyError("rhythm 必须是 RhythmDirector")
         self._rhythm = rhythm
+        # 有限 Start 记进时间线的续额策略（COG-1）。来自代码里的正式世界定义，
+        # 由绑定方交进来，不从存档读：存档决定不了自己的授权怎么续。
+        if allowance_renewal is not None and allowance_renewal not in RENEWAL_POLICIES:
+            raise AutonomyError(f"未知的续额策略: {allowance_renewal!r}")
+        self._allowance_renewal = allowance_renewal
 
         # 已经绑在这个会话上的服务原样复用；没有的才建。协调器不是它们的
         # 拥有者，只是它们的编排者 —— 所以它绝不会造出第二份权威。
@@ -673,6 +683,9 @@ class AutonomousRuntime:
         从下一个完整模拟分钟起生效：补跑途中按下 Start，停机期间触发的到期
         仍然不可用（设计 §5.1）。故障、现实时钟落后、世界上限不归它管——
         它们还在时，Start 成功返回，但如实报告认知仍不可用。
+
+        这个运行时带续额策略、额度有限时，授权是"每个世界日最多 N 次"：
+        额度在每个边界之后续满，直到 Stop 或重启（COG-1）。
         """
         wall = wall if wall is not None else utc_now()
         with self._gate:
@@ -684,6 +697,9 @@ class AutonomousRuntime:
                     sim=self._anchor_minute(wall),
                     wall=self._wall(wall),
                     run_allowance=run_allowance,
+                    renewal=(
+                        self._allowance_renewal if run_allowance is not None else None
+                    ),
                 )
             )
         )
@@ -692,14 +708,15 @@ class AutonomousRuntime:
     def stop_cognition(self, *, wall: Optional[datetime] = None) -> Dict:
         """操作员 Stop：从此刻起认知不可用。时间照走、作息照走。
 
-        已经处于操作员层面的不可用（还没 Start、已经 Stop、额度已用完）时
-        什么都不写。
+        还没 Start、已经 Stop 时什么都不写。额度已用完、故障、世界上限时照样
+        记一条：Stop 收回的是授权本身，带续额的授权不收回，下一个边界就会
+        续满（COG-1 §4）。
         """
         wall = wall if wall is not None else utc_now()
 
         def change(state: SessionState) -> None:
             timeline = self._timeline(state)
-            if timeline.current.causes & OPERATOR_CLEARABLE:
+            if timeline.current.causes & _STOP_IS_NOOP:
                 return
             state.set_cognition(
                 timeline.stopped(
@@ -789,12 +806,22 @@ class AutonomousRuntime:
                 if consumes_allowance(record)
             )
             remaining = max(0, current.run_allowance - used)
+        renews_at = current.renews_at
         report = {
             "available": current.available,
             "causes": sorted(cause.value for cause in current.causes),
             "interval": current.index,
             "run_allowance": current.run_allowance,
             "run_remaining": remaining,
+            # 续额（COG-1）。renews_at 有值只说明额度到时候会续满；故障、世界上限
+            # 还在的话，续满了也不能调用模型。
+            "renewal": current.renewal,
+            "renews_at": renews_at.isoformat() if renews_at is not None else None,
+            "day_start": (
+                current.allowance_from_sim.isoformat()
+                if current.allowance_from_sim is not None
+                else None
+            ),
             "anchor": state.anchor.to_dict() if state.anchor is not None else None,
             "anchor_minute": None,
             "lag_minutes": None,
@@ -993,6 +1020,7 @@ class AutonomousRuntime:
         with self._committing():
             with state.atomic_commit():
                 clock = self.world.clock
+                self._renew_allowance_locked(clock)
                 candidates = [target]
                 due_at = self._scheduler.next_due_at()
                 boundaries = set()
@@ -1008,6 +1036,11 @@ class AutonomousRuntime:
                     if boundary is not None:
                         candidates.append(boundary)
                         boundaries.add(boundary)
+                # 续额边界也是落点：补跑跨两天就落两次、续两次。它不进 boundaries ——
+                # 续额是运维记录，不为它写时间事件，安静的一步照样安静。
+                renews_at = self._renews_at()
+                if renews_at is not None:
+                    candidates.append(renews_at)
                 step_to = min(moment for moment in candidates if moment > clock)
                 silent = quiet and step_to not in boundaries
                 tick = (
@@ -1020,6 +1053,38 @@ class AutonomousRuntime:
                     raise _NotQuiet()
                 self._close_unavailable_dues(tick.due)
         return tick, transitions
+
+    def _renews_at(self) -> Optional[datetime]:
+        timeline = self._state.cognition
+        return timeline.current.renews_at if timeline is not None else None
+
+    def _renew_allowance_locked(self, clock: datetime) -> None:
+        """离开续额边界的那一步开头续额（COG-1 §1）。调用方在时钟步事务里。
+
+        边界 b 上触发的到期属于前一天：它们全部收尾之后时钟才会离开 b，所以续额
+        排在那一分钟的所有结局之后，一个额度账户就够。
+        """
+        renews_at = self._renews_at()
+        if renews_at is None or renews_at > clock:
+            return
+        if renews_at != clock:
+            # 每个边界都是落点，时钟不可能越过它而没续额。走到这里是有人绕过了
+            # 时钟步推进时间。
+            raise AutonomyError(
+                f"时钟 {clock.isoformat()} 越过了续额边界 {renews_at.isoformat()}"
+            )
+        pending = self._state.activation_outbox.pending()
+        if pending:
+            raise AutonomyError(
+                "续额边界上还有到期资格没有结局："
+                + ", ".join(due.due_id for due in pending)
+            )
+        state = self._state
+        state.set_cognition(
+            state.cognition.allowance_renewed(
+                log_length=len(state.agency), sim=clock, wall=self._wall(None)
+            )
+        )
 
     # ── 安静的分钟（存档增长设计 §3）───────────────────────────────────
     def set_quiet_time_events(

@@ -41,6 +41,9 @@ class FormalWorldSpec:
     # 启动当天的那个时刻，此后世界与现实之间会一直差着按下时刻与它的距离。
     start: Optional[time]
     residents: Tuple[str, ...]
+    # 有限 Start 的续额策略（COG-1，见 pns/models/cognition.py 的 RENEWAL_POLICIES）。
+    # None = 一次 Start 就是一份额度，用完再按。
+    allowance_renewal: Optional[str] = None
 
     def tz(self) -> timezone:
         return timezone(self.utc_offset, self.timezone_name)
@@ -62,6 +65,7 @@ YOAKE_MAE = FormalWorldSpec(
     utc_offset=timedelta(hours=9),
     start=time(19, 0),
     residents=("mizuki", "ena", "kanade", "mafuyu"),
+    allowance_renewal="world-day-0500",
 )
 
 FORMAL_WORLDS: Mapping[str, FormalWorldSpec] = {YOAKE_MAE.world_id: YOAKE_MAE}

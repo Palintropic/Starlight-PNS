@@ -368,6 +368,7 @@ class ArchiveTests(unittest.TestCase):
                 "fault_cleared",
                 "wall_clock_behind",
                 "wall_clock_caught_up",
+                "allowance_renewed",
             },
         )
 
