@@ -565,9 +565,23 @@ export const checkpointPersistentWorld = (worldId: string): Promise<PersistentWo
 export const closePersistentWorld = (worldId: string): Promise<PersistentWorldStatus> =>
   fetch(`${worldPath(worldId)}/close`, { method: 'POST' }).then((res) => json(res));
 
-/** 开始自动推这个世界。**唯一**会让服务器自己花 API 额度的入口。 */
-export const startWorldAutonomy = (worldId: string): Promise<PersistentWorldStatus> =>
-  fetch(`${worldPath(worldId)}/autonomy/start`, { method: 'POST' }).then((res) => json(res));
+/**
+ * 开始自动推这个世界。**唯一**会让服务器自己花 API 额度的入口。
+ * `allowance` 是这次 Start 的额度 N；不给就用服务器配置的默认值。
+ */
+export const startWorldAutonomy = (
+  worldId: string,
+  allowance?: number,
+): Promise<PersistentWorldStatus> =>
+  fetch(`${worldPath(worldId)}/autonomy/start`, {
+    method: 'POST',
+    ...(allowance === undefined
+      ? {}
+      : {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allowance }),
+        }),
+  }).then((res) => json(res));
 
 /** 请驱动暂停。可重启，不关闭世界。 */
 export const stopWorldAutonomy = (worldId: string): Promise<PersistentWorldStatus> =>

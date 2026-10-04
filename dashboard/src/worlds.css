@@ -154,6 +154,10 @@
   gap: 8px;
 }
 
+.worlds-actions .worlds-allowance {
+  width: 7em;
+}
+
 .worlds-feedback {
   font: var(--type-body);
   line-height: var(--prose-leading);

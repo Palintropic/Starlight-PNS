@@ -12,7 +12,7 @@
 //
 // 每个用例都用手动兑现的 promise，不靠计时器：竞态测试不该赌调度。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import PersistentWorlds from './PersistentWorlds';
 import { OPERATOR, renderAs } from './testPrincipal';
 import * as api from './api';
@@ -407,6 +407,71 @@ describe('认知开关与世界时钟', () => {
       pending.resolve(world('alpha', { autonomy: driver('alpha', 'running') }));
       await pending.promise;
     });
+  });
+
+  it('额度格空着就用服务器默认；写了数字就按这个数 Start', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    const start = vi
+      .spyOn(api, 'startWorldAutonomy')
+      .mockResolvedValue(world('alpha', { autonomy: driver('alpha', 'running') }));
+
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const button = await screen.findByRole('button', { name: '开始认知' });
+    await act(async () => {
+      button.click();
+    });
+    expect(start).toHaveBeenLastCalledWith('alpha', undefined);
+
+    cleanup();
+    start.mockClear();
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const input = await screen.findByRole('textbox', { name: '这次 Start 的额度' });
+    fireEvent.change(input, { target: { value: ' 300 ' } });
+    await act(async () => {
+      screen.getByRole('button', { name: '开始认知' }).click();
+    });
+    expect(start).toHaveBeenLastCalledWith('alpha', 300);
+  });
+
+  it('空额度框提示的是服务器默认值，不是上一次 Start 填的 N', async () => {
+    stubMountFetches();
+    const stopped = driver('alpha', 'stopped');
+    // 上一次 Start 填了 1，现在停着：run_budget 还报着 1，配置默认是另一个数。
+    stopped.run_budget = { ...stopped.run_budget, limit: 1, used: 1, remaining: 0 };
+    stopped.cadence = { ...stopped.cadence, max_activations_per_run: 200 };
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha', { autonomy: stopped })],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const input = (await screen.findByRole('textbox', {
+      name: '这次 Start 的额度',
+    })) as HTMLInputElement;
+    expect(input.placeholder).toBe('默认 200');
+  });
+
+  it('额度不是 1–100000 的整数就不许按 Start', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha')],
+    });
+    const start = vi.spyOn(api, 'startWorldAutonomy');
+
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const input = await screen.findByRole('textbox', { name: '这次 Start 的额度' });
+    const button = screen.getByRole('button', { name: '开始认知' }) as HTMLButtonElement;
+    for (const bad of ['0', '-1', '2.5', 'abc', '100001']) {
+      fireEvent.change(input, { target: { value: bad } });
+      expect(button.disabled).toBe(true);
+    }
+    await act(async () => {
+      button.click();
+    });
+    expect(start).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: '100000' } });
+    expect(button.disabled).toBe(false);
   });
 
   it('启动被拒（409）时，说的是服务器给的那句话', async () => {

@@ -135,6 +135,21 @@ const CLOCK_STATE_TEXT: Record<string, string> = {
 
 const AGAMOTTO = '阿戈摩托之眼：每个世界日，额度被拨回同一个起点';
 
+/** 与服务器 MAX_ACTIVATIONS_PER_RUN 一致。 */
+const MAX_ALLOWANCE = 100_000;
+
+/**
+ * 额度输入框的值 → 这次 Start 要传的 N。空 = 用服务器默认（undefined）；
+ * 不是 1–MAX 的整数 = null（不许按 Start）。
+ */
+function parseAllowance(draft: string): number | undefined | null {
+  const text = draft.trim();
+  if (text === '') return undefined;
+  if (!/^\d+$/.test(text)) return null;
+  const n = Number(text);
+  return n >= 1 && n <= MAX_ALLOWANCE ? n : null;
+}
+
 /** 模拟时刻（ISO，无时区）给人看的形状：月-日 时:分。 */
 const simMinute = (iso: string): string => iso.slice(5, 16).replace('T', ' ');
 
@@ -203,6 +218,8 @@ export default function PersistentWorlds() {
   const [scenes, setScenes] = useState<SceneOption[]>([]);
   const [characterPool, setCharacterPool] = useState<string[]>([]);
   const [newId, setNewId] = useState('');
+  // 每个世界「开始认知」旁边那格额度的草稿；空 = 用服务器默认。
+  const [allowanceDraft, setAllowanceDraft] = useState<Record<string, string>>({});
   const [newScene, setNewScene] = useState('');
   const [newCharacters, setNewCharacters] = useState<string[]>([]);
 
@@ -379,12 +396,12 @@ export default function PersistentWorlds() {
       (status) => `已存下第 ${status.revision} 版`,
     );
 
-  const onStartAutonomy = (worldId: string) =>
+  const onStartAutonomy = (worldId: string, allowance: number | undefined) =>
     run(
       `${worldId}:autonomy-start`,
       'autonomy-start',
       worldId,
-      () => startWorldAutonomy(worldId),
+      () => startWorldAutonomy(worldId, allowance),
       (status) => {
         const autonomy = status.autonomy;
         if (autonomy && !autonomy.cognition_available && autonomy.cognition_causes.length) {
@@ -602,13 +619,50 @@ export default function PersistentWorlds() {
                             {busy('autonomy-stop') ? '停止中…' : '停止认知'}
                           </button>
                         ) : (
-                          <button
-                            className="btn"
-                            disabled={busy('autonomy-start')}
-                            onClick={() => onStartAutonomy(world.world_id)}
-                          >
-                            {busy('autonomy-start') ? '启动中…' : '开始认知'}
-                          </button>
+                          <>
+                            <input
+                              className="worlds-allowance"
+                              inputMode="numeric"
+                              aria-label="这次 Start 的额度"
+                              title={
+                                driver?.run_budget.renewal
+                                  ? '每个世界日最多多少次认知；空着就用服务器默认'
+                                  : '这一轮最多多少次认知；空着就用服务器默认'
+                              }
+                              // 空着按 Start 用的是服务器默认值，不是上一次填的 N：
+                              // 提示里只能写前者（ena 审 #50 P2）。
+                              placeholder={
+                                driver !== null
+                                  ? `默认 ${driver.cadence.max_activations_per_run}`
+                                  : '默认额度'
+                              }
+                              value={allowanceDraft[world.world_id] ?? ''}
+                              onChange={(e) =>
+                                setAllowanceDraft((prev) => ({
+                                  ...prev,
+                                  [world.world_id]: e.target.value,
+                                }))
+                              }
+                            />
+                            <button
+                              className="btn"
+                              disabled={
+                                busy('autonomy-start') ||
+                                parseAllowance(allowanceDraft[world.world_id] ?? '') === null
+                              }
+                              title={
+                                parseAllowance(allowanceDraft[world.world_id] ?? '') === null
+                                  ? `额度要填 1–${MAX_ALLOWANCE} 的整数`
+                                  : undefined
+                              }
+                              onClick={() => {
+                                const n = parseAllowance(allowanceDraft[world.world_id] ?? '');
+                                if (n !== null) onStartAutonomy(world.world_id, n);
+                              }}
+                            >
+                              {busy('autonomy-start') ? '启动中…' : '开始认知'}
+                            </button>
+                          </>
                         )}
                         <button
                           className="btn"
