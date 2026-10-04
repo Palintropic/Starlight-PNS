@@ -376,11 +376,22 @@ export interface WorldDriverCadence {
   max_activations_per_run: number;
 }
 
-/** **这一轮** Start 的额度。用完了认知以 run_budget_exhausted 关闭，再按一次 Start 就重置。 */
+/** **这一份**授权的额度。
+ *
+ * 不续额（`renewal` 为 null）时一次 Start 一份，用完了认知以 run_budget_exhausted
+ * 关闭，再按一次 Start 就重置。带续额策略时是"每个世界日最多 limit 次"：
+ * used / remaining 是这一天的，`renews_at` 到了续满，直到 Stop 或重启（COG-1）。
+ */
 export interface WorldRunBudget {
   limit: number;
   used: number;
   remaining: number;
+  /** 续额策略 id；null = 这份额度不续。 */
+  renewal?: string | null;
+  /** 下一次续满的模拟时刻。Stop / 还没 Start / 不续额时为 null。有值不承诺到时能调用模型。 */
+  renews_at?: string | null;
+  /** 这一天额度的起点（Start 或上一次续额）。 */
+  day_start?: string | null;
 }
 
 /** 这个世界**一生**的动作用量与上限。

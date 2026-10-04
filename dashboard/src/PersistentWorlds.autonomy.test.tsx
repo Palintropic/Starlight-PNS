@@ -179,6 +179,121 @@ describe('认知开关与世界时钟', () => {
     expect(screen.getByRole('button', { name: '停止认知' })).toBeTruthy();
   });
 
+  it('每天续额的授权用完了：说几点续，并且给的是「停止认知」', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('yoake-mae', {
+          autonomy: driver('yoake-mae', 'stopped', {
+            exit_reason: 'run_budget_exhausted',
+            cognition_causes: ['run_budget_exhausted'],
+            run_budget: {
+              limit: 300,
+              used: 300,
+              remaining: 0,
+              renewal: 'world-day-0500',
+              renews_at: '2026-08-24T05:00:00',
+              day_start: '2026-08-23T05:00:00',
+            },
+          }),
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    await screen.findByText('今天的额度用完了，08-24 05:00 续');
+    expect(screen.getByRole('button', { name: '停止认知' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '开始认知' })).toBeNull();
+    expect(screen.queryByText(/再按一次/)).toBeNull();
+  });
+
+  it('耗尽后 Stop：先说已停，不承诺续额，也不催人再按 Start', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('yoake-mae', {
+          autonomy: driver('yoake-mae', 'stopped', {
+            stop_reason: 'operator',
+            exit_reason: 'run_budget_exhausted',
+            cognition_causes: ['operator_paused', 'run_budget_exhausted'],
+            run_budget: {
+              limit: 300,
+              used: 300,
+              remaining: 0,
+              renewal: 'world-day-0500',
+              renews_at: null,
+              day_start: '2026-08-23T05:00:00',
+            },
+          }),
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    await screen.findByText('已停');
+    expect(screen.getByRole('button', { name: '开始认知' })).toBeTruthy();
+    const toggle = screen.getByRole('button', { name: /yoake-mae/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText('每天 300 次，今天用了 300（已停，不再续）')).toBeTruthy();
+    expect(screen.queryByText(/续$/)).toBeNull();
+    expect(screen.queryByText(/再按一次/)).toBeNull();
+  });
+
+  it.each([
+    ['2026-08-23T04:10:00', '每天 300 次，今天还剩 288，08-23 05:00 续'],
+    ['2026-08-23T05:00:00', '每天 300 次，今天还剩 288，本分钟处理完后续'],
+  ])('续额授权开着，时钟 %s：每天 N 次、今天还剩几次、几点续', async (clock, text) => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('yoake-mae', {
+          clock,
+          autonomy: driver('yoake-mae', 'running', {
+            run_budget: {
+              limit: 300,
+              used: 12,
+              remaining: 288,
+              renewal: 'world-day-0500',
+              renews_at: '2026-08-23T05:00:00',
+              day_start: '2026-08-22T05:00:00',
+            },
+          }),
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /yoake-mae/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText(text)).toBeTruthy();
+    expect(screen.getByText('今天的额度')).toBeTruthy();
+  });
+
+  it('不续额的世界还是「本轮」，用完了才说再按一次', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('alpha', {
+          autonomy: driver('alpha', 'stopped', {
+            exit_reason: 'run_budget_exhausted',
+            cognition_causes: ['run_budget_exhausted'],
+            run_budget: { limit: 200, used: 200, remaining: 0, renewal: null, renews_at: null },
+          }),
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    await screen.findByText('本轮额度用完');
+    expect(screen.getByRole('button', { name: '开始认知' })).toBeTruthy();
+    const toggle = screen.getByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText('本轮额度')).toBeTruthy();
+    expect(screen.getByText(/再按一次「开始认知」就是新的一轮/)).toBeTruthy();
+  });
+
   it('展开之后，时钟状态与认知不可用的全部原因都看得见', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
