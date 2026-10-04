@@ -213,7 +213,9 @@ class DailyRhythmTests(WorldApiTestCase):
 
     def test_the_pack_rhythm_moves_an_open_world_through_its_day(self):
         created = self.create()
-        self.assertEqual(created["clock"][11:16], "02:00")
+        # 开局时刻看锚点，不看此刻的时钟：测试时钟是 3000 倍速，worker 在响应
+        # 构造之前就可能已经走过一分钟（CI 上读到过 02:01）。
+        self.assertEqual(self.world().state.anchor.sim_epoch.strftime("%H:%M"), "02:00")
         # fixture 给的初始活动：频道在场是明说的，所以它有资格写 online_chatting。
         self.assertEqual(created["autonomy"]["cognition_causes"], ["not_started"])
 
