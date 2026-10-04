@@ -1404,6 +1404,12 @@ def _validate_cognition(state: "SessionState") -> None:
                     f"Agency 记录 '{record.due_id}' 用完了单次额度，紧随其后却没有"
                     f"额度耗尽的区间"
                 )
+    _validate_renewals(
+        timeline,
+        records,
+        outbox,
+        state.world_state.clock if state.world_state is not None else None,
+    )
     # 额度耗尽区间只能开在"用完最后一次额度的那条记录"之后，不能挪早也不能挪晚。
     for interval in timeline.intervals[1:]:
         if interval.opened_by is not TransitionKind.RUN_BUDGET_EXHAUSTED:
@@ -1418,6 +1424,81 @@ def _validate_cognition(state: "SessionState") -> None:
                 f"认知区间 {interval.index} 声称额度耗尽，但 Agency 日志在那里并没有"
                 f"恰好用完额度 {previous.run_allowance}"
             )
+
+
+# 按时钟盖 sim 的转换：它们的 opened_at_sim 就是转换那一刻的世界时钟。
+_CLOCK_STAMPED = frozenset(
+    {
+        TransitionKind.STOPPED,
+        TransitionKind.RUN_BUDGET_EXHAUSTED,
+        TransitionKind.WORLD_ACTION_CAP,
+        TransitionKind.FAULT_BEGAN,
+        TransitionKind.WALL_CLOCK_BEHIND,
+        TransitionKind.ALLOWANCE_RENEWED,
+    }
+)
+
+
+def _validate_renewals(timeline, records, outbox, clock) -> None:
+    """把续额钉到 Agency 日志和世界时钟上（COG-1 §6）。
+
+    时间线重放已经保证续额链本身（前提、一天接一天、时刻在受信边界上）。这里
+    再查四条，拒绝任何一次判定或计费所依赖的续额被删、多出、挪动：
+
+      (a) 还会续额的区间里，记录的触发时刻不晚于下一个边界；
+      (b) 额度起点来自续额 b 的区间里，记录的触发时刻晚于 b（沿用这个起点的
+          后续区间也算，不只看续额区间本身）；
+      (c) 还会续额的区间之后紧接的按时钟转换，不晚于下一个边界；
+      (d) 续额不晚于世界时钟；当前区间若还会续额，下一个边界不早于时钟
+          （时钟停在边界、还没离开时相等）。
+
+    夹在两次按锚点转换之间、没有任何记录或按时钟转换依赖的续额被删掉，
+    这里发现不了；它也不影响任何一次判定或计费（设计 §6 的明确边界）。
+    """
+    intervals = timeline.intervals
+    renewed_from: Optional[datetime] = None
+    for position, interval in enumerate(intervals):
+        if interval.opened_by is TransitionKind.ALLOWANCE_RENEWED:
+            renewed_from = interval.allowance_from_sim
+            if clock is None or interval.opened_at_sim > clock:
+                raise SessionStateError(
+                    f"认知区间 {interval.index} 的续额晚于世界时钟"
+                )
+        elif (
+            interval.opened_by is TransitionKind.STARTED
+            or interval.allowance_from_sim is None
+        ):
+            renewed_from = None
+        boundary = interval.renews_at
+        following = intervals[position + 1] if position + 1 < len(intervals) else None
+        end = following.from_log if following is not None else len(records)
+        for record in records[interval.from_log : end]:
+            fired_at = outbox.get(record.due_id).fired_at
+            if boundary is not None and fired_at > boundary:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 在 {fired_at.isoformat()} 触发，越过了"
+                    f"认知区间 {interval.index} 的续额边界 {boundary.isoformat()}"
+                )
+            if renewed_from is not None and fired_at <= renewed_from:
+                raise SessionStateError(
+                    f"Agency 记录 '{record.due_id}' 在 {fired_at.isoformat()} 触发，属于"
+                    f"{renewed_from.isoformat()} 续额之前的那一天，却记在续额之后"
+                )
+        if (
+            boundary is not None
+            and following is not None
+            and following.opened_by in _CLOCK_STAMPED
+            and following.opened_at_sim > boundary
+        ):
+            raise SessionStateError(
+                f"认知区间 {following.index} 在 {following.opened_at_sim.isoformat()} 按时钟"
+                f"转换，越过了续额边界 {boundary.isoformat()}"
+            )
+    boundary = timeline.current.renews_at
+    if boundary is not None and clock is not None and boundary < clock:
+        raise SessionStateError(
+            f"世界时钟已越过续额边界 {boundary.isoformat()}，时间线上却没有那次续额"
+        )
 
 
 def _opens_exhaustion(timeline, interval, log_position: int) -> bool:

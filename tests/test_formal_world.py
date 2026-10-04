@@ -379,6 +379,25 @@ class BootstrapApiTests(PlaneTestCase):
         self.assertEqual(state.world_state.location_of("kanade"), "kanade_home")
         self.assertEqual(len(state.events), 0, "开局不写世界事件")
 
+    def test_start_renews_daily_on_create_and_after_restore(self):
+        # COG-1：正式世界的有限 Start 是"每个世界日最多 N 次"。策略按世界名查代码
+        # 里的定义，开局与恢复两条路都拿得到；恢复本身不续（还没 Start）。
+        url = "/api/persistent-worlds/yoake-mae"
+        self.assertEqual(self.client.post(f"{url}/bootstrap").status_code, 201)
+        budget = self.client.post(f"{url}/autonomy/start").json()["autonomy"]["run_budget"]
+        self.assertEqual(budget["renewal"], "world-day-0500")
+        self.assertEqual(budget["renews_at"][11:], "05:00:00")
+        self.assertIsNotNone(budget["day_start"])
+        self.client.post(f"{url}/close")
+        restored = self.client.post(f"{url}/restore")
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertIsNone(restored.json()["autonomy"]["run_budget"]["renews_at"])
+        budget = self.client.post(f"{url}/autonomy/start").json()["autonomy"]["run_budget"]
+        self.assertEqual(budget["renewal"], "world-day-0500")
+        stopped = self.client.post(f"{url}/autonomy/stop").json()["autonomy"]
+        self.assertIsNone(stopped["run_budget"]["renews_at"])
+        self.assertEqual(stopped["stop_reason"], "operator")
+
     def test_an_unknown_start_mode_is_refused_not_ignored(self):
         with patch.dict(os.environ, {"PNS_FORMAL_START": "tonight"}):
             response = self.client.post("/api/persistent-worlds/yoake-mae/bootstrap")

@@ -7,7 +7,7 @@
 # 这些原因属于 Operational History（Article XIII）：它们解释的是"这一刻为什么
 # 没有做决定"，不是任何 resident 的经历，也不会进入观察、记忆或提示词。
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from enum import Enum
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
@@ -76,6 +76,36 @@ class CognitionTimelineError(ValueError):
     """认知时间线本身不合法，或一次转换不成立。"""
 
 
+# ── 续额策略（COG-1）────────────────────────────────────────────────────
+#
+# 带策略的 Start 授权"每个世界日最多 N 次"：额度在每个边界之后续满。策略是
+# 代码里的闭集，存档只写 id —— 边界时刻不进存档，改存档挪不动它。改边界
+# 要加新 id，旧授权带着旧 id 复核，不被重新解释。
+#
+# 时刻是世界本地时间（模拟时钟就是世界本地时间）。
+RENEWAL_POLICIES: Mapping[str, time] = {"world-day-0500": time(5, 0)}
+
+
+def _renewal_id(value) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in RENEWAL_POLICIES:
+        raise CognitionTimelineError(f"未知的续额策略: {value!r}")
+    return value
+
+
+def next_boundary(renewal: str, after: datetime) -> datetime:
+    """策略 renewal 下严格晚于 after 的第一个续额边界。"""
+    at = RENEWAL_POLICIES[_renewal_id(renewal)]
+    boundary = datetime.combine(after.date(), at)
+    return boundary if boundary > after else boundary + timedelta(days=1)
+
+
+# 续额不能越过的原因：操作员没开或关掉了授权。耗尽、故障、现实时钟落后、世界
+# 上限都不妨碍续额，续额也不清它们（只清 run_budget_exhausted）。
+RENEWAL_BLOCKED_BY = frozenset({CognitionCause.NOT_STARTED, CognitionCause.OPERATOR_PAUSED})
+
+
 class TransitionKind(str, Enum):
     """区间是怎么开始的。闭集。"""
 
@@ -89,6 +119,7 @@ class TransitionKind(str, Enum):
     FAULT_CLEARED = "fault_cleared"
     WALL_CLOCK_BEHIND = "wall_clock_behind"
     WALL_CLOCK_CAUGHT_UP = "wall_clock_caught_up"
+    ALLOWANCE_RENEWED = "allowance_renewed"  # 世界日边界续额（COG-1）
 
 
 def _causes(values, *, allow_empty: bool) -> FrozenSet[CognitionCause]:
@@ -181,6 +212,12 @@ class CognitionInterval:
     # 所以它**不要求单调**：区间按日志位置切，这个字段只供审计和派生 cutoff。
     opened_at_sim: datetime
     opened_at_wall: str
+    # 续额策略 id（COG-1）。None = 这份额度不续。由带策略的 Start 设置，随额度
+    # 往后带；恢复、不带策略的 Start 清掉。
+    renewal: Optional[str] = None
+    # 这一份额度属于哪一天的起点：Start 的 opened_at_sim，或续额的那个边界。
+    # 只在 renewal 不为空时有值——不续额的世界不多出任何字段（复审 F1）。
+    allowance_from_sim: Optional[datetime] = None
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -223,13 +260,37 @@ class CognitionInterval:
         set_(self, "opened_at_sim", _sim_time(self.opened_at_sim, "opened_at_sim"))
         if not isinstance(self.opened_at_wall, str) or not self.opened_at_wall:
             raise CognitionTimelineError("opened_at_wall 必须是非空字符串")
+        set_(self, "renewal", _renewal_id(self.renewal))
+        if self.renewal is None:
+            if self.allowance_from_sim is not None:
+                raise CognitionTimelineError("不续额的区间不能有 allowance_from_sim")
+        else:
+            if allowance is None:
+                raise CognitionTimelineError("续额策略只能跟着有限额度")
+            if self.allowance_from_sim is None:
+                raise CognitionTimelineError("续额的区间必须写明 allowance_from_sim")
+            set_(
+                self,
+                "allowance_from_sim",
+                _sim_time(self.allowance_from_sim, "allowance_from_sim"),
+            )
 
     @property
     def available(self) -> bool:
         return not self.causes
 
+    @property
+    def renews_at(self) -> Optional[datetime]:
+        """这份授权下一次续额的边界；授权不续或已被操作员关掉时为 None。
+
+        有值不等于到时候能调用模型：故障、现实时钟落后、世界上限续额后仍在。
+        """
+        if self.renewal is None or self.causes & RENEWAL_BLOCKED_BY:
+            return None
+        return next_boundary(self.renewal, self.allowance_from_sim)
+
     def to_dict(self) -> Dict:
-        return {
+        payload = {
             "index": self.index,
             "from_log": self.from_log,
             "causes": _sorted_values(self.causes),
@@ -240,6 +301,11 @@ class CognitionInterval:
             "opened_at_sim": self.opened_at_sim.isoformat(),
             "opened_at_wall": self.opened_at_wall,
         }
+        # 为空不写键：不续额的世界序列化与加字段之前相同，旧存档按缺省读回。
+        if self.renewal is not None:
+            payload["renewal"] = self.renewal
+            payload["allowance_from_sim"] = self.allowance_from_sim.isoformat()
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping) -> "CognitionInterval":
@@ -259,6 +325,8 @@ class CognitionInterval:
                 opened_by=payload["opened_by"],
                 opened_at_sim=payload["opened_at_sim"],
                 opened_at_wall=payload["opened_at_wall"],
+                renewal=payload.get("renewal"),
+                allowance_from_sim=payload.get("allowance_from_sim"),
             )
         except (KeyError, TypeError) as e:
             raise CognitionTimelineError(f"区间缺字段或形状不对: {e}") from None
@@ -313,6 +381,11 @@ class CognitionTimeline:
                 wall=interval.opened_at_wall,
                 run_allowance=(
                     interval.run_allowance
+                    if interval.opened_by is TransitionKind.STARTED
+                    else None
+                ),
+                renewal=(
+                    interval.renewal
                     if interval.opened_by is TransitionKind.STARTED
                     else None
                 ),
@@ -371,7 +444,7 @@ class CognitionTimeline:
     # `_next_interval()` 按转换种类决定；调用方只给"何时（日志位置、模拟分钟、
     # 现实时间）"和 Start 的额度。存档加载用同一个函数把每个区间从前一个区间
     # 重放出来，于是单改一个区间的原因、cutoff 或额度都对不上。
-    def _append(self, kind, *, log_length, sim, wall, run_allowance=None):
+    def _append(self, kind, *, log_length, sim, wall, run_allowance=None, renewal=None):
         return CognitionTimeline(
             self.intervals
             + (
@@ -382,6 +455,7 @@ class CognitionTimeline:
                     sim=sim,
                     wall=wall,
                     run_allowance=run_allowance,
+                    renewal=renewal,
                 ),
             )
         )
@@ -394,13 +468,22 @@ class CognitionTimeline:
         """
         return self._append(TransitionKind.RESTORED, log_length=log_length, sim=sim, wall=wall)
 
-    def started(self, *, log_length, sim, wall, run_allowance) -> "CognitionTimeline":
+    def started(
+        self, *, log_length, sim, wall, run_allowance, renewal=None
+    ) -> "CognitionTimeline":
         return self._append(
             TransitionKind.STARTED,
             log_length=log_length,
             sim=sim,
             wall=wall,
             run_allowance=run_allowance,
+            renewal=renewal,
+        )
+
+    def allowance_renewed(self, *, log_length, sim, wall) -> "CognitionTimeline":
+        """世界日边界续额。sim 必须正是当前授权的下一个边界。"""
+        return self._append(
+            TransitionKind.ALLOWANCE_RENEWED, log_length=log_length, sim=sim, wall=wall
         )
 
     def stopped(self, *, log_length, sim, wall) -> "CognitionTimeline":
@@ -470,6 +553,7 @@ def _next_interval(
     sim,
     wall: str,
     run_allowance: Optional[int] = None,
+    renewal: Optional[str] = None,
 ) -> CognitionInterval:
     """一次转换之后的区间。转换规则的唯一实现（设计 §13.3、§14.1）。
 
@@ -478,6 +562,7 @@ def _next_interval(
     | 恢复 | {not_started} ∪（上一区间 ∩ {world_action_cap}） | 上一区间 ∪ {process_stopped} |
     | Start | 上一区间 − 操作员可清的原因 | 上一区间 |
     | 故障解除 / 现实时钟追上 | 上一区间 − 对应原因 | 上一区间 |
+    | 续额 | 上一区间 − {run_budget_exhausted} | 上一区间（非空才加） |
     | 其余 | 上一区间 ∪ 对应原因 | 无 |
 
     cutoff 不由调用方给：`fired_at == sim` 的到期资格仍在旧原因下触发，
@@ -494,8 +579,11 @@ def _next_interval(
         raise CognitionTimelineError("转换的日志位置不能早于当前区间")
     if kind is not TransitionKind.STARTED and run_allowance is not None:
         raise CognitionTimelineError("只有 Start 设置单次额度")
+    if kind is not TransitionKind.STARTED and renewal is not None:
+        raise CognitionTimelineError("只有 Start 设置续额策略")
 
     allowance, since = current.run_allowance, current.allowance_since_log
+    policy, day_start = current.renewal, current.allowance_from_sim
     carried: FrozenSet[CognitionCause] = frozenset()
     if kind is TransitionKind.OPENED:
         raise CognitionTimelineError("opened 只能是时间线的第一个区间")
@@ -504,12 +592,31 @@ def _next_interval(
             current.causes & {CognitionCause.WORLD_ACTION_CAP}
         )
         carried = current.causes | {CognitionCause.PROCESS_STOPPED}
-        allowance = since = None
+        allowance = since = policy = day_start = None
     elif kind is TransitionKind.STARTED:
+        if renewal is not None and run_allowance is None:
+            raise CognitionTimelineError("续额策略只能跟着有限额度")
         causes = current.causes - OPERATOR_CLEARABLE
         carried = current.causes
         allowance = run_allowance
         since = None if run_allowance is None else log_length
+        policy = _renewal_id(renewal)
+        day_start = None if policy is None else sim
+    elif kind is TransitionKind.ALLOWANCE_RENEWED:
+        # 前提全部在这里查：运行时与存档重放共用。sim 必须正是下一个边界，所以
+        # 续额只能一天接一天，不能跳、不能重复、不能挪时刻。
+        expected = current.renews_at
+        if expected is None:
+            raise CognitionTimelineError("allowance_renewed：当前授权不续额或已被操作员关掉")
+        if sim != expected:
+            raise CognitionTimelineError(
+                f"allowance_renewed：续额时刻 {sim.isoformat()} 不是下一个边界 "
+                f"{expected.isoformat()}"
+            )
+        causes = current.causes - {CognitionCause.RUN_BUDGET_EXHAUSTED}
+        carried = current.causes
+        since = log_length
+        day_start = sim
     elif kind in _CLEARED_BY:
         cleared = _CLEARED_BY[kind]
         if cleared not in current.causes:
@@ -537,6 +644,8 @@ def _next_interval(
         opened_by=kind,
         opened_at_sim=sim,
         opened_at_wall=wall,
+        renewal=policy,
+        allowance_from_sim=day_start,
     )
 
 
@@ -640,6 +749,8 @@ __all__ = [
     "CognitionTimeline",
     "CognitionTimelineError",
     "OPERATOR_CLEARABLE",
+    "RENEWAL_BLOCKED_BY",
+    "RENEWAL_POLICIES",
     "TransitionKind",
     "consumes_allowance",
     "QUIET_ASLEEP",
@@ -647,6 +758,7 @@ __all__ = [
     "QUIET_REASONS",
     "REPLY_ACTIVATION_PREFIX",
     "REPLY_LAPSED",
+    "next_boundary",
     "next_minute_after",
     "normalize_causes",
     "unavailable_causes",

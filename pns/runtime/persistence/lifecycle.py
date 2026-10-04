@@ -61,6 +61,7 @@ from datetime import datetime
 from typing import Callable, Dict, Optional, Tuple
 
 from pns.models.clock_anchor import ClockAnchor, utc_now
+from pns.models.cognition import RENEWAL_POLICIES
 from pns.models.session import SessionState, TransactionBoundaryError
 from pns.runtime.agency.engine import AgencyEngine
 from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorker
@@ -126,6 +127,9 @@ class RuntimeAdapters:
     rhythm: Optional[RhythmDirector] = None
     # 作息表来自哪一版内容快照。正式世界据此记冲突待决记录（见 formal_world）。
     content_revision: int = 0
+    # 有限 Start 的续额策略 id（COG-1）。来自代码里的正式世界定义；跟作息一样
+    # 创建和恢复都由调用方交，存档里的授权只记它、不决定它。
+    allowance_renewal: Optional[str] = None
     name: str = "autonomy"
 
     def __post_init__(self) -> None:
@@ -139,6 +143,8 @@ class RuntimeAdapters:
             # 在这里判，而不是等到 bind()：bind() 发生在所有权已经拿走之后，
             # 那时失败会留下一个没人能用、又已经被占住的世界。
             raise LifecycleError("rhythm 必须是 RhythmDirector")
+        if self.allowance_renewal is not None and self.allowance_renewal not in RENEWAL_POLICIES:
+            raise LifecycleError(f"未知的续额策略: {self.allowance_renewal!r}")
 
     def bind(self, state: SessionState) -> AutonomousRuntime:
         """把服务显式绑到这份**已经恢复好**的状态上。
@@ -188,6 +194,7 @@ class RuntimeAdapters:
             retry=self.retry,
             recall_budget=self.recall_budget,
             rhythm=rhythm,
+            allowance_renewal=self.allowance_renewal,
             name=self.name,
         )
 
