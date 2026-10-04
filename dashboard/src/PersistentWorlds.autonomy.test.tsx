@@ -436,6 +436,22 @@ describe('认知开关与世界时钟', () => {
     expect(start).toHaveBeenLastCalledWith('alpha', 300);
   });
 
+  it('空额度框提示的是服务器默认值，不是上一次 Start 填的 N', async () => {
+    stubMountFetches();
+    const stopped = driver('alpha', 'stopped');
+    // 上一次 Start 填了 1，现在停着：run_budget 还报着 1，配置默认是另一个数。
+    stopped.run_budget = { ...stopped.run_budget, limit: 1, used: 1, remaining: 0 };
+    stopped.cadence = { ...stopped.cadence, max_activations_per_run: 200 };
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [world('alpha', { autonomy: stopped })],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const input = (await screen.findByRole('textbox', {
+      name: '这次 Start 的额度',
+    })) as HTMLInputElement;
+    expect(input.placeholder).toBe('默认 200');
+  });
+
   it('额度不是 1–100000 的整数就不许按 Start', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({

@@ -629,10 +629,12 @@ export default function PersistentWorlds() {
                                   ? '每个世界日最多多少次认知；空着就用服务器默认'
                                   : '这一轮最多多少次认知；空着就用服务器默认'
                               }
+                              // 空着按 Start 用的是服务器默认值，不是上一次填的 N：
+                              // 提示里只能写前者（ena 审 #50 P2）。
                               placeholder={
-                                driver?.run_budget.limit != null
-                                  ? String(driver.run_budget.limit)
-                                  : '额度'
+                                driver !== null
+                                  ? `默认 ${driver.cadence.max_activations_per_run}`
+                                  : '默认额度'
                               }
                               value={allowanceDraft[world.world_id] ?? ''}
                               onChange={(e) =>
