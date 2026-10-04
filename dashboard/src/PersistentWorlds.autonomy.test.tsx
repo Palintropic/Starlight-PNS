@@ -270,6 +270,26 @@ describe('认知开关与世界时钟', () => {
     expect(screen.getByText('今天的额度')).toBeTruthy();
   });
 
+  it('不限额的授权说不限额，不显示成 0 / N', async () => {
+    stubMountFetches();
+    vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({
+      worlds: [
+        world('alpha', {
+          autonomy: driver('alpha', 'running', {
+            run_budget: { limit: null, used: null, remaining: null, renewal: null, renews_at: null },
+          }),
+        }),
+      ],
+    });
+    renderAs(OPERATOR, <PersistentWorlds />);
+    const toggle = await screen.findByRole('button', { name: /alpha/ });
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getByText('不限额')).toBeTruthy();
+    expect(screen.queryByText(/条激活/)).toBeNull();
+  });
+
   it('不续额的世界还是「本轮」，用完了才说再按一次', async () => {
     stubMountFetches();
     vi.spyOn(api, 'fetchPersistentWorlds').mockResolvedValue({

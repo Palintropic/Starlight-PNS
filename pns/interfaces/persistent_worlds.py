@@ -106,9 +106,10 @@ class RunBudgetModel(BaseModel):
     跨恢复都成立。
     """
 
-    limit: int
-    used: int
-    remaining: int
+    # 三个都为 null = 不限额（一次 Start 没给上限）。还没 Start 时是 Start 会给的配置值。
+    limit: Optional[int] = None
+    used: Optional[int] = None
+    remaining: Optional[int] = None
     # 续额策略 id；null = 这份额度不续。
     renewal: Optional[str] = None
     # 下一次续满的模拟时刻。Stop / 还没 Start / 不续额时为 null。有值不承诺

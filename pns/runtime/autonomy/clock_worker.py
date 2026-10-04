@@ -407,8 +407,21 @@ class ClockWorker:
             next_due = due_at.isoformat() if due_at is not None else None
         except Exception:  # pragma: no cover - 状态查询不该因为读队列而失败
             next_due = None
-        limit = cognition.get("run_allowance") or self._config.max_activations_per_run
-        remaining = cognition.get("run_remaining")
+        # 三种额度要分开说：还没 Start（显示 Start 会给的配置值）、有限、不限额。
+        # 不限额是一次 Start(None) 装下的授权，不能拿配置值把它冒充成有限的。
+        unlimited = (
+            bool(cognition)
+            and cognition.get("run_allowance") is None
+            and CognitionCause.NOT_STARTED.value not in causes
+        )
+        if unlimited:
+            limit = used = remaining = None
+        else:
+            limit = cognition.get("run_allowance") or self._config.max_activations_per_run
+            remaining = cognition.get("run_remaining")
+            used = (limit - remaining) if remaining is not None else 0
+            if remaining is None:
+                remaining = limit
         with self._lock:
             thread_alive = self._thread is not None and self._thread.is_alive()
             return {
@@ -429,8 +442,8 @@ class ClockWorker:
                 "cadence": self._config.to_dict(),
                 "run_budget": {
                     "limit": limit,
-                    "used": (limit - remaining) if remaining is not None else 0,
-                    "remaining": remaining if remaining is not None else limit,
+                    "used": used,
+                    "remaining": remaining,
                     "renewal": cognition.get("renewal"),
                     "renews_at": cognition.get("renews_at"),
                     "day_start": cognition.get("day_start"),

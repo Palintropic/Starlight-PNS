@@ -212,6 +212,26 @@ class TimeFollowsTheWallTests(WorkerTestCase):
         wait_for(lambda: world.revision > revision, what="过了一个边界才落盘")
 
 
+class RunBudgetStatusTests(WorkerTestCase):
+    def test_the_budget_says_not_started_finite_and_unlimited_apart(self):
+        world = self.open()
+        worker = world.clock_worker
+        # 还没 Start：显示 Start 会给的配置值。
+        budget = worker.status()["run_budget"]
+        self.assertEqual(
+            (budget["limit"], budget["used"], budget["remaining"]),
+            (FAST.max_activations_per_run, 0, FAST.max_activations_per_run),
+        )
+        worker.start_cognition()
+        self.assertEqual(worker.status()["run_budget"]["limit"], FAST.max_activations_per_run)
+        # 不限额的 Start 没有 N：不拿配置值冒充成有限额度（COG-1 实现审 F1）。
+        world.runtime.start_cognition(None)
+        budget = worker.status()["run_budget"]
+        self.assertEqual((budget["limit"], budget["used"], budget["remaining"]), (None, None, None))
+        worker.stop_cognition()
+        self.assertIsNone(worker.status()["run_budget"]["limit"])
+
+
 class OwnershipAndStartupTests(WorkerTestCase):
     def test_close_stops_the_worker_first_and_closes_clean(self):
         world = self.open()

@@ -383,9 +383,10 @@ export interface WorldDriverCadence {
  * used / remaining 是这一天的，`renews_at` 到了续满，直到 Stop 或重启（COG-1）。
  */
 export interface WorldRunBudget {
-  limit: number;
-  used: number;
-  remaining: number;
+  /** 三个都为 null = 不限额（Start 没给上限）。还没 Start 时是 Start 会给的配置值。 */
+  limit: number | null;
+  used: number | null;
+  remaining: number | null;
   /** 续额策略 id；null = 这份额度不续。 */
   renewal?: string | null;
   /** 下一次续满的模拟时刻。Stop / 还没 Start / 不续额时为 null。有值不承诺到时能调用模型。 */
