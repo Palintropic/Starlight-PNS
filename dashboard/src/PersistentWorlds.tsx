@@ -135,6 +135,10 @@ const simMinute = (iso: string): string => iso.slice(5, 16).replace('T', ' ');
 function describeBudget(driver: WorldDriverStatus, clock: string | null): string {
   const budget = driver.run_budget;
   const exhausted = driver.exit_reason === 'run_budget_exhausted';
+  if (budget.limit === null) {
+    // 不限额的授权没有 N，也没有剩余可说。
+    return '不限额';
+  }
   if (budget.renewal) {
     if (!budget.renews_at) {
       // Stop 了：授权收回，不写续额时刻。
