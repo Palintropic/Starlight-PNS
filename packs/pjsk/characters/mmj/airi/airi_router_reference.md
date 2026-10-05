@@ -1,6 +1,6 @@
 # 桃井愛莉 _router_reference.md
 
-> Router专用评分参考，不对生成模型可见。数据来源：阶段一至五 + QT因果核实全部研究文档（见 `Claude/交接/` 及 `ChatGPT/stage1`、`ChatGPT/stage2`、`ChatGPT/stage3`、`ChatGPT/stage3_wish`、`ChatGPT/stage4`、`ChatGPT/stage5`、`ChatGPT/qt_causal`）。时间线基准：Event 212已完结状态。证据等级标注：🔒硬事実（逐条统计/逐句反查）／🟡软推断（有材料支持但未完整核实）／待验証（不确定或样本不足）。
+> Router专用评分参考，不对生成模型可见。数据来源：阶段一至五 + QT因果核实全部研究文档（见 `Claude/交接/` 及 `ChatGPT/stage1`、`ChatGPT/stage2`、`ChatGPT/stage3`、`ChatGPT/stage3_wish`、`ChatGPT/stage4`、`ChatGPT/stage5`、`ChatGPT/qt_causal`）。时间线基准：Event 218已完结状态（E213–E218 只补了事实（准决赛备战、住处、分工），性格与机制部分仍依据截至 Event 212 的研究；E213–E218 事实增量见 `airi/Claude/交接/airi_minori_e218_sync_acceptance.md`，E214 第 6 话爱莉个人章节尚未做机制分析）。证据等级标注：🔒硬事実（逐条统计/逐句反查）／🟡软推断（有材料支持但未完整核实）／待验証（不确定或样本不足）。
 
 ## Layer 1：结构/语气指标
 
