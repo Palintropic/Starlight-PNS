@@ -1366,11 +1366,15 @@ class ExistingSurfaceTests(WorldApiTestCase):
             "/api/persistent-worlds/{world_id}/quiet-time-events",
             # 「世界」页的只读概览。
             "/api/persistent-worlds/{world_id}/overview",
+            # WORLD-2：break-glass 维护入口（预检、执行、查询）。
+            "/api/persistent-worlds/{world_id}/world2/preflight",
+            "/api/persistent-worlds/{world_id}/world2/operations",
+            "/api/persistent-worlds/{world_id}/world2/operations/{operation_id}",
         ):
             self.assertIn(expected, paths)
-        # 这个前缀下只有这十一条，一条不多。
+        # 这个前缀下只有这十四条，一条不多。
         self.assertEqual(
-            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 11
+            len([p for p in paths if p.startswith("/api/persistent-worlds")]), 14
         )
 
 

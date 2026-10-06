@@ -58,7 +58,13 @@ from pns.runtime.persistence import (
     WorldIdError,
 )
 
-from .authz import principal_of
+from .authz import (
+    BREAK_GLASS_PRINCIPAL_ID,
+    VIA_BEARER,
+    RequestPrincipal,
+    current_principal,
+    principal_of,
+)
 from .composition import AdaptersUnavailable, ContentUnavailable, WorldControlPlane
 
 router = APIRouter(prefix="/api/persistent-worlds", tags=["persistent-worlds"])
@@ -706,3 +712,97 @@ def close_persistent_world(
     """
     with _translated(plane, "close", world_id):
         return _status(plane.close(world_id))
+
+
+# ── WORLD-2：地点扩展与居民入住（break-glass bearer 专用） ─────────────────
+#
+# 三个接口（实施单 §4.8；一扩展 + 四入住是五个独立原子结果，接口上逐笔可区分）：
+#
+#   POST /{world_id}/world2/preflight              只读：提议、指纹、可行与否、下一个窗口
+#   POST /{world_id}/world2/operations             执行一笔；同 id 同请求的重试**可能补存**
+#   GET  /{world_id}/world2/operations/{op_id}     从已提交历史查这一笔与它此刻的耐久档；不补存
+#
+# 鉴权（审查 F2）：中间件照旧管 401、operate / read 与跨源边界；这一组路由再加一个
+# 主体依赖，只放行 break-glass 主体经 bearer 来的请求。admin 账户的浏览器会话、
+# open-development 主体一律 403。不新增 scope：break-glass 的 scope 集合是固定的
+# ALL_SCOPES，新 scope 会在中间件那一步把合法 bearer 也拦掉。
+#
+# 请求体在主体依赖**之后**才读：主体依赖挂在路由组上，FastAPI 先跑路由组的依赖、
+# 再解端点参数，所以不合格的主体发畸形请求体，先得到的是鉴权拒绝。
+def require_break_glass(request: Request) -> RequestPrincipal:
+    principal = current_principal(request)
+    if principal.principal_id != BREAK_GLASS_PRINCIPAL_ID or principal.via != VIA_BEARER:
+        raise _error(
+            403, "forbidden", "WORLD-2 维护接口只接受 break-glass bearer 凭据"
+        )
+    return principal
+
+
+async def _world2_body(request: Request) -> Any:
+    try:
+        return await request.json()
+    except ValueError:
+        raise _error(422, "bad_request", "请求体不是 JSON") from None
+
+
+def _world2_rejected(e) -> HTTPException:
+    status = 422 if e.code == "bad_request" else 409
+    return HTTPException(
+        status, {"category": "world2_rejected", "outcome": "rejected", "code": e.code, "message": _safe(e)}
+    )
+
+
+@contextmanager
+def _world2_translated(plane: WorldControlPlane, op: str, world_id: str):
+    from pns.runtime.admission import AdmissionRejected
+
+    try:
+        yield
+    except AdmissionRejected as e:
+        raise _world2_rejected(e) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _translate(e, plane, world_id, op) from e
+
+
+_world2 = APIRouter(prefix="/{world_id}/world2", dependencies=[Depends(require_break_glass)])
+
+
+@_world2.post("/preflight")
+def world2_preflight(
+    world_id: str,
+    body: Any = Depends(_world2_body),
+    principal: RequestPrincipal = Depends(require_break_glass),
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """只读预检。没有副作用。"""
+    with _world2_translated(plane, "world2_preflight", world_id):
+        return plane.world_admission(world_id, operator=principal.principal_id).preflight(body)
+
+
+@_world2.post("/operations")
+def world2_execute(
+    world_id: str,
+    body: Any = Depends(_world2_body),
+    principal: RequestPrincipal = Depends(require_break_glass),
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """执行一笔（extension 或 admission）。同 operation_id 同请求的重试只查询或补存。"""
+    with _world2_translated(plane, "world2_execute", world_id):
+        return plane.world_admission(world_id, operator=principal.principal_id).execute(body)
+
+
+@_world2.get("/operations/{operation_id}")
+def world2_operation(
+    world_id: str,
+    operation_id: str,
+    principal: RequestPrincipal = Depends(require_break_glass),
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """从已提交历史查一笔。不补存；要补存就用同一 operation_id 重发执行请求。"""
+    with _world2_translated(plane, "world2_query", world_id):
+        return plane.world_admission(world_id, operator=principal.principal_id).query(operation_id)
+
+
+router.include_router(_world2)

@@ -906,6 +906,18 @@ class WorldControlPlane:
             raise LifecycleError(f"世界 '{world.world_id}' 没有时钟 worker（不按现实时间走）")
         return worker
 
+    def world_admission(self, world_id: str, *, operator: str):
+        """这个已打开世界的 WORLD-2 维护入口（地点扩展、居民入住）。
+
+        经当前拥有世界的 PersistentWorld 与它的提交闸门执行；节律取本进程的
+        服务器侧开局节律，跟开局播种同一份。
+        """
+        from pns.runtime.admission import WorldAdmission
+
+        return WorldAdmission(
+            self._require_open(world_id), cadence=self._autonomy.cadence, operator=operator
+        )
+
     def _require_open(self, world_id: str):
         name = validate_world_id(world_id)
         world = self._service.opened(name)
