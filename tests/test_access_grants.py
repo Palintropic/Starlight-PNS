@@ -384,8 +384,8 @@ class PackGrantTests(unittest.TestCase):
         self.assertEqual(ena.channels, frozenset({"nightcord"}))
 
     def test_characters_without_content_get_nothing_by_default(self):
-        # 25 時以外的角色还没有世界侧内容。
-        for character_id in ("ichika", "airi"):
+        # 25 時与 MMJ（WORLD-2）以外的角色还没有世界侧内容。
+        for character_id in ("ichika", "kohane"):
             with self.subTest(character_id=character_id):
                 self.assertIsNone(self.registry.grants(character_id))
 
