@@ -61,6 +61,13 @@ class ActivityKind(str, Enum):
     ONLINE_CHATTING = "online_chatting"
     # 在路上：作息行程从出发到到达之间的活动（WORLD-1）。
     COMMUTING = "commuting"
+    # 偶像的备赛与工作（WORLD-2，MMJ 入住）。现有活动都套不上：studying 会被读成
+    # 学校课业，composing 是作曲，working_part_time 是兼职，editing_video 是剪辑。
+    IDOL_PRACTICE = "idol_practice"  # 唱跳练习、基础 lesson
+    PHYSICAL_TRAINING = "physical_training"  # 体能、器械
+    STAGE_PLANNING = "stage_planning"  # 演出构思、备赛讨论
+    PERFORMANCE_REVIEW = "performance_review"  # 看演出录像做研究
+    IDOL_WORK = "idol_work"  # 个人的外部偶像工作（未细分种类）
 
 
 @dataclass(frozen=True)

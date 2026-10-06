@@ -372,7 +372,7 @@ scope 决定，非安全方法默认要求 `operate`。既没配管理凭据、�
 
 `activity` 是服务器声明的闭集：`unspecified`、`idle`、`resting`、`eating`、`studying`、
 `working_part_time`、`drawing`、`composing`、`editing_video`、`writing_lyrics`、`online_chatting`、
-`commuting`。
+`commuting`、`idol_practice`、`physical_training`、`stage_planning`、`performance_review`、`idol_work`。
 接口不接受自由文本。
 
 一次成功的新变化会提交 `character.activity_changed` 事件并立即 checkpoint，返回

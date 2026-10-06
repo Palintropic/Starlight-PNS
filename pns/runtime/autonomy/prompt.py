@@ -60,6 +60,11 @@ _ACTIVITY_LABELS = {
     "writing_lyrics": "作词",
     "online_chatting": "在线聊天",
     "commuting": "在路上",
+    "idol_practice": "唱跳练习",
+    "physical_training": "体能训练",
+    "stage_planning": "构思舞台、讨论演出",
+    "performance_review": "看演出录像做研究",
+    "idol_work": "偶像工作",
 }
 
 

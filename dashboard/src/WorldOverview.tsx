@@ -26,6 +26,11 @@ const ACTIVITY_LABEL: Record<string, string> = {
   writing_lyrics: '作词',
   online_chatting: '线上聊天',
   commuting: '在路上',
+  idol_practice: '唱跳练习',
+  physical_training: '体能训练',
+  stage_planning: '舞台企划',
+  performance_review: '看演出录像',
+  idol_work: '偶像工作',
 };
 const activityLabel = (kind: string) => ACTIVITY_LABEL[kind] ?? kind;
 
