@@ -432,13 +432,89 @@ def _parse_table(payload, character_id, table, locations, channels) -> Tuple[Rhy
     return tuple(segments)
 
 
+# ── 存进世界历史的作息（WORLD-2）─────────────────────────────────────────
+#
+# 入住事件与重放基准要把作息表**本身**存进存档：只存指纹的话，恢复时拿不回内容。
+# 这里的格式跟 YAML 是两回事：YAML 是作者写的（weekday / rest_day），这里是
+# `DailyRhythm.to_dict()` 的形状外加一个格式版本。不复用 parse_daily_rhythm ——
+# 两种形状碰巧相似不能当成契约（WORLD-2 复审 F3）。
+#
+# 解码是严格的：键必须一个不多一个不少，解出来再编码一遍必须和输入逐字相同。
+# 所以解码结果的指纹（formal_world.rhythm_fingerprint，同样基于 to_dict）一定等于
+# 写进存档时的那个——任何一个字段被改过，要么解码失败，要么指纹对不上。
+RHYTHM_CODEC_SCHEMA = "pns.daily_rhythm/1"
+
+_ENCODED_KEYS = frozenset({"schema", "character_id", "segments"})
+_ENCODED_OPTIONAL_KEYS = frozenset({"rest_day_segments"})
+_ENCODED_SEGMENT_KEYS = frozenset({"at", "activity", "location_id", "channel_id", "source"})
+
+
+def encode_rhythm(rhythm: DailyRhythm) -> Dict:
+    """把一份作息表编码成可以写进世界历史的 JSON 值。"""
+    if not isinstance(rhythm, DailyRhythm):
+        raise RhythmError("只能编码 DailyRhythm")
+    return {"schema": RHYTHM_CODEC_SCHEMA, **rhythm.to_dict()}
+
+
+def decode_rhythm(payload, *, character_id: Optional[str] = None) -> DailyRhythm:
+    """`encode_rhythm` 的逆。任何不是它亲手写出来的形状都拒绝。
+
+    给了 `character_id` 就同时核对这份作息是不是这个人的。
+    """
+    if not isinstance(payload, Mapping):
+        raise RhythmError("编码的作息表必须是字典")
+    keys = set(payload)
+    if not _ENCODED_KEYS <= keys or keys - _ENCODED_KEYS - _ENCODED_OPTIONAL_KEYS:
+        raise RhythmError(
+            f"编码的作息表键不对：收到 {'、'.join(sorted(map(str, keys))) or '空'}"
+        )
+    if payload["schema"] != RHYTHM_CODEC_SCHEMA:
+        raise RhythmError(f"不认识的作息编码版本: {payload['schema']!r}")
+    owner = payload["character_id"]
+    if character_id is not None and owner != character_id:
+        raise RhythmError(f"编码的作息表属于 {owner!r}，不是 {character_id!r}")
+    rest = payload.get("rest_day_segments")
+    rhythm = DailyRhythm(
+        character_id=owner,
+        segments=_decode_table(payload["segments"], "segments"),
+        rest_day_segments=None if rest is None else _decode_table(rest, "rest_day_segments"),
+    )
+    if encode_rhythm(rhythm) != dict(payload):
+        # 例如段的顺序被打乱、键写成了等价但不同的形状：DailyRhythm 会悄悄规整它，
+        # 指纹也就跟写进去的那一份不一样了。
+        raise RhythmError("编码的作息表不是规范形状")
+    return rhythm
+
+
+def _decode_table(entries, label: str) -> Tuple[RhythmSegment, ...]:
+    if not isinstance(entries, (list, tuple)):
+        raise RhythmError(f"编码的作息表 {label} 必须是列表")
+    segments = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping) or set(entry) != _ENCODED_SEGMENT_KEYS:
+            raise RhythmError(f"编码的作息表 {label} 第 {index + 1} 项形状不对")
+        segments.append(
+            RhythmSegment(
+                at=parse_day_minute(entry["at"], f"{label} 第 {index + 1} 项的 at"),
+                activity=entry["activity"],
+                location_id=entry["location_id"],
+                channel_id=entry["channel_id"],
+                source=entry["source"],
+            )
+        )
+    return tuple(segments)
+
+
 __all__ = [
     "MAX_SEGMENTS",
     "MINUTES_PER_DAY",
+    "RHYTHM_CODEC_SCHEMA",
     "DailyRhythm",
     "RhythmError",
     "RhythmSegment",
     "RhythmSource",
+    "decode_rhythm",
+    "encode_rhythm",
     "format_day_minute",
     "parse_daily_rhythm",
     "parse_day_minute",
