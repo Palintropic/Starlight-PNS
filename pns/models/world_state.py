@@ -335,8 +335,20 @@ class WorldState:
         """这个角色是不是这个频道的成员（有没有资格加入，不是此刻在不在）。"""
         return channel_id in self.channel_grants.get(character_id, set())
 
+    def _replace_locations(self, graph: LocationGraph) -> None:
+        """整体换上一张新的地点图。**只给 WORLD-2 的地点扩展用**（事件提交边界）。
+
+        旧图不解冻、不就地修改；新图换上就冻结。是否只增不改由
+        pns/world/extension.py 在提交前判定，这里只负责过写守卫、换引用。
+        """
+        self._check_writable()
+        if not isinstance(graph, LocationGraph):
+            raise WorldStateError("只能换上 LocationGraph")
+        graph._freeze()
+        self.locations = graph
+
     def _grant_location(self, character_id: str, location_id: str, role: str) -> None:
-        """建世界时装入一条进入授予。**只给建世界的代码用**，运行期没有调用方。"""
+        """装入一条进入授予。**只给建世界与 WORLD-2 入住用**（入住事件的状态效果）。"""
         self._check_writable()
         self._require_character_id(character_id)
         if not self.locations.has(location_id):
@@ -346,7 +358,7 @@ class WorldState:
         self.location_grants.setdefault(character_id, {})[location_id] = role
 
     def _grant_channel(self, character_id: str, channel_id: str) -> None:
-        """建世界时装入一条频道成员资格。**只给建世界的代码用**。"""
+        """装入一条频道成员资格。**只给建世界与 WORLD-2 入住用**。"""
         self._check_writable()
         self._require_character_id(character_id)
         if not self.channels.has(channel_id):

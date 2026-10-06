@@ -479,9 +479,10 @@ class SessionState:
             raise RuntimeError("这份 WorldState 已经挂在另一个会话上")
         # 世界状态的每个写方法都先问这份会话还能不能写（fence / 只读快照块）。
         world_state._write_guard = self.require_writable
-        # 位置图与频道表是随存档走的静态结构，会话期间不变（运行期没有任何
-        # 入口改它们，回滚快照也不覆盖它们）。挂上会话就冻结，让它们各自的
-        # add() 也不再是一条绕过栅栏的写入口。
+        # 位置图与频道表是随存档走的静态结构。挂上会话就冻结，让它们各自的
+        # add() 不再是一条绕过栅栏的写入口。运行期唯一的改法是 WORLD-2 的地点
+        # 扩展：离线建好一张新图、提交时整体换引用（WorldState._replace_locations），
+        # 回滚快照记着旧引用。
         world_state.locations._freeze()
         world_state.channels._freeze()
         self.world_state = world_state
@@ -798,6 +799,26 @@ class SessionState:
         if timeline.current.from_log > len(self.agency):
             raise SessionStateError("认知区间不能从一条还不存在的 Agency 记录开始")
         self.cognition = timeline
+
+    def _admit_character(self, character_id: str) -> None:
+        """把一位新居民加进名单（WORLD-2 入住事件的会话侧效果）。
+
+        只在本线程的提交事务里调用（随事务回滚）。旧居民的位置与轮转顺序不变，
+        新人排在末尾。会话若维护着逐角色的历史槽位，给她开一个**空的**：入住不是
+        一个场景开场，不塞开场白（设计 D2）。
+        """
+        self.require_writable()
+        if not self.transaction_is_mine:
+            raise SessionStateError("新居民只能在本线程的提交事务里加入")
+        if not isinstance(character_id, str) or not character_id:
+            raise SessionStateError("character_id 必须是非空字符串")
+        if character_id in self.characters:
+            raise SessionStateError(f"'{character_id}' 已经在名单里")
+        self.characters.append(character_id)
+        # 存档规则：两张表要么都空、要么都覆盖整个名单（from_dict 校验）。
+        if self.histories or self.pending_corrections:
+            self.histories[character_id] = []
+            self.pending_corrections[character_id] = None
 
     def set_anchor(self, anchor: ClockAnchor) -> None:
         """在当前事务内换锚点（开世界、换倍率）。随事务回滚。"""

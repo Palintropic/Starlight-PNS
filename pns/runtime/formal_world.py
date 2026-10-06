@@ -97,6 +97,11 @@ def _grants_fingerprint(grants) -> str:
     )
 
 
+def grants_fingerprint(grants) -> str:
+    """一份授予的内容指纹（与开局 origin 里记的是同一个口径）。"""
+    return _grants_fingerprint(grants)
+
+
 def formal_session_state(
     spec: FormalWorldSpec,
     registry,

@@ -56,6 +56,36 @@ class EventType(str, Enum):
     WORLD_TIME_ADVANCED = "world.time_advanced"
     CHARACTER_LOCATION_CHANGED = "character.location_changed"
     CHARACTER_ACTIVITY_CHANGED = "character.activity_changed"
+    # WORLD-2：只能由世界的维护入口提交的两种权威操作。见 AUTHORITY_EVENT_TYPES。
+    WORLD_LOCATIONS_EXTENDED = "world.locations_extended"
+    WORLD_RESIDENT_ADMITTED = "world.resident_admitted"
+
+
+# 权威操作（WORLD-2）：世界开始以更高分辨率跟踪地点或居民。它们不是世界里发生的事，
+# 没有任何人感知得到——曝光、记忆编码、回话触发一律**按类型**跳过，不靠 scope、
+# actor 为空或 payload 不渲染（设计 D6）。只有维护入口能提交它们，Agency 与模型
+# 输出走的公共提交入口一律拒绝。
+AUTHORITY_EVENT_TYPES = frozenset(
+    {EventType.WORLD_LOCATIONS_EXTENDED, EventType.WORLD_RESIDENT_ADMITTED}
+)
+
+_EXTENSION_PAYLOAD_KEYS = frozenset(
+    {"operation_id", "envelope", "locations", "append_connections", "graph_before", "graph_after"}
+)
+_ADMISSION_PAYLOAD_KEYS = frozenset(
+    {
+        "operation_id",
+        "envelope",
+        "character_id",
+        "location_id",
+        "activity",
+        "channel_id",
+        "roommates",
+        "rhythm",
+        "grants",
+        "fingerprints",
+    }
+)
 
 
 # payload/provenance 只允许放 JSON 安全的值。这不是洁癖：任何别的对象都可能
@@ -219,6 +249,34 @@ class Event:
                 raise EventError(
                     "character.activity_changed 的 payload.activity 必须是非空字符串"
                 )
+        elif self.type in AUTHORITY_EVENT_TYPES:
+            self._validate_authority_shape()
+
+    def _validate_authority_shape(self) -> None:
+        """权威操作的形状：世界级、无锚点、payload 白名单。内容合不合法由提交边界对着世界判。"""
+        name = self.type.value
+        if self.actor_id is not None or self.participants:
+            raise EventError(f"{name} 是世界级操作，不能有 actor 或 participants")
+        if self.location_id is not None or self.channel_id is not None:
+            # 入住的落点只放在类型化 payload 里：顶层锚点会被曝光规则当成"在哪发生"。
+            raise EventError(f"{name} 的顶层 location_id / channel_id 必须为空")
+        if self.scope is not EventScope.PUBLIC:
+            raise EventError(f"{name} 的 scope 必须是 public（不可感知由类型决定）")
+        keys = (
+            _EXTENSION_PAYLOAD_KEYS
+            if self.type is EventType.WORLD_LOCATIONS_EXTENDED
+            else _ADMISSION_PAYLOAD_KEYS
+        )
+        if set(self.payload) != keys:
+            raise EventError(
+                f"{name} 的 payload 键必须正好是 {'、'.join(sorted(keys))}，"
+                f"收到 {'、'.join(sorted(map(str, self.payload))) or '空'}"
+            )
+        operation_id = self.payload["operation_id"]
+        if not isinstance(operation_id, str) or not operation_id:
+            raise EventError(f"{name} 的 payload.operation_id 必须是非空字符串")
+        if not isinstance(self.payload["envelope"], Mapping):
+            raise EventError(f"{name} 的 payload.envelope 必须是字典")
 
     def _require_actor(self) -> None:
         if self.actor_id is None:

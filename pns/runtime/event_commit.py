@@ -15,12 +15,23 @@
 from typing import Dict, Optional, Tuple
 
 from pns.models.channel import ChannelKind
-from pns.models.event import Event, EventScope, EventType
+from pns.models.event import AUTHORITY_EVENT_TYPES, Event, EventScope, EventType
 from pns.models.event_store import EventStore
+from pns.models.location import access_admits
 from pns.models.observation import Observation
 from pns.models.session import SessionState, Turn
 from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.exposure import evaluate_event_exposure, observations_for
+from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint
+from pns.world.extension import ExtensionError, extended_graph, graph_fingerprint
+from pns.world.grants import (
+    CharacterGrants,
+    GrantError,
+    decode_grants,
+    install_grants,
+    validate_grants_against,
+)
+from pns.world.rhythm import DailyRhythm, RhythmError, decode_rhythm
 
 
 class EventCommitError(ValueError):
@@ -109,6 +120,97 @@ def validate_against_world(world: WorldState, event: Event) -> None:
             raise EventCommitError(
                 f"角色 '{event.actor_id}' 已经处于活动 '{activity.value}'"
             )
+    if event.type is EventType.WORLD_LOCATIONS_EXTENDED:
+        _extension_of(world, event)
+    if event.type is EventType.WORLD_RESIDENT_ADMITTED:
+        _admission_of(world, event)
+
+
+# ── WORLD-2 的两种权威操作 ──────────────────────────────────────────────
+#
+# 校验与应用都从 payload 重新推导同一份结果（新图 / 作息与授予），所以"校验过的"
+# 和"生效的"不可能是两样东西。这里只判"这一笔对这个世界是否成立"；入住窗口、
+# 室友是否都睡着、前身扫描、账本与排期由维护入口在闸门内另行判定。
+def _extension_of(world: WorldState, event: Event):
+    payload = event.payload
+    if payload["graph_before"] != graph_fingerprint(world.locations):
+        raise EventCommitError("地点扩展的 graph_before 与世界当前的地点图不符")
+    try:
+        graph = extended_graph(
+            world.locations, payload["locations"], payload["append_connections"]
+        )
+    except ExtensionError as e:
+        raise EventCommitError(f"地点扩展不成立：{e}") from None
+    if payload["graph_after"] != graph_fingerprint(graph):
+        raise EventCommitError("地点扩展的 graph_after 与扩展结果不符")
+    new_ids = set(graph.ids()) - set(world.locations.ids())
+    for character_id, grants in world.location_grants.items():
+        if new_ids & set(grants):
+            raise EventCommitError(
+                f"已有角色 '{character_id}' 持有新地点的授予：扩展不能改变已有居民的可进入范围"
+            )
+    return graph
+
+
+def _admission_of(world: WorldState, event: Event) -> Tuple[DailyRhythm, CharacterGrants]:
+    payload = event.payload
+    character_id = payload["character_id"]
+    if not isinstance(character_id, str) or not character_id:
+        raise EventCommitError("入住的 character_id 必须是非空字符串")
+    if (
+        character_id in world.known_characters()
+        or character_id in world.location_grants
+        or character_id in world.channel_grants
+    ):
+        raise EventCommitError(f"世界里已经有 '{character_id}' 的记录，不能首次入住")
+    try:
+        rhythm = decode_rhythm(payload["rhythm"], character_id=character_id)
+        grants = decode_grants(payload["grants"], character_id=character_id)
+        validate_grants_against(grants, world.locations, world.channels)
+    except (RhythmError, GrantError) as e:
+        raise EventCommitError(f"入住的作息或授予不成立：{e}") from None
+    fingerprints = payload["fingerprints"]
+    expected = {"rhythm": rhythm_fingerprint(rhythm), "grants": grants_fingerprint(grants)}
+    if not hasattr(fingerprints, "keys") or dict(fingerprints) != expected:
+        raise EventCommitError("入住 payload 的指纹与其中的作息 / 授予不符")
+
+    location_id = payload["location_id"]
+    if not isinstance(location_id, str) or not world.locations.has(location_id):
+        raise EventCommitError(f"入住地点不存在：{location_id!r}")
+    if not access_admits(
+        world.locations.get(location_id).access, grants.location_roles().get(location_id)
+    ):
+        raise EventCommitError(f"'{character_id}' 的授予不允许她出现在 '{location_id}'")
+    try:
+        activity = ActivityKind(payload["activity"])
+    except ValueError:
+        raise EventCommitError(f"入住活动未知：{payload['activity']!r}") from None
+    channel_id = payload["channel_id"]
+    if channel_id is not None and (
+        not isinstance(channel_id, str)
+        or not world.channels.has(channel_id)
+        or channel_id not in grants.channels
+    ):
+        raise EventCommitError(f"入住频道不成立：{channel_id!r}")
+
+    # 初始状态必须就是作息表此刻那一段：入住不是一次"临时安排"。
+    segment = rhythm.segment_at(event.occurred_at)
+    if (segment.location_id, segment.activity, segment.channel_id) != (
+        location_id,
+        activity,
+        channel_id,
+    ):
+        raise EventCommitError("入住的地点 / 活动 / 频道与她此刻的作息段不一致")
+
+    roommates = payload["roommates"]
+    if (
+        not isinstance(roommates, (list, tuple))
+        or not all(isinstance(item, str) and item for item in roommates)
+        or len(set(roommates)) != len(roommates)
+        or character_id in roommates
+    ):
+        raise EventCommitError("入住的 roommates 必须是不含本人、不重复的角色 id 列表")
+    return rhythm, grants
 
 
 # ── 阶段二：状态效果 ────────────────────────────────────────────────────
@@ -139,6 +241,21 @@ def _apply_activity_changed(world: WorldState, event: Event) -> None:
     world.set_activity(event.actor_id, event.payload["activity"])
 
 
+def _apply_locations_extended(world: WorldState, event: Event) -> None:
+    world._replace_locations(_extension_of(world, event))
+
+
+def _apply_resident_admitted(world: WorldState, event: Event) -> None:
+    # 顺序固定：先装授予（放置要靠它），再放置、设活动、入频道。
+    _, grants = _admission_of(world, event)
+    character_id = event.payload["character_id"]
+    install_grants(world, grants)
+    world.place_character(character_id, event.payload["location_id"])
+    world.set_activity(character_id, event.payload["activity"])
+    if event.payload["channel_id"] is not None:
+        world.join_channel(character_id, event.payload["channel_id"])
+
+
 _APPLY = {
     EventType.DIALOGUE_SPOKEN: _apply_nothing,
     EventType.MESSAGE_SENT: _apply_nothing,
@@ -147,6 +264,8 @@ _APPLY = {
     EventType.WORLD_TIME_ADVANCED: _apply_time_advanced,
     EventType.CHARACTER_LOCATION_CHANGED: _apply_location_changed,
     EventType.CHARACTER_ACTIVITY_CHANGED: _apply_activity_changed,
+    EventType.WORLD_LOCATIONS_EXTENDED: _apply_locations_extended,
+    EventType.WORLD_RESIDENT_ADMITTED: _apply_resident_admitted,
 }
 
 
@@ -185,6 +304,11 @@ def _refuse_rhythm_identity(event: Event) -> None:
     if isinstance(event, Event) and claims_rhythm(event.provenance):
         raise EventCommitError(
             "只有作息自己能提交带作息 provenance（kind/segment_key/trip_leg）的事件"
+        )
+    if isinstance(event, Event) and event.type in AUTHORITY_EVENT_TYPES:
+        # 公共提交入口（Agency、模型输出、HTTP 改活动）提不出权威操作。
+        raise EventCommitError(
+            f"{event.type.value} 只能经世界的维护入口提交（commit_authority_event）"
         )
 
 
@@ -257,6 +381,25 @@ def _commit_session_event(state: SessionState, event: Event) -> Dict:
     with state.atomic_commit():
         projection = _commit_event(state.world_state, state.events, event)
         _record_exposure(state, event)
+    return projection
+
+
+def commit_authority_event(state: SessionState, event: Event) -> Dict:
+    """WORLD-2 的权威操作提交入口。**只给世界的维护入口用**（C8 的入住服务）。
+
+    跟会话事件同一个原子边界：世界状态效果 + 追加历史 + 会话侧效果（入住时把她加进
+    名单、开空的历史槽位）同生共死。**不做曝光**：这两种操作没有任何人感知得到，连一条
+    "没感知到"的判定都不写。调用方可以把它放进自己更大的事务里（账本、排期、导演发布），
+    嵌套事务一起回滚。
+    """
+    if not isinstance(event, Event) or event.type not in AUTHORITY_EVENT_TYPES:
+        raise EventCommitError("权威提交入口只收 WORLD-2 的权威操作")
+    if claims_rhythm(event.provenance):
+        raise EventCommitError("权威操作不能带作息 provenance")
+    with state.atomic_commit():
+        projection = _commit_event(state.world_state, state.events, event)
+        if event.type is EventType.WORLD_RESIDENT_ADMITTED:
+            state._admit_character(event.payload["character_id"])
     return projection
 
 

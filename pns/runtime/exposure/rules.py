@@ -6,6 +6,7 @@
 #
 # 判定顺序是刻意的，写在这里免得以后被人调换：
 #
+#   0. 权威操作（WORLD-2）  → 任何人都感知不到，连"自己"也没有（按类型，不看 scope）
 #   1. 自己做的事           → 一律自观察（架构文档 §19：自动作不走外部感知）
 #   2. 世界里没有这个角色   → 不可感知
 #   3. 睡着了               → 不可感知（在忙不算，忙不等于世界没发生过）
@@ -20,7 +21,7 @@
 # public 一律回世界状态现算。
 from typing import Optional, Tuple
 
-from pns.models.event import Event, EventScope
+from pns.models.event import AUTHORITY_EVENT_TYPES, Event, EventScope
 from pns.models.exposure import ExposureDecision, ExposureReason
 from pns.models.world_state import Availability, WorldState
 
@@ -66,6 +67,11 @@ def _location_reason(
 
 def _decide(world: WorldState, event: Event, character_id: str):
     """返回 (理由码, detail)；纯函数，不碰任何状态。"""
+    # 0. 权威操作：世界开始跟踪一个地点或居民，不是世界里发生的事（设计 D6）。
+    #    放在最前面，scope、actor、锚点怎么写都绕不过去。
+    if event.type in AUTHORITY_EVENT_TYPES:
+        return ExposureReason.AUTHORITY_OPERATION, {"type": event.type.value}
+
     # 1. 自动作：不走外部感知通道。
     if event.actor_id is not None and character_id == event.actor_id:
         return ExposureReason.SELF_ACTION, {"scope": event.scope.value}
@@ -172,7 +178,13 @@ def candidate_characters(world: WorldState, event: Event) -> Tuple[str, ...]:
 def evaluate_event_exposure(
     world: WorldState, event: Event
 ) -> Tuple[ExposureDecision, ...]:
-    """对所有候选角色逐个判定，按角色 ID 排序返回（顺序也是确定的）。"""
+    """对所有候选角色逐个判定，按角色 ID 排序返回（顺序也是确定的）。
+
+    权威操作没有候选：连"没感知到"的判定都不写，免得每一笔入住给日志添一排噪音。
+    单独问某个人（evaluate_exposure）仍然得到 AUTHORITY_OPERATION。
+    """
+    if event.type in AUTHORITY_EVENT_TYPES:
+        return ()
     return tuple(
         evaluate_exposure(world, event, character_id)
         for character_id in candidate_characters(world, event)

@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
+from pns.models.frozen import thaw_json_value
 from pns.models.world_state import ActivityKind
 from pns.world.calendar import DayKind, day_kind
 
@@ -479,7 +480,8 @@ def decode_rhythm(payload, *, character_id: Optional[str] = None) -> DailyRhythm
         segments=_decode_table(payload["segments"], "segments"),
         rest_day_segments=None if rest is None else _decode_table(rest, "rest_day_segments"),
     )
-    if encode_rhythm(rhythm) != dict(payload):
+    # 事件 payload 是深冻结的（元组代替列表），比较前还原成普通 JSON 形状。
+    if encode_rhythm(rhythm) != thaw_json_value(payload):
         # 例如段的顺序被打乱、键写成了等价但不同的形状：DailyRhythm 会悄悄规整它，
         # 指纹也就跟写进去的那一份不一样了。
         raise RhythmError("编码的作息表不是规范形状")
