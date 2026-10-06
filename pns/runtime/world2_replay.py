@@ -27,6 +27,7 @@ from pns.models.session import SessionState
 from pns.models.world_state import WorldState
 from pns.runtime.event_commit import _commit_event
 from pns.runtime.formal_world import rhythm_subject
+from pns.runtime.world2_seed import SeedError, activation_from_seed
 from pns.runtime.world2_baseline import (
     WORLD_FIELDS,
     BaselineError,
@@ -71,6 +72,7 @@ def verify_world2_history(state: SessionState) -> None:
     world = _world_from(baseline)
     roster = list(baseline["roster"])
     admitted: List[Tuple[str, str, str]] = []
+    seeds = []
     scratch = EventStore()
     for event in events[start:]:
         # 提交时 occurred_at 就是世界时钟；时钟推进不一定都有事件（安静分钟），
@@ -92,6 +94,7 @@ def verify_world2_history(state: SessionState) -> None:
                     payload["operation_id"],
                 )
             )
+            seeds.append(event)
     world.clock = state.world_state.clock
 
     if roster != list(state.characters):
@@ -103,6 +106,45 @@ def verify_world2_history(state: SessionState) -> None:
     recorded = [(a.subject, a.fingerprint, a.operation_id) for a in ledger.admissions]
     if recorded != admitted:
         raise WorldReplayError("账本里的入住采用与世界历史里的入住事件对不上")
+    for event in seeds:
+        _check_seed(state, event)
+
+
+def _check_seed(state: SessionState, event) -> None:
+    """新居民的周期激活还在队列里，而且只是按自己的周期往前推过。
+
+    周期激活触发后换成下一次（相位不变，见 ScheduledActivation.next_occurrence），
+    运行期没有别的入口会摘掉它。所以：在、只在一处、身份与节律原样、到期时刻是
+    初次到期加整数个周期。
+    """
+    character_id = event.payload["character_id"]
+    try:
+        seeded = activation_from_seed(
+            event.payload["seed"], character_id=character_id, admitted_at=event.occurred_at
+        )
+    except SeedError as e:
+        raise WorldReplayError(f"入住事件的排期种子不成立：{e}") from None
+    queue = state.activations
+    if not queue.has(seeded.activation_id):
+        raise WorldReplayError(f"新居民 '{character_id}' 有入住记录，队列里却没有她的种子排期")
+    current = queue.get(seeded.activation_id)
+    if (current.kind, current.character_id, current.interval_minutes, dict(current.payload)) != (
+        seeded.kind,
+        seeded.character_id,
+        seeded.interval_minutes,
+        dict(seeded.payload),
+    ):
+        raise WorldReplayError(f"新居民 '{character_id}' 的种子排期与入住记录不符")
+    recurring = [
+        a.activation_id
+        for a in queue.for_character(character_id)
+        if a.kind is seeded.kind and a.is_recurring
+    ]
+    if recurring != [seeded.activation_id]:
+        raise WorldReplayError(f"新居民 '{character_id}' 的周期激活不止种子一条（双播）")
+    elapsed = (current.due_at - seeded.due_at).total_seconds() / 60
+    if elapsed < 0 or elapsed % seeded.interval_minutes:
+        raise WorldReplayError(f"新居民 '{character_id}' 的种子排期不在自己的周期相位上")
 
 
 def _check_anchoring(state: SessionState, baseline: Dict, rhythms, start: int) -> None:

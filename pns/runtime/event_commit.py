@@ -24,6 +24,7 @@ from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.exposure import evaluate_event_exposure, observations_for
 from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint, rhythm_subject
 from pns.runtime.world2_baseline import BaselineError, check_baseline_at_commit
+from pns.runtime.world2_seed import SeedError, activation_from_seed
 from pns.world.extension import ExtensionError, extended_graph, graph_fingerprint
 from pns.world.grants import (
     CharacterGrants,
@@ -211,6 +212,12 @@ def _admission_of(world: WorldState, event: Event) -> Tuple[DailyRhythm, Charact
         or character_id in roommates
     ):
         raise EventCommitError("入住的 roommates 必须是不含本人、不重复的角色 id 列表")
+    try:
+        activation_from_seed(
+            payload["seed"], character_id=character_id, admitted_at=event.occurred_at
+        )
+    except SeedError as e:
+        raise EventCommitError(f"入住的排期种子不成立：{e}") from None
     return rhythm, grants
 
 
@@ -405,6 +412,7 @@ def commit_authority_event(state: SessionState, event: Event) -> Dict:
         if event.type is EventType.WORLD_RESIDENT_ADMITTED:
             payload = event.payload
             state._admit_character(payload["character_id"])
+            _schedule_seed(state, event)
             # 入住采用：她的作息作为一项新内容进账本，与已有记录、决定共用一条序号。
             state.set_content(
                 state.content.admitted(
@@ -414,6 +422,21 @@ def commit_authority_event(state: SessionState, event: Event) -> Dict:
                 )
             )
     return projection
+
+
+def _schedule_seed(state: SessionState, event: Event) -> None:
+    """排入新居民的周期激活。旧居民的排期一条不动；同名排期已在队列里就拒绝。"""
+    activation = activation_from_seed(
+        event.payload["seed"],
+        character_id=event.payload["character_id"],
+        admitted_at=event.occurred_at,
+    )
+    queue = state.activations
+    try:
+        queue._check_can_append(activation)
+    except ValueError as e:
+        raise EventCommitError(f"新居民的排期排不进去：{e}") from None
+    queue._append(activation)
 
 
 def _check_baseline_order(state: SessionState, event: Event) -> None:

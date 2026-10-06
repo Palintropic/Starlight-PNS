@@ -47,6 +47,7 @@ from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint  # n
 from pns.runtime.memory.encoder import MemoryEncoder  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.runtime.world2_baseline import build_baseline  # noqa: E402
+from pns.runtime.world2_seed import admission_seed  # noqa: E402
 from pns.world.extension import graph_fingerprint  # noqa: E402
 from pns.world.grants import encode_grants  # noqa: E402
 from pns.world.locations import build_default_location_graph  # noqa: E402
@@ -125,7 +126,10 @@ def _event(world, kind, payload, event_id="w2:evt", **overrides):
     return Event(**fields)
 
 
-def _admission_payload(world, character_id="airi"):
+MMJ = ("airi", "minori", "haruka", "shizuku")
+
+
+def _admission_payload(world, character_id="airi", ordinal=None):
     registry = BOUNDARY.active()
     rhythm = registry.rhythms()[character_id]
     grants = registry.grants(character_id)
@@ -137,13 +141,21 @@ def _admission_payload(world, character_id="airi"):
         "location_id": segment.location_id,
         "activity": segment.activity.value,
         "channel_id": segment.channel_id,
-        "roommates": [c for c in ("airi", "minori", "haruka", "shizuku") if c != character_id],
+        "roommates": [c for c in MMJ if c != character_id],
         "rhythm": encode_rhythm(rhythm),
         "grants": encode_grants(grants),
         "fingerprints": {
             "rhythm": rhythm_fingerprint(rhythm),
             "grants": grants_fingerprint(grants),
         },
+        "seed": admission_seed(
+            character_id,
+            ordinal=MMJ.index(character_id) if ordinal is None else ordinal,
+            admitted_at=world.clock,
+            first_delay_minutes=5,
+            stagger_minutes=5,
+            interval_minutes=15,
+        ),
     }
 
 
@@ -465,7 +477,14 @@ class ZeroPerceptionTests(unittest.TestCase):
             _event(self.world, EventType.WORLD_RESIDENT_ADMITTED, _admission_payload(self.world), "a"),
         )
         after = snapshot()
-        self.assertEqual(after, before)
+        # 排期唯一的增量是她自己的种子（C7）；旧居民的条目原样、顺序不变。
+        old_entries = tuple(e for e in after[3] if e[1].character_id != "airi")
+        self.assertEqual(old_entries, before[3])
+        self.assertEqual(
+            [e[1].activation_id for e in after[3] if e[1].character_id == "airi"],
+            ["seed.activation:airi"],
+        )
+        self.assertEqual(after[:3] + after[4:], before[:3] + before[4:])
 
     def test_everyone_gets_authority_operation_even_with_forged_anchors(self):
         payload = _extension_payload(self.state)

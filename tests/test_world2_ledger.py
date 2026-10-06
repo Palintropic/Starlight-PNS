@@ -37,6 +37,7 @@ from pns.runtime.event_commit import (  # noqa: E402
 )
 from pns.runtime.persistence.archive import ArchiveError, WorldArchive  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
+from pns.runtime.scheduler import PersistentScheduler  # noqa: E402
 from pns.runtime.world2_baseline import build_baseline  # noqa: E402
 from pns.runtime.world2_replay import WorldReplayError, verify_world2_history  # noqa: E402
 from pns.world.locations import build_default_location_graph  # noqa: E402
@@ -189,18 +190,10 @@ def _activity(state, actor, activity, event_id):
     )
 
 
-def _advance(state, minutes, event_id):
-    world = state.world_state
-    commit_session_event(
-        state,
-        Event(
-            event_id=event_id,
-            type=EventType.WORLD_TIME_ADVANCED,
-            occurred_at=world.clock,
-            scope=EventScope.PUBLIC,
-            payload={"minutes": minutes},
-        ),
-    )
+def _advance(state, minutes, event_id=None):
+    """经调度器推进：周期排期（含新人的种子）按自己的相位往前换。"""
+    scheduler = state.scheduler if state.scheduler is not None else PersistentScheduler(state)
+    scheduler.advance_by(minutes)
 
 
 def _offer_before(state):

@@ -32,14 +32,15 @@ from typing import Optional, Sequence, Tuple
 from pns.models.activation import ActivationKind, ScheduledActivation
 from pns.runtime.autonomy.context import MAX_CUE_CHARS
 
-# 播种出来的激活 ID 前缀。确定性 —— 同一个角色在同一个世界里只可能有一条。
-SEED_PREFIX = "seed.activation"
-
-# 各项节律的上界。它们是**安全预算**，不是审美：一个手滑写成 100000 的周期
-# 会让世界永远不动，一个写成 0 的周期会让它每分钟都在花钱。
-MAX_INTERVAL_MINUTES = 7 * 24 * 60
-MAX_FIRST_DELAY_MINUTES = 7 * 24 * 60
-MAX_STAGGER_MINUTES = 24 * 60
+# ID 规则与节律上界跟入住种子共用一份（pns/runtime/world2_seed.py）。
+from pns.runtime.world2_seed import (
+    MAX_FIRST_DELAY_MINUTES,
+    MAX_INTERVAL_MINUTES,
+    MAX_STAGGER_MINUTES,
+    SEED_PREFIX,
+    SeedError,
+)
+from pns.runtime.world2_seed import seed_activation_id as _seed_activation_id
 
 
 class SeedingError(ValueError):
@@ -103,9 +104,10 @@ def _bounded(value, label: str, low: int, high: int) -> int:
 
 def seed_activation_id(character_id: str) -> str:
     """这个角色在这个世界里那条开局排期的 ID。确定性，所以撞车会被发现。"""
-    if not isinstance(character_id, str) or not character_id:
-        raise SeedingError("character_id 必须是非空字符串")
-    return f"{SEED_PREFIX}:{character_id}"
+    try:
+        return _seed_activation_id(character_id)
+    except SeedError as e:
+        raise SeedingError(str(e)) from None
 
 
 def seed_character_activations(

@@ -93,6 +93,8 @@ _ADMISSION_PAYLOAD_KEYS = frozenset(
         "rhythm",
         "grants",
         "fingerprints",
+        # 首次排期种子：稳定序位与算出来的首次到期（pns/runtime/world2_seed.py）。
+        "seed",
     }
 )
 

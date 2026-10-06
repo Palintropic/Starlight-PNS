@@ -304,6 +304,30 @@ def evaluate_rhythm_gate(
     return ledger, RhythmGate(accepted=accepted, subjects=tuple(subjects))
 
 
+def check_roster_runnable(state: SessionState, rhythms: Mapping, director) -> None:
+    """名单上的**每一个人**此刻都能被作息驱动（WORLD-2 入住的门内检查，设计 §4.4）。
+
+    `evaluate_rhythm_gate` 只枚举账本里已登记的作息主体，它的 complete 说明不了
+    名单上有没有漏掉谁。这里按名单逐人核三样：账本里有已采用版本；冻结内容快照
+    （`rhythms`）里有定义且正是那一版；导演里有她、而且也是那一版。
+    """
+    ledger = state.content
+    if ledger is None:
+        raise FormalWorldError("没有内容账本的世界不能核名单")
+    for character_id in state.characters:
+        adopted = ledger.adopted_fingerprint(rhythm_subject(character_id))
+        if adopted is None:
+            raise FormalWorldError(f"名单上的 '{character_id}' 在账本里没有已采用的作息")
+        definition = rhythms.get(character_id)
+        if definition is None or rhythm_fingerprint(definition) != adopted:
+            raise FormalWorldError(
+                f"名单上的 '{character_id}' 在本次打开所用的内容里没有已采用的那一版作息"
+            )
+        entry = director.rhythm_for(character_id) if director is not None else None
+        if entry is None or rhythm_fingerprint(entry) != adopted:
+            raise FormalWorldError(f"名单上的 '{character_id}' 在作息导演里没有已采用的那一版")
+
+
 def rhythm_gate(
     state: SessionState, rhythms: Mapping, *, registry_revision: int, wall: str
 ) -> RhythmGate:
@@ -342,6 +366,7 @@ __all__ = [
     "formal_world",
     "RhythmGate",
     "RhythmGateSubject",
+    "check_roster_runnable",
     "evaluate_rhythm_gate",
     "gated_rhythms",
     "rhythm_gate",
