@@ -48,6 +48,7 @@ class ExposureReason(Enum):
     PUBLIC_NOT_PERCEIVED = "public_not_perceived"  # 公开≠自动知道，当下没撞上
     UNAVAILABLE = "unavailable"  # 睡着了，感知不到外界
     UNKNOWN_CHARACTER = "unknown_character"  # 世界里没有这个角色
+    AUTHORITY_OPERATION = "authority_operation"  # WORLD-2 权威操作，任何人都感知不到
 
     @property
     def exposed(self) -> bool:

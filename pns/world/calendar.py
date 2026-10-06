@@ -18,6 +18,8 @@
 # 学校的长假（暑假、寒假、春假）不在这里：那是每所学校各自的安排，不是国家日历。
 #
 # 纯内容：不 import 运行时、不读磁盘，import 没有副作用。
+import hashlib
+import json
 from datetime import date
 from enum import Enum
 from typing import Dict
@@ -64,6 +66,8 @@ _JP_HOLIDAYS = (
 JP_HOLIDAYS: Dict[date, str] = dict(_JP_HOLIDAYS)
 HOLIDAYS_KNOWN_FROM = date(2026, 1, 1)
 HOLIDAYS_KNOWN_UNTIL = date(2027, 12, 31)
+# date.weekday() 里算休息日的那几天：周六、周日。
+REST_WEEKDAYS = frozenset({5, 6})
 
 
 class DayKind(str, Enum):
@@ -85,16 +89,41 @@ def day_kind(day: date) -> DayKind:
     """周六、周日、收录范围内的祝日是休息日；其余是平日。"""
     if not isinstance(day, date):
         raise TypeError(f"day_kind 只认 date，收到 {day!r}")
-    if day.weekday() >= 5 or day in JP_HOLIDAYS:
+    if day.weekday() in REST_WEEKDAYS or day in JP_HOLIDAYS:
         return DayKind.REST_DAY
     return DayKind.WEEKDAY
 
 
+# 选表规则的版本。改了"哪一天算休息日"的**规则**（不是更新祝日表）就加一。
+CALENDAR_RULES_VERSION = 1
+
+
+def calendar_fingerprint() -> str:
+    """这份日历决定"哪天用哪张作息表"的全部输入的指纹（WORLD-2 复审 F3）。
+
+    作息指纹只覆盖作息表本身；同一份作息在两份不同的日历下会在不同的日子换表。
+    所以存进世界的重放基准同时记下这个指纹：恢复时对不上，就说明选表行为变了，
+    要明确迁移，不能悄悄按新日历重放旧日子。
+    """
+    payload = {
+        "rules_version": CALENDAR_RULES_VERSION,
+        "rest_weekdays": sorted(REST_WEEKDAYS),
+        "holidays_known_from": HOLIDAYS_KNOWN_FROM.isoformat(),
+        "holidays_known_until": HOLIDAYS_KNOWN_UNTIL.isoformat(),
+        "holidays": [[day.isoformat(), name] for day, name in sorted(JP_HOLIDAYS.items())],
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 __all__ = [
+    "CALENDAR_RULES_VERSION",
     "DayKind",
     "HOLIDAYS_KNOWN_FROM",
     "HOLIDAYS_KNOWN_UNTIL",
     "JP_HOLIDAYS",
+    "REST_WEEKDAYS",
+    "calendar_fingerprint",
     "day_kind",
     "holiday_name",
     "holidays_known",

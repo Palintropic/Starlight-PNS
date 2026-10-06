@@ -17,6 +17,7 @@
 from dataclasses import dataclass
 from typing import FrozenSet, Mapping, Optional, Sequence, Tuple
 
+from pns.models.frozen import thaw_json_value
 from pns.models.location import access_admits, accepted_roles
 from pns.world.rhythm import MINUTES_PER_DAY
 from pns.world.routing import plan_route
@@ -218,8 +219,82 @@ def _check_day_trips(character_id, before, today, after, grants, locations) -> N
             )
 
 
+# ── 存进世界历史的授予（WORLD-2）────────────────────────────────────────
+#
+# 入住事件要把授予定义本身写进存档，恢复时才拿得回来。跟作息编码同一条规矩：
+# 严格解码，解出来再编码一遍必须和输入逐字相同。存在性与身份是否被地点接受，
+# 由调用方对着当时的世界图另行校验（validate_grants_against）。
+GRANTS_CODEC_SCHEMA = "pns.access_grants/1"
+_ENCODED_GRANT_KEYS = frozenset({"schema", "character_id", "locations", "channels"})
+
+
+def encode_grants(grants: CharacterGrants) -> Mapping:
+    if not isinstance(grants, CharacterGrants):
+        raise GrantError("只能编码 CharacterGrants")
+    return {
+        "schema": GRANTS_CODEC_SCHEMA,
+        "character_id": grants.character_id,
+        "locations": [[location_id, role] for location_id, role in sorted(grants.locations)],
+        "channels": sorted(grants.channels),
+    }
+
+
+def decode_grants(payload, *, character_id: Optional[str] = None) -> CharacterGrants:
+    if not isinstance(payload, Mapping) or set(payload) != _ENCODED_GRANT_KEYS:
+        raise GrantError("编码的授予形状不对")
+    if payload["schema"] != GRANTS_CODEC_SCHEMA:
+        raise GrantError(f"不认识的授予编码版本: {payload['schema']!r}")
+    owner = payload["character_id"]
+    if not isinstance(owner, str) or not owner:
+        raise GrantError("编码的授予缺少 character_id")
+    if character_id is not None and owner != character_id:
+        raise GrantError(f"编码的授予属于 {owner!r}，不是 {character_id!r}")
+    locations = _require_list(payload["locations"], "编码的授予 locations")
+    pairs = []
+    for entry in locations:
+        if (
+            not isinstance(entry, (list, tuple))
+            or len(entry) != 2
+            or not all(isinstance(item, str) and item for item in entry)
+        ):
+            raise GrantError("编码的授予 locations 每项必须是 [location_id, role]")
+        pairs.append((entry[0], entry[1]))
+    if len({location_id for location_id, _ in pairs}) != len(pairs):
+        raise GrantError("编码的授予里同一地点出现了两次")
+    channels = _require_list(payload["channels"], "编码的授予 channels")
+    if not all(isinstance(item, str) and item for item in channels) or len(set(channels)) != len(
+        channels
+    ):
+        raise GrantError("编码的授予 channels 必须是不重复的非空字符串")
+    grants = CharacterGrants(
+        character_id=owner, locations=tuple(sorted(pairs)), channels=frozenset(channels)
+    )
+    if encode_grants(grants) != thaw_json_value(payload):
+        raise GrantError("编码的授予不是规范形状")
+    return grants
+
+
+def validate_grants_against(grants: CharacterGrants, locations, channels) -> None:
+    """这份授予在这张图 / 这份频道表上是否成立：地点存在且非公开、身份被接受、频道存在。
+
+    走的是角色包 YAML 的同一个校验器，两条路的判据不会分叉。
+    """
+    parse_access_grants(
+        {
+            "locations": [
+                {"location_id": location_id, "role": role}
+                for location_id, role in grants.locations
+            ],
+            "channels": sorted(grants.channels),
+        },
+        character_id=grants.character_id,
+        locations=locations,
+        channels=channels,
+    )
+
+
 def install_grants(world, grants: CharacterGrants) -> None:
-    """建世界时把一个角色的授予装进 WorldState。"""
+    """把一个角色的授予装进 WorldState：建世界时，以及 WORLD-2 入住事件的状态效果。"""
     for location_id, role in grants.locations:
         world._grant_location(grants.character_id, location_id, role)
     for channel_id in sorted(grants.channels):
@@ -227,12 +302,16 @@ def install_grants(world, grants: CharacterGrants) -> None:
 
 
 __all__ = [
+    "GRANTS_CODEC_SCHEMA",
     "CharacterGrants",
     "GrantError",
+    "decode_grants",
+    "encode_grants",
     "install_grants",
     "may_enter",
     "parse_access_grants",
     "require_rhythm_channels_joinable",
     "require_rhythm_is_enterable",
     "require_rhythm_trips_fit",
+    "validate_grants_against",
 ]

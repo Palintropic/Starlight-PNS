@@ -48,7 +48,7 @@ from pns.models.cognition import (
     unavailable_causes,
     wall_now,
 )
-from pns.models.event import EventType
+from pns.models.event import AUTHORITY_EVENT_TYPES, EventType
 from pns.models.frozen import thaw_json_value
 from pns.models.session import SessionState
 from pns.models.world_state import WorldState
@@ -842,6 +842,9 @@ class AgencyEngine:
         对话退回固定节拍。已经有一次不晚于那一刻的排期的人不再加。排期跟触发
         它的事件同生共死，事务回滚它也一起消失。
         """
+        if event.type in AUTHORITY_EVENT_TYPES:
+            # WORLD-2 权威操作不是一句话，也没人感知得到：按类型不排回话。
+            return
         delay = self._budget.reply_delay_minutes
         if delay is None or not event.participants:
             return

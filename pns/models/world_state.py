@@ -61,6 +61,13 @@ class ActivityKind(str, Enum):
     ONLINE_CHATTING = "online_chatting"
     # 在路上：作息行程从出发到到达之间的活动（WORLD-1）。
     COMMUTING = "commuting"
+    # 偶像的备赛与工作（WORLD-2，MMJ 入住）。现有活动都套不上：studying 会被读成
+    # 学校课业，composing 是作曲，working_part_time 是兼职，editing_video 是剪辑。
+    IDOL_PRACTICE = "idol_practice"  # 唱跳练习、基础 lesson
+    PHYSICAL_TRAINING = "physical_training"  # 体能、器械
+    STAGE_PLANNING = "stage_planning"  # 演出构思、备赛讨论
+    PERFORMANCE_REVIEW = "performance_review"  # 看演出录像做研究
+    IDOL_WORK = "idol_work"  # 个人的外部偶像工作（未细分种类）
 
 
 @dataclass(frozen=True)
@@ -328,8 +335,20 @@ class WorldState:
         """这个角色是不是这个频道的成员（有没有资格加入，不是此刻在不在）。"""
         return channel_id in self.channel_grants.get(character_id, set())
 
+    def _replace_locations(self, graph: LocationGraph) -> None:
+        """整体换上一张新的地点图。**只给 WORLD-2 的地点扩展用**（事件提交边界）。
+
+        旧图不解冻、不就地修改；新图换上就冻结。是否只增不改由
+        pns/world/extension.py 在提交前判定，这里只负责过写守卫、换引用。
+        """
+        self._check_writable()
+        if not isinstance(graph, LocationGraph):
+            raise WorldStateError("只能换上 LocationGraph")
+        graph._freeze()
+        self.locations = graph
+
     def _grant_location(self, character_id: str, location_id: str, role: str) -> None:
-        """建世界时装入一条进入授予。**只给建世界的代码用**，运行期没有调用方。"""
+        """装入一条进入授予。**只给建世界与 WORLD-2 入住用**（入住事件的状态效果）。"""
         self._check_writable()
         self._require_character_id(character_id)
         if not self.locations.has(location_id):
@@ -339,7 +358,7 @@ class WorldState:
         self.location_grants.setdefault(character_id, {})[location_id] = role
 
     def _grant_channel(self, character_id: str, channel_id: str) -> None:
-        """建世界时装入一条频道成员资格。**只给建世界的代码用**。"""
+        """装入一条频道成员资格。**只给建世界与 WORLD-2 入住用**。"""
         self._check_writable()
         self._require_character_id(character_id)
         if not self.channels.has(channel_id):
@@ -490,6 +509,10 @@ class WorldState:
                 character_id: set(grants)
                 for character_id, grants in self.channel_grants.items()
             },
+            # 地点图与频道表是冻结的值，只记引用（WORLD-2）：扩展在事务外离线建好新图、
+            # 事务内整体换引用；失败时换回旧引用，不解冻、不就地改旧图。
+            "locations": self.locations,
+            "channels": self.channels,
         }
 
     def _restore_mutable_state(self, snapshot: Dict) -> None:
@@ -518,6 +541,8 @@ class WorldState:
             character_id: set(grants)
             for character_id, grants in snapshot["channel_grants"].items()
         }
+        self.locations = snapshot["locations"]
+        self.channels = snapshot["channels"]
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:

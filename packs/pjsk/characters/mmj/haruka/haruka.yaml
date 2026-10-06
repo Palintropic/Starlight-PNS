@@ -23,3 +23,156 @@ family:
   - relation: 备注
     name: null
     note: "官方对话确认为独生女。没有'家庭反对/逼迫当偶像'的剧情线。退出ASRUN：本人叙述的近因是害怕到身体动不了、站不上舞台；与前成员真依的冲突只见于回忆，伤病成因与完整因果未交代，不应写成单一确定的核心原因，也不是父母施压"
+
+# 结构化日常作息与授予（WORLD-2，MMJ 入住）。出处与推断边界见
+# kickoff/CONTENT_3_MMJ_DORM_DATA_DRAFT.md（ena 调研，瑞希验收）。原作只给了"做过什么"：
+# 四人合住 LUMINA FORUM 的一间寝室、备赛、各自外出工作、单位制仍有学业；
+# 每一个钟点、频率、一起吃饭都是试运行的推断。休息日只表示学校休课，不是偶像工作全休。
+# 四人每晚 23:00–06:30 同在寝室睡觉，入住只在这段窗口里进行（WORLD-2 设计 §3.2）。
+daily_rhythm:
+  weekday:
+    # INFERRED 睡眠钟点/长度；D R01/R09未找到固定规章；共享寝室 D §0；F1设计窗口
+    - at: "00:00"
+      activity: resting
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 起床/洗漱时刻，非每日叫醒职责；D §5本次仅零散醒着场景
+    - at: "06:30"
+      activity: idle
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    - at: "07:15"
+      activity: eating
+      location_id: lumina_forum_dining_room
+      source: inferred
+    # INFERRED 体能排程/频率；D C1442后篇 L80实乃理/遥训练；遥 E213-6 L5–33夜练
+    - at: "08:00"
+      activity: physical_training
+      location_id: lumina_forum_training_room
+      source: inferred
+    # INFERRED 单位制到校窗口/每平日频率；S #7，各人仍有学业；本次到校只实乃理/遥部分确认
+    - at: "10:00"
+      activity: studying
+      location_id: miyamasuzaka_girls
+      source: inferred
+    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    - at: "12:30"
+      activity: eating
+      location_id: lumina_forum_dining_room
+      source: inferred
+    # INFERRED 个人外出窗口/频率/现场；D R03；实乃理仅S #31 E209历史工作依据
+    - at: "13:15"
+      activity: idol_work
+      location_id: mmj_haruka_worksite
+      source: inferred
+    # INFERRED 企划窗口/频率；D E213-4/8与C1444后篇 L66–114
+    - at: "16:00"
+      activity: stage_planning
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    - at: "18:30"
+      activity: eating
+      location_id: lumina_forum_dining_room
+      source: inferred
+    # INFERRED 重看舞台录像窗口/频率；D C1442后篇 L72–118雫、C1440后篇 L90–124遥
+    - at: "19:15"
+      activity: performance_review
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 体能排程/频率；D C1442后篇 L80实乃理/遥训练；遥 E213-6 L5–33夜练
+    - at: "20:00"
+      activity: physical_training
+      location_id: lumina_forum_training_room
+      source: inferred
+    # INFERRED 清醒休闲窗口；D C1440后篇 L74–124 单次放松
+    - at: "21:15"
+      activity: idle
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 睡眠钟点/长度；D R01/R09未找到固定规章；共享寝室 D §0；F1设计窗口
+    - at: "23:00"
+      activity: resting
+      location_id: lumina_forum_mmj_room
+      source: inferred
+  rest_day:
+    # INFERRED 睡眠钟点/长度；D R01/R09未找到固定规章；共享寝室 D §0；F1设计窗口
+    - at: "00:00"
+      activity: resting
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 起床/洗漱时刻，非每日叫醒职责；D §5本次仅零散醒着场景
+    - at: "07:00"
+      activity: idle
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    - at: "08:00"
+      activity: eating
+      location_id: lumina_forum_dining_room
+      source: inferred
+    # INFERRED 体能排程/频率；D C1442后篇 L80实乃理/遥训练；遥 E213-6 L5–33夜练
+    - at: "09:00"
+      activity: physical_training
+      location_id: lumina_forum_training_room
+      source: inferred
+    # INFERRED 唱跳排程/每日频率；S #22训练用途；D E213-8备赛，不保证全员同期
+    - at: "10:30"
+      activity: idol_practice
+      location_id: lumina_forum_lesson_room
+      source: inferred
+    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    - at: "12:30"
+      activity: eating
+      location_id: lumina_forum_dining_room
+      source: inferred
+    # INFERRED 个人外出窗口/频率/现场；D R03；实乃理仅S #31 E209历史工作依据
+    - at: "13:15"
+      activity: idol_work
+      location_id: mmj_haruka_worksite
+      source: inferred
+    # INFERRED 重看舞台录像窗口/频率；D C1442后篇 L72–118雫、C1440后篇 L90–124遥
+    - at: "16:00"
+      activity: performance_review
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    - at: "18:30"
+      activity: eating
+      location_id: lumina_forum_dining_room
+      source: inferred
+    # INFERRED 企划窗口/频率；D E213-4/8与C1444后篇 L66–114
+    - at: "19:15"
+      activity: stage_planning
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 清醒休闲窗口；D C1440后篇 L74–124 单次放松
+    - at: "21:00"
+      activity: idle
+      location_id: lumina_forum_mmj_room
+      source: inferred
+    # INFERRED 睡眠钟点/长度；D R01/R09未找到固定规章；共享寝室 D §0；F1设计窗口
+    - at: "23:00"
+      activity: resting
+      location_id: lumina_forum_mmj_room
+      source: inferred
+access_grants:
+  locations:
+    - location_id: lumina_forum
+      role: participant
+    - location_id: lumina_forum_mmj_room
+      role: mmj_roommate
+    - location_id: lumina_forum_lesson_room
+      role: participant
+    - location_id: lumina_forum_training_room
+      role: participant
+    - location_id: lumina_forum_dining_room
+      role: participant
+    - location_id: lumina_forum_meeting_room
+      role: participant
+    - location_id: miyamasuzaka_girls
+      role: student
+    - location_id: mmj_haruka_worksite
+      role: worker
+  channels: []

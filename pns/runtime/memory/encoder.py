@@ -22,7 +22,7 @@
 from datetime import datetime
 from typing import Dict, Optional, Sequence, Tuple
 
-from pns.models.event import Event
+from pns.models.event import AUTHORITY_EVENT_TYPES, Event
 from pns.models.memory import (
     MemoryError,
     MemoryRecord,
@@ -39,6 +39,9 @@ from pns.runtime.memory.encoding import (
     MemoryBudget,
     draft_memories,
 )
+
+# WORLD-2 权威操作的类型值：观察里只带 type 字符串。
+_AUTHORITY_TYPE_VALUES = frozenset(kind.value for kind in AUTHORITY_EVENT_TYPES)
 
 
 class MemoryEncoderError(ValueError):
@@ -162,6 +165,16 @@ class MemoryEncoder:
     ) -> Tuple[EncodingDecision, ...]:
         owner = observation.observer_id
         observation_id = observation.observation_id
+        if observation.perceived.get("type") in _AUTHORITY_TYPE_VALUES:
+            # WORLD-2 权威操作不会被曝光，正常走不到这里；按类型再拦一道，不靠"碰巧没有观察"。
+            return (
+                EncodingDecision(
+                    observation_id=observation_id,
+                    owner_id=owner,
+                    outcome=EncodingOutcome.SKIPPED_NOT_ELIGIBLE,
+                    detail={"reason": "authority_operation"},
+                ),
+            )
         drafts = draft_memories(observation)
         if not drafts:
             # 显式的"不记"：白名单外的观察类型（比如时钟前进这种系统心跳），

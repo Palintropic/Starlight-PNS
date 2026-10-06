@@ -16,6 +16,10 @@
 # 顺序只看序号，不看墙钟（墙钟会被往回拨）；删掉任何一条记录都会在序号里
 # 留下空洞。
 #
+# 第三种操作是**入住采用**（WORLD-2）：一位新居民入住时，她的作息作为一项新内容
+# 进入账本。它与记录、决定共用同一条操作序号；内容项只能经入住采用新增，开局之后
+# 没有别的路。
+#
 # 它是运维记录（Article XIII），不是世界真相，不进任何角色的上下文。不可变值
 # 对象，整体替换，随事务回滚、随存档往返。
 import hashlib
@@ -140,11 +144,51 @@ def _seq(value, label: str) -> int:
 
 
 @dataclass(frozen=True)
+class ContentAdmission:
+    """一项内容随新居民入住进入账本（WORLD-2）：开局之后新增内容项的唯一来源。
+
+    `operation_id` 指向世界历史里那条 world.resident_admitted；恢复时两边逐条互验。
+    """
+
+    subject: str
+    fingerprint: str
+    seq: int
+    operation_id: str
+
+    def __post_init__(self) -> None:
+        _text(self.subject, "subject")
+        _fingerprint(self.fingerprint, "fingerprint")
+        _seq(self.seq, "seq")
+        _text(self.operation_id, "operation_id")
+
+    def to_dict(self) -> Dict:
+        return {
+            "subject": self.subject,
+            "fingerprint": self.fingerprint,
+            "seq": self.seq,
+            "operation_id": self.operation_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "ContentAdmission":
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "subject",
+            "fingerprint",
+            "seq",
+            "operation_id",
+        }:
+            raise ContentLedgerError("入住采用记录的字段不对")
+        return cls(**dict(payload))
+
+
+@dataclass(frozen=True)
 class ContentLedger:
     adopted: Tuple[Tuple[str, str], ...]
     conflicts: Tuple[ContentConflict, ...] = ()
     # 下一次操作要用的序号 = 已经发生过的操作数。
     next_seq: int = 0
+    # 入住采用（WORLD-2），按序号排列。
+    admissions: Tuple[ContentAdmission, ...] = ()
 
     def __post_init__(self) -> None:
         adopted = tuple(sorted((str(k), str(v)) for k, v in dict(self.adopted).items()))
@@ -157,6 +201,22 @@ class ContentLedger:
         _seq(self.next_seq, "next_seq")
         current = dict(adopted)
         used = []
+        admitted = set()
+        previous_admission = -1
+        for admission in self.admissions:
+            if not isinstance(admission, ContentAdmission):
+                raise ContentLedgerError("admissions 里只能放 ContentAdmission")
+            if admission.subject not in current:
+                raise ContentLedgerError(
+                    f"入住采用记录的内容项 '{admission.subject}' 不在已采用版本里"
+                )
+            if admission.subject in admitted:
+                raise ContentLedgerError(f"内容项 '{admission.subject}' 入住采用了两次")
+            if admission.seq <= previous_admission:
+                raise ContentLedgerError("入住采用记录必须按序号排列")
+            admitted.add(admission.subject)
+            previous_admission = admission.seq
+            used.append(admission.seq)
         previous_offer = -1
         for conflict in self.conflicts:
             if not isinstance(conflict, ContentConflict):
@@ -177,9 +237,12 @@ class ContentLedger:
             raise ContentLedgerError(
                 "内容账本的操作序号不连续（有记录被删、被改回待决或被凭空加入）"
             )
-        # 不用开局版本也能查的一条：每项内容若被采用过，此刻的版本就是按序号
-        # 最后一次采用的那一版。完整的重放见 check_genesis。
-        latest: Dict[str, Tuple[int, str]] = {}
+        # 不用开局版本也能查的一条：每项内容若被采用过（含入住采用），此刻的版本
+        # 就是按序号最后一次采用的那一版。完整的重放见 check_genesis。
+        latest: Dict[str, Tuple[int, str]] = {
+            admission.subject: (admission.seq, admission.fingerprint)
+            for admission in self.admissions
+        }
         for conflict in self.conflicts:
             if conflict.status is ConflictStatus.ADOPTED:
                 seen = latest.get(conflict.subject)
@@ -191,6 +254,7 @@ class ContentLedger:
                     f"'{subject}' 的已采用版本与最后一次采用记录不一致"
                 )
         object.__setattr__(self, "conflicts", tuple(self.conflicts))
+        object.__setattr__(self, "admissions", tuple(self.admissions))
 
     # ── 查询 ────────────────────────────────────────────────────────────
     def adopted_fingerprint(self, subject: str) -> Optional[str]:
@@ -265,6 +329,7 @@ class ContentLedger:
                 ),
             ),
             self.next_seq + 1,
+            self.admissions,
         )
 
     def decided(self, conflict_id: str, status, *, wall: str) -> "ContentLedger":
@@ -307,8 +372,22 @@ class ContentLedger:
             adopted = dict(self.adopted)
             if status is ConflictStatus.ADOPTED:
                 adopted[conflict.subject] = conflict.offered_fingerprint
-            return ContentLedger(tuple(adopted.items()), tuple(conflicts), self.next_seq + 1)
+            return ContentLedger(
+                tuple(adopted.items()), tuple(conflicts), self.next_seq + 1, self.admissions
+            )
         raise ContentLedgerError(f"没有这条冲突记录: {conflict_id}")
+
+    def admitted(self, subject: str, fingerprint: str, *, operation_id: str) -> "ContentLedger":
+        """一位新居民入住：她的这一项内容以这一版进入账本，占一个操作序号。"""
+        if self.adopted_fingerprint(subject) is not None:
+            raise ContentLedgerError(f"'{subject}' 已经在账本里，不能再入住采用")
+        admission = ContentAdmission(subject, fingerprint, self.next_seq, operation_id)
+        return ContentLedger(
+            self.adopted + ((subject, fingerprint),),
+            self.conflicts,
+            self.next_seq + 1,
+            self.admissions + (admission,),
+        )
 
     # ── 校验：已采用版本从哪来 ──────────────────────────────────────────
     def check_successor_of(self, previous: "ContentLedger") -> None:
@@ -323,8 +402,18 @@ class ContentLedger:
             raise ContentLedgerError("冲突记录只能追加或被决定，不能删")
         if self.next_seq < previous.next_seq:
             raise ContentLedgerError("操作序号不能倒退")
-        if set(dict(self.adopted)) != set(dict(previous.adopted)):
-            raise ContentLedgerError("内容账本不能增减内容项")
+        before_admissions = previous.admissions
+        if self.admissions[: len(before_admissions)] != before_admissions:
+            raise ContentLedgerError("入住采用记录只能追加，不能删改")
+        new_admissions = self.admissions[len(before_admissions):]
+        for admission in new_admissions:
+            if admission.seq < previous.next_seq:
+                raise ContentLedgerError("新的入住采用用了一个已经用过的序号")
+        # 内容项只能经入住采用新增，不能减少。
+        if set(dict(self.adopted)) != set(dict(previous.adopted)) | {
+            admission.subject for admission in new_admissions
+        }:
+            raise ContentLedgerError("内容账本不能增减内容项（新增只能经入住采用）")
         for before, after in zip(before_all, after_all):
             if before == after:
                 continue
@@ -339,20 +428,48 @@ class ContentLedger:
                 raise ContentLedgerError("新记录用了一个已经用过的序号")
 
     def check_genesis(self, genesis: Mapping[str, str]) -> None:
-        """从开局版本出发，按操作序号重放全部记录与决定，必须恰好走到此刻的版本。
+        """从开局版本出发，按操作序号重放全部记录、决定与入住采用，必须恰好走到此刻的版本。
 
         每条记录针对的必须是记录那一刻的已采用版本；每次采用针对的必须是采用那一
-        刻的已采用版本。只有序号决定先后，墙钟时间不参与。
+        刻的已采用版本；入住采用的内容项在那一刻之前不存在。只有序号决定先后，墙钟
+        时间不参与。
         """
+        if set(dict(self.adopted)) != set(genesis) | {a.subject for a in self.admissions}:
+            raise ContentLedgerError("内容账本的内容项与开局来源加入住采用不一致")
+        if dict(self._replay(genesis, self.next_seq)) != dict(self.adopted):
+            raise ContentLedgerError("已采用版本不是从开局版本经采用记录走到的")
+
+    def adopted_before(self, genesis: Mapping[str, str], seq: int) -> Dict[str, str]:
+        """从开局版本重放到序号 `seq` 之前（不含）时的已采用版本。WORLD-2 基准拿它核对。"""
+        _seq(seq, "seq")
+        if seq > self.next_seq:
+            raise ContentLedgerError("序号超出了账本已经发生过的操作")
+        return self._replay(genesis, seq)
+
+    def _replay(self, genesis: Mapping[str, str], until: int) -> Dict[str, str]:
         current = dict(genesis)
-        if set(dict(self.adopted)) != set(current):
-            raise ContentLedgerError("内容账本的内容项与开局来源不一致")
         operations = []
         for conflict in self.conflicts:
             operations.append((conflict.offered_seq, "offer", conflict))
             if conflict.decided_seq is not None:
                 operations.append((conflict.decided_seq, "decide", conflict))
-        for _, kind, conflict in sorted(operations, key=lambda op: op[0]):
+        for admission in self.admissions:
+            operations.append((admission.seq, "admit", admission))
+        for seq, kind, record in sorted(operations, key=lambda op: op[0]):
+            if seq >= until:
+                break
+            if kind == "admit":
+                if record.subject in current:
+                    raise ContentLedgerError(
+                        f"入住采用的内容项 '{record.subject}' 在那一刻已经存在"
+                    )
+                current[record.subject] = record.fingerprint
+                continue
+            conflict = record
+            if conflict.subject not in current:
+                raise ContentLedgerError(
+                    f"冲突 '{conflict.conflict_id}' 针对的内容项在那一刻还不存在"
+                )
             base = current[conflict.subject]
             if kind == "offer":
                 if conflict.adopted_fingerprint != base:
@@ -365,16 +482,19 @@ class ContentLedger:
                         f"冲突 '{conflict.conflict_id}' 被采用时针对的不是当时的已采用版本"
                     )
                 current[conflict.subject] = conflict.offered_fingerprint
-        if current != dict(self.adopted):
-            raise ContentLedgerError("已采用版本不是从开局版本经采用记录走到的")
+        return current
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
-        return {
+        payload = {
             "adopted": dict(self.adopted),
             "conflicts": [c.to_dict() for c in self.conflicts],
             "next_seq": self.next_seq,
         }
+        # 没入住过的世界存档形状不变（WORLD-2 之前的代码照样读得懂）。
+        if self.admissions:
+            payload["admissions"] = [a.to_dict() for a in self.admissions]
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping) -> "ContentLedger":
@@ -386,10 +506,15 @@ class ContentLedger:
             raise ContentLedgerError("内容账本必须有 adopted（字典）与 conflicts（列表）")
         if "next_seq" not in payload:
             raise ContentLedgerError("内容账本缺少 next_seq（操作序号）")
+        admissions = payload.get("admissions", [])
+        if not isinstance(admissions, list) or ("admissions" in payload and not admissions):
+            # 空列表不写进存档（to_dict）；出现了就必须是非空数组。
+            raise ContentLedgerError("内容账本的 admissions 必须是非空数组")
         return cls(
             tuple(adopted.items()),
             tuple(ContentConflict.from_dict(item) for item in conflicts),
             payload["next_seq"],
+            tuple(ContentAdmission.from_dict(item) for item in admissions),
         )
 
 
@@ -419,6 +544,7 @@ def genesis_from_origin(origin) -> Dict[str, str]:
 
 __all__ = [
     "ConflictStatus",
+    "ContentAdmission",
     "ContentConflict",
     "ContentLedger",
     "ContentLedgerError",

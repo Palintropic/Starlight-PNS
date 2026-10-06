@@ -72,7 +72,16 @@ from pns.runtime.autonomy.outcome import (
 )
 from pns.runtime.memory.encoder import MemoryEncoder
 from pns.runtime.memory.recall import MemoryRecall
-from pns.runtime.event_commit import _commit_rhythm_event, commit_session_event
+from pns.runtime.event_commit import (
+    _commit_rhythm_event,
+    commit_authority_event,
+    commit_session_event,
+)
+from pns.runtime.formal_world import (
+    FormalWorldError,
+    check_roster_runnable,
+    evaluate_rhythm_gate,
+)
 from pns.runtime.rhythm import RhythmDirector
 from pns.runtime.scheduler import PersistentScheduler
 
@@ -790,6 +799,79 @@ class AutonomousRuntime:
                 raise AutonomyError(str(e)) from e
 
         self._ledger(change)
+
+    # ── WORLD-2：入住与地点扩展（设计 v3 §4.4） ──────────────────────────
+    def _commit_world2(
+        self,
+        event,
+        *,
+        content_rhythms: Mapping,
+        registry_revision: int,
+        wall: Optional[datetime] = None,
+    ) -> Dict:
+        """在线性化闸门内提交一笔 WORLD-2 权威操作，并在同一边界发布新的作息导演。
+
+        **只给世界的维护入口用**（C8 的入住服务）。`content_rhythms` 是本次打开
+        世界所用的那份冻结内容快照里的作息表（全包，不只是已采用的）。
+
+        `event` 可以是一条现成的 Event，也可以是 `build(state) -> Event`：后者在闸门
+        之内、事务之前调用，入住窗口、室友、前身、种子、基准都对着那一刻的世界判
+        （时钟在预检之后可能已经走了）。它抛出的异常原样上浮，什么都没改。
+
+        跟时钟步、Agency 提交、内容决定走同一把闸门、同一个事务，所以与它们之间
+        只有两种先后，没有交错。顺序：
+          1. 运行时在跑（held / 已停的世界不能借入住解锁或重启）；
+          2. 此刻的作息门齐（纯算，不记任何新提议）；
+          3. 提交事件（状态、账本、排期都在事务里）；
+          4. 入住：在当前导演上加这一个人，旧居民的表原样复用；
+          5. 名单上每一个人都有已采用版本、内容定义、导演条目；
+          6. 换上新导演。
+        任何一步失败，事务回滚，导演从没换过。不改 held、start / stop、认知时间线。
+        """
+        stamp = self._wall(wall)
+        with self._gate:
+            self._require_running("WORLD-2 操作")
+            state = self._state
+            if self.in_transaction or state.transaction_is_mine:
+                # 导演是事务管不到的运行期对象：嵌在别人的事务里，外层回滚时状态撤了、
+                # 导演却已经换上。所以这笔操作必须自己就是最外层事务。
+                raise AutonomyError("WORLD-2 操作必须是最外层事务，不能嵌在别的提交里")
+            director = self._rhythm
+            if not isinstance(event, Event):
+                event = event(state)
+            with self._committing():
+                with state.atomic_commit():
+                    if state.content is None:
+                        raise AutonomyError("WORLD-2 操作只用于带内容账本的正式世界")
+                    _, gate = evaluate_rhythm_gate(
+                        state.content,
+                        content_rhythms,
+                        registry_revision=registry_revision,
+                        wall=stamp,
+                    )
+                    if not gate.complete:
+                        raise AutonomyError(
+                            "作息门未齐（"
+                            + "、".join(f"{s.character_id}:{s.reason}" for s in gate.blocked())
+                            + "），不能做 WORLD-2 操作"
+                        )
+                    projection = commit_authority_event(state, event)
+                    if event.type is EventType.WORLD_RESIDENT_ADMITTED:
+                        character_id = event.payload["character_id"]
+                        rhythm = content_rhythms.get(character_id)
+                        if director is None or rhythm is None:
+                            raise AutonomyError(
+                                f"本次打开所用的内容里没有 '{character_id}' 的作息，不能入住"
+                            )
+                        director = director.with_resident(character_id, rhythm)
+                    try:
+                        check_roster_runnable(state, content_rhythms, director)
+                    except FormalWorldError as e:
+                        raise AutonomyError(str(e)) from None
+                    # 最后一步：换上新导演。之后事务退出不会再失败（最外层、无出口校验），
+                    # 所以"事件提交了"与"导演换上了"同时成立或同时不成立。
+                    self._rhythm = director
+            return projection
 
     def cognition_status(self, wall: Optional[datetime] = None) -> Optional[Dict]:
         """认知此刻可不可用、为什么，额度还剩多少；锚点换算出的此刻与时钟差多少。"""

@@ -79,6 +79,17 @@ class RhythmDirector:
             entries[character_id] = rhythm
         self._rhythms = entries
 
+    def with_resident(self, character_id: str, rhythm: DailyRhythm) -> "RhythmDirector":
+        """加了这一位新居民的新导演（WORLD-2 入住）。本导演不变。
+
+        已有居民的表对象原样复用，不重新读内容、不顺带热更任何人。
+        """
+        if character_id in self._rhythms:
+            raise RhythmDirectorError(f"'{character_id}' 已经在作息导演里了")
+        director = RhythmDirector({character_id: rhythm})
+        director._rhythms = {**self._rhythms, **director._rhythms}
+        return director
+
     def __len__(self) -> int:
         return len(self._rhythms)
 
