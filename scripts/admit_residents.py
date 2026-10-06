@@ -39,7 +39,8 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 ENV_TOKEN = "PNS_ADMIN_TOKEN"
-DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+# 跟 scripts/healthcheck.py 一样：容器里服务听在 127.0.0.1:$PORT（默认 7860）。
+DEFAULT_BASE_URL = f"http://127.0.0.1:{os.environ.get('PORT', '7860')}"
 DEFAULT_WORLD = "yoake-mae"
 
 # send(method, path, body) -> (status, json)

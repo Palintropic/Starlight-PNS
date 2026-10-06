@@ -390,6 +390,91 @@ scope 决定，非安全方法默认要求 `operate`。既没配管理凭据、�
 
 ---
 
+## 4.2 WORLD-2：地点扩展与居民入住
+
+运行中的正式世界（yoake-mae）增加地点、解析新居民的维护入口。三个接口都只接受
+**break-glass bearer**（`Authorization: Bearer $PNS_ADMIN_TOKEN`）：中间件照常负责 401、
+operate / read 与跨源边界，这一组路由再要求主体是 `svc-break-glass` 且经 bearer 而来。
+admin 账户的浏览器会话、开放开发模式的主体一律 403。主体检查先于读请求体。
+
+一次 MMJ 入住是 **1 次地点扩展 + 4 次单人入住**，各自是独立的原子操作，逐笔报告结果；
+不承诺"全成或全不成"。世界必须是打开且在运行的（被 CONTENT-4 搁置的世界不能借入住解锁），
+作息门必须齐。入住只影响世界状态与排期，不改 held、start / stop、认知时间线，也不 Start 认知。
+
+### `POST /api/persistent-worlds/{world_id}/world2/preflight`
+
+只读，没有副作用。请求体二选一：
+
+```json
+{"kind": "extension"}
+{"kind": "admission", "character_id": "airi", "roommates": ["minori", "haruka", "shizuku"], "ordinal": 0}
+```
+
+返回 `feasible`、不可行时的 `reasons`（`[{code, message}]`）、`proposal` 与 `fingerprints`：
+
+- 扩展：`proposal.locations`（冷图里世界还没有的地点）、`append_connections`（追加在旧地点连接
+  末尾、连向新地点的连接）、`first_operation`（是否会同时记下重放基准）；`fingerprints` 是
+  `graph_before` / `graph_after`。
+- 入住：`proposal.location_id`（她作息此刻所在的住宿地点）、`window`（这一段睡眠的开始与出发时刻）、
+  `roommates`、`ordinal`；`fingerprints` 是冻结内容快照里她的作息与授予指纹；`next_window`
+  是此刻或之后第一个按作息可行的睡眠窗口（房里有没有人醒着要到时再判）。
+
+预检可行不代替执行：执行时在提交闸门内对着那一刻的世界重新判断。
+
+### `POST /api/persistent-worlds/{world_id}/world2/operations`
+
+执行一笔。请求体由预检结果拼出，外加调用方选定的 `operation_id`（1–64 位字母数字与 `._:-`）：
+
+```json
+{"kind": "extension", "operation_id": "mmj-ext-1", "graph_before": "…", "graph_after": "…"}
+{"kind": "admission", "operation_id": "mmj-airi", "character_id": "airi",
+ "location_id": "lumina_forum_mmj_room", "roommates": ["minori", "haruka", "shizuku"],
+ "ordinal": 0, "window": {"start": "…", "end": "…"},
+ "fingerprints": {"rhythm": "…", "grants": "…"}}
+```
+
+字段严格，多一个少一个都是 422。处理顺序：
+
+1. 在闸门内按 `operation_id` 查世界历史。已提交过、请求相同 → 不重新判断窗口、前身与种子，
+   只报告结果；没到 `durable` 时再存一次（**这个接口在重试时可能写盘，不是只读**）。
+   已提交过、请求不同 → 409 `operation_id_conflict`。
+2. 没提交过才判断：内容指纹与预检一致、世界里没有她的任何记录（首次解析）、她此刻在作息的
+   睡眠段、地点是作息指定的住宿地点、还没到出发时刻、窗口与预检一致、声明的室友按作息住在这里、
+   房里每个人都是声明室友且都睡着、没有位置未知的居民。
+3. 提交（状态、账本入住采用、排期种子、作息导演在同一个边界里），然后 checkpoint。
+
+结果（200）：
+
+```json
+{"operation_id": "mmj-airi", "kind": "admission", "found": true, "outcome": "durable",
+ "event_id": "world2:mmj-airi", "sequence": 1234, "revision": 57,
+ "character_id": "airi", "retry": false}
+```
+
+| `outcome` | 含义 |
+|---|---|
+| `durable` | 磁盘上那一版含这一笔，目录同步有证据 |
+| `visible_not_durable` | 磁盘上那一版含这一笔，但耐久性证实不了（目录同步失败或平台不支持；或由存档恢复而来、没有证据） |
+| `committed` | 已提交到内存里的世界，还没存下去。此时崩溃会回到上一次 checkpoint，这一笔不在了 |
+
+被拒（什么都没改）返回 `{"detail": {"category": "world2_rejected", "outcome": "rejected", "code", "message"}}`：
+请求不合格 422（`bad_request`），其余 409。常见的 `code`：`stale_preflight`（世界或内容在预检之后变了，
+重新预检）、`predecessor`、`not_asleep`、`not_lodging`、`past_departure`、`bad_roommate`、`occupied`、
+`awake`、`unknown_occupancy`、`nothing_to_extend`、`cold_graph_conflict`、`operation_id_conflict`、
+`refused`（运行时没在跑、作息门未齐、世界不是正式世界等）。
+
+### `GET /api/persistent-worlds/{world_id}/world2/operations/{operation_id}`
+
+只读，不写盘。返回同上的结果形状；没有这一笔时 `{"operation_id", "outcome": null, "found": false}`。
+要把一笔 `committed` 补存成 `durable`，用**同一份**请求重发执行接口。
+
+### 命令行
+
+`scripts/admit_residents.py` 只调用上面三个接口，token 从 `PNS_ADMIN_TOKEN` 读。运维步骤见
+`DEPLOY_UBUNTU_DOCKER.md` 第 10.2 节。
+
+---
+
 ## 5. 数据文件
 
 | 路径 | 写入时机 | 说明 |

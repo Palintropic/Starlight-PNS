@@ -569,6 +569,48 @@ docker compose exec -T app python scripts/content_decisions.py yoake-mae \
 
 退出码 0 之后回 dashboard 再按一次"恢复"：门齐，世界正常运行，补跑离线时间。认知照旧不会自动 Start。
 
+### 10.2 居民入住（WORLD-2）
+
+给运行中的正式世界加地点、让新居民入住。接口与结果档位见 `API.md` 第 4.2 节。前提：
+
+- 新居民的内容（作息、授予、冷图里的新地点）已随镜像部署，并且世界是在这次部署之后**恢复**的——
+  入住只用世界打开时那份冻结的内容快照；
+- 世界打开、在运行、没有被内容待决搁置（第 10.1 节）；
+- **先按第 12 节停机备份**。入住写进世界历史之后，旧版本代码会拒绝打开这份存档（不认识的事件类型），
+  回滚只能连同备份一起恢复（第 11 节）；
+- 认知额度 N 已经定好：加人不会自动加额度，全世界共用一个计数。
+
+入住窗口是新居民作息里的睡眠段（MMJ 宿舍是东京时间 23:00 前后到早上出发之前），房里已有的人
+都必须是声明的室友而且睡着。一次执行一笔，按顺序：
+
+```bash
+# 在容器里跑，凭据从容器环境里来，不写在命令行上
+docker compose exec -T app python scripts/admit_residents.py preflight extension
+
+# 1. 地点扩展（世界上第一笔 WORLD-2 操作同时记下重放基准）
+docker compose exec -T app python scripts/admit_residents.py \
+    execute extension --operation-id mmj-ext-1 --record /app/data/world2-mmj-ext-1.json
+
+# 2. 四人逐个入住；ordinal 是这一批里的固定序位（0–3），决定首次排期的错开
+docker compose exec -T app python scripts/admit_residents.py preflight admission \
+    --character airi --roommates minori,haruka,shizuku --ordinal 0
+docker compose exec -T app python scripts/admit_residents.py execute admission \
+    --operation-id mmj-airi --character airi --roommates minori,haruka,shizuku --ordinal 0 \
+    --record /app/data/world2-mmj-airi.json
+# minori（1）、haruka（2）、shizuku（3）同上
+```
+
+- `execute` 先预检，预检不可行就什么都不发、退出码 2；可行就把要发的请求体写进 `--record`
+  文件，再发送。
+- 退出码 0 = `durable`。退出码 3（`committed` / `visible_not_durable`）**先停下来**，看
+  `docker compose exec app python scripts/admit_residents.py status <operation_id>` 和世界状态面的
+  `last_error`，不要自动重试到底。要补存时用同一份记下来的请求重发：
+  `execute --request /app/data/world2-<operation_id>.json`（只查询或补存，不重新判断）。
+  不要改 operation_id 重发——那会被当成一笔新的入住，而她已经在世界里了，会被前身检查拒绝。
+- 中间一笔失败（例如第三个人此刻醒着），已成功的不会撤销，后面的人可以独立执行；失败的那位等
+  下一个窗口（预检的 `next_window`）再来。
+- 完成后手动 checkpoint 一次，看 overview 里新居民的位置，第二天早上看她们是否按作息起床、移动。
+
 ## 11. 回滚
 
 ```bash
