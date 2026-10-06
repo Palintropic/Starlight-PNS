@@ -440,7 +440,17 @@ def _schedule_seed(state: SessionState, event: Event) -> None:
 
 
 def _check_baseline_order(state: SessionState, event: Event) -> None:
-    """世界上第一笔 WORLD-2 操作必须是带基准的地点扩展；之后谁都不再带基准。"""
+    """世界上第一笔 WORLD-2 操作必须是带基准的地点扩展；之后谁都不再带基准。
+
+    operation_id 在全部 WORLD-2 事件里唯一：同一个 id 只能对应一个提交结果，
+    查询与重试才认得出是哪一笔（扩展不进账本，账本互验管不到它）。
+    """
+    operation_id = event.payload["operation_id"]
+    if any(
+        e.type in AUTHORITY_EVENT_TYPES and e.payload["operation_id"] == operation_id
+        for e in state.events
+    ):
+        raise EventCommitError(f"operation_id '{operation_id}' 已经被另一笔 WORLD-2 操作用过")
     first = not any(e.type in AUTHORITY_EVENT_TYPES for e in state.events)
     if event.type is EventType.WORLD_RESIDENT_ADMITTED:
         if first:

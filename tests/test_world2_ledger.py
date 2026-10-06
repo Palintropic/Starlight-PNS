@@ -278,6 +278,7 @@ class CommitBaselineTests(unittest.TestCase):
         first = _extension_payload(self.state)
         self._extend(first)
         second = copy.deepcopy(first)  # 同一份内容、同一份基准：基准检查先于图检查
+        second["operation_id"] = "op-ext-2"  # 换个 id，别让唯一性检查先拦下
         with self.assertRaisesRegex(EventCommitError, "只在世界上第一笔"):
             self._extend(second, "w2:ext2")
 
@@ -347,6 +348,16 @@ class CommitBaselineTests(unittest.TestCase):
         payload = _extension_payload(self.state)
         self.state.content = None
         self.assert_refused(payload, "WORLD-2 的权威操作只用于带内容账本的正式世界")
+
+    def test_an_operation_id_cannot_be_reused(self):
+        state = _admitted_world()
+        annex = dict(_annex_extension(state), operation_id="op-ext")
+        events = len(state.events)
+        with self.assertRaisesRegex(EventCommitError, "已经被另一笔 WORLD-2 操作用过"):
+            commit_authority_event(
+                state, _event(state.world_state, EventType.WORLD_LOCATIONS_EXTENDED, annex, "w2:ext2")
+            )
+        self.assertEqual(len(state.events), events)
 
     def test_admission_writes_the_ledger_in_the_same_transaction(self):
         self._extend(_extension_payload(self.state))
@@ -474,6 +485,7 @@ class ReplayTests(unittest.TestCase):
             index = next(i for i, e in enumerate(events) if e["event_id"] == "w2:admit:airi")
             twin = copy.deepcopy(events[index])
             twin["event_id"] = "w2:admit:airi:twin"
+            twin["payload"]["operation_id"] = "op-admit-airi-twin"  # 只测"同一个人入住两次"
             events.insert(index + 1, twin)
             _renumbered(p)
 
@@ -512,6 +524,19 @@ class ReplayTests(unittest.TestCase):
         first = self._event_entry(payload, "w2:ext")["payload"]["baseline"]
         self._event_entry(payload, "w2:ext2")["payload"]["baseline"] = first
         with self.assertRaisesRegex(WorldReplayError, "第二份重放基准"):
+            _restore(payload)
+
+    def test_two_operations_sharing_an_id(self):
+        # ena 的 F1 反例：两笔合法扩展，只把第二笔的 operation_id 改成第一笔的。
+        state = _admitted_world()
+        commit_authority_event(
+            state,
+            _event(state.world_state, EventType.WORLD_LOCATIONS_EXTENDED, _annex_extension(state), "w2:ext2"),
+        )
+        payload = state.to_dict()
+        _restore(copy.deepcopy(payload))
+        self._event_entry(payload, "w2:ext2")["payload"]["operation_id"] = "op-ext"
+        with self.assertRaisesRegex(WorldReplayError, "同一个 operation_id"):
             _restore(payload)
 
     def test_changed_prefix_identity(self):

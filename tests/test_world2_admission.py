@@ -262,6 +262,22 @@ class RetryTests(AdmissionTestCase):
         self.assert_rejected(changed, "operation_id_conflict")
         self.assert_rejected(dict(body, kind="extension", graph_before="x", graph_after="y") | {}, "bad_request")
 
+    def test_an_ambiguous_history_is_not_resolved_by_picking_one(self):
+        self.extend("op-1")
+        first = self.state.events.get("world2:op-1")
+        forged = Event(
+            event_id="world2:op-1:forged",
+            type=first.type,
+            occurred_at=self.state.world_state.clock,
+            scope=first.scope,
+            payload=dict(first.payload, baseline=None),
+        )
+        with self.state.atomic_commit():
+            self.state.events._append(forged)
+        with self.assertRaises(AdmissionRejected) as caught:
+            self.admission.query("op-1")
+        self.assertEqual(caught.exception.code, "operation_id_ambiguous")
+
     def test_an_extension_id_cannot_be_reused_for_an_admission(self):
         self.extend("op-1")
         pre, body = self.admission_body(operation_id="op-1")

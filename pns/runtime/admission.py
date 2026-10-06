@@ -276,10 +276,18 @@ def predecessor_records(state: SessionState, character_id: str) -> List[str]:
 
 
 def find_operation(state: SessionState, operation_id: str) -> Optional[Tuple[Event, int]]:
-    for sequence, event in enumerate(state.events.events()):
-        if event.type in AUTHORITY_EVENT_TYPES and event.payload["operation_id"] == operation_id:
-            return event, sequence
-    return None
+    """这个 operation_id 对应的那一条已提交 WORLD-2 事件。多于一条就是存档坏了，不挑一条凑合。"""
+    found = [
+        (event, sequence)
+        for sequence, event in enumerate(state.events.events())
+        if event.type in AUTHORITY_EVENT_TYPES and event.payload["operation_id"] == operation_id
+    ]
+    if len(found) > 1:
+        raise AdmissionRejected(
+            "operation_id_ambiguous",
+            f"世界历史里有 {len(found)} 笔 WORLD-2 操作用了 operation_id '{operation_id}'",
+        )
+    return found[0] if found else None
 
 
 # ── 服务 ────────────────────────────────────────────────────────────────

@@ -10,7 +10,8 @@
 #      效果重放一遍（_commit_event），推导出名单、地点图、授予、位置、频道在场、
 #      活动；与恢复出来的快照逐项比；
 #   4. 账本里的入住采用与历史里的入住事件一一对应（内容项、指纹、operation_id、先后），
-#      而且都在基准之后。
+#      而且都在基准之后；
+#   5. 全部 WORLD-2 事件的 operation_id 互不相同（扩展不进账本，第 4 条管不到它们）。
 #
 # 任何一项不符都拒绝打开（fail closed），不自动修复，也不从快照重新生成基准。
 # 从没用过 WORLD-2 的存档什么都不查（只要求账本里没有入住采用）。
@@ -52,6 +53,10 @@ def verify_world2_history(state: SessionState) -> None:
         return
     if ledger is None or state.world_state is None:
         raise WorldReplayError("有 WORLD-2 操作的世界必须带世界状态与内容账本")
+
+    operation_ids = [events[i].payload["operation_id"] for i in positions]
+    if len(set(operation_ids)) != len(operation_ids):
+        raise WorldReplayError("世界历史里有两笔 WORLD-2 操作用了同一个 operation_id")
 
     start = positions[0]
     first = events[start]
