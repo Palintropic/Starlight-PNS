@@ -572,6 +572,8 @@ class WorldControlPlane:
             # 规矩：世界打开的那一刻锁定，之后重载内容动不了已经打开的世界。
             rhythm=RhythmDirector(registry.rhythms()),
             content_revision=registry.revision,
+            # WORLD-2 的维护入口用同一份冻结快照（新居民的作息、授予、冷图）。
+            content=registry,
             seed=seed,
             allowance_renewal=allowance_renewal,
         )

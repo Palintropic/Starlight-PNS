@@ -803,7 +803,7 @@ class AutonomousRuntime:
     # ── WORLD-2：入住与地点扩展（设计 v3 §4.4） ──────────────────────────
     def _commit_world2(
         self,
-        event: Event,
+        event,
         *,
         content_rhythms: Mapping,
         registry_revision: int,
@@ -813,6 +813,10 @@ class AutonomousRuntime:
 
         **只给世界的维护入口用**（C8 的入住服务）。`content_rhythms` 是本次打开
         世界所用的那份冻结内容快照里的作息表（全包，不只是已采用的）。
+
+        `event` 可以是一条现成的 Event，也可以是 `build(state) -> Event`：后者在闸门
+        之内、事务之前调用，入住窗口、室友、前身、种子、基准都对着那一刻的世界判
+        （时钟在预检之后可能已经走了）。它抛出的异常原样上浮，什么都没改。
 
         跟时钟步、Agency 提交、内容决定走同一把闸门、同一个事务，所以与它们之间
         只有两种先后，没有交错。顺序：
@@ -833,6 +837,8 @@ class AutonomousRuntime:
                 # 导演却已经换上。所以这笔操作必须自己就是最外层事务。
                 raise AutonomyError("WORLD-2 操作必须是最外层事务，不能嵌在别的提交里")
             director = self._rhythm
+            if not isinstance(event, Event):
+                event = event(state)
             with self._committing():
                 with state.atomic_commit():
                     if state.content is None:

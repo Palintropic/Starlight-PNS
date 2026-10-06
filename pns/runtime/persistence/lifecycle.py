@@ -150,6 +150,10 @@ class RuntimeAdapters:
     # 有限 Start 的续额策略 id（COG-1）。来自代码里的正式世界定义；跟作息一样
     # 创建和恢复都由调用方交，存档里的授权只记它、不决定它。
     allowance_renewal: Optional[str] = None
+    # 打开这个世界所用的那份冻结内容快照（ContentRegistry）。WORLD-2 的维护入口
+    # 从这里取新居民的作息、授予与冷图——跟作息导演、生成闭包同一份快照，所以
+    # "入住用的内容"与"世界跑的内容"不会是两份。不给就不能做 WORLD-2 操作。
+    content: Optional[object] = None
     name: str = "autonomy"
 
     def __post_init__(self) -> None:
@@ -397,8 +401,12 @@ class PersistentWorld:
         directory_synced: Optional[bool] = None,
         segments: Tuple[EventSegment, ...] = (),
         baseline: Optional[Tuple] = None,
+        content: Optional[object] = None,
+        content_revision: int = 0,
     ) -> None:
         self._world_id = world_id
+        self._content = content
+        self._content_revision = content_revision
         self._store = store
         self._state = state
         self._runtime = runtime
@@ -452,6 +460,25 @@ class PersistentWorld:
     def revision(self) -> int:
         """磁盘上那一份是第几版。**不是**"我打算写第几版"。"""
         return self._revision
+
+    @property
+    def content(self) -> Optional[object]:
+        """打开这个世界所用的冻结内容快照；没交就是 None。"""
+        return self._content
+
+    @property
+    def content_revision(self) -> int:
+        return self._content_revision
+
+    def saved_durability(self) -> Tuple[Optional[int], Optional[bool], Optional[bool]]:
+        """磁盘上那一版含多少条事件，以及它的耐久性证据（durable, directory_synced）。
+
+        事件历史只追加、回滚只截回事务开始，所以"序号 < 条数"就是"这条事件在磁盘上那
+        一版里"。读不出一致指纹时条数是 None（不确定）。
+        """
+        with self._lock:
+            count = self._fingerprint[2] if self._fingerprint is not None else None
+            return count, self._durable, self._directory_synced
 
     @property
     def closed(self) -> bool:
@@ -882,6 +909,8 @@ class WorldLifecycleService:
                 checkpoint_policy=policy,
                 service=self,
                 snapshot_timeout=snapshot_timeout,
+                content=adapters.content,
+                content_revision=adapters.content_revision,
             )
             # 组装完成：从这里起不能再整段换存档或重绑服务。发布先于第一次写盘：
             # 发布时的整体校验没过的状态，一个字节都不许落到磁盘上。
@@ -984,6 +1013,8 @@ class WorldLifecycleService:
                 snapshot_timeout=snapshot_timeout,
                 segments=archive.segments,
                 baseline=baseline,
+                content=adapters.content,
+                content_revision=adapters.content_revision,
             )
             # 先发布（整体校验），再写任何东西：绑定期间通过公开接口形成的不一致
             # 必须在落盘之前被拒绝，失败的恢复不许把原本合法的存档写坏。
