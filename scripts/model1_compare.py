@@ -48,11 +48,13 @@ class BudgetExceeded(RuntimeError):
 def estimate_yuan(usage):
     if not usage:
         return 0.0
-    total_in = usage.get("input_tokens") or 0
+    # Anthropic-format usage: input_tokens excludes cache reads and cache
+    # writes, which are reported separately (MiMo bills writes as input).
+    fresh = (usage.get("input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
     cached = usage.get("cache_read_input_tokens") or 0
     out = usage.get("output_tokens") or 0
     return (
-        (total_in - cached) * PRICE_PER_M["input"]
+        fresh * PRICE_PER_M["input"]
         + cached * PRICE_PER_M["cache_read"]
         + out * PRICE_PER_M["output"]
     ) / 1_000_000

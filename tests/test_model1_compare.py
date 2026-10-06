@@ -94,9 +94,15 @@ def _write_world(root, events, observations, records):
 
 class MeterTest(unittest.TestCase):
     def test_estimate_uses_cache_price_for_cached_input(self):
-        usage = {"input_tokens": 1_000_000, "cache_read_input_tokens": 400_000,
-                 "output_tokens": 100_000}
+        # input_tokens excludes cache reads (shape observed from MiMo, 2026-10-06).
+        usage = {"input_tokens": 600_000, "cache_read_input_tokens": 400_000,
+                 "cache_creation_input_tokens": None, "output_tokens": 100_000}
         self.assertAlmostEqual(m1.estimate_yuan(usage), 0.6 * 3 + 0.4 * 0.025 + 0.1 * 6)
+
+    def test_estimate_never_negative_when_prompt_is_almost_all_cached(self):
+        usage = {"input_tokens": 1, "cache_read_input_tokens": 4032, "output_tokens": 375}
+        self.assertAlmostEqual(
+            m1.estimate_yuan(usage), (1 * 3 + 4032 * 0.025 + 375 * 6) / 1_000_000)
 
     def test_budget_stops_even_when_router_swallows_the_raise(self):
         from pns.logic import router as router_mod
