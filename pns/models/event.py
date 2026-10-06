@@ -70,7 +70,16 @@ AUTHORITY_EVENT_TYPES = frozenset(
 )
 
 _EXTENSION_PAYLOAD_KEYS = frozenset(
-    {"operation_id", "envelope", "locations", "append_connections", "graph_before", "graph_after"}
+    {
+        "operation_id",
+        "envelope",
+        "locations",
+        "append_connections",
+        "graph_before",
+        "graph_after",
+        # 世界上第一条扩展带重放基准，之后的一律 None（pns/runtime/world2_baseline.py）。
+        "baseline",
+    }
 )
 _ADMISSION_PAYLOAD_KEYS = frozenset(
     {

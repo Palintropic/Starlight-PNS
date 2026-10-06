@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from pns.models.session import SessionState
 from pns.models.time_events import TimeEventPolicy, legacy_epoch
 from pns.runtime.persistence.naming import validate_world_id
+from pns.runtime.world2_replay import WorldReplayError, verify_world2_history
 
 # 存档格式版本。改变形状就 +1，并且在这里写清楚旧版怎么升级 —— 不认识的版本
 # 一律响亮拒绝，绝不"尽量读读看"。
@@ -701,4 +702,11 @@ class WorldArchive:
             raise ArchiveError("恢复出来的会话身份跟信封对不上")
         if state.world_state is None or state.world_state.clock != self.clock:
             raise ArchiveError("恢复出来的世界时钟跟信封对不上")
+        # WORLD-2：用过入住 / 地点扩展的世界，从重放基准加后缀重放，与快照逐项互验。
+        # 从没用过的存档这一步什么都不做。它要用提交边界的状态效果重放，所以放在
+        # 运行时这一层，不在 SessionState.from_dict（models 不依赖 runtime）。
+        try:
+            verify_world2_history(state)
+        except WorldReplayError as e:
+            raise ArchiveError(f"世界 '{self.world_id}' 的 WORLD-2 记录没通过互验: {e}") from e
         return state

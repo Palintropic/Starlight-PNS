@@ -22,7 +22,8 @@ from pns.models.observation import Observation
 from pns.models.session import SessionState, Turn
 from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.exposure import evaluate_event_exposure, observations_for
-from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint
+from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint, rhythm_subject
+from pns.runtime.world2_baseline import BaselineError, check_baseline_at_commit
 from pns.world.extension import ExtensionError, extended_graph, graph_fingerprint
 from pns.world.grants import (
     CharacterGrants,
@@ -396,11 +397,43 @@ def commit_authority_event(state: SessionState, event: Event) -> Dict:
         raise EventCommitError("权威提交入口只收 WORLD-2 的权威操作")
     if claims_rhythm(event.provenance):
         raise EventCommitError("权威操作不能带作息 provenance")
+    if state.content is None:
+        raise EventCommitError("WORLD-2 的权威操作只用于带内容账本的正式世界")
     with state.atomic_commit():
+        _check_baseline_order(state, event)
         projection = _commit_event(state.world_state, state.events, event)
         if event.type is EventType.WORLD_RESIDENT_ADMITTED:
-            state._admit_character(event.payload["character_id"])
+            payload = event.payload
+            state._admit_character(payload["character_id"])
+            # 入住采用：她的作息作为一项新内容进账本，与已有记录、决定共用一条序号。
+            state.set_content(
+                state.content.admitted(
+                    rhythm_subject(payload["character_id"]),
+                    payload["fingerprints"]["rhythm"],
+                    operation_id=payload["operation_id"],
+                )
+            )
     return projection
+
+
+def _check_baseline_order(state: SessionState, event: Event) -> None:
+    """世界上第一笔 WORLD-2 操作必须是带基准的地点扩展；之后谁都不再带基准。"""
+    first = not any(e.type in AUTHORITY_EVENT_TYPES for e in state.events)
+    if event.type is EventType.WORLD_RESIDENT_ADMITTED:
+        if first:
+            raise EventCommitError("世界上第一笔 WORLD-2 操作必须是带重放基准的地点扩展")
+        return
+    baseline = event.payload["baseline"]
+    if not first:
+        if baseline is not None:
+            raise EventCommitError("重放基准只在世界上第一笔 WORLD-2 操作里记一次")
+        return
+    if baseline is None:
+        raise EventCommitError("世界上第一笔 WORLD-2 操作必须带重放基准")
+    try:
+        check_baseline_at_commit(state, baseline)
+    except BaselineError as e:
+        raise EventCommitError(f"重放基准不成立：{e}") from None
 
 
 def commit_dialogue(state: SessionState, turn: Turn, event: Event) -> Dict:

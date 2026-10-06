@@ -25,7 +25,13 @@ for _path in (str(REPO_ROOT), str(REPO_ROOT / "scripts")):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from pns.models.event import Event, EventError, EventScope, EventType  # noqa: E402
+from pns.models.event import (  # noqa: E402
+    AUTHORITY_EVENT_TYPES,
+    Event,
+    EventError,
+    EventScope,
+    EventType,
+)
 from pns.models.exposure import ExposureReason  # noqa: E402
 from pns.models.location import LocationGraphError  # noqa: E402
 from pns.models.observation import Observation  # noqa: E402
@@ -40,6 +46,7 @@ from pns.runtime.exposure.rules import evaluate_event_exposure, evaluate_exposur
 from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint  # noqa: E402
 from pns.runtime.memory.encoder import MemoryEncoder  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
+from pns.runtime.world2_baseline import build_baseline  # noqa: E402
 from pns.world.extension import graph_fingerprint  # noqa: E402
 from pns.world.grants import encode_grants  # noqa: E402
 from pns.world.locations import build_default_location_graph  # noqa: E402
@@ -56,7 +63,16 @@ def _old_world_state():
         return _state(registry)
 
 
-def _extension_payload(world):
+def _baseline_or_none(state):
+    """世界上第一笔 WORLD-2 操作带基准，之后的不带（C6）。"""
+    if any(e.type in AUTHORITY_EVENT_TYPES for e in state.events):
+        return None
+    rhythms = BOUNDARY.active().rhythms()
+    return build_baseline(state, {cid: rhythms[cid] for cid in state.characters})
+
+
+def _extension_payload(state):
+    world = state.world_state
     cold = build_default_location_graph()
     new = [location.to_dict() for location in cold if location.location_id in NEW]
     appended = [
@@ -74,6 +90,7 @@ def _extension_payload(world):
         "append_connections": {"city_streets": appended},
         "graph_before": graph_fingerprint(world.locations),
         "graph_after": graph_fingerprint(after),
+        "baseline": _baseline_or_none(state),
     }
 
 
@@ -136,8 +153,9 @@ class _Injected(RuntimeError):
 
 class ShapeTests(unittest.TestCase):
     def setUp(self):
-        self.world = _old_world_state().world_state
-        self.payload = _extension_payload(self.world)
+        self.state = _old_world_state()
+        self.world = self.state.world_state
+        self.payload = _extension_payload(self.state)
 
     def test_accepts_the_canonical_shape(self):
         _event(self.world, EventType.WORLD_LOCATIONS_EXTENDED, self.payload)
@@ -174,7 +192,7 @@ class EntryPointTests(unittest.TestCase):
         self.state = _old_world_state()
         self.world = self.state.world_state
         self.event = _event(
-            self.world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(self.world)
+            self.world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(self.state)
         )
 
     def test_public_entries_refuse_authority_events(self):
@@ -205,7 +223,7 @@ class ExtensionTests(unittest.TestCase):
         self.state = _old_world_state()
         self.world = self.state.world_state
         self.old_graph = self.world.locations
-        self.payload = _extension_payload(self.world)
+        self.payload = _extension_payload(self.state)
 
     def _commit(self, payload):
         return commit_authority_event(
@@ -312,7 +330,7 @@ class AdmissionTests(unittest.TestCase):
             _event(
                 self.world,
                 EventType.WORLD_LOCATIONS_EXTENDED,
-                _extension_payload(self.world),
+                _extension_payload(self.state),
                 event_id="w2:ext",
             ),
         )
@@ -407,7 +425,7 @@ class RollbackTests(unittest.TestCase):
             with state.atomic_commit():
                 commit_authority_event(
                     state,
-                    _event(world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(world), "e"),
+                    _event(world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(state), "e"),
                 )
                 commit_authority_event(
                     state,
@@ -440,7 +458,7 @@ class ZeroPerceptionTests(unittest.TestCase):
         before = snapshot()
         commit_authority_event(
             state,
-            _event(self.world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(self.world), "e"),
+            _event(self.world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(self.state), "e"),
         )
         commit_authority_event(
             state,
@@ -450,7 +468,7 @@ class ZeroPerceptionTests(unittest.TestCase):
         self.assertEqual(after, before)
 
     def test_everyone_gets_authority_operation_even_with_forged_anchors(self):
-        payload = _extension_payload(self.world)
+        payload = _extension_payload(self.state)
         event = _event(self.world, EventType.WORLD_LOCATIONS_EXTENDED, payload)
         self.assertEqual(evaluate_event_exposure(self.world, event), ())
         for character_id in FOUR:
@@ -475,7 +493,7 @@ class ZeroPerceptionTests(unittest.TestCase):
 
     def test_reply_offers_skip_authority_events_by_type(self):
         # 一个什么属性都没有的"引擎"：守卫不在，读 _budget 就会炸。
-        event = _event(self.world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(self.world))
+        event = _event(self.world, EventType.WORLD_LOCATIONS_EXTENDED, _extension_payload(self.state))
         AgencyEngine._offer_replies(SimpleNamespace(), event)
 
 
