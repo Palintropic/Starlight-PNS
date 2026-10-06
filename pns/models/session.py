@@ -723,6 +723,11 @@ class SessionState:
         turns_length = len(self.turns)
         history_lengths = {cid: len(items) for cid, items in self.histories.items()}
         corrections = dict(self.pending_corrections)
+        # 名单与轮转位置（WORLD-2）：入住在事务里给名单追加一人，失败时名单必须一起
+        # 回到原样，否则会留下一个没有槽位、没有作息的"居民"。引用和内容都记。
+        characters = self.characters
+        characters_snapshot = list(characters)
+        character_index = self.current_character_index
         # 引用和内容都要记：块内如果发生了存档恢复（restore_scheduler_archive
         # 和 restore_agency_archive 会整个换掉这几个容器），只回滚内容会留下
         # 换过之后的那一份。
@@ -768,6 +773,9 @@ class SessionState:
                     del self.histories[cid]
             self.pending_corrections.clear()
             self.pending_corrections.update(corrections)
+            characters[:] = characters_snapshot
+            self.characters = characters
+            self.current_character_index = character_index
             raise
 
     def set_cognition(self, timeline: CognitionTimeline) -> None:

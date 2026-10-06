@@ -497,6 +497,10 @@ class WorldState:
                 character_id: set(grants)
                 for character_id, grants in self.channel_grants.items()
             },
+            # 地点图与频道表是冻结的值，只记引用（WORLD-2）：扩展在事务外离线建好新图、
+            # 事务内整体换引用；失败时换回旧引用，不解冻、不就地改旧图。
+            "locations": self.locations,
+            "channels": self.channels,
         }
 
     def _restore_mutable_state(self, snapshot: Dict) -> None:
@@ -525,6 +529,8 @@ class WorldState:
             character_id: set(grants)
             for character_id, grants in snapshot["channel_grants"].items()
         }
+        self.locations = snapshot["locations"]
+        self.channels = snapshot["channels"]
 
     # ── 序列化 ──────────────────────────────────────────────────────────
     def to_dict(self) -> Dict:
