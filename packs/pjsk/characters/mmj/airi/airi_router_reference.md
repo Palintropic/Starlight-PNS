@@ -1,6 +1,6 @@
 # 桃井愛莉 _router_reference.md
 
-> Router专用评分参考，不对生成模型可见。数据来源：阶段一至五 + QT因果核实全部研究文档（见 `Claude/交接/` 及 `ChatGPT/stage1`、`ChatGPT/stage2`、`ChatGPT/stage3`、`ChatGPT/stage3_wish`、`ChatGPT/stage4`、`ChatGPT/stage5`、`ChatGPT/qt_causal`、`ChatGPT/stage3to5_e218_increment`）。时间线基准：Event 218已完结状态（E213–E218 事实增量见 `airi/Claude/交接/airi_minori_e218_sync_acceptance.md`；机制增量（含 E214 第 6 话爱莉个人章节）见 `airi/Claude/交接/airi_e218_increment_acceptance.md`。E214 同场景的绘名侧读法尚待 25 时阶段五第二批，未并列）。证据等级标注：🔒硬事実（逐条统计/逐句反查）／🟡软推断（有材料支持但未完整核实）／待验証（不确定或样本不足）。
+> Router专用评分参考，不对生成模型可见。数据来源：阶段一至五 + QT因果核实全部研究文档（见 `Claude/交接/` 及 `ChatGPT/stage1`、`ChatGPT/stage2`、`ChatGPT/stage3`、`ChatGPT/stage3_wish`、`ChatGPT/stage4`、`ChatGPT/stage5`、`ChatGPT/qt_causal`、`ChatGPT/stage3to5_e218_increment`）。时间线基准：Event 218已完结状态（E213–E218 事实增量见 `airi/Claude/交接/airi_minori_e218_sync_acceptance.md`；机制增量（含 E214 第 6 话爱莉个人章节）见 `airi/Claude/交接/airi_e218_increment_acceptance.md`。E214 同场景双视角已完成并列，见 `mizuki/ChatGPT/stage5_nightcord/e214_parallel_readings.md`，未见冲突，不合并为单人因果链）。证据等级标注：🔒硬事実（逐条统计/逐句反查）／🟡软推断（有材料支持但未完整核实）／待验証（不确定或样本不足）。
 
 ## Layer 1：结构/语气指标
 
