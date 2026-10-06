@@ -188,7 +188,56 @@ class HappyPathTests(AdmissionTestCase):
         self.assertEqual(self.admission.query("nope"), {"operation_id": "nope", "outcome": None, "found": False})
 
 
-# ── 2. 重试 ─────────────────────────────────────────────────────────────
+class EndToEndTests(AdmissionTestCase):
+    """实施单 §5 的端到端：夜间窗口里扩展 + 四笔入住，关闭再恢复，跑一个模拟日。"""
+
+    def test_a_simulated_day_after_admission(self):
+        before = [e.to_dict() for e in self.state.events.events()]
+        observations_before = len(self.state.observations)
+        self.extend()
+        for cid in MMJ:
+            self.assertEqual(self.admit(cid)["outcome"], DURABLE)
+        self.world.close("e2e")
+
+        world = self.service.restore("yoake-mae", adapters=_adapters(self.registry))
+        state = world.state
+        start = state.world_state.clock
+        visited = {cid: set() for cid in MMJ}
+        for _ in range(24 * 4):  # 一个模拟日，每 15 分钟看一眼
+            world.runtime.advance(15)
+            for cid in MMJ:
+                visited[cid].add(state.world_state.location_of(cid))
+        self.assertEqual(state.world_state.clock, start + timedelta(days=1))
+
+        # 旧世界的历史是新历史的原样前缀。
+        after = [e.to_dict() for e in state.events.events()]
+        self.assertEqual(after[: len(before)], before)
+        # 入住与扩展没有人观察到（之后的正常生活照常被观察）。
+        authority = {
+            e.event_id
+            for e in state.events.events()
+            if e.type in (EventType.WORLD_LOCATIONS_EXTENDED, EventType.WORLD_RESIDENT_ADMITTED)
+        }
+        self.assertEqual(len(authority), 5)
+        self.assertFalse(
+            [o for o in state.observations if o.source_event_id in authority]
+        )
+        self.assertFalse(
+            [d for d in state.exposures if d.event_id in authority]
+        )
+        self.assertGreater(len(state.observations), observations_before)
+        # 四人都按作息动起来：周一离开宿舍去了别处，这一刻又在作息说的地方。
+        for cid in MMJ:
+            self.assertGreater(len(visited[cid] - {ROOM}), 0, cid)
+            expected = self.registry.rhythm(cid).segment_at(state.world_state.clock)
+            self.assertEqual(state.world_state.location_of(cid), expected.location_id, cid)
+        world.checkpoint("e2e")
+        world.close("e2e")
+        # 跑过一天之后再恢复一次：重放互验仍然成立（种子已经按周期推了好几轮）。
+        self.service.restore("yoake-mae", adapters=_adapters(self.registry)).close("e2e")
+
+
+# ── 2. 重试 ──────────────────────────────────────────────────────────
 class RetryTests(AdmissionTestCase):
     def test_same_request_returns_the_committed_one_even_after_the_window_closed(self):
         self.extend()
