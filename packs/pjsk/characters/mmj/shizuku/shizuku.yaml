@@ -62,10 +62,10 @@ daily_rhythm:
       activity: idol_work
       location_id: mmj_shizuku_worksite
       source: inferred
-    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    # INFERRED 平日在校午饭；S #31 E209-5 出现过学校午饭（一次企划，非每日）；钟点/频率推断
     - at: "12:30"
       activity: eating
-      location_id: lumina_forum_dining_room
+      location_id: miyamasuzaka_girls
       source: inferred
     # INFERRED 单位制到校窗口/每平日频率；S #7，各人仍有学业；本次到校只实乃理/遥部分确认
     - at: "13:15"

@@ -56,18 +56,23 @@ daily_rhythm:
       activity: studying
       location_id: miyamasuzaka_girls
       source: inferred
-    # INFERRED 饭点/食堂沿用/全员频率；D E213-3 L59仅共餐预期
+    # INFERRED 平日在校午饭；S #31 E209-5 出现过学校午饭（一次企划，非每日）；钟点/频率推断
     - at: "12:30"
       activity: eating
-      location_id: lumina_forum_dining_room
+      location_id: miyamasuzaka_girls
+      source: inferred
+    # INFERRED 午后留校窗口；S #7，各人仍有学业；在校时长推断
+    - at: "13:15"
+      activity: studying
+      location_id: miyamasuzaka_girls
       source: inferred
     # INFERRED 个人外出窗口/频率/现场；D R03；实乃理仅S #31 E209历史工作依据
-    - at: "13:15"
+    - at: "15:00"
       activity: idol_work
       location_id: mmj_haruka_worksite
       source: inferred
     # INFERRED 企划窗口/频率；D E213-4/8与C1444后篇 L66–114
-    - at: "16:00"
+    - at: "17:30"
       activity: stage_planning
       location_id: lumina_forum_mmj_room
       source: inferred
