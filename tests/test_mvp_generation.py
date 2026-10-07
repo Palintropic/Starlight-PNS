@@ -605,31 +605,67 @@ class PromptScopeTests(MvpTestCase):
         self.assertNotIn("和你在一起", situation)
         self.assertNotIn("【此刻你身边】", situation)
 
-    def test_a_channel_message_is_told_the_channel_carries_sound_not_sight(self):
+    def test_only_people_beside_you_can_be_seen_whatever_the_medium(self):
         """生产上见过的失败（10-07 02:24）：真冬下线后，有人猜她睡着了，
-        绘名就在频道里描述她"趴着睡"。被描述的人往往已经不在频道里了，
-        所以频道里没人时也要说。"""
-        channels = self.registry.new_channel_registry()
-        for others in ((), ("kanade",)):
-            situation = render_situation(
-                replace(_context("ena"), channel_characters=others),
-                channels=channels,
-                names={"kanade": "宵崎奏"},
-            )
-            self.assertIn("你只听得到声音，看不到人", situation)
-            self.assertIn("不要说得像亲眼看到一样", situation)
+        绘名就在频道里描述她"趴着睡"。
 
-        in_person = render_situation(
-            replace(
-                _context("ena"),
+        四种情形都要带上这条边界：频道里没人（被描述的往往是刚下线的
+        那个）、频道里既有同处一地的人也有远处的人、独自当面说话、和人
+        当面说话。同处一地的人仍然列在"同处一地"一栏，这句话不能说
+        "频道里的人都不在你这里" —— 那会跟那一栏矛盾。对话里说过的仍然
+        可以转述，这个出口必须在。
+        """
+        channels = self.registry.new_channel_registry()
+        names = {"kanade": "宵崎奏", "mafuyu": "朝比奈真冬"}
+        heard_guess = Observation(
+            source_event_id="e-guess",
+            observer_id="ena",
+            reason=ExposureReason.CHANNEL_MEMBER,
+            observed_at=datetime(2026, 8, 23, 0, 55),
+            perceived={
+                "type": "message.sent",
+                "actor_id": "mizuki",
+                "char_name": "晓山瑞希",
+                "text": "……啊，是不是已经睡着了。",
+                "channel_id": "nightcord",
+            },
+        )
+        base = replace(_context("ena"), observations=(heard_guess,))
+        cases = {
+            "channel, nobody else online": base,
+            "channel, one beside you and one far away": replace(
+                base,
+                co_located_characters=("kanade",),
+                channel_characters=("mafuyu",),
+            ),
+            "in person, alone": replace(
+                base, action_id=ActionId.SPEAK_HERE, target_id=None
+            ),
+            "in person, with someone": replace(
+                base,
                 action_id=ActionId.SPEAK_HERE,
                 target_id=None,
                 co_located_characters=("kanade",),
             ),
+        }
+        for label, context in cases.items():
+            with self.subTest(label):
+                situation = render_situation(
+                    context, channels=channels, names=names
+                )
+                self.assertIn("【你看得到的】只有和你同处一地的人", situation)
+                self.assertIn("包括线上频道里的人", situation)
+                self.assertIn("只能从对话里知道", situation)
+                self.assertIn("不要说得像亲眼看到一样", situation)
+                self.assertNotIn("频道里的其他人和你不在同一个地方", situation)
+
+        mixed = render_situation(
+            cases["channel, one beside you and one far away"],
             channels=channels,
-            names={"kanade": "宵崎奏"},
+            names=names,
         )
-        self.assertNotIn("【线上频道】", in_person)
+        self.assertIn("【此刻与你同处一地的】宵崎奏", mixed)
+        self.assertIn("【此刻与你同一在线频道的】朝比奈真冬", mixed)
 
     def test_heard_lines_say_when_where_and_whether_they_were_your_own(self):
         """生产上见过的失败：下线后在自己房间里，接着对频道里的人说话。
