@@ -274,6 +274,16 @@ def render_situation(
         and not context.channel_characters
     ):
         parts.append("【此刻频道里】没有别人在线。")
+    if context.action_id is ActionId.SEND_CHANNEL_MESSAGE:
+        # 频道是只有声音的通道。生产上见过：一个人下线后，另一个人在频道里
+        # 猜"是不是睡着了"，第三个人就接着描述了她"趴着睡"的样子 —— 曝光
+        # 没漏，是模型把猜测演成了亲眼所见。不管此刻频道里还有没有人都要说：
+        # 被描述的往往正是已经下线的那个。
+        parts.append(
+            "【线上频道】频道里的其他人和你不在同一个地方：你只听得到声音，看不到人。"
+            "别人此刻的姿势、样子、在做什么，只能从对话里知道；对话里没人说过的，"
+            "最多当成猜测说出来，不要说得像亲眼看到一样。"
+        )
     if (
         context.perceived_characters
         and not context.co_located_characters

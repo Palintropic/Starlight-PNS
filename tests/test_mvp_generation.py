@@ -605,6 +605,32 @@ class PromptScopeTests(MvpTestCase):
         self.assertNotIn("和你在一起", situation)
         self.assertNotIn("【此刻你身边】", situation)
 
+    def test_a_channel_message_is_told_the_channel_carries_sound_not_sight(self):
+        """生产上见过的失败（10-07 02:24）：真冬下线后，有人猜她睡着了，
+        绘名就在频道里描述她"趴着睡"。被描述的人往往已经不在频道里了，
+        所以频道里没人时也要说。"""
+        channels = self.registry.new_channel_registry()
+        for others in ((), ("kanade",)):
+            situation = render_situation(
+                replace(_context("ena"), channel_characters=others),
+                channels=channels,
+                names={"kanade": "宵崎奏"},
+            )
+            self.assertIn("你只听得到声音，看不到人", situation)
+            self.assertIn("不要说得像亲眼看到一样", situation)
+
+        in_person = render_situation(
+            replace(
+                _context("ena"),
+                action_id=ActionId.SPEAK_HERE,
+                target_id=None,
+                co_located_characters=("kanade",),
+            ),
+            channels=channels,
+            names={"kanade": "宵崎奏"},
+        )
+        self.assertNotIn("【线上频道】", in_person)
+
     def test_heard_lines_say_when_where_and_whether_they_were_your_own(self):
         """生产上见过的失败：下线后在自己房间里，接着对频道里的人说话。
 
