@@ -756,6 +756,228 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(len(draft_memories(observation)), 1)
 
 
+# ── 满了就忘：每个角色的上限 ────────────────────────────────────────────
+class ForgettingTests(unittest.TestCase):
+    """生产上见过的失败：512 条整局上限在开局约 24 小时后用满，之后五天
+    一条都没再记进去，新入住的角色一条记忆都没有。满了要忘，不能停。"""
+
+    def _ids(self, state, owner="mizuki"):
+        return [r.memory_id for r in state.memories.for_owner(owner)]
+
+    def test_a_full_owner_forgets_a_decayed_trace_before_anything_else(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=3))
+        # mizuki 自己说的一句：情节 + 短时痕迹，显著度高。
+        encoder.commit_and_encode(
+            _message(state, "我来了。", actor="mizuki", event_id="e1")
+        )
+        decayed = derive_memory_id("mizuki", "e1", MemoryClass.WORKING)
+        state.world_state.advance_time(121)
+        # 旁听到的一句：显著度低，但还新鲜。按得分它排在过期痕迹后面，
+        # 可过期的那条此刻起对任何召回都已经不存在了 —— 先忘的必须是它。
+        encoder.commit_and_encode(_message(state, "嗯。", event_id="e2"))
+        live = derive_memory_id("mizuki", "e2", MemoryClass.WORKING)
+        state.world_state.advance_time(1)
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "好。", event_id="e3")
+        )
+        self.assertNotIn(decayed, self._ids(state))
+        self.assertIn(live, self._ids(state))
+        self.assertEqual(len(self._ids(state)), 3)
+        mine = [d for d in decisions if d.owner_id == "mizuki"]
+        self.assertEqual([d.outcome for d in mine], [EncodingOutcome.ENCODED])
+        self.assertEqual(mine[0].detail["forgot"], decayed)
+
+    def test_with_nothing_decayed_the_least_recallable_goes_not_the_oldest(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=3))
+        # mizuki 自己说的一句：情节 + 短时痕迹，显著度高。
+        encoder.commit_and_encode(
+            _message(state, "我来了。", actor="mizuki", event_id="e1")
+        )
+        state.world_state.advance_time(1)
+        # 旁听到的一句：只有短时痕迹，显著度低，而且更新。
+        encoder.commit_and_encode(_message(state, "嗯。", event_id="e2"))
+        overheard = derive_memory_id("mizuki", "e2", MemoryClass.WORKING)
+        self.assertIn(overheard, self._ids(state))
+        state.world_state.advance_time(1)
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "好。", event_id="e3")
+        )
+        self.assertNotIn(overheard, self._ids(state))
+        self.assertIn(
+            derive_memory_id("mizuki", "e1", MemoryClass.EPISODIC), self._ids(state)
+        )
+        forgot = [d.detail.get("forgot") for d in decisions if d.owner_id == "mizuki"]
+        self.assertEqual(forgot, [overheard])
+
+    def test_commitments_and_identity_are_never_forgotten(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=2))
+        encoder.commit_and_encode(
+            _message(state, "mizuki，我答应了明天把和声写完。", event_id="e1")
+        )
+        kept = {r.memory_class for r in state.memories.for_owner("mizuki")}
+        # 同一条观察长出来的兄弟记忆互不挤占：剩下的显式跳过，不忘掉已经写下的。
+        self.assertEqual(kept, {MemoryClass.COMMITMENT, MemoryClass.IDENTITY})
+        state.world_state.advance_time(200)
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "普通一句。", event_id="e2")
+        )
+        kept = {r.memory_class for r in state.memories.for_owner("mizuki")}
+        self.assertEqual(kept, {MemoryClass.COMMITMENT, MemoryClass.IDENTITY})
+        mine = [d for d in decisions if d.owner_id == "mizuki"]
+        self.assertEqual(
+            {(d.outcome, d.detail.get("reason")) for d in mine},
+            {(EncodingOutcome.SKIPPED_BUDGET, "max_records_per_owner")},
+        )
+
+    def test_one_observation_does_not_crowd_out_its_own_siblings(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=1))
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "我来了。", actor="mizuki", event_id="e1")
+        )
+        # 情节先写下；短时痕迹是同一件事的另一面，不能为了它把情节忘掉。
+        self.assertEqual(
+            self._ids(state), [derive_memory_id("mizuki", "e1", MemoryClass.EPISODIC)]
+        )
+        working = [
+            d
+            for d in decisions
+            if d.owner_id == "mizuki" and d.memory_class is MemoryClass.WORKING
+        ]
+        self.assertEqual(
+            [(d.outcome, d.detail.get("reason")) for d in working],
+            [(EncodingOutcome.SKIPPED_BUDGET, "max_records_per_owner")],
+        )
+
+    def test_the_only_record_of_a_world_fact_is_not_forgotten(self):
+        """ena 首审 P2：忘掉唯一的那条事实，_known_fact() 就以为自己从没
+        知道过，同一个事实会被重新记一遍。"""
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=2))
+        # ena 走进 mizuki 的房间：mizuki 记下事实 + 一条短时痕迹。
+        encoder.commit_and_encode(_move(state, "ena", "mizuki_home_room", "m1"))
+        fact = derive_memory_id("mizuki", "m1", MemoryClass.SEMANTIC)
+        self.assertIn(fact, self._ids(state))
+        state.world_state.advance_time(200)
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "我来了。", actor="mizuki", event_id="e2")
+        )
+        # 情节记忆忘掉了已过期的痕迹；同一句话的短时痕迹再要位置时，唯一
+        # 可忘的只剩那条事实 —— 它不能忘，于是显式跳过。
+        self.assertEqual(
+            self._ids(state),
+            [fact, derive_memory_id("mizuki", "e2", MemoryClass.EPISODIC)],
+        )
+        working = [
+            d
+            for d in decisions
+            if d.owner_id == "mizuki" and d.memory_class is MemoryClass.WORKING
+        ]
+        self.assertEqual(
+            [(d.outcome, d.detail.get("reason")) for d in working],
+            [(EncodingOutcome.SKIPPED_BUDGET, "max_records_per_owner")],
+        )
+
+    def test_a_world_fact_superseded_by_a_newer_value_can_be_forgotten(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=3))
+        encoder.commit_and_encode(_move(state, "mizuki", "city_streets", "m1"))
+        state.world_state.advance_time(1)
+        encoder.commit_and_encode(_move(state, "mizuki", "mizuki_home_room", "m2"))
+        # 旧取值被新取值盖过之后可以忘；当前知道的仍然是新取值。
+        self.assertEqual(
+            self._ids(state),
+            [
+                derive_memory_id("mizuki", "m2", memory_class)
+                for memory_class in (
+                    MemoryClass.SEMANTIC,
+                    MemoryClass.EPISODIC,
+                    MemoryClass.WORKING,
+                )
+            ],
+        )
+        self.assertEqual(
+            encoder._known_fact("mizuki", "location:mizuki"), "mizuki_home_room"
+        )
+
+    def test_the_store_is_present_tense(self):
+        """ena 首审 P2/P3 的两个边界，写成契约：
+
+        - 拿更早的 now 去召回，看到的是今天的存储，忘掉的不会回来；
+        - 幂等以记录还在为前提：忘掉之后再编码同一条观察，会再记一次。
+        """
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=1))
+        encoder.commit_and_encode(_message(state, "一句。", event_id="e1"))
+        first = derive_memory_id("mizuki", "e1", MemoryClass.WORKING)
+        state.world_state.advance_time(121)
+        encoder.commit_and_encode(_message(state, "两句。", event_id="e2"))
+        self.assertNotIn(first, self._ids(state))
+
+        recalled = MemoryRecall(state).recall_for("mizuki", now=CLOCK)
+        self.assertNotIn(first, [s.record.memory_id for s in recalled.memories])
+
+        decisions = encoder.encode_event("e1")
+        mine = [d for d in decisions if d.owner_id == "mizuki"]
+        self.assertEqual([d.outcome for d in mine], [EncodingOutcome.ENCODED])
+        self.assertEqual(self._ids(state), [first])
+
+    def test_one_full_owner_does_not_stop_another_from_remembering(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=1))
+        for index in range(4):
+            state.world_state.advance_time(1)
+            encoder.commit_and_encode(
+                _message(state, f"第{index}句。", event_id=f"e{index}")
+            )
+        latest = derive_memory_id("mizuki", "e3", MemoryClass.WORKING)
+        self.assertEqual(self._ids(state), [latest])
+        self.assertEqual(len(state.memories.for_owner("ena")), 1)
+
+    def test_a_rolled_back_transaction_takes_the_forgetting_back_too(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=1))
+        encoder.commit_and_encode(_message(state, "一句。", event_id="e1"))
+        before = state.memories.records()
+        state.world_state.advance_time(1)
+        commit_session_event(state, _message(state, "两句。", event_id="e2"))
+        with self.assertRaises(RuntimeError):
+            with state.atomic_commit():
+                decisions = encoder.encode_event("e2")
+                self.assertIn(
+                    "forgot", [k for d in decisions for k in d.detail]
+                )
+                raise RuntimeError("boom")
+        self.assertEqual(state.memories.records(), before)
+        self.assertTrue(
+            state.memories.has(derive_memory_id("mizuki", "e1", MemoryClass.WORKING))
+        )
+        # 回滚之后再编码一次，结果跟没失败过一样。
+        encoder.encode_event("e2")
+        self.assertEqual(
+            self._ids(state), [derive_memory_id("mizuki", "e2", MemoryClass.WORKING)]
+        )
+
+    def test_a_store_that_has_forgotten_restores_and_keeps_counting(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=1))
+        # 同一分钟里说三句：存档前不推时钟（推了就得有对应的时间事件）。
+        for index in range(3):
+            encoder.commit_and_encode(
+                _message(state, f"第{index}句。", event_id=f"e{index}")
+            )
+        self.assertEqual(
+            [r.memory_id for r in state.memories.for_owner("mizuki")],
+            [derive_memory_id("mizuki", "e2", MemoryClass.WORKING)],
+        )
+        restored = SessionState.from_dict(deepcopy(state.to_dict()))
+        self.assertEqual(restored.memories.records(), state.memories.records())
+        restored_encoder = MemoryEncoder(
+            restored, budget=MemoryBudget(max_records_per_owner=1)
+        )
+        restored.world_state.advance_time(1)
+        restored_encoder.commit_and_encode(
+            _message(restored, "又一句。", event_id="e9")
+        )
+        self.assertEqual(
+            [r.memory_id for r in restored.memories.for_owner("mizuki")],
+            [derive_memory_id("mizuki", "e9", MemoryClass.WORKING)],
+        )
+
+
 # ── AC9 原子性 ──────────────────────────────────────────────────────────
 class AtomicityTests(unittest.TestCase):
     def setUp(self):

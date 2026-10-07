@@ -734,7 +734,8 @@ class SessionState:
         # 换过之后的那一份。
         agency = self.agency
         memories = self.memories
-        memories_length = len(memories)
+        # 记内容而不是长度：编码腾位置时会从中间拿掉记录，截回原长度还原不了。
+        memories_snapshot = memories._snapshot()
         activations = self.activations
         activations_snapshot = activations._snapshot()
         outbox = self.activation_outbox
@@ -761,7 +762,7 @@ class SessionState:
             self.agency = agency
             agency._rollback_to(agency_length)
             self.memories = memories
-            memories._rollback_to(memories_length)
+            memories._restore(memories_snapshot)
             self.activations = activations
             activations._restore(activations_snapshot)
             self.activation_outbox = outbox
