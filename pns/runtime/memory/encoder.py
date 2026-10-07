@@ -39,6 +39,7 @@ from pns.runtime.memory.encoding import (
     MemoryBudget,
     draft_memories,
 )
+from pns.runtime.memory.recall import RecallQuery, score_memory
 
 # WORLD-2 权威操作的类型值：观察里只带 type 字符串。
 _AUTHORITY_TYPE_VALUES = frozenset(kind.value for kind in AUTHORITY_EVENT_TYPES)
@@ -254,6 +255,17 @@ class MemoryEncoder:
                     "limit": self._budget.max_records_per_session,
                 },
             )
+        forgotten = None
+        if len(store.for_owner(owner)) >= self._budget.max_records_per_owner:
+            forgotten = self._make_room(owner, observation.source_event_id, encoded_at)
+            if forgotten is None:
+                return skipped(
+                    EncodingOutcome.SKIPPED_BUDGET,
+                    {
+                        "reason": "max_records_per_owner",
+                        "limit": self._budget.max_records_per_owner,
+                    },
+                )
 
         record = MemoryRecord(
             owner_id=owner,
@@ -275,14 +287,53 @@ class MemoryEncoder:
             self._state.record_memories((record,))
         except MemoryError as e:
             raise MemoryEncoderError(str(e)) from e
+        detail = {"salience": draft.salience}
+        if forgotten is not None:
+            # 忘掉了哪一条要留在决策里："为了记住这条忘了那条"是一次真实的
+            # 状态变化，不能悄悄发生。
+            detail["forgot"] = forgotten
         return EncodingDecision(
             observation_id=observation_id,
             owner_id=owner,
             outcome=EncodingOutcome.ENCODED,
             memory_class=draft.memory_class,
             memory_id=memory_id,
-            detail={"salience": draft.salience},
+            detail=detail,
         )
+
+    def _make_room(
+        self, owner_id: str, source_event_id: str, now: datetime
+    ) -> Optional[str]:
+        """这个角色的记忆满了：忘掉一条最不可能再想起来的，返回它的 ID。
+
+        顺序：
+          1. 已经衰减的短时痕迹，旧的先忘。衰减只随时钟单调前进，它们对此刻
+             及以后的**任何**召回都已经不存在了，忘掉它们召回结果一个字都不变。
+          2. 其余非固定类别里，按"此刻不带线索的召回"排在最后的那条（得分
+             最低，同分时更旧的先忘）—— 也就是这个角色最不可能想起来的那件事。
+        承诺和身份（固定类别）永远不忘。同一条观察刚长出来的兄弟记忆也不忘：
+        为了记住一件事的某一面，忘掉它的另一面，没有意义。
+        一条可忘的都没有就返回 None，调用方给出显式的 SKIPPED_BUDGET。
+        """
+        query = RecallQuery(owner_id=owner_id, now=now)
+
+        def rank(record):
+            if record.is_decayed_at(now):
+                return (0, 0, record.encoded_at, record.memory_id)
+            return (1, score_memory(record, query), record.encoded_at, record.memory_id)
+
+        candidates = [
+            record
+            for record in self.store.for_owner(owner_id)
+            if not record.pinned and record.source_event_id != source_event_id
+        ]
+        if not candidates:
+            return None
+        victim = min(candidates, key=rank)
+        # 跟追加走同一道写闸：只读的会话连遗忘也不许发生。
+        self._state.require_writable()
+        self.store._forget(victim.memory_id)
+        return victim.memory_id
 
     def _known_fact(self, owner_id: str, fact: str) -> Optional[str]:
         """这个角色目前记着的这条世界事实的取值；不知道就是 None。

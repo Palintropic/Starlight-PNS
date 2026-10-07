@@ -53,12 +53,24 @@ class MemoryBudget:
     # 按持久度排的）。默认 5 —— 规则表下一条观察真的可能长出的最多条数，
     # 所以默认配置不会悄悄丢掉东西；要收紧就显式传一个更小的预算。
     max_records_per_observation: int = 5
-    # 一个会话累计最多存多少条记忆。计数**从存储推导**，不另存计数器：
-    # 计数器会在存档往返之后归零，于是恢复出来的会话能把上限再用一遍。
-    max_records_per_session: int = 512
+    # 每个角色最多留多少条记忆。满了不是"不再记"，而是先忘掉一条最不可能
+    # 再想起来的（编码器的 _make_room）：一个活着的世界不能在第二天就停止
+    # 记事（生产上 yoake-mae 的 512 条整局上限在开局约 24 小时后用满，之后
+    # 五天里一条都没再记进去，新入住的四个人一条记忆都没有）。按人算是为了
+    # 一个话多的角色不会把别人的名额占光。
+    max_records_per_owner: int = 512
+    # 整个会话的兜底上限：一个会话里的角色数是有限的，这条正常碰不到；碰到了
+    # 就是显式的不记（不跨角色腾位置 —— 那等于让一个人替另一个人遗忘）。
+    # 两种计数都**从存储推导**，不另存计数器：计数器会在存档往返之后归零，
+    # 于是恢复出来的会话能把上限再用一遍。
+    max_records_per_session: int = 8192
 
     def __post_init__(self) -> None:
-        for name in ("max_records_per_observation", "max_records_per_session"):
+        for name in (
+            "max_records_per_observation",
+            "max_records_per_owner",
+            "max_records_per_session",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise EncodingError(f"{name} 必须是整数，收到 {value!r}")
@@ -68,6 +80,7 @@ class MemoryBudget:
     def to_dict(self) -> Dict:
         return {
             "max_records_per_observation": self.max_records_per_observation,
+            "max_records_per_owner": self.max_records_per_owner,
             "max_records_per_session": self.max_records_per_session,
         }
 

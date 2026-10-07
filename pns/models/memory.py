@@ -730,6 +730,28 @@ class MemoryStore:
             self._ids.discard(record.memory_id)
         del self._records[length:]
 
+    def _forget(self, memory_id: str) -> MemoryRecord:
+        """从存储里拿掉一条记忆（只供编码事务在腾位置时使用）。
+
+        这是存储里唯一不是"追加"的写入，所以事务回滚不能再靠"截回原长度"：
+        atomic_commit() 对记忆存储记的是 _snapshot()，不是长度。剩下的记录
+        顺序不变，编码时间仍然单调，存档恢复的逐条核对照常成立。
+        """
+        for index, record in enumerate(self._records):
+            if record.memory_id == memory_id:
+                del self._records[index]
+                self._ids.discard(memory_id)
+                return record
+        raise MemoryError(f"未知的 memory_id: {memory_id}")
+
+    def _snapshot(self) -> Tuple[MemoryRecord, ...]:
+        # 记录本身不可变，记一份引用元组就够了。
+        return tuple(self._records)
+
+    def _restore(self, snapshot: Tuple[MemoryRecord, ...]) -> None:
+        self._records = list(snapshot)
+        self._ids = {record.memory_id for record in self._records}
+
     # ── 读取 ────────────────────────────────────────────────────────────
     def __len__(self) -> int:
         return len(self._records)
