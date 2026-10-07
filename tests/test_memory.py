@@ -848,6 +848,76 @@ class ForgettingTests(unittest.TestCase):
             [(EncodingOutcome.SKIPPED_BUDGET, "max_records_per_owner")],
         )
 
+    def test_the_only_record_of_a_world_fact_is_not_forgotten(self):
+        """ena 首审 P2：忘掉唯一的那条事实，_known_fact() 就以为自己从没
+        知道过，同一个事实会被重新记一遍。"""
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=2))
+        # ena 走进 mizuki 的房间：mizuki 记下事实 + 一条短时痕迹。
+        encoder.commit_and_encode(_move(state, "ena", "mizuki_home_room", "m1"))
+        fact = derive_memory_id("mizuki", "m1", MemoryClass.SEMANTIC)
+        self.assertIn(fact, self._ids(state))
+        state.world_state.advance_time(200)
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "我来了。", actor="mizuki", event_id="e2")
+        )
+        # 情节记忆忘掉了已过期的痕迹；同一句话的短时痕迹再要位置时，唯一
+        # 可忘的只剩那条事实 —— 它不能忘，于是显式跳过。
+        self.assertEqual(
+            self._ids(state),
+            [fact, derive_memory_id("mizuki", "e2", MemoryClass.EPISODIC)],
+        )
+        working = [
+            d
+            for d in decisions
+            if d.owner_id == "mizuki" and d.memory_class is MemoryClass.WORKING
+        ]
+        self.assertEqual(
+            [(d.outcome, d.detail.get("reason")) for d in working],
+            [(EncodingOutcome.SKIPPED_BUDGET, "max_records_per_owner")],
+        )
+
+    def test_a_world_fact_superseded_by_a_newer_value_can_be_forgotten(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=3))
+        encoder.commit_and_encode(_move(state, "mizuki", "city_streets", "m1"))
+        state.world_state.advance_time(1)
+        encoder.commit_and_encode(_move(state, "mizuki", "mizuki_home_room", "m2"))
+        # 旧取值被新取值盖过之后可以忘；当前知道的仍然是新取值。
+        self.assertEqual(
+            self._ids(state),
+            [
+                derive_memory_id("mizuki", "m2", memory_class)
+                for memory_class in (
+                    MemoryClass.SEMANTIC,
+                    MemoryClass.EPISODIC,
+                    MemoryClass.WORKING,
+                )
+            ],
+        )
+        self.assertEqual(
+            encoder._known_fact("mizuki", "location:mizuki"), "mizuki_home_room"
+        )
+
+    def test_the_store_is_present_tense(self):
+        """ena 首审 P2/P3 的两个边界，写成契约：
+
+        - 拿更早的 now 去召回，看到的是今天的存储，忘掉的不会回来；
+        - 幂等以记录还在为前提：忘掉之后再编码同一条观察，会再记一次。
+        """
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=1))
+        encoder.commit_and_encode(_message(state, "一句。", event_id="e1"))
+        first = derive_memory_id("mizuki", "e1", MemoryClass.WORKING)
+        state.world_state.advance_time(121)
+        encoder.commit_and_encode(_message(state, "两句。", event_id="e2"))
+        self.assertNotIn(first, self._ids(state))
+
+        recalled = MemoryRecall(state).recall_for("mizuki", now=CLOCK)
+        self.assertNotIn(first, [s.record.memory_id for s in recalled.memories])
+
+        decisions = encoder.encode_event("e1")
+        mine = [d for d in decisions if d.owner_id == "mizuki"]
+        self.assertEqual([d.outcome for d in mine], [EncodingOutcome.ENCODED])
+        self.assertEqual(self._ids(state), [first])
+
     def test_one_full_owner_does_not_stop_another_from_remembering(self):
         state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=1))
         for index in range(4):
