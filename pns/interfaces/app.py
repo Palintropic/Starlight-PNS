@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import accounts_api
 from . import auth as auth_routes
-from . import config, health, persistent_worlds, review, simulate, world
+from . import config, health, persistent_worlds, review, simulate, usage, world
 from .accounts import AccountError, AccountStore
 from .composition import AutonomySettings, WorldControlPlane
 from .paths import ACCOUNTS_DB_FILE, DASHBOARD_DIST
@@ -284,6 +284,8 @@ def create_app(
     # 组装边界挂在 application state 上，路由通过依赖显式取用 —— 没有模块级
     # 单例，所以同一个进程里起两个 app 不会共享一份所有权账本。
     app.state.world_control_plane = plane
+    # 用量告警的两个阈值（COST-1）。在这里读，写错了进程就起不来。
+    app.state.usage_settings = usage.UsageSettings.from_env()
     app.state.deployment = deployment
     app.state.admin_auth = auth
     app.state.accounts = store
@@ -303,6 +305,7 @@ def create_app(
     app.include_router(config.router)
     app.include_router(world.router)
     app.include_router(persistent_worlds.router)
+    app.include_router(usage.router)
     app.include_router(simulate.router)
 
     # 挂在所有 API/WS 路由之后，作为兜底：`dashboard/` 是唯一前端（`npm run
