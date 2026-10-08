@@ -42,7 +42,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
 import pns.logic.router as router_mod
@@ -80,14 +80,23 @@ from pns.runtime.persistence import (
 )
 from pns.runtime.reload import BOUNDARY
 from pns.runtime.rhythm import RhythmDirector
+from pns.runtime.usage_ledger import (
+    OPERATION_TRUNCATED,
+    PATH_GENERATION,
+    PATH_JUDGE,
+    UsageLedger,
+)
 from pns.world.scene_compat import SceneMappingError
 
 from .paths import DATA_DIR
+from .usage_meter import MeteredClient, UsageMeter
 
 # 存档根是**服务器配置**，不是浏览器能传的路径。环境变量在调用时才读，不在
 # 导入时读 —— 导入这个模块不该固化任何一次进程环境的快照。
 WORLD_ROOT_ENV = "PNS_WORLD_ROOT"
 DEFAULT_WORLD_ROOT = DATA_DIR / "worlds"
+# 用量账本（COST-1）在存档根的旁边：生产上是 /app/data/usage。
+USAGE_DIR_NAME = "usage"
 
 # 自主运行的节律与生成参数。全部是**服务器侧**配置：环境变量在调用时才读，
 # 浏览器一个字节都传不进来（见 AutonomySettings.from_env）。
@@ -324,8 +333,16 @@ class WorldControlPlane:
         client_factory: Optional[Callable[..., object]] = None,
         checkpoint_policy: Optional[CheckpointPolicy] = None,
         autonomy: Optional[AutonomySettings] = None,
+        usage_ledger: Optional[UsageLedger] = None,
     ) -> None:
         self._root = Path(root) if root is not None else default_world_root()
+        # 用量账本是运维数据：放在存档根**旁边**，不在任何一个世界的目录里，
+        # 也不经过 FileWorldStore。构造它同样不碰磁盘。
+        self._usage_ledger = (
+            usage_ledger
+            if usage_ledger is not None
+            else UsageLedger(self._root.parent / USAGE_DIR_NAME)
+        )
         # 两个构造函数都不碰磁盘。这一行之后，进程里依然没有目录、没有锁。
         self._store = FileWorldStore(self._root)
         self._service = WorldLifecycleService(self._store)
@@ -357,6 +374,10 @@ class WorldControlPlane:
     @property
     def store(self) -> FileWorldStore:
         return self._store
+
+    @property
+    def usage_ledger(self) -> UsageLedger:
+        return self._usage_ledger
 
     @property
     def service(self) -> WorldLifecycleService:
@@ -434,6 +455,7 @@ class WorldControlPlane:
         self,
         registry: ContentRegistry,
         *,
+        world_id: str = "",
         seed: Optional[Callable[[SessionState], None]] = None,
         allowance_renewal: Optional[str] = None,
     ) -> RuntimeAdapters:
@@ -470,7 +492,7 @@ class WorldControlPlane:
                 "还没有配置生成模型，角色开不了口；请先在设置里完成配置"
             )
         try:
-            client = self._client_factory(api_key, settings=models)
+            raw_client = self._client_factory(api_key, settings=models)
         except Exception as e:
             # 这个工厂**收到过 API Key**，所以从它这里出来的任何东西都是不可信
             # 数据 —— 包括异常本身。
@@ -492,7 +514,34 @@ class WorldControlPlane:
                 "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置"
             ) from e
 
+        # 生成和判分共用这一个 client，所以计量挂在这里两条路都过（COST-1）。
+        # 传输层由 MeteredClient 在 SDK 调用点记；操作层由下面两个闭包各开
+        # 一个 operation，说明这次最后有没有产出能用的东西。
+        meter = UsageMeter(
+            self._usage_ledger,
+            world_id=world_id,
+            protocol=models.api_format,
+            prices=registry.price_table(),
+        )
+        client = MeteredClient(raw_client, meter)
+
         def judge(request: AuditRequest) -> object:
+            with meter.operation(
+                PATH_JUDGE, request.character_id, models.evaluator_model
+            ) as op:
+                result = _judge(request)
+                # 能用的判分 = 世界会接受的判分：有分数、七维完整（audit.py 的
+                # RouterAuditor 对不完整的一律不接受）。router.judge 把调用失败、
+                # 解析失败、结构残缺的 JSON 都变成了"不完整"，这些都没判出东西，
+                # 世界照样在等。
+                op.settle(
+                    isinstance(result, Mapping)
+                    and "drift_score" in result
+                    and result.get("dimensions_complete") is True
+                )
+                return result
+
+        def _judge(request: AuditRequest) -> object:
             # `recent_lines` 是这个角色生成前自己看到的几行，只进判分提示，
             # 不进事件、观察或记忆（见 audit.py 的 AuditRequest）。
             return router_mod.judge(
@@ -516,6 +565,14 @@ class WorldControlPlane:
         channels = registry.new_channel_registry()
 
         def call_model(character_id: str, view, history: List[Dict]) -> object:
+            with meter.operation(
+                PATH_GENERATION, character_id, models.generator_model
+            ) as op:
+                result = _call_model(op, character_id, view, history)
+                op.settle(True)
+                return result
+
+        def _call_model(op, character_id: str, view, history: List[Dict]) -> object:
             # `view` 是角色作用域的世界投影（pns/runtime/autonomy/prompt.py），
             # **不是** WorldState：问它别人在哪，它抛错而不是回答。
             try:
@@ -530,6 +587,7 @@ class WorldControlPlane:
                     registry=registry,
                 )
             except GenerationTruncated as e:
+                op.outcome = OPERATION_TRUNCATED
                 # 拿到了半句话。它长得跟一句完整的话一模一样，所以必须在这里
                 # 就拦掉：提交下去就是让角色说了一句它没说完的话。可重试 ——
                 # 下一次采样很可能就说得完。消息是我们自己的话，不含 provider
@@ -605,7 +663,7 @@ class WorldControlPlane:
 
         # 适配器先造：它失败时还没有任何所有权被拿走，也还没有白造一份初始
         # 世界出来。
-        adapters = self.build_adapters(registry, seed=seed)
+        adapters = self.build_adapters(registry, world_id=name, seed=seed)
         state = self.new_session_state(
             world_id=name,
             scene_id=scene_id,
@@ -654,7 +712,10 @@ class WorldControlPlane:
 
         # 续额策略来自代码里的正式世界定义（COG-1 §5），不来自存档。
         adapters = self.build_adapters(
-            registry, seed=seed, allowance_renewal=spec.allowance_renewal
+            registry,
+            world_id=name,
+            seed=seed,
+            allowance_renewal=spec.allowance_renewal,
         )
         # 开局状态和时钟锚点必须用**同一个**现实时刻。"now" 模式下模拟端是按下
         # 那一分钟的整分，现实端也截到同一个整分：否则按在 02:01:15 的世界会
@@ -700,6 +761,7 @@ class WorldControlPlane:
         spec = formal_world(name)
         adapters = self.build_adapters(
             self.registry(),
+            world_id=name,
             allowance_renewal=spec.allowance_renewal if spec is not None else None,
         )
         world = self._service.restore(

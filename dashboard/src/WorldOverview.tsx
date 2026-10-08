@@ -10,6 +10,7 @@ import {
   type WorldOverview as WorldOverviewData,
 } from './api';
 import './worldOverview.css';
+import { UsageAlert } from './UsagePanel';
 
 // Labels for the backend's closed ActivityKind set (pns/models/world_state.py). Anything not
 // listed falls back to its raw id rather than a guess.
@@ -275,11 +276,17 @@ export default function WorldOverview() {
   };
 
   if (openWorlds === null && !error) {
-    return <div className="world-overview"><p className="wo-note">正在读取世界…</p></div>;
+    return (
+      <div className="world-overview">
+        <UsageAlert />
+        <p className="wo-note">正在读取世界…</p>
+      </div>
+    );
   }
   if (openWorlds !== null && !openWorlds.length) {
     return (
       <div className="world-overview">
+        <UsageAlert />
         <p className="wo-note">
           本进程里没有开着的世界。去「持久世界」页开局或恢复一个，这里就会显示它此刻的样子。
         </p>
@@ -305,6 +312,7 @@ export default function WorldOverview() {
 
   return (
     <div className="world-overview">
+      <UsageAlert />
       <div className="wo-head">
         <div className="wo-clock">
           <span className="wo-time">{data ? timeText(data.clock) : '--:--'}</span>
