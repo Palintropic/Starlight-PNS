@@ -356,11 +356,19 @@ def _record_from_dict(raw: Any) -> LedgerRecord:
         raise ValueError("enum")
     if failure is not None and failure not in FAILURES:
         raise ValueError("failure")
+    # 写入路径上这几个字段是一起定的：拿到响应就没有失败分类；SDK 抛了异常
+    # 就一定有分类，而且这次操作一定是 failed。对不上的行不是我们写的。
+    if transport == TRANSPORT_RESPONSE and failure is not None:
+        raise ValueError("consistency")
+    if transport == TRANSPORT_ERROR and (failure is None or operation != OPERATION_FAILED):
+        raise ValueError("consistency")
     if path not in PATHS:
         raise ValueError("path")
     strings = [raw.get(k) for k in ("world_id", "character_id", "model", "protocol")]
     if not all(isinstance(s, str) for s in strings):
         raise ValueError("strings")
+    if cost is not None and (usage is None or prices is None):
+        raise ValueError("consistency")
     return LedgerRecord(
         at=_parse_at(raw.get("at")),
         world_id=strings[0],
@@ -380,6 +388,14 @@ def _record_from_dict(raw: Any) -> LedgerRecord:
 # ── 账本文件 ─────────────────────────────────────────────────────────────
 
 LEDGER_WRITE_FAILED = "[usage-ledger] 用量账本写入失败；这次调用照常进行，统计会少一行"
+
+
+def _order(record: "LedgerRecord") -> Tuple[datetime, int]:
+    """读账的顺序：按 `at`；同一时刻时，不成功的排在成功的后面。
+
+    这样同一份账本不论行序如何，汇总都一样；而且平局时偏保守——一次跟失败
+    同时结束的成功不会把告警清掉。"""
+    return (record.at, 0 if record.operation == OPERATION_OK else 1)
 
 
 def _utcnow() -> datetime:
@@ -465,7 +481,7 @@ class UsageLedger:
                 if since is not None and record.at < since:
                     continue
                 records.append(record)
-        records.sort(key=lambda r: r.at)
+        records.sort(key=_order)
         return records, corrupt
 
     def _days(self) -> List[date]:
@@ -620,7 +636,8 @@ def balance_estimate(
 ) -> Optional[Dict[str, Any]]:
     if anchor is None:
         return None
-    after = [r for r in records if r.at >= anchor.at]
+    # 锚点是"此刻的余额"：同一时刻已经结束的那次调用算在锚点之前。
+    after = [r for r in records if r.at > anchor.at]
     spent = sum(r.cost_yuan for r in after if r.cost_yuan is not None)
     estimated = anchor.balance_yuan - spent
     return {
@@ -663,6 +680,8 @@ def summarize(
         days = ledger._days()
         if days and days[0] < read_from.date():
             all_records, corrupt = ledger.read()
+    # 时钟跳回、或者有人手写了未来的行：还没发生的调用不算。
+    all_records = [r for r in all_records if r.at <= now]
     window = [r for r in all_records if r.at >= window_start]
 
     by_day: Dict[str, Dict[str, Any]] = {}

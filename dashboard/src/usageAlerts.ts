@@ -82,7 +82,9 @@ export function alertLines(summary: UsageSummary): { tone: 'bad' | 'caution'; te
   const lines: { tone: 'bad' | 'caution'; text: string }[] = [];
   const streak = summary.failure_streak;
   if (streak.alert && streak.since) {
-    const reason = streak.last_failure ? FAILURE_TEXT[streak.last_failure] : FAILURE_TEXT.unknown;
+    // 后端的枚举是封闭的，但界面不该因为一个没见过的值写出 "undefined"。
+    const reason =
+      (streak.last_failure && FAILURE_TEXT[streak.last_failure]) || FAILURE_TEXT.unknown;
     lines.push({
       tone: 'bad',
       text:

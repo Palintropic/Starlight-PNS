@@ -79,6 +79,18 @@ describe('alertLines', () => {
     expect(line.text).toContain('欠费');
   });
 
+  it('never writes undefined for a reason it does not know', () => {
+    const odd = summary({
+      failure_streak: {
+        ...failing.failure_streak,
+        last_failure: 'failed' as unknown as UsageSummary['failure_streak']['last_failure'],
+      },
+    });
+    const [line] = alertLines(odd);
+    expect(line.text).not.toContain('undefined');
+    expect(line.text).toContain('原因不明');
+  });
+
   it('does not alert below the threshold', () => {
     const quiet = summary({
       failure_streak: { ...failing.failure_streak, consecutive: 3, alert: false },

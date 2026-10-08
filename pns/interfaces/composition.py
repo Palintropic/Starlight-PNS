@@ -97,8 +97,6 @@ WORLD_ROOT_ENV = "PNS_WORLD_ROOT"
 DEFAULT_WORLD_ROOT = DATA_DIR / "worlds"
 # 用量账本（COST-1）在存档根的旁边：生产上是 /app/data/usage。
 USAGE_DIR_NAME = "usage"
-# router.judge 吞掉调用失败、解析失败后返回的那两种固定 drift_type。
-JUDGE_UNUSABLE_TYPES = frozenset({"error", "解析失败"})
 
 # 自主运行的节律与生成参数。全部是**服务器侧**配置：环境变量在调用时才读，
 # 浏览器一个字节都传不进来（见 AutonomySettings.from_env）。
@@ -532,13 +530,14 @@ class WorldControlPlane:
                 PATH_JUDGE, request.character_id, models.evaluator_model
             ) as op:
                 result = _judge(request)
-                # router.judge 把调用失败和解析失败都吞成一个固定结果；这两种
-                # 都没判出东西来，世界照样在等。
+                # 能用的判分 = 世界会接受的判分：有分数、七维完整（audit.py 的
+                # RouterAuditor 对不完整的一律不接受）。router.judge 把调用失败、
+                # 解析失败、结构残缺的 JSON 都变成了"不完整"，这些都没判出东西，
+                # 世界照样在等。
                 op.settle(
-                    not (
-                        isinstance(result, Mapping)
-                        and result.get("drift_type") in JUDGE_UNUSABLE_TYPES
-                    )
+                    isinstance(result, Mapping)
+                    and "drift_score" in result
+                    and result.get("dimensions_complete") is True
                 )
                 return result
 

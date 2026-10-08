@@ -390,6 +390,58 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn(KEY, json.dumps(summary))
 
 
+class EdgeSemanticsTest(unittest.TestCase):
+    """ena 实现审 F2/F3 与未来记录、读回一致性。"""
+
+    def test_anchor_excludes_a_call_ending_at_the_same_instant(self):
+        records = [_record(_at(3)), _record(_at(4))]
+        estimate = ul.balance_estimate(
+            records, ul.BalanceAnchor(100, _at(3)), earliest=_at(3), warn_yuan=10
+        )
+        per_call = ul.estimate_cost(ul.Usage(100, 0, 900, 50), MIMO_PRO)
+        self.assertAlmostEqual(estimate["spent_since_anchor_yuan"], per_call)
+
+    def test_ties_do_not_depend_on_line_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = []
+            for order in ((_failed(_at(5)), _record(_at(5))), (_record(_at(5)), _failed(_at(5)))):
+                root = Path(tmp) / str(len(results))
+                ledger = ul.UsageLedger(root)
+                for record in order:
+                    ledger.append(record)
+                records, _ = ledger.read()
+                results.append(ul.failure_streak(records))
+        self.assertEqual(results[0], results[1])
+        # 平局偏保守：跟失败同时结束的成功不清掉这次失败。
+        self.assertEqual(results[0]["consecutive"], 1)
+
+    def test_future_rows_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = ul.UsageLedger(Path(tmp), clock=lambda: _at(14))
+            ledger.append(_record(_at(13)))
+            ledger.append(_failed(_at(15)))
+            summary = ul.summarize(ledger, days=1, anchor=None)
+        self.assertEqual(summary["total"]["calls"], 1)
+        self.assertEqual(summary["failure_streak"]["consecutive"], 0)
+
+    def test_inconsistent_rows_are_corrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = ul.UsageLedger(Path(tmp))
+            ledger.append(_record(_at(1)))
+            path = Path(tmp) / "2026-10-08.jsonl"
+            row = json.loads(path.read_text())
+            bad = [
+                {**row, "failure": "payment"},  # 有响应却有失败分类
+                {**row, "transport": "error", "failure": None, "operation": "failed"},
+                {**row, "transport": "error", "failure": "payment", "operation": "ok"},
+                {**row, "fresh_input": None, "cache_write": None, "cache_read": None,
+                 "output": None},  # 没有用量却有花费
+            ]
+            path.write_text("".join(json.dumps(r) + "\n" for r in bad))
+            records, corrupt = ledger.read()
+        self.assertEqual((records, corrupt), ([], len(bad)))
+
+
 class BoundedReadTest(unittest.TestCase):
     """汇总只读需要的那几天，但连续失败段和锚点不能因此读错。"""
 

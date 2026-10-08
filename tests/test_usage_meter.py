@@ -38,8 +38,13 @@ from pns.runtime import usage_ledger as ul  # noqa: E402
 
 KEY = "sk-meter-canary-0123456789"
 ROUTER_MARK = "监督者Router"
+from pns.logic.router import DIMENSION_KEYS  # noqa: E402
+
 VERDICT = json.dumps(
-    {"drift_score": 1, "confidence": 0.9, "drift_type": "无", "reason": "ok", "dimensions": {}},
+    {
+        "drift_score": 1, "confidence": 0.9, "drift_type": "无", "reason": "ok",
+        "dimensions": {key: {"score": 1, "reason": "像"} for key in DIMENSION_KEYS},
+    },
     ensure_ascii=False,
 )
 
@@ -183,6 +188,48 @@ class MeterWiringTest(unittest.TestCase):
         rows = self.rows()
         self.assertEqual([r.operation for r in rows], ["failed", "unusable", "unusable"])
         self.assertEqual(ul.failure_streak(rows)["consecutive"], 3)
+
+    def test_structurally_empty_verdict_is_unusable(self):
+        # 合法 JSON，但没有七维：router.judge 会补出默认字段，世界照样不接受。
+        self.client.behaviour["judge"] = _response("{}", usage=_usage())
+        result = self.audit()
+        self.assertFalse(result["dimensions_complete"])
+        (row,) = self.rows()
+        self.assertEqual(row.operation, "unusable")
+
+    def test_concurrent_operations_do_not_cross(self):
+        import threading
+
+        from pns.interfaces.usage_meter import MeteredClient, UsageMeter
+
+        barrier = threading.Barrier(2)
+
+        class Slow:
+            def __init__(self):
+                self.messages = self
+
+            def create(self, *, tag, **kwargs):
+                barrier.wait(timeout=5)
+                return _response("x", usage=_usage(fresh=tag, cached=0, out=tag))
+
+        meter = UsageMeter(self.ledger, world_id="w", protocol="anthropic", prices={})
+        wrapped = MeteredClient(Slow(), meter)
+
+        def worker(character, tag):
+            with meter.operation("generation", character, "m") as op:
+                wrapped.messages.create(tag=tag)
+                op.settle(True)
+
+        threads = [
+            threading.Thread(target=worker, args=("kanade", 11)),
+            threading.Thread(target=worker, args=("mafuyu", 22)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        by_character = {r.character_id: r.usage.fresh_input for r in self.rows()}
+        self.assertEqual(by_character, {"kanade": 11, "mafuyu": 22})
 
     def test_truncation_is_recorded_and_billed(self):
         self.client.behaviour["generate"] = _response("说到一半", usage=_usage(), stop_reason="max_tokens")
