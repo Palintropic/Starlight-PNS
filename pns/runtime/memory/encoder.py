@@ -315,7 +315,8 @@ class MemoryEncoder:
              及以后的**任何**召回都已经不存在了，忘掉它们召回结果一个字都不变。
           2. 其余非固定类别里，按"此刻不带线索的召回"排在最后的那条（得分
              最低，同分时更旧的先忘）—— 也就是这个角色最不可能想起来的那件事。
-        承诺和身份（固定类别）永远不忘。世界事实只有在被同一事实更新的取值
+        此刻仍置顶的记忆（身份；没过置顶期限的约定）不忘；置顶过期的约定
+        跟普通记忆一样参加排序（MEM-2）。世界事实只有在被同一事实更新的取值
         盖过之后才能忘：`_known_fact()` 读的是最新取值，忘掉被盖过的旧值它的
         答案不变；忘掉唯一的那条，它就会以为自己从没知道过，同一个事实会被
         重新记一遍。同一条观察刚长出来的兄弟记忆也不忘：为了记住一件事的
@@ -345,7 +346,7 @@ class MemoryEncoder:
         candidates = [
             record
             for record in mine
-            if not record.pinned
+            if not record.is_pinned_at(now)
             and record.source_event_id != source_event_id
             and (
                 record.memory_class is not MemoryClass.SEMANTIC

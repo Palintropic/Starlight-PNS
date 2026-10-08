@@ -201,7 +201,7 @@ def _recency_bonus(record: MemoryRecord, now: datetime) -> int:
 
 def score_memory(record: MemoryRecord, query: RecallQuery) -> int:
     """一条记忆在这次查询下的得分。确定性、可手算。"""
-    score = record.memory_class.recall_weight + record.salience
+    score = record.recall_weight_at(query.now) + record.salience
     score += _recency_bonus(record, query.now)
     if query.cues:
         text = _content_text(record)
@@ -266,7 +266,7 @@ def recall(
         eligible.append(ScoredMemory(record=record, score=score_memory(record, query)))
 
     ordered = sorted(eligible, key=lambda scored: _order_key(scored, query.now))
-    selected = _apply_budget(ordered, budget)
+    selected = _apply_budget(ordered, budget, query.now)
     return RecallResult(
         query=query,
         memories=tuple(sorted(selected, key=lambda s: _order_key(s, query.now))),
@@ -277,9 +277,9 @@ def recall(
 
 
 def _apply_budget(
-    ordered: Sequence[ScoredMemory], budget: RecallBudget
+    ordered: Sequence[ScoredMemory], budget: RecallBudget, now: datetime
 ) -> List[ScoredMemory]:
-    """两遍选取：先给永久类别留位置，再按分数填满剩下的。"""
+    """两遍选取：先给此刻仍置顶的记忆留位置，再按分数填满剩下的。"""
     selected: List[ScoredMemory] = []
     per_class: Dict[MemoryClass, int] = {}
     pinned_taken = 0
@@ -289,7 +289,7 @@ def _apply_budget(
         selected.append(scored)
         memory_class = scored.record.memory_class
         per_class[memory_class] = per_class.get(memory_class, 0) + 1
-        if memory_class.pinned:
+        if scored.record.is_pinned_at(now):
             pinned_taken += 1
 
     def has_room(scored: ScoredMemory) -> bool:
@@ -300,7 +300,7 @@ def _apply_budget(
         )
 
     for scored in ordered:
-        if not scored.record.pinned:
+        if not scored.record.is_pinned_at(now):
             continue
         if pinned_taken >= budget.max_pinned:
             break

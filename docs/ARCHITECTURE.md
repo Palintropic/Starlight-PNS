@@ -859,8 +859,18 @@ episodic     no decay                             weight 20
 semantic     no decay                             weight 25
 relational   no decay                             weight 30
 identity     no decay, pinned                     weight 50
-commitment   no decay, pinned                     weight 60
+commitment   no decay, pinned for 3 simulated days weight 60 (20 once the pin lapses)
 ```
+
+A commitment here is a spoken promise recognised from a marker in the line, not a
+structured obligation with a due date. Its pin is time-limited: within three
+simulated days it is reserved a slot and never forgotten, as before; after that it
+is recalled like an ordinary episode — still there when a cue points at it, no
+longer the first thing that comes to mind every time, and forgettable when the
+owner's store is full. Pinning, weights and decay are recall-side behaviour; they
+are not part of the archive check, so changing them never invalidates an existing
+memory. A promise that must hold beyond the horizon needs authoritative state of
+its own (see §18), which does not exist yet.
 
 Every member has a real encoding rule behind it, a real prompt tag, and tests
 that produce each one from an actual observation. Encoding is a whitelist over
@@ -920,8 +930,8 @@ in the service, the same shape as `build_agency_context`. Scoring is integer-onl
 (class weight, salience, recency band, cue hits capped, counterpart match) and
 ordering is a total order — score, then age, then id — so there are no ties and
 no dependence on dict iteration or floating point. The budget is explicit: total
-items, items per class, and slots reserved for the pinned classes, with a two-pass
-selection so a tight budget cannot squeeze out a commitment. Truncation is
+items, items per class, and slots reserved for memories that are pinned at the time of recall, with a
+two-pass selection so a tight budget cannot squeeze out a live commitment. Truncation is
 flagged, because "did not come to mind" and "never happened" are different facts.
 
 The prompt projection is a whitelist. Memory and event ids, exposure reason

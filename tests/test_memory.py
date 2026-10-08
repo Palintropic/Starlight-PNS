@@ -35,6 +35,7 @@ from pns.models.memory import (
     FRAGMENT_CHARS,
     MEMORY_ARCHIVE_VERSION,
     MIN_FRAGMENT,
+    PROMISE_HORIZON_MINUTES,
     MemoryClass,
     MemoryError,
     MemoryMismatch,
@@ -757,6 +758,181 @@ class EligibilityTests(unittest.TestCase):
 
 
 # ── 满了就忘：每个角色的上限 ────────────────────────────────────────────
+from pns.runtime.memory.recall import (  # noqa: E402
+    ScoredMemory,
+    _apply_budget,
+    score_memory,
+)
+
+
+class CommitmentHorizonTests(unittest.TestCase):
+    """MEM-2：生产上 10-02 03:54 绘名一句"那说好了，谁先下线谁就认输"被记成
+    约定，之后六天里三个人每一次开口，第一个想起的都是它。约定的置顶有期限：
+    期限内跟以前一样，过了期限退回普通权重——还记得，只是不再钉在第一行。"""
+
+    BET = "那说好了，谁先下线谁就认输"
+
+    def setUp(self):
+        self.state, self.encoder = _rig()
+        self.encoder.commit_and_encode(_message(self.state, self.BET, event_id="bet"))
+        self.bet = derive_memory_id("mizuki", "bet", MemoryClass.COMMITMENT)
+
+    def _later(self, minutes, text, event_id):
+        self.state.world_state.advance_time(minutes)
+        self.encoder.commit_and_encode(
+            _message(self.state, text, actor="mizuki", event_id=event_id)
+        )
+
+    def _recall(self, **kwargs):
+        return MemoryRecall(self.state).recall_for("mizuki", **kwargs)
+
+    def _record(self, memory_id):
+        return next(
+            r for r in self.state.memories.for_owner("mizuki") if r.memory_id == memory_id
+        )
+
+    def test_the_pin_ends_exactly_at_the_horizon(self):
+        record = self._record(self.bet)
+        edge = record.encoded_at + timedelta(minutes=PROMISE_HORIZON_MINUTES)
+        self.assertTrue(record.is_pinned_at(edge))
+        self.assertFalse(record.is_pinned_at(edge + timedelta(seconds=1)))
+        self.assertEqual(record.recall_weight_at(edge), 60)
+        self.assertEqual(record.recall_weight_at(edge + timedelta(seconds=1)), 20)
+
+    def test_within_the_horizon_it_still_comes_first(self):
+        self._later(60, "去画画了。", "e1")
+        first = self._recall().records[0]
+        self.assertEqual(first.memory_id, self.bet)
+
+    def test_after_the_horizon_it_no_longer_leads(self):
+        self._later(PROMISE_HORIZON_MINUTES + 60, "去画画了。", "e1")
+        result = self._recall()
+        self.assertNotEqual(result.records[0].memory_id, self.bet)
+
+    def test_after_the_horizon_a_cue_still_brings_it_back(self):
+        # 还记得：聊到认输的时候想得起来。
+        self._later(PROMISE_HORIZON_MINUTES * 2, "去画画了。", "e1")
+        ids = [r.memory_id for r in self._recall(cues=["认输"]).records]
+        self.assertIn(self.bet, ids)
+
+    def test_a_lapsed_commitment_does_not_hold_a_pinned_slot(self):
+        self.state.world_state.advance_time(PROMISE_HORIZON_MINUTES + 1)
+        self.encoder.commit_and_encode(
+            _message(self.state, "我答应你明天一定把和声写完", event_id="fresh")
+        )
+        fresh = derive_memory_id("mizuki", "fresh", MemoryClass.COMMITMENT)
+        result = recall(
+            self.state.memories.for_owner("mizuki"),
+            RecallQuery(owner_id="mizuki", now=self.state.world_state.clock),
+            budget=RecallBudget(max_items=1, max_per_class=1, max_pinned=1),
+        )
+        self.assertEqual([r.memory_id for r in result.records], [fresh])
+
+    def test_the_lapsed_weight_is_what_the_score_uses(self):
+
+        record = self._record(self.bet)
+        edge = record.encoded_at + timedelta(minutes=PROMISE_HORIZON_MINUTES)
+        before = score_memory(record, RecallQuery(owner_id="mizuki", now=edge))
+        after = score_memory(
+            record, RecallQuery(owner_id="mizuki", now=edge + timedelta(seconds=1))
+        )
+        self.assertEqual(before - after, 60 - 20)
+
+    def test_a_lapsed_commitment_cannot_take_the_pinned_slot_from_identity(self):
+        # 置顶位按"此刻是否置顶"分配，不按类别。手工给过期的约定一个更高的
+        # 分数（比如话题正好聊到它），它排在最前，但唯一的置顶位仍归身份记忆。
+        state, encoder = _rig()
+        encoder.commit_and_encode(_message(state, "mizuki，今天也辛苦了", event_id="hi"))
+        state.world_state.advance_time(1)
+        encoder.commit_and_encode(_message(state, self.BET, event_id="bet"))
+        later = state.world_state.clock + timedelta(minutes=PROMISE_HORIZON_MINUTES + 1)
+        mine = {r.memory_class: r for r in state.memories.for_owner("mizuki")}
+        ordered = [
+            ScoredMemory(record=mine[MemoryClass.COMMITMENT], score=200),
+            ScoredMemory(record=mine[MemoryClass.IDENTITY], score=100),
+        ]
+        selected = _apply_budget(
+            ordered, RecallBudget(max_items=1, max_per_class=1, max_pinned=1), later
+        )
+        self.assertEqual(
+            [s.record.memory_class for s in selected], [MemoryClass.IDENTITY]
+        )
+
+    def test_a_full_owner_can_forget_a_lapsed_commitment(self):
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=2))
+        encoder.commit_and_encode(_message(state, self.BET, event_id="bet"))
+        kept = {r.memory_class for r in state.memories.for_owner("mizuki")}
+        self.assertIn(MemoryClass.COMMITMENT, kept)
+        state.world_state.advance_time(PROMISE_HORIZON_MINUTES + 1)
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "我来了。", actor="mizuki", event_id="e2")
+        )
+        forgot = {d.detail.get("forgot") for d in decisions if d.owner_id == "mizuki"}
+        self.assertIn(derive_memory_id("mizuki", "bet", MemoryClass.COMMITMENT), forgot)
+
+    def test_an_archive_written_before_mem2_restores_unchanged(self):
+        # tests/fixtures/mem2_pre_horizon_session.json 是用 MEM-2 之前的代码
+        # （8148a5a）生成的存档：含约定、身份、唯一的世界事实。新代码逐条
+        # 核对资格通过，记忆一条不少。
+        import json
+
+        path = Path(__file__).resolve().parent / "fixtures" / "mem2_pre_horizon_session.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        restored = SessionState.from_dict(raw)
+        self.assertEqual(
+            len(restored.memories), len(raw["memory"]["store"]["records"])
+        )
+        self.assertIn(
+            MemoryClass.COMMITMENT,
+            {r.memory_class for r in restored.memories.for_owner("mizuki")},
+        )
+
+    def test_forgetting_a_lapsed_commitment_spares_facts_and_siblings(self):
+        # 组合场景：唯一的世界事实、过期的约定、同一观察刚长出的兄弟记忆同时
+        # 在场，满了要忘的只能是过期的那条约定。
+        state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=3))
+        mine = lambda: {r.memory_id for r in state.memories.for_owner("mizuki")}  # noqa: E731
+
+        def keep_only(event_id, memory_class):
+            for record in list(state.memories.for_owner("mizuki")):
+                if record.source_event_id == event_id and record.memory_class is not memory_class:
+                    state.memories._forget(record.memory_id)
+
+        encoder.commit_and_encode(_move(state, "ena", "mizuki_home_room", "m1"))
+        keep_only("m1", MemoryClass.SEMANTIC)
+        state.world_state.advance_time(1)
+        encoder.commit_and_encode(_message(state, self.BET, event_id="bet"))
+        keep_only("bet", MemoryClass.COMMITMENT)
+        fact = derive_memory_id("mizuki", "m1", MemoryClass.SEMANTIC)
+        bet = derive_memory_id("mizuki", "bet", MemoryClass.COMMITMENT)
+        self.assertEqual(mine(), {fact, bet})
+
+        state.world_state.advance_time(PROMISE_HORIZON_MINUTES + 1)
+        _, decisions = encoder.commit_and_encode(
+            _message(state, "我来了。", actor="mizuki", event_id="e3")
+        )
+        episode = derive_memory_id("mizuki", "e3", MemoryClass.EPISODIC)
+        self.assertIn(fact, mine())
+        self.assertIn(episode, mine())
+        self.assertNotIn(bet, mine())
+        forgot = [d.detail.get("forgot") for d in decisions if d.owner_id == "mizuki"]
+        self.assertIn(bet, forgot)
+
+    def test_eligibility_is_unchanged_so_old_archives_restore(self):
+        # 行为只在召回一侧：带着约定的存档往返一次，逐条通过资格核对；
+        # 置顶过期之后，两份存储召回出来的结果也一模一样。
+        restored = SessionState.from_dict(deepcopy(self.state.to_dict()))
+        self.assertIn(
+            self.bet, [r.memory_id for r in restored.memories.for_owner("mizuki")]
+        )
+        later = self.state.world_state.clock + timedelta(minutes=PROMISE_HORIZON_MINUTES * 3)
+        query = RecallQuery(owner_id="mizuki", now=later)
+        self.assertEqual(
+            recall(restored.memories.for_owner("mizuki"), query).to_dict(),
+            recall(self.state.memories.for_owner("mizuki"), query).to_dict(),
+        )
+
+
 class ForgettingTests(unittest.TestCase):
     """生产上见过的失败：512 条整局上限在开局约 24 小时后用满，之后五天
     一条都没再记进去，新入住的角色一条记忆都没有。满了要忘，不能停。"""
@@ -809,7 +985,7 @@ class ForgettingTests(unittest.TestCase):
         forgot = [d.detail.get("forgot") for d in decisions if d.owner_id == "mizuki"]
         self.assertEqual(forgot, [overheard])
 
-    def test_commitments_and_identity_are_never_forgotten(self):
+    def test_live_commitments_and_identity_are_not_forgotten(self):
         state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=2))
         encoder.commit_and_encode(
             _message(state, "mizuki，我答应了明天把和声写完。", event_id="e1")
