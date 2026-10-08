@@ -1,0 +1,1499 @@
+{
+ "agency": {
+  "clock": "2026-08-21T23:50:00",
+  "log": {
+   "records": []
+  },
+  "session_id": "s1"
+ },
+ "anchor": null,
+ "characters": [
+  "mizuki",
+  "ena"
+ ],
+ "cognition": null,
+ "content": null,
+ "created_at": "2026-10-09T00:29:36.366236",
+ "current_character": "mizuki",
+ "current_character_index": 0,
+ "events": {
+  "events": [
+   {
+    "actor_id": "ena",
+    "causation_id": null,
+    "channel_id": null,
+    "correlation_id": null,
+    "event_id": "m1",
+    "location_id": "mizuki_home_room",
+    "occurred_at": "2026-08-21T23:50:00",
+    "participants": [],
+    "payload": {},
+    "provenance": {},
+    "scope": "location",
+    "sequence": 0,
+    "type": "character.location_changed"
+   },
+   {
+    "actor_id": "ena",
+    "causation_id": null,
+    "channel_id": "nightcord",
+    "correlation_id": null,
+    "event_id": "bet",
+    "location_id": null,
+    "occurred_at": "2026-08-21T23:50:00",
+    "participants": [
+     "ena",
+     "mizuki"
+    ],
+    "payload": {
+     "char_name": "ena",
+     "text": "那说好了，谁先下线谁就认输"
+    },
+    "provenance": {},
+    "scope": "channel",
+    "sequence": 1,
+    "type": "message.sent"
+   },
+   {
+    "actor_id": "ena",
+    "causation_id": null,
+    "channel_id": "nightcord",
+    "correlation_id": null,
+    "event_id": "hi",
+    "location_id": null,
+    "occurred_at": "2026-08-21T23:50:00",
+    "participants": [
+     "ena",
+     "mizuki"
+    ],
+    "payload": {
+     "char_name": "ena",
+     "text": "mizuki，今天也辛苦了"
+    },
+    "provenance": {},
+    "scope": "channel",
+    "sequence": 2,
+    "type": "message.sent"
+   }
+  ]
+ },
+ "exposures": {
+  "decisions": [
+   {
+    "character_id": "ena",
+    "detail": {
+     "scope": "location"
+    },
+    "evaluated_at": "2026-08-21T23:50:00",
+    "event_id": "m1",
+    "exposed": true,
+    "reason": "self_action"
+   },
+   {
+    "character_id": "mizuki",
+    "detail": {
+     "availability": "available",
+     "character_location_id": "mizuki_home_room",
+     "event_location_id": "mizuki_home_room",
+     "scope": "location"
+    },
+    "evaluated_at": "2026-08-21T23:50:00",
+    "event_id": "m1",
+    "exposed": true,
+    "reason": "same_location"
+   },
+   {
+    "character_id": "ena",
+    "detail": {
+     "scope": "channel"
+    },
+    "evaluated_at": "2026-08-21T23:50:00",
+    "event_id": "bet",
+    "exposed": true,
+    "reason": "self_action"
+   },
+   {
+    "character_id": "mizuki",
+    "detail": {
+     "availability": "available",
+     "channel_id": "nightcord",
+     "scope": "channel"
+    },
+    "evaluated_at": "2026-08-21T23:50:00",
+    "event_id": "bet",
+    "exposed": true,
+    "reason": "channel_member"
+   },
+   {
+    "character_id": "ena",
+    "detail": {
+     "scope": "channel"
+    },
+    "evaluated_at": "2026-08-21T23:50:00",
+    "event_id": "hi",
+    "exposed": true,
+    "reason": "self_action"
+   },
+   {
+    "character_id": "mizuki",
+    "detail": {
+     "availability": "available",
+     "channel_id": "nightcord",
+     "scope": "channel"
+    },
+    "evaluated_at": "2026-08-21T23:50:00",
+    "event_id": "hi",
+    "exposed": true,
+    "reason": "channel_member"
+   }
+  ]
+ },
+ "histories": {
+  "ena": [
+   {
+    "content": "【场景】开场",
+    "role": "user"
+   }
+  ],
+  "mizuki": [
+   {
+    "content": "【场景】开场\n请开始对话。",
+    "role": "user"
+   }
+  ]
+ },
+ "last_error": null,
+ "memory": {
+  "clock": "2026-08-21T23:50:00",
+  "session_id": "s1",
+  "store": {
+   "records": [
+    {
+     "content": {
+      "about": "ena",
+      "fact": "location:ena",
+      "kind": "world_fact",
+      "value": "mizuki_home_room"
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "semantic",
+     "memory_id": "ena@m1#semantic",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 45,
+     "sequence": 0,
+     "source_event_id": "m1",
+     "source_observation_id": "ena@m1"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "episode",
+      "self": true,
+      "summary": "去了 mizuki_home_room",
+      "where": {
+       "location_id": "mizuki_home_room"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "episodic",
+     "memory_id": "ena@m1#episodic",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 45,
+     "sequence": 1,
+     "source_event_id": "m1",
+     "source_observation_id": "ena@m1"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "trace",
+      "summary": "去了 mizuki_home_room",
+      "where": {
+       "location_id": "mizuki_home_room"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "working",
+     "memory_id": "ena@m1#working",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 45,
+     "sequence": 2,
+     "source_event_id": "m1",
+     "source_observation_id": "ena@m1"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "fact": "location:ena",
+      "kind": "world_fact",
+      "value": "mizuki_home_room"
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "semantic",
+     "memory_id": "mizuki@m1#semantic",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "same_location"
+     },
+     "salience": 5,
+     "sequence": 3,
+     "source_event_id": "m1",
+     "source_observation_id": "mizuki@m1"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "trace",
+      "summary": "去了 mizuki_home_room",
+      "where": {
+       "location_id": "mizuki_home_room"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "working",
+     "memory_id": "mizuki@m1#working",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "same_location"
+     },
+     "salience": 5,
+     "sequence": 4,
+     "source_event_id": "m1",
+     "source_observation_id": "mizuki@m1"
+    },
+    {
+     "content": {
+      "by": "ena",
+      "kind": "commitment",
+      "self": true,
+      "summary": "说了一句话：「那说好了，谁…」"
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "commitment",
+     "memory_id": "ena@bet#commitment",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 70,
+     "sequence": 5,
+     "source_event_id": "bet",
+     "source_observation_id": "ena@bet"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "self_relevant",
+      "source": "self_commitment",
+      "summary": "说了一句话：「那说好了，谁…」"
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "identity",
+     "memory_id": "ena@bet#identity",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 70,
+     "sequence": 6,
+     "source_event_id": "bet",
+     "source_observation_id": "ena@bet"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "episode",
+      "self": true,
+      "summary": "说了一句话：「那说好了，谁…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "episodic",
+     "memory_id": "ena@bet#episodic",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 70,
+     "sequence": 7,
+     "source_event_id": "bet",
+     "source_observation_id": "ena@bet"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "trace",
+      "summary": "说了一句话：「那说好了，谁…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "working",
+     "memory_id": "ena@bet#working",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 70,
+     "sequence": 8,
+     "source_event_id": "bet",
+     "source_observation_id": "ena@bet"
+    },
+    {
+     "content": {
+      "by": "ena",
+      "kind": "commitment",
+      "self": false,
+      "summary": "说了一句话：「那说好了，谁…」"
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "commitment",
+     "memory_id": "mizuki@bet#commitment",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "channel_member"
+     },
+     "salience": 30,
+     "sequence": 9,
+     "source_event_id": "bet",
+     "source_observation_id": "mizuki@bet"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "episode",
+      "self": false,
+      "summary": "说了一句话：「那说好了，谁…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "episodic",
+     "memory_id": "mizuki@bet#episodic",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "channel_member"
+     },
+     "salience": 30,
+     "sequence": 10,
+     "source_event_id": "bet",
+     "source_observation_id": "mizuki@bet"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "trace",
+      "summary": "说了一句话：「那说好了，谁…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "working",
+     "memory_id": "mizuki@bet#working",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "channel_member"
+     },
+     "salience": 30,
+     "sequence": 11,
+     "source_event_id": "bet",
+     "source_observation_id": "mizuki@bet"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "episode",
+      "self": true,
+      "summary": "说了一句话：「mizuki…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "episodic",
+     "memory_id": "ena@hi#episodic",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 50,
+     "sequence": 12,
+     "source_event_id": "hi",
+     "source_observation_id": "ena@hi"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "trace",
+      "summary": "说了一句话：「mizuki…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "working",
+     "memory_id": "ena@hi#working",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "ena",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "self_action"
+     },
+     "salience": 50,
+     "sequence": 13,
+     "source_event_id": "hi",
+     "source_observation_id": "ena@hi"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "self_relevant",
+      "source": "addressed_by_other",
+      "summary": "说了一句话：「mizuki…」"
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "identity",
+     "memory_id": "mizuki@hi#identity",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "channel_member"
+     },
+     "salience": 40,
+     "sequence": 14,
+     "source_event_id": "hi",
+     "source_observation_id": "mizuki@hi"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "interaction",
+      "summary": "说了一句话：「mizuki…」"
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "relational",
+     "memory_id": "mizuki@hi#relational",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "channel_member"
+     },
+     "salience": 40,
+     "sequence": 15,
+     "source_event_id": "hi",
+     "source_observation_id": "mizuki@hi"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "episode",
+      "self": false,
+      "summary": "说了一句话：「mizuki…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "episodic",
+     "memory_id": "mizuki@hi#episodic",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "channel_member"
+     },
+     "salience": 40,
+     "sequence": 16,
+     "source_event_id": "hi",
+     "source_observation_id": "mizuki@hi"
+    },
+    {
+     "content": {
+      "about": "ena",
+      "kind": "trace",
+      "summary": "说了一句话：「mizuki…」",
+      "where": {
+       "channel_id": "nightcord"
+      }
+     },
+     "encoded_at": "2026-08-21T23:50:00",
+     "memory_class": "working",
+     "memory_id": "mizuki@hi#working",
+     "observed_at": "2026-08-21T23:50:00",
+     "owner_id": "mizuki",
+     "provenance": {
+      "encoder": "declared-rules-v2",
+      "kind": "observation",
+      "reason": "channel_member"
+     },
+     "salience": 40,
+     "sequence": 17,
+     "source_event_id": "hi",
+     "source_observation_id": "mizuki@hi"
+    }
+   ]
+  },
+  "version": 2
+ },
+ "metadata": {},
+ "observations": {
+  "observations": [
+   {
+    "observed_at": "2026-08-21T23:50:00",
+    "observer_id": "ena",
+    "perceived": {
+     "actor_id": "ena",
+     "channel_id": null,
+     "location_id": "mizuki_home_room",
+     "type": "character.location_changed"
+    },
+    "reason": "self_action",
+    "source_event_id": "m1"
+   },
+   {
+    "observed_at": "2026-08-21T23:50:00",
+    "observer_id": "mizuki",
+    "perceived": {
+     "actor_id": "ena",
+     "location_id": "mizuki_home_room",
+     "type": "character.location_changed"
+    },
+    "reason": "same_location",
+    "source_event_id": "m1"
+   },
+   {
+    "observed_at": "2026-08-21T23:50:00",
+    "observer_id": "ena",
+    "perceived": {
+     "actor_id": "ena",
+     "channel_id": "nightcord",
+     "char_name": "ena",
+     "location_id": null,
+     "text": "那说好了，谁先下线谁就认输",
+     "type": "message.sent"
+    },
+    "reason": "self_action",
+    "source_event_id": "bet"
+   },
+   {
+    "observed_at": "2026-08-21T23:50:00",
+    "observer_id": "mizuki",
+    "perceived": {
+     "actor_id": "ena",
+     "channel_id": "nightcord",
+     "char_name": "ena",
+     "text": "那说好了，谁先下线谁就认输",
+     "type": "message.sent"
+    },
+    "reason": "channel_member",
+    "source_event_id": "bet"
+   },
+   {
+    "observed_at": "2026-08-21T23:50:00",
+    "observer_id": "ena",
+    "perceived": {
+     "actor_id": "ena",
+     "channel_id": "nightcord",
+     "char_name": "ena",
+     "location_id": null,
+     "text": "mizuki，今天也辛苦了",
+     "type": "message.sent"
+    },
+    "reason": "self_action",
+    "source_event_id": "hi"
+   },
+   {
+    "observed_at": "2026-08-21T23:50:00",
+    "observer_id": "mizuki",
+    "perceived": {
+     "actor_id": "ena",
+     "channel_id": "nightcord",
+     "char_name": "ena",
+     "text": "mizuki，今天也辛苦了",
+     "type": "message.sent"
+    },
+    "reason": "channel_member",
+    "source_event_id": "hi"
+   }
+  ]
+ },
+ "pending_corrections": {
+  "ena": null,
+  "mizuki": null
+ },
+ "rhythm_dispositions": [],
+ "scene": "gate",
+ "scheduler": {
+  "clock": "2026-08-21T23:50:00",
+  "outbox": {
+   "records": []
+  },
+  "queue": {
+   "activations": [],
+   "next_sequence": 0
+  },
+  "session_id": "s1"
+ },
+ "session_id": "s1",
+ "stats": {
+  "avg_score": 0,
+  "corrections": 0,
+  "max_score": 0,
+  "ooc_count": 0,
+  "total_turns": 0
+ },
+ "status": "created",
+ "time_events": {
+  "epoch": "2026-08-21T23:50:00",
+  "records": []
+ },
+ "turns": [],
+ "world_state": {
+  "channel_grants": {
+   "ena": [
+    "nightcord"
+   ],
+   "kanade": [
+    "nightcord"
+   ],
+   "mafuyu": [
+    "nightcord"
+   ],
+   "mizuki": [
+    "nightcord"
+   ]
+  },
+  "channel_members": {
+   "nightcord": [
+    "ena",
+    "mizuki"
+   ]
+  },
+  "channels": {
+   "nightcord": {
+    "channel_id": "nightcord",
+    "description": "Nightcord 语音频道",
+    "kind": "mixed",
+    "name": "Nightcord",
+    "private": true
+   }
+  },
+  "character_activities": {},
+  "character_availability": {},
+  "character_locations": {
+   "ena": "mizuki_home_room",
+   "mizuki": "mizuki_home_room"
+  },
+  "clock": "2026-08-21T23:50:00",
+  "date": "2026-08-21",
+  "location_grants": {
+   "ena": {
+    "clothing_store_floor": "staff",
+    "ena_home": "household",
+    "ena_home_studio": "household",
+    "kamiyama_high": "student",
+    "kanade_home": "household",
+    "kanade_home_room": "household",
+    "lumina_forum": "participant",
+    "lumina_forum_dining_room": "participant",
+    "lumina_forum_lesson_room": "participant",
+    "lumina_forum_meeting_room": "participant",
+    "lumina_forum_mmj_room": "mmj_roommate",
+    "lumina_forum_training_room": "participant",
+    "miyamasuzaka_girls": "student",
+    "mizuki_home": "household",
+    "mizuki_home_room": "household",
+    "mmj_airi_worksite": "worker",
+    "mmj_haruka_worksite": "worker",
+    "mmj_minori_worksite": "worker",
+    "mmj_shizuku_worksite": "worker",
+    "private_residence": "fixture",
+    "tokyo": "fixture"
+   },
+   "kanade": {
+    "clothing_store_floor": "staff",
+    "ena_home": "household",
+    "ena_home_studio": "household",
+    "kamiyama_high": "student",
+    "kanade_home": "household",
+    "kanade_home_room": "household",
+    "lumina_forum": "participant",
+    "lumina_forum_dining_room": "participant",
+    "lumina_forum_lesson_room": "participant",
+    "lumina_forum_meeting_room": "participant",
+    "lumina_forum_mmj_room": "mmj_roommate",
+    "lumina_forum_training_room": "participant",
+    "miyamasuzaka_girls": "student",
+    "mizuki_home": "household",
+    "mizuki_home_room": "household",
+    "mmj_airi_worksite": "worker",
+    "mmj_haruka_worksite": "worker",
+    "mmj_minori_worksite": "worker",
+    "mmj_shizuku_worksite": "worker",
+    "private_residence": "fixture",
+    "tokyo": "fixture"
+   },
+   "mafuyu": {
+    "clothing_store_floor": "staff",
+    "ena_home": "household",
+    "ena_home_studio": "household",
+    "kamiyama_high": "student",
+    "kanade_home": "household",
+    "kanade_home_room": "household",
+    "lumina_forum": "participant",
+    "lumina_forum_dining_room": "participant",
+    "lumina_forum_lesson_room": "participant",
+    "lumina_forum_meeting_room": "participant",
+    "lumina_forum_mmj_room": "mmj_roommate",
+    "lumina_forum_training_room": "participant",
+    "miyamasuzaka_girls": "student",
+    "mizuki_home": "household",
+    "mizuki_home_room": "household",
+    "mmj_airi_worksite": "worker",
+    "mmj_haruka_worksite": "worker",
+    "mmj_minori_worksite": "worker",
+    "mmj_shizuku_worksite": "worker",
+    "private_residence": "fixture",
+    "tokyo": "fixture"
+   },
+   "mizuki": {
+    "clothing_store_floor": "staff",
+    "ena_home": "household",
+    "ena_home_studio": "household",
+    "kamiyama_high": "student",
+    "kanade_home": "household",
+    "kanade_home_room": "household",
+    "lumina_forum": "participant",
+    "lumina_forum_dining_room": "participant",
+    "lumina_forum_lesson_room": "participant",
+    "lumina_forum_meeting_room": "participant",
+    "lumina_forum_mmj_room": "mmj_roommate",
+    "lumina_forum_training_room": "participant",
+    "miyamasuzaka_girls": "student",
+    "mizuki_home": "household",
+    "mizuki_home_room": "household",
+    "mmj_airi_worksite": "worker",
+    "mmj_haruka_worksite": "worker",
+    "mmj_minori_worksite": "worker",
+    "mmj_shizuku_worksite": "worker",
+    "private_residence": "fixture",
+    "tokyo": "fixture"
+   }
+  },
+  "location_state": {},
+  "locations": {
+   "city_streets": {
+    "access": {
+     "public": true
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "kamiyama_high_gate",
+      "travel_minutes": 1
+     },
+     {
+      "mode": "walk",
+      "to_id": "clothing_store",
+      "travel_minutes": 8
+     },
+     {
+      "mode": "walk",
+      "to_id": "ena_home",
+      "travel_minutes": 12
+     },
+     {
+      "mode": "walk",
+      "to_id": "mizuki_home",
+      "travel_minutes": 12
+     },
+     {
+      "mode": "walk",
+      "to_id": "kanade_home",
+      "travel_minutes": 12
+     },
+     {
+      "mode": "walk",
+      "to_id": "miyamasuzaka_gate",
+      "travel_minutes": 1
+     },
+     {
+      "mode": "walk",
+      "to_id": "private_residence",
+      "travel_minutes": 12
+     },
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum",
+      "travel_minutes": 15
+     },
+     {
+      "mode": "walk",
+      "to_id": "mmj_minori_worksite",
+      "travel_minutes": 20
+     },
+     {
+      "mode": "walk",
+      "to_id": "mmj_haruka_worksite",
+      "travel_minutes": 20
+     },
+     {
+      "mode": "walk",
+      "to_id": "mmj_airi_worksite",
+      "travel_minutes": 20
+     },
+     {
+      "mode": "walk",
+      "to_id": "mmj_shizuku_worksite",
+      "travel_minutes": 20
+     }
+    ],
+    "description": "街道",
+    "kind": "outdoor",
+    "location_id": "city_streets",
+    "name": "街道",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": false
+    }
+   },
+   "clothing_store": {
+    "access": {
+     "public": true
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 8
+     },
+     {
+      "mode": "walk",
+      "to_id": "clothing_store_floor",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "服装店",
+    "kind": "building",
+    "location_id": "clothing_store",
+    "name": "服装店",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "clothing_store_floor": {
+    "access": {
+     "public": false,
+     "role": [
+      "staff",
+      "guest"
+     ]
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "clothing_store",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "服装店，整理区，挂满新季衣架",
+    "kind": "room",
+    "location_id": "clothing_store_floor",
+    "name": "服装店·整理区",
+    "parent_id": "clothing_store",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "ena_home": {
+    "access": {
+     "public": false,
+     "role": [
+      "household",
+      "guest"
+     ]
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 12
+     },
+     {
+      "mode": "walk",
+      "to_id": "ena_home_studio",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "绘名家",
+    "kind": "building",
+    "location_id": "ena_home",
+    "name": "绘名家",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "ena_home_studio": {
+    "access": {
+     "public": false,
+     "role": [
+      "household",
+      "guest"
+     ]
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "ena_home",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "绘名家，她的画室，台灯开着",
+    "kind": "room",
+    "location_id": "ena_home_studio",
+    "name": "绘名家·画室",
+    "parent_id": "ena_home",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "kamiyama_high": {
+    "access": {
+     "public": false,
+     "role": "student"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "kamiyama_high_gate",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "神山高校",
+    "kind": "building",
+    "location_id": "kamiyama_high",
+    "name": "神山高校",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "kamiyama_high_gate": {
+    "access": {
+     "public": true
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "kamiyama_high",
+      "travel_minutes": 2
+     },
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "神山高校校门口",
+    "kind": "outdoor",
+    "location_id": "kamiyama_high_gate",
+    "name": "神山高校校门口",
+    "parent_id": "kamiyama_high",
+    "perception": {
+     "indoor": false
+    }
+   },
+   "kanade_home": {
+    "access": {
+     "public": false,
+     "role": [
+      "household",
+      "guest"
+     ]
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 12
+     },
+     {
+      "mode": "walk",
+      "to_id": "kanade_home_room",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "宵崎家",
+    "kind": "building",
+    "location_id": "kanade_home",
+    "name": "宵崎家",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "kanade_home_room": {
+    "access": {
+     "public": false,
+     "role": [
+      "household",
+      "guest"
+     ]
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "kanade_home",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "宵崎家，奏的房间",
+    "kind": "room",
+    "location_id": "kanade_home_room",
+    "name": "宵崎家·奏的房间",
+    "parent_id": "kanade_home",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "lumina_forum": {
+    "access": {
+     "public": false,
+     "role": "participant"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 15
+     },
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum_mmj_room",
+      "travel_minutes": 2
+     },
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum_lesson_room",
+      "travel_minutes": 2
+     },
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum_training_room",
+      "travel_minutes": 2
+     },
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum_dining_room",
+      "travel_minutes": 2
+     },
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum_meeting_room",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "LUMINA FORUM·公共通行区",
+    "kind": "building",
+    "location_id": "lumina_forum",
+    "name": "LUMINA FORUM·公共通行区",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "lumina_forum_dining_room": {
+    "access": {
+     "public": false,
+     "role": "participant"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "LUMINA FORUM·食堂",
+    "kind": "room",
+    "location_id": "lumina_forum_dining_room",
+    "name": "LUMINA FORUM·食堂",
+    "parent_id": "lumina_forum",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "lumina_forum_lesson_room": {
+    "access": {
+     "public": false,
+     "role": "participant"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "LUMINA FORUM·lesson room",
+    "kind": "room",
+    "location_id": "lumina_forum_lesson_room",
+    "name": "LUMINA FORUM·lesson room",
+    "parent_id": "lumina_forum",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "lumina_forum_meeting_room": {
+    "access": {
+     "public": false,
+     "role": "participant"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "LUMINA FORUM·会议室",
+    "kind": "room",
+    "location_id": "lumina_forum_meeting_room",
+    "name": "LUMINA FORUM·会议室",
+    "parent_id": "lumina_forum",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "lumina_forum_mmj_room": {
+    "access": {
+     "public": false,
+     "role": "mmj_roommate"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "LUMINA FORUM·MMJ共享寝室",
+    "kind": "room",
+    "location_id": "lumina_forum_mmj_room",
+    "name": "LUMINA FORUM·MMJ共享寝室",
+    "parent_id": "lumina_forum",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "lumina_forum_training_room": {
+    "access": {
+     "public": false,
+     "role": "participant"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "lumina_forum",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "LUMINA FORUM·training room",
+    "kind": "room",
+    "location_id": "lumina_forum_training_room",
+    "name": "LUMINA FORUM·training room",
+    "parent_id": "lumina_forum",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "miyamasuzaka_gate": {
+    "access": {
+     "public": true
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "miyamasuzaka_girls",
+      "travel_minutes": 2
+     },
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "宫益坂女子学园校门口",
+    "kind": "outdoor",
+    "location_id": "miyamasuzaka_gate",
+    "name": "宫益坂女子学园校门口",
+    "parent_id": "miyamasuzaka_girls",
+    "perception": {
+     "indoor": false
+    }
+   },
+   "miyamasuzaka_girls": {
+    "access": {
+     "public": false,
+     "role": "student"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "miyamasuzaka_gate",
+      "travel_minutes": 2
+     }
+    ],
+    "description": "宫益坂女子学园",
+    "kind": "building",
+    "location_id": "miyamasuzaka_girls",
+    "name": "宫益坂女子学园",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "mizuki_home": {
+    "access": {
+     "public": false,
+     "role": [
+      "household",
+      "guest"
+     ]
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 12
+     },
+     {
+      "mode": "walk",
+      "to_id": "mizuki_home_room",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "瑞希家",
+    "kind": "building",
+    "location_id": "mizuki_home",
+    "name": "瑞希家",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true
+    }
+   },
+   "mizuki_home_room": {
+    "access": {
+     "public": false,
+     "role": [
+      "household",
+      "guest"
+     ]
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "mizuki_home",
+      "travel_minutes": 1
+     }
+    ],
+    "description": "瑞希的房间",
+    "kind": "room",
+    "location_id": "mizuki_home_room",
+    "name": "瑞希家·房间",
+    "parent_id": "mizuki_home",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "mmj_airi_worksite": {
+    "access": {
+     "public": false,
+     "role": "worker"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 20
+     }
+    ],
+    "description": "爱莉的工作现场",
+    "kind": "building",
+    "location_id": "mmj_airi_worksite",
+    "name": "爱莉的工作现场",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "mmj_haruka_worksite": {
+    "access": {
+     "public": false,
+     "role": "worker"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 20
+     }
+    ],
+    "description": "遥的工作现场",
+    "kind": "building",
+    "location_id": "mmj_haruka_worksite",
+    "name": "遥的工作现场",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "mmj_minori_worksite": {
+    "access": {
+     "public": false,
+     "role": "worker"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 20
+     }
+    ],
+    "description": "实乃理的工作现场",
+    "kind": "building",
+    "location_id": "mmj_minori_worksite",
+    "name": "实乃理的工作现场",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "mmj_shizuku_worksite": {
+    "access": {
+     "public": false,
+     "role": "worker"
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 20
+     }
+    ],
+    "description": "雫的工作现场",
+    "kind": "building",
+    "location_id": "mmj_shizuku_worksite",
+    "name": "雫的工作现场",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "private_residence": {
+    "access": {
+     "public": false
+    },
+    "connections": [
+     {
+      "mode": "walk",
+      "to_id": "city_streets",
+      "travel_minutes": 12
+     }
+    ],
+    "description": "各自房间",
+    "kind": "building",
+    "location_id": "private_residence",
+    "name": "各自住处",
+    "parent_id": "tokyo",
+    "perception": {
+     "indoor": true,
+     "private": true
+    }
+   },
+   "tokyo": {
+    "access": {},
+    "connections": [],
+    "description": "东京",
+    "kind": "region",
+    "location_id": "tokyo",
+    "name": "东京",
+    "parent_id": null,
+    "perception": {
+     "indoor": false
+    }
+   }
+  },
+  "metadata": {},
+  "time": "23:50"
+ }
+}
