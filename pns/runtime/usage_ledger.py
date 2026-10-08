@@ -262,8 +262,13 @@ def normalize_usage(protocol: str, usage: Any) -> Optional[Usage]:
         # MiMo 不提供缓存写入字段；缺省或 null 都按 0（它不单独计费）。
         raw_write = _field(usage, "cache_creation_input_tokens")
         write = 0 if raw_write is _MISSING or raw_write is None else _count(raw_write)
-        # 缓存命中是 null 时不知道命中了多少：整组无法估算，而不是当 0。
-        cache_read = _count(_field(usage, "cache_read_input_tokens"))
+        # 缓存命中：MiMo 没读到缓存时给 null，读到了给整数（2026-10-09 生产实测：
+        # 同样形状的请求，命中的那次是 1024，其余都是 null）。所以 null 就是 0。
+        # 键根本不存在仍算形状不对：那不是"没命中"，是这家 provider 不报这一项。
+        raw_read = _field(usage, "cache_read_input_tokens")
+        if raw_read is _MISSING:
+            raise _Malformed()
+        cache_read = 0 if raw_read is None else _count(raw_read)
         return Usage(fresh, write, cache_read, output)
     except _Malformed:
         return None
