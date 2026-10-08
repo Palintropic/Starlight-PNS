@@ -76,19 +76,25 @@ class AnthropicUsageTest(unittest.TestCase):
         )
         self.assertEqual(usage, ul.Usage(1, 0, 3, 2))
 
-    def test_null_cache_read_means_unknown_not_zero(self):
+    def test_null_cache_read_means_no_cache_hit(self):
+        # 生产实测（10-09）：MiMo 没命中缓存时这一项是 null。
         usage = ul.normalize_usage(
             "anthropic",
             {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": None},
         )
-        self.assertIsNone(usage)
+        self.assertEqual(usage, ul.Usage(1, 0, 0, 2))
+
+    def test_a_missing_cache_read_key_is_still_malformed(self):
+        self.assertIsNone(
+            ul.normalize_usage("anthropic", {"input_tokens": 1, "output_tokens": 2})
+        )
 
     def test_malformed_values_make_the_whole_usage_unknown(self):
         good = {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3}
         for key in good:
             for bad in (True, -1, "5", 1.0, None):
                 if key == "cache_read_input_tokens" and bad is None:
-                    continue  # 已在上面单独测
+                    continue  # null 是"没命中"，单独测
                 with self.subTest(key=key, bad=bad):
                     self.assertIsNone(ul.normalize_usage("anthropic", {**good, key: bad}))
         self.assertIsNone(ul.normalize_usage("anthropic", None))
