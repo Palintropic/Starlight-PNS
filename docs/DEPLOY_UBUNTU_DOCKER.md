@@ -172,6 +172,8 @@ Docker 具名卷（不在上面这棵树里）
 │   ├── worlds/<world_id>/world.json    世界存档（状态 + 最近的事件 + 分卷清单）
 │   ├── worlds/<world_id>/history/      已封存的事件分卷，封存后不再改动
 │   ├── worlds/<world_id>/OWNER.lock    所有权锁
+│   ├── usage/YYYY-MM-DD.jsonl          模型用量账本，按北京日期分文件（见 9.1）
+│   ├── usage/balance_anchor.json       操作者记下的控制台余额
 │   ├── accounts.sqlite3                账户与安全审计（0600，见第 8 节）
 │   ├── drift_scores.jsonl              判分记录
 │   └── review_decisions.jsonl          人工审核决策
@@ -510,6 +512,27 @@ docker compose down                # 停机并删掉容器；**卷保留**
 
 > `docker compose ps -a` 里正常停机的退出码是 **143**（128 + SIGTERM）。这是 `docker stop`
 > 期望看到的形状，不是失败。
+
+### 9.1 模型用量与断供（COST-1）
+
+服务器把每一次生成、判分调用记进 `/app/data/usage/`：一行一次调用，按北京日期分文件。记的只有
+世界、住民、路径、配置里的模型名、拿没拿到响应、失败分类（`payment` / `auth` / `rate_limited` /
+`bad_request` / `server` / `network` / `unknown`）、四类 token 数和按 `config.yaml` 的 `pricing:`
+估算的花费。provider 的报错原文不进账本。账本不是世界数据，不在任何存档里；丢了只影响统计。
+
+- **断供提示**：连续 `PNS_PROVIDER_FAILURE_ALERT`（默认 6）次调用没有产出能用的结果，后台「世界」页
+  顶上标红，写明从几点起、失败几次、原因。MiMo 余额不足返回 HTTP 402，显示为「欠费」。拿到 HTTP 200
+  但没有文本、判分解析失败也算失败，不会让计数归零。
+- **余额估算**：MiMo 没有余额接口。在「持久世界」页填一次**控制台上看到的余额本身**（不是充值额），
+  之后服务器从这个数往下扣。低于 `PNS_BALANCE_WARN_YUAN`（默认 10 元）时标黄。它永远是估算：计费
+  有延迟；超时、5xx 的请求可能扣了钱但没有用量（单独计数）；SDK 内部的自动重试看不见。充值后
+  重新填一次。
+- **价目表**：`config.yaml` 的 `pricing:`，单位元 / 百万 token。表里没有的模型照常调用，花费记为
+  「未定价」，不当成 0。换模型（例如 v2.6）之前先确认表里有它。
+- **写不进账本**（磁盘满、权限错）：调用照常进行，日志里打一行
+  `[usage-ledger] 用量账本写入失败…`，后台显示次数。这个计数只在当前进程里，重启后归零。
+- 读账本（最新那天的最后 5 行）：
+  `docker compose exec -T app sh -c 'tail -n 5 "$(ls /app/data/usage/*.jsonl | tail -n 1)"'`。
 
 ## 10. 升级
 
