@@ -63,3 +63,13 @@ development:
   mock_api: false                 # 是否mock API调用（测试用）
   verbose: false                  # 是否显示详细日志
   save_all_turns: true            # 是否保存所有turn（不仅仅是有drift的）
+
+# 模型价目表（COST-1 用量账本按它估算花费）。单位：元 / 百万 token。
+# 出处：MiMo 官方按量计费页 https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go
+# （2026-10-01 核对）。缓存写入官方标注"限时免费"，所以 cache_write 填 0；
+# 免费期结束要回来改。不在表里的模型照常调用，花费记为"未定价"，不当成 0。
+pricing:
+  mimo-v2.5-pro:   {input: 3.0, cache_write: 0.0, cache_read: 0.025, output: 6.0}
+  mimo-v2.6-pro:   {input: 3.0, cache_write: 0.0, cache_read: 0.025, output: 6.0}
+  mimo-v2.5:       {input: 1.0, cache_write: 0.0, cache_read: 0.02,  output: 2.0}
+  mimo-v2.6-flash: {input: 1.0, cache_write: 0.0, cache_read: 0.02,  output: 2.0}

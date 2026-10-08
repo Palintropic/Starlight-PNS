@@ -189,7 +189,7 @@ def run_content_decisions(
     """
     outcomes = _parse(decisions)
     report = MaintenanceReport(world_id=world_id, outcomes=outcomes)
-    adapters = plane.build_adapters(plane.registry())
+    adapters = plane.build_adapters(plane.registry(), world_id=world_id)
     world = plane.service.restore(
         world_id,
         adapters=adapters,

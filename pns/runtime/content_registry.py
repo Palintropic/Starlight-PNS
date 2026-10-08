@@ -33,6 +33,7 @@ from dotenv import dotenv_values, load_dotenv
 from pns.models.channel import ChannelRegistry
 from pns.models.frozen import freeze_json_value, thaw_json_value
 from pns.models.location import LocationGraph
+from pns.runtime.usage_ledger import Prices, parse_price_table
 from pns.world.channels import build_default_channel_registry
 from pns.world.data_module import DataModuleError, evaluate_data_source, require
 from pns.world.characters.registry import CharacterNotReadyError, load_pack_data
@@ -375,6 +376,10 @@ class ContentRegistry:
     def settings_snapshot(self) -> Dict:
         return thaw_json_value(self.settings)
 
+    def price_table(self) -> Mapping[str, Prices]:
+        """config.yaml `pricing:` 段解析出的价目表（构建时已校验过）。"""
+        return parse_price_table(self.settings.get("pricing"))
+
     # ── 角色 ──────────────────────────────────────────────────────────
     def has_character(self, character_id: str) -> bool:
         return character_id in self.characters
@@ -568,6 +573,11 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
     # 与 load_dotenv(override=True) 同样的优先级：.env 覆盖进程环境。
     models = ModelSettings.from_env({**os.environ, **env_file})
     settings = _load_settings(CONFIG_PATH)
+    # 价目表写错了要让这份配置不通过，而不是让用量账本按错价记一个月。
+    try:
+        parse_price_table(settings.get("pricing"))
+    except ValueError as e:
+        raise ConfigValidationError(f"config.yaml 的 pricing 不合法：{e}") from e
 
     scenes_ns = _read_data_module(SCENES_PATH)
     scenes = _require(scenes_ns, "SCENES", dict, SCENES_PATH)
