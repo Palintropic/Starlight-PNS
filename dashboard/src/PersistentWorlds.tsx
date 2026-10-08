@@ -41,6 +41,7 @@ import {
   type WorldDriverStatus,
 } from './api';
 import { useCan } from './principal';
+import { UsagePanel } from './UsagePanel';
 import './worlds.css';
 
 type Action =
@@ -491,6 +492,8 @@ export default function PersistentWorlds() {
       </div>
 
       {loadError ? <div className="worlds-error">{loadError}</div> : null}
+
+      <UsagePanel />
 
       {canOperate &&
       worlds !== null &&

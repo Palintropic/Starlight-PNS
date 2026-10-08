@@ -659,3 +659,85 @@ export interface WorldOverview {
 
 export const fetchWorldOverview = (worldId: string, limit = 200): Promise<WorldOverview> =>
   fetch(`${worldPath(worldId)}/overview?limit=${limit}`).then((res) => json(res));
+
+// ── 用量账本（COST-1）────────────────────────────────────────────────────
+//
+// 全是服务器自己记的账：MiMo 没有余额接口。花费是按本地价目表的估算，
+// 拿不到的（没 usage、没定价、失败了不知道扣没扣）单独计数，不算成 0。
+
+export interface UsageBucket {
+  calls: number;
+  fresh_input: number;
+  cache_write: number;
+  cache_read: number;
+  output: number;
+  cost_yuan: number;
+  /** 有用量但模型不在价目表里。 */
+  unpriced: number;
+  /** 拿到了响应但读不出用量。 */
+  no_usage: number;
+  /** 超时 / 服务器错误：可能已经扣了钱，但没有用量。 */
+  billing_uncertain: number;
+  failed: number;
+  cache_hit_rate: number | null;
+}
+
+export type UsageFailure =
+  | 'auth'
+  | 'payment'
+  | 'rate_limited'
+  | 'bad_request'
+  | 'server'
+  | 'network'
+  | 'unknown'
+  | 'unusable'
+  | 'truncated';
+
+export interface UsageFailureStreak {
+  consecutive: number;
+  /** 这一段第一次失败的时刻（UTC ISO）。 */
+  since: string | null;
+  last_failure: UsageFailure | null;
+  alert: boolean;
+  alert_threshold: number;
+}
+
+export interface UsageBalance {
+  anchor: { balance_yuan: number; at: string };
+  spent_since_anchor_yuan: number;
+  estimated_yuan: number;
+  uncounted_calls: number;
+  billing_uncertain_calls: number;
+  anchor_before_ledger: boolean;
+  low: boolean;
+  warn_yuan: number;
+}
+
+export interface UsageSummary {
+  now: string;
+  timezone: string;
+  /** [第一天, 今天]，北京日期。 */
+  days: [string, string];
+  total: UsageBucket;
+  by_day: Record<string, UsageBucket>;
+  by_world: Record<string, UsageBucket>;
+  by_path: Record<string, UsageBucket>;
+  by_character: Record<string, UsageBucket>;
+  failure_streak: UsageFailureStreak;
+  balance: UsageBalance | null;
+  ledger_write_failures: number;
+  corrupt_lines: number;
+}
+
+export const fetchUsageSummary = (days = 7): Promise<UsageSummary> =>
+  fetch(`/api/usage/summary?days=${days}`).then((res) => json(res));
+
+/** 记下"控制台上看到的此刻余额"（余额本身，不是充值额）。 */
+export const setBalanceAnchor = (
+  balanceYuan: number,
+): Promise<{ balance_yuan: number; at: string }> =>
+  fetch('/api/usage/balance-anchor', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ balance_yuan: balanceYuan }),
+  }).then((res) => json(res));

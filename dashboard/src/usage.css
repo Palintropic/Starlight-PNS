@@ -1,0 +1,124 @@
+/* dashboard/src/usage.css — 模型用量面板与断供横幅（COST-1），W10M tokens in index.css. */
+
+.usage-alert {
+  display: flex;
+  flex-direction: column;
+  gap: var(--header-gap);
+  padding: var(--gutter) var(--page-margin) 0;
+}
+.usage-alert-line {
+  font: var(--type-body);
+  line-height: var(--prose-leading);
+  padding-left: var(--gutter);
+  border-left: 4px solid currentColor;
+}
+.usage-alert-line.bad { color: var(--warn); }
+.usage-alert-line.caution { color: var(--caution); }
+
+.usage h3,
+.usage h4,
+.usage p {
+  margin: 0;
+}
+.usage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+}
+.usage h3 {
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
+}
+.usage h4 {
+  font: var(--type-control);
+  font-weight: 600;
+  color: var(--SystemBaseHigh);
+}
+.usage-error { font: var(--type-body); color: var(--warn); }
+
+.usage-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); /* by eye */
+  gap: var(--gutter);
+}
+.usage-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--gutter);
+  background: var(--SystemChromeLow);
+}
+.usage-tile-label {
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.usage-tile-value {
+  font: var(--type-title);
+  color: var(--SystemBaseHigh);
+  font-variant-numeric: tabular-nums;
+}
+.usage-tile-note {
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+
+.usage-note,
+.usage-hint,
+.usage-dim {
+  font: var(--type-caption);
+  line-height: 18px;
+  color: var(--SystemBaseMedium);
+}
+.usage-note { max-width: 68ch; }
+
+.usage-balance {
+  display: flex;
+  flex-direction: column;
+  gap: var(--header-gap);
+}
+.usage-balance-value {
+  font: var(--type-subtitle);
+  color: var(--SystemBaseHigh);
+  font-variant-numeric: tabular-nums;
+}
+.usage-anchor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--gutter);
+}
+.usage-anchor label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--header-gap);
+  font: var(--type-control);
+  color: var(--SystemBaseHigh);
+}
+.usage-anchor input { width: 160px; }
+.usage-feedback { font: var(--type-control); }
+.usage-feedback.ok { color: var(--ok); }
+.usage-feedback.error { color: var(--warn); }
+
+.usage-people ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-width: 420px; /* by eye: keep the amount next to the name */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.usage-people li {
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) auto auto;
+  gap: var(--gutter);
+  font: var(--type-control);
+  color: var(--SystemBaseHigh);
+  font-variant-numeric: tabular-nums;
+}
+.usage-person { font-family: var(--mono); }
+
+@media (max-width: 760px) {
+  .usage-anchor input { width: 100%; }
+  .usage-anchor label { flex: 1 1 100%; }
+}
