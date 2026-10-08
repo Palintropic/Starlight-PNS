@@ -68,10 +68,15 @@ class ClassBehavior:
 
     # 编码之后多少模拟分钟内还召得回来；None = 不衰减。
     decay_minutes: Optional[int]
-    # True = 召回预算优先保留它，挤不掉。
+    # True = 召回预算优先保留它，挤不掉，记忆满了也不忘。
     pinned: bool
     # 召回打分的基础权重。
     recall_weight: int
+    # 置顶的期限（模拟分钟）；None = 只要是固定类别就一直置顶。过了期限，
+    # 这条记忆不再固定，权重降到 lapsed_weight —— 还记得，只是不再每次都
+    # 第一个想起来，记忆满了也可以被忘掉。
+    pin_minutes: Optional[int] = None
+    lapsed_weight: Optional[int] = None
 
 
 class MemoryClass(str, Enum):
@@ -84,7 +89,7 @@ class MemoryClass(str, Enum):
     WORKING = "working"  # 短时痕迹：什么都记一下，但会过期
     EPISODIC = "episodic"  # 情节：与自己有关的那些发生
     RELATIONAL = "relational"  # 关系：某个人对我做了什么
-    COMMITMENT = "commitment"  # 承诺：说出口的约定，永不衰减、挤不掉
+    COMMITMENT = "commitment"  # 承诺：说出口的约定；限期置顶，过期后退回普通权重
     SEMANTIC = "semantic"  # 世界事实：谁在哪、谁在哪个频道
     IDENTITY = "identity"  # 身份相关：我承诺了什么、别人怎么说我
 
@@ -105,6 +110,9 @@ class MemoryClass(str, Enum):
         return self.behavior.recall_weight
 
 
+# 一句口头约定在召回里保持置顶的时长：3 个模拟日。
+PROMISE_HORIZON_MINUTES = 3 * 24 * 60
+
 _CLASS_BEHAVIOR: Dict[MemoryClass, ClassBehavior] = {
     # 短时痕迹两小时后就召不回来了。这不是"删掉"：记录还在存储里，只是不再
     # 进入召回投影 —— 编码与召回分开，衰减属于召回那一侧。
@@ -115,7 +123,17 @@ _CLASS_BEHAVIOR: Dict[MemoryClass, ClassBehavior] = {
     # 承诺与身份相关的经验有更强的持久化保证（架构文档 §17）：不衰减，
     # 而且召回预算优先给它们留位置。
     MemoryClass.IDENTITY: ClassBehavior(decay_minutes=None, pinned=True, recall_weight=50),
-    MemoryClass.COMMITMENT: ClassBehavior(decay_minutes=None, pinned=True, recall_weight=60),
+    # 约定的置顶有期限（MEM-2）：这里的"约定"是从台词里认出来的口头约定，
+    # 不是结构化的承诺状态。永久置顶会把一句玩笑赌约钉成每次开口第一个想起
+    # 的事；过了期限它退回一条普通情节的权重，被线索问到时照样想得起来。
+    # 这些都是召回一侧的行为，不参与存档校验。
+    MemoryClass.COMMITMENT: ClassBehavior(
+        decay_minutes=None,
+        pinned=True,
+        recall_weight=60,
+        pin_minutes=PROMISE_HORIZON_MINUTES,
+        lapsed_weight=20,
+    ),
 }
 
 
@@ -533,7 +551,26 @@ class MemoryRecord:
 
     @property
     def pinned(self) -> bool:
+        """类别上是不是固定类别。此刻是否仍然置顶看 is_pinned_at()。"""
         return self.memory_class.pinned
+
+    def is_pinned_at(self, now: datetime) -> bool:
+        """到了这一刻还算不算置顶。**只读**：不改写记录本身。"""
+        if not isinstance(now, datetime):
+            raise MemoryError("now 必须是 datetime（模拟时钟时间）")
+        behavior = self.memory_class.behavior
+        if not behavior.pinned:
+            return False
+        if behavior.pin_minutes is None:
+            return True
+        return (now - self.encoded_at).total_seconds() <= behavior.pin_minutes * 60
+
+    def recall_weight_at(self, now: datetime) -> int:
+        """这一刻的召回基础权重：置顶过期的约定退回 lapsed_weight。"""
+        behavior = self.memory_class.behavior
+        if behavior.lapsed_weight is not None and not self.is_pinned_at(now):
+            return behavior.lapsed_weight
+        return behavior.recall_weight
 
     def is_decayed_at(self, now: datetime) -> bool:
         """到了这一刻还召不召得回来。**只读**：衰减不改写记录本身。"""
@@ -824,6 +861,7 @@ class MemoryStore:
 
 
 __all__ = [
+    "PROMISE_HORIZON_MINUTES",
     "COMMITMENT_MARKERS",
     "ENCODABLE_TYPES",
     "EPISODIC_THRESHOLD",
