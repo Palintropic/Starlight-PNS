@@ -428,8 +428,13 @@ class UsageLedger:
                 print(LEDGER_WRITE_FAILED, file=sys.stderr)
                 return False
 
-    def read(self, since: Optional[datetime] = None) -> Tuple[List[LedgerRecord], int]:
-        """读出 `since`（含）之后的所有记录，按 `at` 排序；返回 (记录, 损坏行数)。"""
+    def read(
+        self, since: Optional[datetime] = None, *, until_day: Optional[date] = None
+    ) -> Tuple[List[LedgerRecord], int]:
+        """读出 `since`（含）之后的所有记录，按 `at` 排序；返回 (记录, 损坏行数)。
+
+        只打开日期不早于 `since` 那天（北京日期）、且不晚于 `until_day` 的文件。
+        """
         if not self._root.is_dir():
             return [], 0
         first_day = since.astimezone(BEIJING).date() if since is not None else None
@@ -441,6 +446,8 @@ class UsageLedger:
             except ValueError:
                 continue
             if first_day is not None and day < first_day:
+                continue
+            if until_day is not None and day > until_day:
                 continue
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
@@ -461,9 +468,25 @@ class UsageLedger:
         records.sort(key=lambda r: r.at)
         return records, corrupt
 
+    def _days(self) -> List[date]:
+        if not self._root.is_dir():
+            return []
+        days = []
+        for path in self._root.glob("*.jsonl"):
+            try:
+                days.append(date.fromisoformat(path.stem))
+            except ValueError:
+                continue
+        return sorted(days)
+
     def earliest(self) -> Optional[datetime]:
-        records, _ = self.read()
-        return records[0].at if records else None
+        """账本里最早一行的时刻。只读最早那个有内容的文件。"""
+        for day in self._days():
+            start = datetime.combine(day, datetime.min.time(), BEIJING)
+            records, _ = self.read(since=start, until_day=day)
+            if records:
+                return records[0].at
+        return None
 
 
 # ── 余额锚点 ─────────────────────────────────────────────────────────────
@@ -629,7 +652,17 @@ def summarize(
     first_day = today - timedelta(days=max(days, 1) - 1)
     window_start = datetime.combine(first_day, datetime.min.time(), BEIJING)
 
-    all_records, corrupt = ledger.read()
+    # 只读需要的那几天：窗口起点和锚点里更早的那个。连续失败段如果一直延伸到
+    # 读取范围的开头，说明更早的文件里可能还有，才往前补读整本账。
+    read_from = window_start
+    if anchor is not None and anchor.at < read_from:
+        read_from = anchor.at
+    read_from = datetime.combine(read_from.astimezone(BEIJING).date(), datetime.min.time(), BEIJING)
+    all_records, corrupt = ledger.read(since=read_from)
+    if not any(r.operation == OPERATION_OK for r in all_records):
+        days = ledger._days()
+        if days and days[0] < read_from.date():
+            all_records, corrupt = ledger.read()
     window = [r for r in all_records if r.at >= window_start]
 
     by_day: Dict[str, Dict[str, Any]] = {}
@@ -667,7 +700,7 @@ def summarize(
         "balance": balance_estimate(
             all_records,
             anchor,
-            earliest=all_records[0].at if all_records else None,
+            earliest=ledger.earliest() if anchor is not None else None,
             warn_yuan=warn_yuan,
         ),
         "ledger_write_failures": ledger.write_failures,

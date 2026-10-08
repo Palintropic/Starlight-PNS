@@ -390,5 +390,53 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn(KEY, json.dumps(summary))
 
 
+class BoundedReadTest(unittest.TestCase):
+    """汇总只读需要的那几天，但连续失败段和锚点不能因此读错。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.ledger = ul.UsageLedger(self.root, clock=lambda: _at(14, day=20))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _poison(self, day):
+        with open(self.root / f"2026-10-{day:02d}.jsonl", "a") as fh:
+            fh.write("{broken\n")
+
+    def test_old_files_are_not_opened_when_today_is_healthy(self):
+        self.ledger.append(_record(_at(1, day=3)))
+        self._poison(3)
+        self.ledger.append(_record(_at(1, day=20)))
+        summary = ul.summarize(self.ledger, days=1, anchor=None)
+        self.assertEqual(summary["corrupt_lines"], 0)
+        self.assertEqual(summary["total"]["calls"], 1)
+
+    def test_a_streak_older_than_the_window_is_still_found(self):
+        self.ledger.append(_record(_at(1, day=10)))
+        for day in range(11, 21):
+            self.ledger.append(_failed(_at(2, day=day)))
+        streak = ul.summarize(self.ledger, days=1, anchor=None)["failure_streak"]
+        self.assertEqual(streak["consecutive"], 10)
+        self.assertEqual(streak["since"], _at(2, day=11).isoformat())
+
+    def test_anchor_older_than_the_window_still_counts_its_spending(self):
+        self.ledger.append(_record(_at(1, day=5)))
+        self.ledger.append(_record(_at(3, day=12)))
+        self.ledger.append(_record(_at(1, day=20)))
+        anchor = ul.BalanceAnchor(10.0, _at(2, day=5))
+        balance = ul.summarize(self.ledger, days=1, anchor=anchor)["balance"]
+        per_call = ul.estimate_cost(ul.Usage(100, 0, 900, 50), MIMO_PRO)
+        self.assertAlmostEqual(balance["spent_since_anchor_yuan"], 2 * per_call)
+        self.assertFalse(balance["anchor_before_ledger"])
+
+    def test_anchor_before_the_first_row_is_flagged(self):
+        self.ledger.append(_record(_at(5, day=12)))
+        anchor = ul.BalanceAnchor(10.0, _at(1, day=12))
+        balance = ul.summarize(self.ledger, days=1, anchor=anchor)["balance"]
+        self.assertTrue(balance["anchor_before_ledger"])
+
+
 if __name__ == "__main__":
     unittest.main()
