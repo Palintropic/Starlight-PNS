@@ -36,7 +36,12 @@ BEIJING = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 PATH_GENERATION = "generation"
 PATH_JUDGE = "judge"
-PATHS = (PATH_GENERATION, PATH_JUDGE)
+# COST-2：只为维持提示词缓存而发的请求。它花钱、要记账，但它不是世界在说话，
+# 所以不参与"断供了没有"的判断（见 failure_streak）。
+PATH_WARM = "warm"
+PATHS = (PATH_GENERATION, PATH_JUDGE, PATH_WARM)
+# 世界真正靠它说话的那几路。连续失败只看它们。
+SERVING_PATHS = (PATH_GENERATION, PATH_JUDGE)
 
 TRANSPORT_RESPONSE = "response"
 TRANSPORT_ERROR = "error"
@@ -575,9 +580,13 @@ def failure_streak(records: Iterable[LedgerRecord]) -> Dict[str, Any]:
 
     只有 ok 能归零：拿到 HTTP 200 但没文本、被过滤、判分解析失败，世界一样
     是哑的。`records` 必须已按 `at` 排好。
+
+    续命（`warm`）不算：它成功不代表世界能说话，它失败也不代表世界哑了。
     """
     tail: List[LedgerRecord] = []
     for record in records:
+        if record.path not in SERVING_PATHS:
+            continue
         if record.operation == OPERATION_OK:
             tail = []
         else:
@@ -681,7 +690,9 @@ def summarize(
         read_from = anchor.at
     read_from = datetime.combine(read_from.astimezone(BEIJING).date(), datetime.min.time(), BEIJING)
     all_records, corrupt = ledger.read(since=read_from)
-    if not any(r.operation == OPERATION_OK for r in all_records):
+    if not any(
+        r.operation == OPERATION_OK and r.path in SERVING_PATHS for r in all_records
+    ):
         days = ledger._days()
         if days and days[0] < read_from.date():
             all_records, corrupt = ledger.read()

@@ -51,6 +51,7 @@ from pns.models.cognition import (
     CognitionCause,
     CognitionTimeline,
     consumes_allowance,
+    unavailable_causes,
 )
 from pns.models.event import Event, EventType
 from pns.models.session import SessionState
@@ -270,6 +271,26 @@ class AutonomousRuntime:
         人会被那次提交挡住）。需要一致快照的用 status()。
         """
         return self._running
+
+    def warm_admissible(self) -> bool:
+        """此刻认知可不可用 —— 给提示词缓存续命（COST-2）问的。
+
+        它跟真实生成的"认知不可用就当场收尾"用的是**同一个**判据
+        （`pns.models.cognition.unavailable_causes`），只是没有一条具体的到期，
+        `fired_at` 取当前模拟时刻：额度耗尽、故障、现实时钟落后、backlog 盖住
+        此刻、没 Start、已 Stop，一律是 False。
+
+        它**不**模拟某个住民的免费收尾、策略签发或要不要判分：它回答的是"一条
+        新的认知操作现在能不能进生成路径"，不是"马上会不会有 provider 调用"。
+        没有认知时间线的会话（研究会话）一律 False：续命只属于持久世界。
+        """
+        with self._gate:
+            if not self._running or self.stop_requested:
+                return False
+            timeline = self._state.cognition
+            if timeline is None:
+                return False
+            return not unavailable_causes(timeline.current, self.clock)
 
     @property
     def stop_requested(self) -> bool:

@@ -154,6 +154,7 @@ class ClockWorker:
         config: ClockConfig,
         *,
         wall_clock: Optional[Callable[[], datetime]] = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         for attribute in ("world_id", "runtime", "checkpoint_if_due"):
             if not hasattr(world, attribute):
@@ -178,6 +179,10 @@ class ClockWorker:
         self._last_progress_at: Optional[str] = None
         self._last_tick_at: Optional[str] = None
         self._last_tick: Optional[Dict] = None
+        # 提示词缓存续命（COST-2）。世界句柄上没有就不续。只在这个线程里用。
+        self._warmer = getattr(world, "warmer", None)
+        self._monotonic = monotonic
+        self._round_clean = False
 
     # ── 读 ──────────────────────────────────────────────────────────────
     @property
@@ -251,6 +256,7 @@ class ClockWorker:
                 if not self._should_run():
                     break
                 delay = self._iterate()
+                delay = self._warm(delay)
                 self._stop_event.wait(delay)
         finally:
             with self._lock:
@@ -266,8 +272,33 @@ class ClockWorker:
             return False
         return True
 
+    def _warm(self, delay: float) -> float:
+        """一轮干净的推进之后，用这一轮的等待时间给一个角色的缓存续命（COST-2）。
+
+        lag 预算：只在这一轮成功、没在补跑、没落后时续；最多一次请求，超时不超过
+        这一轮本来要等的时间；花掉的时间从等待里扣。于是一轮的总时长跟不续命时
+        一样，时钟不会因为续命落后。准入用的是跟真实生成同一个认知可用性判据，
+        而且在读它之前、之后都不拿 worker 自己的锁。
+        """
+        if self._warmer is None or not self._round_clean or delay <= 0:
+            return delay
+        if self._stop_event.is_set():
+            return delay
+        try:
+            if not self._world.runtime.warm_admissible():
+                return delay
+        except BaseException:  # noqa: BLE001 - 问不出来就不续，不影响时钟
+            return delay
+        started = self._monotonic()
+        try:
+            self._warmer.warm_once(timeout=delay)
+        except BaseException:  # noqa: BLE001 - warm_once 自己不抛；兜底
+            pass
+        return max(0.0, delay - (self._monotonic() - started))
+
     def _iterate(self) -> float:
         """跑一轮，返回到下一轮之前要等多少秒。"""
+        self._round_clean = False
         try:
             report, lag = self._step()
         except BaseException as e:  # noqa: BLE001 - 记下来，绝不让 worker 静默死掉
@@ -284,6 +315,7 @@ class ClockWorker:
         if report["minutes"] > 0 and lag > 0:
             # 还在补跑，而且这一段确实推进了：不等满节拍，接着走下一段。
             return 0.0
+        self._round_clean = lag <= 0
         return float(self._config.interval_seconds)
 
     def _step(self):
