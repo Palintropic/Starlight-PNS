@@ -86,23 +86,29 @@ class CacheWarmer:
         self._seq = 0
         self._slots: Dict[Key, _Slot] = {}
         self._client: Any = None
+        self._client_factory: Optional[Callable[[], Any]] = None
         self._meter: Any = None
 
     # ── 接线 ────────────────────────────────────────────────────────────
-    def attach(self, client: Any, meter: Any) -> None:
+    def attach(
+        self, client: Any, meter: Any, *, client_factory: Optional[Callable[[], Any]] = None
+    ) -> None:
         """续命请求要走同一个 meter：同一本账、同一把 send lock。
 
         `client` 应当是**关掉 SDK 自动重试**的那一份（composition 用
         `with_options(max_retries=0)` 建）：续命的超时必须就是它的总时长上限，
-        否则一次超时后 SDK 再试两次，时钟就被拖住了（实现审 P1）。可以交一个
-        无参工厂，第一次续命时才建。
+        否则一次超时后 SDK 再试两次，时钟就被拖住了（实现审 P1）。也可以只交
+        `client_factory`，第一次续命时才建。
         """
+        if (client is None) == (client_factory is None):
+            raise ValueError("client 与 client_factory 必须且只能给一个")
         self._client = client
+        self._client_factory = client_factory
         self._meter = meter
 
     def _resolved_client(self) -> Any:
-        if callable(self._client) and not hasattr(self._client, "messages") and not hasattr(self._client, "chat"):
-            self._client = self._client()
+        if self._client is None and self._client_factory is not None:
+            self._client = self._client_factory()
         return self._client
 
     @property
@@ -189,7 +195,7 @@ class CacheWarmer:
         语义 —— 判定通过之后才算"开始"；判定之后才生效的 Stop 拦不住这一戳，
         也拦不住一次已经判定过的真实生成。
         """
-        if self._client is None or self._meter is None:
+        if (self._client is None and self._client_factory is None) or self._meter is None:
             return False
         prefix = self.due()
         if prefix is None:

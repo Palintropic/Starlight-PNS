@@ -576,7 +576,10 @@ class WorldControlPlane:
             # 续命用一份关掉 SDK 自动重试的 client：它的超时就是总时长上限，
             # 时钟不会被一次续命的重试拖住。同一个 meter：同一本账、同一把锁。
             # 第一次真要续命时才建，建 adapters 本身不碰 provider client。
-            warmer.attach(lambda: MeteredClient(_without_retries(raw_client), meter), meter)
+            warmer.attach(
+                None, meter,
+                client_factory=lambda: MeteredClient(_without_retries(raw_client), meter),
+            )
 
         def judge(request: AuditRequest) -> object:
             with meter.operation(
