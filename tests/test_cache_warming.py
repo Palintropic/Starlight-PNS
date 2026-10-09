@@ -297,6 +297,52 @@ class FailureTests(WarmerTestCase):
         self.assertEqual(summary["by_path"]["generation"]["calls"], 1)
 
 
+def _lock_is_free_elsewhere(lock):
+    """从另一个线程试拿一下；拿到就在**同一个线程**里放掉（RLock 只能由持有者释放）。"""
+    got = []
+
+    def probe():
+        if lock.acquire(blocking=False):
+            got.append(True)
+            lock.release()
+        else:
+            got.append(False)
+
+    t = threading.Thread(target=probe)
+    t.start()
+    t.join(timeout=5)
+    return got[0]
+
+
+class InLockTests(WarmerTestCase):
+    def test_admission_is_asked_while_holding_the_send_lock(self):
+        self.real_call()
+        self.now.advance(180)
+        seen = []
+
+        def admit():
+            free = _lock_is_free_elsewhere(self.meter.send_lock)
+            seen.append(free)
+            return False
+
+        self.assertFalse(self.warmer.warm_once(timeout=5, admit=admit))
+        self.assertEqual(seen, [False], "别的线程此刻拿不到锁")
+        self.assertEqual(len(self.raw.requests), 1, "准入被拒就不发")
+
+    def test_seq_is_allocated_inside_the_send_lock(self):
+        held = []
+        original = self.warmer.capture
+
+        def capture(*a, **k):
+            free = _lock_is_free_elsewhere(self.meter.send_lock)
+            held.append(not free)
+            return original(*a, **k)
+
+        self.warmer.capture = capture
+        self.real_call()
+        self.assertEqual(held, [True])
+
+
 class SendLockTests(WarmerTestCase):
     def _race(self, real_first):
         self.real_call()
@@ -379,6 +425,23 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(slot.prefix.request["extra_body"], {"temperature": 0.85})
         self.assertEqual(slot.prefix.request["system"], self.calls[0]["system"])
 
+    def test_warm_client_does_not_retry_but_the_real_one_still_does(self):
+        seen = []
+
+        def with_options(**kwargs):
+            seen.append(kwargs)
+            clone = FakeClient()
+            clone.tag = "no-retry"
+            return clone
+
+        self.client.with_options = with_options
+        adapters = self.plane().build_adapters(self.registry, world_id="a")
+        self.assertEqual(seen, [], "建 adapters 不碰 provider client")
+        client = adapters.warmer._resolved_client()
+        self.assertEqual(seen, [{"max_retries": 0}])
+        self.assertEqual(client._target.tag, "no-retry")
+        self.assertIs(adapters.warmer._meter, client._meter, "同一本账、同一把锁")
+
     def test_bad_settings_are_refused(self):
         for kwargs in ({"warm_window_seconds": -1}, {"warm_interval_seconds": 5}, {"warm_window_seconds": "20m"}):
             with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
@@ -401,8 +464,13 @@ class _StubWarmer:
         self.monotonic = monotonic
         self.cost = cost
         self.calls = []
+        self.before_admit = None
 
-    def warm_once(self, timeout):
+    def warm_once(self, timeout, admit=lambda: True):
+        if self.before_admit is not None:
+            self.before_admit()
+        if not admit():
+            return False
         self.calls.append(timeout)
         self.monotonic.advance(self.cost)
         return True
@@ -449,6 +517,25 @@ class ClockWorkerLagTests(unittest.TestCase):
         worker._stop_event.set()
         self.assertEqual(worker._warm(5.0), 5.0)
         self.assertEqual(warmer.calls, [])
+
+    def test_stop_between_the_first_check_and_the_send_is_honoured(self):
+        worker, warmer, _ = _stub_worker()
+        worker._round_clean = True
+        warmer.before_admit = worker._stop_event.set  # close 在两次检查之间发生
+        self.assertEqual(worker._warm(5.0), 5.0)
+        self.assertEqual(warmer.calls, [], "锁里那一次检查拦住了")
+
+    def test_cognition_stop_between_checks_is_honoured(self):
+        worker, warmer, world = _stub_worker()
+        worker._round_clean = True
+
+        def stop():
+            world.runtime.admissible = False
+
+        warmer.before_admit = stop
+        worker._warm(5.0)
+        self.assertEqual(warmer.calls, [])
+        self.assertEqual(world.runtime.asked, 2, "锁外问一次、锁里再问一次")
 
     def test_only_a_clean_round_is_clean(self):
         cases = [

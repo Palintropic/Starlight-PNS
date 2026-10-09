@@ -290,8 +290,13 @@ class ClockWorker:
         except BaseException:  # noqa: BLE001 - 问不出来就不续，不影响时钟
             return delay
         started = self._monotonic()
+
+        def admit() -> bool:
+            # 锁里那一次：close 的停止请求和 Stop 都在这里最后拦一次。
+            return not self._stop_event.is_set() and self._world.runtime.warm_admissible()
+
         try:
-            self._warmer.warm_once(timeout=delay)
+            self._warmer.warm_once(timeout=delay, admit=admit)
         except BaseException:  # noqa: BLE001 - warm_once 自己不抛；兜底
             pass
         return max(0.0, delay - (self._monotonic() - started))

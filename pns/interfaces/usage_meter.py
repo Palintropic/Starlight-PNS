@@ -102,7 +102,8 @@ class UsageMeter:
         self._warmer = warmer
         # 只有挂了续命的世界才串行发送：续命请求与真实请求不交错。没有续命的
         # client（研究会话、bench）对并发保持完全透明，跟 COST-1 时一样。
-        self._send_lock: Any = threading.Lock() if warmer is not None else nullcontext()
+        # 可重入：续命在持锁时再确认一次准入，然后经同一个 MeteredClient 发送。
+        self._send_lock: Any = threading.RLock() if warmer is not None else nullcontext()
 
     @property
     def warmer(self) -> Optional[Any]:
@@ -212,10 +213,11 @@ class _MeteredMethod:
         self._method = method
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        if not args:
-            self._meter.capture(kwargs)
         try:
             with self._meter.send_lock:
+                # seq 在锁里分配：它的顺序就是真实发送的顺序（实现审 P2）。
+                if not args:
+                    self._meter.capture(kwargs)
                 response = self._method(*args, **kwargs)
         except Exception as e:
             self._meter.record_error(e)

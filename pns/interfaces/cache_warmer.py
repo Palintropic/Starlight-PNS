@@ -90,9 +90,20 @@ class CacheWarmer:
 
     # ── 接线 ────────────────────────────────────────────────────────────
     def attach(self, client: Any, meter: Any) -> None:
-        """续命请求要走同一个 MeteredClient：同一本账、同一把 send lock。"""
+        """续命请求要走同一个 meter：同一本账、同一把 send lock。
+
+        `client` 应当是**关掉 SDK 自动重试**的那一份（composition 用
+        `with_options(max_retries=0)` 建）：续命的超时必须就是它的总时长上限，
+        否则一次超时后 SDK 再试两次，时钟就被拖住了（实现审 P1）。可以交一个
+        无参工厂，第一次续命时才建。
+        """
         self._client = client
         self._meter = meter
+
+    def _resolved_client(self) -> Any:
+        if callable(self._client) and not hasattr(self._client, "messages") and not hasattr(self._client, "chat"):
+            self._client = self._client()
+        return self._client
 
     @property
     def window_seconds(self) -> float:
@@ -170,8 +181,14 @@ class CacheWarmer:
         request["max_tokens"] = 1
         return request
 
-    def warm_once(self, timeout: float) -> bool:
-        """续一个最该续的 key。返回是否真的发了请求。从不抛出。"""
+    def warm_once(self, timeout: float, admit: Callable[[], bool] = lambda: True) -> bool:
+        """续一个最该续的 key。返回是否真的发了请求。从不抛出。
+
+        `admit` 在**拿到 send lock 之后、发送之前**再问一次（实现审 P1）：调用方
+        先问过一次只是为了不白等锁；真正算数的是锁里这一次。它跟真实生成同一个
+        语义 —— 判定通过之后才算"开始"；判定之后才生效的 Stop 拦不住这一戳，
+        也拦不住一次已经判定过的真实生成。
+        """
         if self._client is None or self._meter is None:
             return False
         prefix = self.due()
@@ -180,20 +197,27 @@ class CacheWarmer:
         path, character_id, model, _ = prefix.key
         request = self.warm_request(prefix)
         ok = False
-        with self._lock:
-            slot = self._slots.get(prefix.key)
-            if slot is not None:
-                slot.last_sent_at = self._now()
-        try:
-            with self._meter.operation(PATH_WARM, character_id, model) as op:
-                if self._protocol == "openai":
-                    self._client.chat.completions.create(**request, timeout=timeout)
-                else:
-                    self._client.messages.create(**request, timeout=timeout)
-                op.settle(True)
-                ok = True
-        except Exception:  # noqa: BLE001 - 续命失败只记账、只计数，绝不影响世界
-            ok = False
+        with self._meter.send_lock:
+            try:
+                if not admit():
+                    return False
+            except Exception:  # noqa: BLE001 - 问不出来就不续
+                return False
+            with self._lock:
+                slot = self._slots.get(prefix.key)
+                if slot is not None:
+                    slot.last_sent_at = self._now()
+            try:
+                with self._meter.operation(PATH_WARM, character_id, model) as op:
+                    client = self._resolved_client()
+                    if self._protocol == "openai":
+                        client.chat.completions.create(**request, timeout=timeout)
+                    else:
+                        client.messages.create(**request, timeout=timeout)
+                    op.settle(True)
+                    ok = True
+            except Exception:  # noqa: BLE001 - 续命失败只记账、只计数，绝不影响世界
+                ok = False
         with self._lock:
             slot = self._slots.get(prefix.key)
             # 只记到它续的那一版：这期间真实请求已经换了前缀的话，失败不算到新前缀头上。

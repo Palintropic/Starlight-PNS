@@ -335,6 +335,17 @@ class AutonomySettings:
         }
 
 
+def _without_retries(client):
+    """同一个 provider client，但不自动重试（SDK 默认重试 2 次）。
+
+    anthropic / openai 的 client 都有 `with_options`；没有的（测试替身）原样用。
+    """
+    with_options = getattr(client, "with_options", None)
+    if callable(with_options):
+        return with_options(max_retries=0)
+    return client
+
+
 def _new_session_id(world_id: str) -> str:
     """新世界的会话身份。由服务器生成 —— 浏览器不许决定一个世界叫什么。"""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -562,7 +573,10 @@ class WorldControlPlane:
         )
         client = MeteredClient(raw_client, meter)
         if warmer is not None:
-            warmer.attach(client, meter)
+            # 续命用一份关掉 SDK 自动重试的 client：它的超时就是总时长上限，
+            # 时钟不会被一次续命的重试拖住。同一个 meter：同一本账、同一把锁。
+            # 第一次真要续命时才建，建 adapters 本身不碰 provider client。
+            warmer.attach(lambda: MeteredClient(_without_retries(raw_client), meter), meter)
 
         def judge(request: AuditRequest) -> object:
             with meter.operation(
