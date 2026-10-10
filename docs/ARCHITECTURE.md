@@ -357,6 +357,16 @@ useful historical fact but a bad access rule: a character who has since left
 would still match it. Only `private` and `participant` scope, where the field
 means "the characters this event names", treat it as authoritative.
 
+For `dialogue.spoken` and `message.sent` in those two scopes the snapshot is
+enforced at the commit boundary: `participants` must be exactly the occupants of
+that location node (or the members of that channel) at that moment, the speaker
+must be among them, and a location-scoped line may not also carry a channel. A
+world records in `metadata["speech_occupancy_checked_from"]` the first event
+sequence number committed under this check (set once, at the first bind with this
+code; 0 for a new world). Speech before it carries an unverified list; the World
+tab labels company only for checked lines. If an older build without the check
+later opens the world and commits speech, the marker cannot tell.
+
 `pns/models/observation.py` defines `Observation`, the character-specific
 projection of a committed event: source event ID, observer, the reason it was
 perceived, the simulation time, and redacted perceived content. Redaction is a

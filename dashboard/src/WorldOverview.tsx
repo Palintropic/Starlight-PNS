@@ -9,6 +9,7 @@ import {
   type ResidentAvailability,
   type WorldOverview as WorldOverviewData,
 } from './api';
+import { isSpeech, speechSetting } from './speechSetting';
 import './worldOverview.css';
 import { UsageAlert } from './UsagePanel';
 
@@ -61,6 +62,8 @@ const QUIET_GAP_MINUTES = 60;
 // streets, and `private_residence`, which stands for everyone's separate homes.
 const NOT_TOGETHER = new Set(['tokyo', 'city_streets', 'private_residence']);
 
+const SPEECH_TAG = { alone: '独自', together: '当面', online: '线上' } as const;
+
 // How often the page re-reads the world. The clock runs on its own; this only refreshes the view.
 const POLL_MS = 5000;
 const EVENT_LIMIT = 200;
@@ -87,7 +90,8 @@ function durationText(minutes: number): string {
 function minutesBetween(a: string, b: string): number {
   return Math.round((parseClock(b).getTime() - parseClock(a).getTime()) / 60000);
 }
-const textOf = (e: OverviewEvent) => (typeof e.payload.text === 'string' ? e.payload.text : '');
+// The payload is backend JSON and may be missing or null on odd records; render nothing rather than throw.
+const textOf = (e: OverviewEvent) => (typeof e.payload?.text === 'string' ? e.payload.text : '');
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -245,31 +249,50 @@ export default function WorldOverview() {
   );
   const activityText = (r: OverviewResident) => `${activityLabel(r.activity.kind)}（${timeText(r.activity.since)} 起）`;
 
+  const names = (ids: string[]) => ids.map(nameOf).join('、');
+
+  // A line's setting comes only from its own record, and only when the backend checked that record's
+  // presence list at commit time. That is co-presence, not who it was addressed to or who heard it.
+  const renderSpeech = (e: OverviewEvent) => {
+    const setting = speechSetting(e, NOT_TOGETHER, data?.speech_occupancy_checked_from ?? null);
+    const where = e.channel_id ? channelName(e.channel_id) : locationName(e.location_id);
+    const company =
+      setting.kind === 'together'
+        ? `在场：${names(setting.others)}`
+        : setting.kind === 'online' && setting.others !== null
+          ? setting.others.length
+            ? `在线：${names(setting.others)}`
+            : '频道里只有自己'
+          : null;
+    return (
+      <>
+        {setting.kind !== 'unknown' ? (
+          <span className={`wo-speech-tag ${setting.kind}`}>{SPEECH_TAG[setting.kind]}</span>
+        ) : null}
+        <strong>{nameOf(e.actor)}</strong> 在 {where} {e.type === 'message.sent' ? '发了消息' : '说'}
+        {company ? (
+          <span className="wo-speech-company">
+            <span className="wo-speech-sep"> · </span>
+            {company}
+          </span>
+        ) : null}
+        <span className="wo-quote">{textOf(e)}</span>
+      </>
+    );
+  };
+
   const renderEvent = (e: OverviewEvent) => {
+    if (isSpeech(e)) return renderSpeech(e);
     const who = <strong>{nameOf(e.actor)}</strong>;
     switch (e.type) {
       case 'character.location_changed':
         return <>{who} 到了 {locationName(e.location_id)}</>;
       case 'character.activity_changed':
-        return <>{who} 开始{activityLabel(String(e.payload.activity ?? ''))}</>;
+        return <>{who} 开始{activityLabel(String(e.payload?.activity ?? ''))}</>;
       case 'presence.joined_channel':
         return <>{who} 进入 {channelName(e.channel_id)}</>;
       case 'presence.left_channel':
         return <>{who} 离开 {channelName(e.channel_id)}</>;
-      case 'message.sent':
-        return (
-          <>
-            {who} 在 {channelName(e.channel_id)}
-            <span className="wo-quote">{textOf(e)}</span>
-          </>
-        );
-      case 'dialogue.spoken':
-        return (
-          <>
-            {who} 在 {e.channel_id ? channelName(e.channel_id) : locationName(e.location_id)} 说
-            <span className="wo-quote">{textOf(e)}</span>
-          </>
-        );
       default:
         return <>{who} · {e.type}</>;
     }

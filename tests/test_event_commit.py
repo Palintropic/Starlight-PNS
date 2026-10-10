@@ -56,6 +56,8 @@ def _dialogue(event_id="e1", **overrides):
         "occurred_at": CLOCK,
         "scope": EventScope.LOCATION,
         "actor_id": "mizuki",
+        # 地点档台词的 participants 必须恰好是那一刻在那里的人（_world 把两人放在校门口）。
+        "participants": ("ena", "mizuki"),
         "location_id": "kamiyama_high_gate",
         "payload": {"text": "喵？"},
     }
@@ -137,6 +139,7 @@ class CommitReferenceValidationTests(unittest.TestCase):
             scope=EventScope.CHANNEL,
             channel_id="nightcord",
             location_id=None,
+            participants=tuple(world.channel_participants("nightcord")),
         )
         commit_event(world, self.store, event)
         self.assertEqual(len(self.store), 1)
@@ -403,9 +406,9 @@ class CommitAtomicityTests(unittest.TestCase):
     def test_the_returned_projection_is_a_fresh_structure(self):
         projection = commit_event(self.world, self.store, _dialogue())
         projection["payload"]["text"] = "被改掉了"
-        projection["participants"].append("ena")
+        projection["participants"].append("kanade")
         self.assertEqual(self.store.get("e1").payload["text"], "喵？")
-        self.assertEqual(self.store.get("e1").participants, ())
+        self.assertEqual(self.store.get("e1").participants, ("ena", "mizuki"))
 
 
 class SessionCommitTests(unittest.TestCase):

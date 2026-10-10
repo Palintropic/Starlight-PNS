@@ -655,6 +655,8 @@ export interface WorldOverview {
   events: OverviewEvent[];
   total_events: number;
   first_event_at: string | null;
+  /** 从这个序号（含）起的台词，在场名单在提交时核对过；之前的没有。null = 从未核对。 */
+  speech_occupancy_checked_from: number | null;
 }
 
 export const fetchWorldOverview = (worldId: string, limit = 200): Promise<WorldOverview> =>

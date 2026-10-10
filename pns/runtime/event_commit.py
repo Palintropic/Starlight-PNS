@@ -111,6 +111,8 @@ def validate_against_world(world: WorldState, event: Event) -> None:
         raise EventCommitError(
             f"角色 '{event.actor_id}' 已经位于 '{event.location_id}'"
         )
+    if event.type in _SPEECH_TYPES:
+        _require_complete_occupancy(world, event)
     if event.type is EventType.CHARACTER_ACTIVITY_CHANGED:
         try:
             activity = ActivityKind(event.payload["activity"])
@@ -220,6 +222,45 @@ def _admission_of(world: WorldState, event: Event) -> Tuple[DailyRhythm, Charact
         raise EventCommitError(f"入住的排期种子不成立：{e}") from None
     return rhythm, grants
 
+
+
+_SPEECH_TYPES = (EventType.DIALOGUE_SPOKEN, EventType.MESSAGE_SENT)
+
+# 世界元数据里的键：这个世界从第几条事件（含）起，台词的在场名单受下面这条核对。
+# 在它之前提交的台词没经过核对，名单只能当"记录里写的人"，证明不了完整。
+SPEECH_OCCUPANCY_CHECKED_FROM = "speech_occupancy_checked_from"
+
+
+def _require_complete_occupancy(world: WorldState, event: Event) -> None:
+    """地点档、频道档的台词，participants 必须恰好是提交这一刻在那里的人。
+
+    这两档的 participants 被读作"说这句话时谁在场 / 谁在线"（世界页的独自 /
+    当面 / 线上就靠它）。只要说话人在名单里并不能证明名单是全的：漏掉一个
+    同处者，"当面"就成了"独自"。所以在提交边界按权威状态逐人核对，多一个、
+    少一个都拒绝；说话人自己也必须真的在那个地点 / 频道里。其他档（private、
+    participant）的 participants 是被点名者，不是在场快照，这里不管。
+    """
+    if event.scope is EventScope.LOCATION:
+        if event.channel_id is not None:
+            raise EventCommitError(
+                f"地点档的台词 '{event.event_id}' 不能同时挂在频道上"
+            )
+        present = set(world.characters_at(event.location_id))
+        where = f"地点 '{event.location_id}'"
+    elif event.scope is EventScope.CHANNEL:
+        present = set(world.channel_participants(event.channel_id))
+        where = f"频道 '{event.channel_id}'"
+    else:
+        return
+    if event.actor_id not in present:
+        raise EventCommitError(
+            f"台词 '{event.event_id}' 的说话人 '{event.actor_id}' 此刻不在{where}"
+        )
+    if set(event.participants) != present:
+        raise EventCommitError(
+            f"台词 '{event.event_id}' 的 participants 必须恰好是此刻在{where}的人"
+            f"（{sorted(present)}），收到 {sorted(event.participants)}"
+        )
 
 # ── 阶段二：状态效果 ────────────────────────────────────────────────────
 #

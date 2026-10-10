@@ -388,6 +388,8 @@ class WorldOverviewModel(BaseModel):
     # 整份世界历史的条数（含时间推进），和最早一条的时刻。
     total_events: int
     first_event_at: Optional[str] = None
+    # 从这个序号（含）起的台词，在场名单在提交时核对过；之前的没有。None = 从未核对。
+    speech_occupancy_checked_from: Optional[int] = None
 
 
 class ActivityUpdateModel(BaseModel):

@@ -234,6 +234,30 @@
   display: block;
   color: var(--SystemBaseHigh);
 }
+/* Where a line was said. Alone is the quietest, online carries the accent: remote presence is
+   a different medium, not a different place. */
+.wo-speech-tag {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 6px;
+  border: 1px solid var(--SystemBaseLow);
+  font: var(--type-caption);
+  line-height: 16px;
+  vertical-align: 1px;
+  color: var(--SystemBaseMedium);
+}
+.wo-speech-tag.together {
+  border-color: var(--SystemBaseMediumLow);
+  color: var(--SystemBaseHigh);
+}
+.wo-speech-tag.online {
+  border-color: var(--SystemAccent);
+  background: var(--SystemAccent);
+  color: var(--SystemChromeWhite);
+}
+.wo-speech-company {
+  color: var(--SystemBaseMedium);
+}
 /* Quiet stretch: a fact, not a warning, so no semantic colour. */
 .wo-quiet {
   margin: 4px 0 4px 68px;
@@ -253,5 +277,13 @@
   .wo-side,
   .wo-timeline {
     overflow: visible;
+  }
+  /* Too narrow for the company to share a line with the speaker: give it its own line instead
+     of breaking a name in half. */
+  .wo-speech-company {
+    display: block;
+  }
+  .wo-speech-sep {
+    display: none;
   }
 }

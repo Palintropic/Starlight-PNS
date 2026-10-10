@@ -430,6 +430,7 @@ class CharacterScopedContextTests(unittest.TestCase):
             occurred_at=world.clock,
             scope=EventScope.LOCATION,
             actor_id="mizuki",
+            participants=world.characters_at("mizuki_home_room"),
             location_id="mizuki_home_room",
             payload={"text": "hi", "char_name": "瑞希"},
             provenance={"drift_score": 7, "is_ooc": True, "generator_model": "m"},
