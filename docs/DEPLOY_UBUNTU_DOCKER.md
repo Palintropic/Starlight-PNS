@@ -647,6 +647,37 @@ docker compose exec -T app python scripts/admit_residents.py execute admission \
   下一个窗口（预检的 `next_window`）再来。
 - 完成后手动 checkpoint 一次，看 overview 里新居民的位置，第二天早上看她们是否按作息起床、移动。
 
+### 10.3 只换模型
+
+模型名只来自 `.env` 的 `MODEL`、`GENERATOR_MODEL`、`EVALUATOR_MODEL`，后两个优先于 `MODEL`。换模型
+不需要新镜像：
+
+```bash
+cd /opt/starlight-pns
+docker compose logs --no-color --tail 200 > /tmp/pns-before-model-switch.log
+cp -p .env backups/pns-env-$(date +%Y%m%d_%H%M%S)
+# 编辑 .env：三个模型名一起改
+docker compose up -d          # .env 变了，compose 会重建容器；不加 --build
+```
+
+容器重建后世界是关着的，照第 7 节恢复，再按 Start。
+
+**容器 healthy 不代表换成功。** 模型名写错时开机不报错，第一次调用才失败，而且错误看起来像
+provider 或凭据问题。完成的判据是：Start 之后至少有一条台词生成并判分成功，且它的审计记录里
+`generator_model` 和 `evaluator_model` 都是新模型名：
+
+```bash
+docker compose exec app grep -oE '"(generator|evaluator)_model": ?"[^"]*"' \
+    /app/data/worlds/<world_id>/world.json | tail -2
+```
+
+只看 `.env` 不够：只改了 `MODEL`、漏改另外两个时，`.env` 看起来对，实际调用的仍是旧模型。
+研究会话（模拟）用的是同一套模型配置，换完也跑一次确认。
+
+回滚就是把 `.env` 改回去再 `up -d`。**回滚目标必须仍在服务期内**：MiMo 的 `mimo-v2.5-pro` /
+`mimo-v2.5` 在北京时间 2026-10-21 10:00 下线，官方不做自动路由，过点之后回滚到它们只会让每次
+调用失败。
+
 ## 11. 回滚
 
 ```bash

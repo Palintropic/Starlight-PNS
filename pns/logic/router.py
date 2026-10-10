@@ -271,7 +271,7 @@ def judge(
         ooc_threshold = settings.ooc_threshold
         char_name = registry.character_name(character)
     else:
-        model = os.environ.get("EVALUATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.5-pro")
+        model = os.environ.get("EVALUATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.6-pro")
         evaluator_provider = os.environ.get("PROVIDER", "")
         ooc_threshold = OOC_THRESHOLD
         from pns.world.characters.registry import get_character_metadata
