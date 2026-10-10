@@ -218,6 +218,10 @@ class CognitionInterval:
     # 这一份额度属于哪一天的起点：Start 的 opened_at_sim，或续额的那个边界。
     # 只在 renewal 不为空时有值——不续额的世界不多出任何字段（复审 F1）。
     allowance_from_sim: Optional[datetime] = None
+    # 每个世界日的上限 N（TODO 43）。同一世界日里再 Start 时，run_allowance 只装
+    # 当天剩下的 N − 已用，这里记 N 本身，下一个边界按它续满。None = 等于
+    # run_allowance（这个字段出现之前的存档都是这样，重放结果不变）。
+    day_allowance: Optional[int] = None
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -274,6 +278,17 @@ class CognitionInterval:
                 "allowance_from_sim",
                 _sim_time(self.allowance_from_sim, "allowance_from_sim"),
             )
+        day = self.day_allowance
+        if day is not None:
+            if self.renewal is None:
+                raise CognitionTimelineError("只有续额的区间才有每日上限 day_allowance")
+            if isinstance(day, bool) or not isinstance(day, int) or day < allowance:
+                raise CognitionTimelineError("day_allowance 必须是不小于 run_allowance 的整数")
+
+    @property
+    def daily_allowance(self) -> Optional[int]:
+        """每个世界日的上限 N：边界之后续满到它。"""
+        return self.day_allowance if self.day_allowance is not None else self.run_allowance
 
     @property
     def available(self) -> bool:
@@ -305,6 +320,8 @@ class CognitionInterval:
         if self.renewal is not None:
             payload["renewal"] = self.renewal
             payload["allowance_from_sim"] = self.allowance_from_sim.isoformat()
+        if self.day_allowance is not None:
+            payload["day_allowance"] = self.day_allowance
         return payload
 
     @classmethod
@@ -327,6 +344,7 @@ class CognitionInterval:
                 opened_at_wall=payload["opened_at_wall"],
                 renewal=payload.get("renewal"),
                 allowance_from_sim=payload.get("allowance_from_sim"),
+                day_allowance=payload.get("day_allowance"),
             )
         except (KeyError, TypeError) as e:
             raise CognitionTimelineError(f"区间缺字段或形状不对: {e}") from None
@@ -389,6 +407,11 @@ class CognitionTimeline:
                     if interval.opened_by is TransitionKind.STARTED
                     else None
                 ),
+                day_allowance=(
+                    interval.day_allowance
+                    if interval.opened_by is TransitionKind.STARTED
+                    else None
+                ),
             )
             if replayed != interval:
                 raise CognitionTimelineError(
@@ -444,7 +467,9 @@ class CognitionTimeline:
     # `_next_interval()` 按转换种类决定；调用方只给"何时（日志位置、模拟分钟、
     # 现实时间）"和 Start 的额度。存档加载用同一个函数把每个区间从前一个区间
     # 重放出来，于是单改一个区间的原因、cutoff 或额度都对不上。
-    def _append(self, kind, *, log_length, sim, wall, run_allowance=None, renewal=None):
+    def _append(
+        self, kind, *, log_length, sim, wall, run_allowance=None, renewal=None, day_allowance=None
+    ):
         return CognitionTimeline(
             self.intervals
             + (
@@ -456,6 +481,7 @@ class CognitionTimeline:
                     wall=wall,
                     run_allowance=run_allowance,
                     renewal=renewal,
+                    day_allowance=day_allowance,
                 ),
             )
         )
@@ -469,8 +495,9 @@ class CognitionTimeline:
         return self._append(TransitionKind.RESTORED, log_length=log_length, sim=sim, wall=wall)
 
     def started(
-        self, *, log_length, sim, wall, run_allowance, renewal=None
+        self, *, log_length, sim, wall, run_allowance, renewal=None, day_allowance=None
     ) -> "CognitionTimeline":
+        """`day_allowance` 是每日上限 N；同一世界日再 Start 时 run_allowance 只装剩下的。"""
         return self._append(
             TransitionKind.STARTED,
             log_length=log_length,
@@ -478,6 +505,7 @@ class CognitionTimeline:
             wall=wall,
             run_allowance=run_allowance,
             renewal=renewal,
+            day_allowance=day_allowance,
         )
 
     def allowance_renewed(self, *, log_length, sim, wall) -> "CognitionTimeline":
@@ -554,6 +582,7 @@ def _next_interval(
     wall: str,
     run_allowance: Optional[int] = None,
     renewal: Optional[str] = None,
+    day_allowance: Optional[int] = None,
 ) -> CognitionInterval:
     """一次转换之后的区间。转换规则的唯一实现（设计 §13.3、§14.1）。
 
@@ -581,9 +610,12 @@ def _next_interval(
         raise CognitionTimelineError("只有 Start 设置单次额度")
     if kind is not TransitionKind.STARTED and renewal is not None:
         raise CognitionTimelineError("只有 Start 设置续额策略")
+    if kind is not TransitionKind.STARTED and day_allowance is not None:
+        raise CognitionTimelineError("只有 Start 设置每日上限")
 
     allowance, since = current.run_allowance, current.allowance_since_log
     policy, day_start = current.renewal, current.allowance_from_sim
+    day_limit = current.day_allowance
     carried: FrozenSet[CognitionCause] = frozenset()
     if kind is TransitionKind.OPENED:
         raise CognitionTimelineError("opened 只能是时间线的第一个区间")
@@ -592,16 +624,19 @@ def _next_interval(
             current.causes & {CognitionCause.WORLD_ACTION_CAP}
         )
         carried = current.causes | {CognitionCause.PROCESS_STOPPED}
-        allowance = since = policy = day_start = None
+        allowance = since = policy = day_start = day_limit = None
     elif kind is TransitionKind.STARTED:
         if renewal is not None and run_allowance is None:
             raise CognitionTimelineError("续额策略只能跟着有限额度")
+        if day_allowance is not None and renewal is None:
+            raise CognitionTimelineError("每日上限只能跟着续额策略")
         causes = current.causes - OPERATOR_CLEARABLE
         carried = current.causes
         allowance = run_allowance
         since = None if run_allowance is None else log_length
         policy = _renewal_id(renewal)
         day_start = None if policy is None else sim
+        day_limit = day_allowance
     elif kind is TransitionKind.ALLOWANCE_RENEWED:
         # 前提全部在这里查：运行时与存档重放共用。sim 必须正是下一个边界，所以
         # 续额只能一天接一天，不能跳、不能重复、不能挪时刻。
@@ -615,6 +650,8 @@ def _next_interval(
             )
         causes = current.causes - {CognitionCause.RUN_BUDGET_EXHAUSTED}
         carried = current.causes
+        # 续满到每日上限 N，不是当天 Start 时剩下的那一截。
+        allowance = current.daily_allowance
         since = log_length
         day_start = sim
     elif kind in _CLEARED_BY:
@@ -646,7 +683,37 @@ def _next_interval(
         opened_at_wall=wall,
         renewal=policy,
         allowance_from_sim=day_start,
+        day_allowance=day_limit,
     )
+
+
+def allowance_used_on_day(intervals, records, *, renewal: str, at) -> int:
+    """`at` 所在的那个世界日里，带续额策略 `renewal` 的授权已经用掉了几次认知。
+
+    世界日是 [当天的边界, 下一个边界)，跟续额的边界同一个定义（续额区间的
+    额度起点正是当天的边界）。只数额度起点（allowance_from_sim）落在这一天里的
+    区间覆盖到的记录：恢复、Stop 之间那些
+    没有授权的区间不算，前一天的授权也不算。`records` 是 Agency 日志（按位置），
+    只看时间线覆盖到的那一段。`intervals` 是时间线的区间序列（可以是前缀，存档
+    复核按"那次 Start 之前"来算）。运行时 Start 和存档复核调用的都是这一个函数。
+    """
+    at = _sim_time(at, "at")
+    boundary = next_boundary(renewal, at)
+    day_begin = boundary - timedelta(days=1)
+    intervals = tuple(intervals)
+    used = 0
+    for position, interval in enumerate(intervals):
+        if (
+            interval.renewal != renewal
+            or interval.allowance_from_sim is None
+            or not day_begin <= interval.allowance_from_sim < boundary
+        ):
+            continue
+        end = (
+            intervals[position + 1].from_log if position + 1 < len(intervals) else len(records)
+        )
+        used += sum(1 for record in records[interval.from_log : end] if consumes_allowance(record))
+    return used
 
 
 def wall_now() -> str:

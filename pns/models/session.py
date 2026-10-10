@@ -18,6 +18,7 @@ from pns.models.cognition import (
     CognitionTimeline,
     CognitionTimelineError,
     TransitionKind,
+    allowance_used_on_day,
     consumes_allowance,
     unavailable_causes,
 )
@@ -1434,6 +1435,23 @@ def _validate_cognition(state: "SessionState") -> None:
                     f"Agency 记录 '{record.due_id}' 用完了单次额度，紧随其后却没有"
                     f"额度耗尽的区间"
                 )
+    # 同一世界日再 Start（TODO 43）：写明了每日上限的 Start，装的必须正是 N 减去
+    # 那一刻之前这一天已用掉的。少记已用就等于白送额度，所以按日志重算、对不上就拒。
+    # 没写每日上限的旧 Start（字段出现之前的存档）按旧规则，不追溯。
+    for interval in timeline.intervals[1:]:
+        if interval.opened_by is not TransitionKind.STARTED or interval.day_allowance is None:
+            continue
+        used = allowance_used_on_day(
+            timeline.intervals[: interval.index],
+            records[: interval.from_log],
+            renewal=interval.renewal,
+            at=interval.opened_at_sim,
+        )
+        if interval.run_allowance != interval.day_allowance - used:
+            raise SessionStateError(
+                f"认知区间 {interval.index} 的 Start 装了 {interval.run_allowance} 次额度，"
+                f"但这一天之前已用 {used} 次、每日上限 {interval.day_allowance}"
+            )
     _validate_renewals(
         timeline,
         records,

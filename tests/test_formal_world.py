@@ -420,6 +420,28 @@ class BootstrapApiTests(PlaneTestCase):
         self.assertEqual(budget["renewal"], "world-day-0500")
         self.assertIsNotNone(budget["renews_at"])
 
+    def test_a_same_day_start_reports_the_day_and_refuses_when_spent(self):
+        # TODO 43：同一世界日再 Start 只装 N − 今天已用；limit 显示 N、used 是今天一共
+        # 用的。"今天已用"的计数本身在 test_cognition_same_day 里测，这里只钉接线。
+        from unittest.mock import patch
+
+        url = "/api/persistent-worlds/yoake-mae"
+        self.assertEqual(self.client.post(f"{url}/bootstrap").status_code, 201)
+        target = "pns.runtime.autonomy.coordinator.allowance_used_on_day"
+        with patch(target, return_value=100):
+            started = self.client.post(f"{url}/autonomy/start", json={"allowance": 300})
+        self.assertEqual(started.status_code, 200, started.text)
+        budget = started.json()["autonomy"]["run_budget"]
+        self.assertEqual(
+            (budget["limit"], budget["used"], budget["remaining"]), (300, 100, 200)
+        )
+        self.client.post(f"{url}/autonomy/stop")
+        with patch(target, return_value=300):
+            refused = self.client.post(f"{url}/autonomy/start", json={"allowance": 300})
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["detail"]["category"], "allowance_spent_today")
+        self.assertEqual(self.client.get(url).json()["autonomy"]["stop_reason"], "operator")
+
     def test_a_bad_allowance_is_refused_before_anything_starts(self):
         url = "/api/persistent-worlds/yoake-mae"
         self.assertEqual(self.client.post(f"{url}/bootstrap").status_code, 201)

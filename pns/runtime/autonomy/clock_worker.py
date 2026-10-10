@@ -456,7 +456,13 @@ class ClockWorker:
         if unlimited:
             limit = used = remaining = None
         else:
-            limit = cognition.get("run_allowance") or self._config.max_activations_per_run
+            # 带续额时显示每日上限 N：同一世界日再 Start 过，这份授权只装了剩下的一截，
+            # used 仍是"今天一共用了几次"。
+            limit = (
+                cognition.get("day_allowance")
+                or cognition.get("run_allowance")
+                or self._config.max_activations_per_run
+            )
             remaining = cognition.get("run_remaining")
             used = (limit - remaining) if remaining is not None else 0
             if remaining is None:
