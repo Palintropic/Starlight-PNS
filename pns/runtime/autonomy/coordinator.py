@@ -50,7 +50,9 @@ from pns.models.cognition import (
     RENEWAL_POLICIES,
     CognitionCause,
     CognitionTimeline,
+    allowance_used_on_day,
     consumes_allowance,
+    day_end,
     unavailable_causes,
 )
 from pns.models.event import Event, EventType
@@ -95,6 +97,21 @@ _RECENT = 20
 # 超过就按一次可重试的失败交回，到期仍待处理（不落任何记录）。
 _QUIET_RECHECKS = 3
 _AUDIT_RECENT_LINES = 12
+
+
+class AllowanceSpentToday(ValueError):
+    """同一世界日里再 Start，但给的 N 不比今天已经用掉的多（TODO 43）。
+
+    这不是服务坏了，是"今天的额度已经用完了"：重启或 Stop→Start 不再白送一份。
+    """
+
+    def __init__(self, used: int, allowance: int):
+        super().__init__(
+            f"这个世界日已经用掉 {used} 次认知，额度 {allowance} 不够再开；"
+            f"要么填大于 {used} 的额度，要么等下一个续额边界"
+        )
+        self.used = used
+        self.allowance = allowance
 
 
 class AutonomyError(ValueError):
@@ -715,24 +732,48 @@ class AutonomousRuntime:
         它们还在时，Start 成功返回，但如实报告认知仍不可用。
 
         这个运行时带续额策略、额度有限时，授权是"每个世界日最多 N 次"：
-        额度在每个边界之后续满，直到 Stop 或重启（COG-1）。
+        额度在每个边界之后续满，直到 Stop 或重启（COG-1）。同一世界日里再
+        Start（Stop 之后、重启恢复之后）不重新装满：这次只装 N 减去今天已经
+        用掉的，N 不比已用的多就拒绝（AllowanceSpentToday，TODO 43）。
         """
         wall = wall if wall is not None else utc_now()
         with self._gate:
             self._require_running("Start")
-        self._ledger(
-            lambda state: state.set_cognition(
-                self._timeline(state).started(
+        renewal = self._allowance_renewal if run_allowance is not None else None
+
+        def change(state: SessionState) -> None:
+            timeline = self._timeline(state)
+            sim = self._anchor_minute(wall)
+            allowance, day_allowance, day_start = run_allowance, None, None
+            if renewal is not None:
+                # 这次授权从哪一天开始付账，看**时钟**而不是锚点：时钟停在边界、或补跑
+                # 还没追上时，接下来要处理的到期仍属于时钟所在的那一天（ena 复审 P2）。
+                end = day_end(renewal, self.clock)
+                outbox = state.activation_outbox
+                used = allowance_used_on_day(
+                    timeline.intervals,
+                    state.agency.records(),
+                    lambda record: outbox.get(record.due_id).fired_at,
+                    renewal=renewal,
+                    end=end,
+                )
+                if used >= run_allowance:
+                    raise AllowanceSpentToday(used, run_allowance)
+                allowance, day_allowance = run_allowance - used, run_allowance
+                day_start = end - timedelta(days=1)
+            state.set_cognition(
+                timeline.started(
                     log_length=len(state.agency),
-                    sim=self._anchor_minute(wall),
+                    sim=sim,
                     wall=self._wall(wall),
-                    run_allowance=run_allowance,
-                    renewal=(
-                        self._allowance_renewal if run_allowance is not None else None
-                    ),
+                    run_allowance=allowance,
+                    renewal=renewal,
+                    day_allowance=day_allowance,
+                    day_start=day_start,
                 )
             )
-        )
+
+        self._ledger(change)
         return self.cognition_status(wall)
 
     def stop_cognition(self, *, wall: Optional[datetime] = None) -> Dict:
@@ -916,6 +957,8 @@ class AutonomousRuntime:
             "interval": current.index,
             "run_allowance": current.run_allowance,
             "run_remaining": remaining,
+            # 每个世界日的上限 N。同一世界日再 Start 过时，run_allowance 只是 N 剩下的一截。
+            "day_allowance": current.daily_allowance,
             # 续额（COG-1）。renews_at 有值只说明额度到时候会续满；故障、世界上限
             # 还在的话，续满了也不能调用模型。
             "renewal": current.renewal,

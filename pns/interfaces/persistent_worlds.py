@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from pns.runtime.agency.policy import AgencyPolicyError
 from pns.runtime.autonomy.audit import AuditError
-from pns.runtime.autonomy.coordinator import AutonomyError
+from pns.runtime.autonomy.coordinator import AllowanceSpentToday, AutonomyError
 from pns.runtime.autonomy.clock_worker import MAX_ACTIVATIONS_PER_RUN, ClockWorkerError
 from pns.runtime.event_commit import EventCommitError
 from pns.models.session import SessionFencedError, TransactionBoundaryError
@@ -447,6 +447,9 @@ def _translate(
         )
     if isinstance(e, AdaptersUnavailable):
         return _error(503, "adapters_unavailable", e)
+    if isinstance(e, AllowanceSpentToday):
+        # 同一世界日里再 Start，这一天的 N 次已经用完：不是服务坏了，是不再白送一份。
+        return _error(409, "allowance_spent_today", e)
     if isinstance(e, ClockWorkerError):
         return _error(409, "autonomy_refused", e)
     if isinstance(e, EventCommitError):
