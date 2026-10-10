@@ -23,7 +23,12 @@ async def _sent(action) -> bool:
 
 @router.websocket("/ws/run")
 async def run_simulation(ws: WebSocket):
-    await ws.accept()
+    # 握手阶段 starlette 不把 OSError 转成 WebSocketDisconnect，客户端在 accept
+    # 之前就走了的话只能在这里认出来。
+    try:
+        await ws.accept()
+    except (OSError, WebSocketDisconnect):
+        return
 
     try:
         params = await ws.receive_json()

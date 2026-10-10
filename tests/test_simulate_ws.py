@@ -5,6 +5,7 @@
 # 自己的 OSError → WebSocketDisconnect 转换，而不是在替身里直接抛。
 #
 # 盯住的断开路径：
+#   0. 握手（accept）时客户端已消失
 #   1. 读参数时客户端已断开
 #   2. 建会话失败、回错误消息时客户端已断开
 #   3. 推送台词途中客户端断开（会话要注销）
@@ -37,7 +38,7 @@ class _FakeRuntime:
         self.closed = True
 
 
-def _socket(incoming, sends_before_gone):
+def _socket(incoming, sends_before_gone, gone_before_accept=False):
     """incoming：客户端依次发来的 ASGI 消息；第 sends_before_gone 条 websocket.send
     起，ASGI send 抛 OSError（像 uvicorn 发现对端已断开那样）。"""
     queue = [{"type": "websocket.connect"}, *incoming]
@@ -47,6 +48,8 @@ def _socket(incoming, sends_before_gone):
         return queue.pop(0) if queue else {"type": "websocket.disconnect", "code": 1006}
 
     async def send(message):
+        if gone_before_accept and message["type"] == "websocket.accept":
+            raise OSError("peer gone before accept")
         if message["type"] in ("websocket.send", "websocket.close"):
             if len([m for m in sent if m["type"] == "websocket.send"]) >= sends_before_gone:
                 raise OSError("peer went away")
@@ -64,6 +67,11 @@ class WsRunDisconnectTests(unittest.TestCase):
     def _run(self, ws, **create):
         with patch.object(simulate.SessionRuntime, "create", **create):
             asyncio.run(simulate.run_simulation(ws))
+
+    def test_a_client_gone_before_accept_ends_quietly(self):
+        ws, sent = _socket([], sends_before_gone=0, gone_before_accept=True)
+        self._run(ws, return_value=_FakeRuntime())  # 不抛
+        self.assertEqual(sent, [])
 
     def test_a_disconnect_before_params_ends_quietly(self):
         ws, _ = _socket([{"type": "websocket.disconnect", "code": 1001}], sends_before_gone=0)
