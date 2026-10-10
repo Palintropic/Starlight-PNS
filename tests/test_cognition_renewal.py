@@ -15,6 +15,7 @@
 # 运行: python -m unittest discover -s tests -p test_cognition_renewal.py
 import copy
 import unittest
+from datetime import timedelta
 
 from test_clock_runtime import (
     SIM,
@@ -63,6 +64,7 @@ class _Outbox:
 
 # SIM 是 09-27 19:00：sim(600) 是 09-28 05:00，sim(2040) 是 09-29 05:00。
 B1, B2 = sim(600), sim(2040)
+DAY0 = B1 - timedelta(days=1)  # SIM 所在世界日的起点：09-27 05:00
 
 
 def _bind(state, calls, renewal=POLICY):
@@ -167,7 +169,8 @@ class SerializationTests(unittest.TestCase):
         runtime.start_cognition(3, wall=wall())
         current = state.cognition.current.to_dict()
         self.assertEqual(current["renewal"], POLICY)
-        self.assertEqual(current["allowance_from_sim"], SIM.isoformat())
+        # TODO 43：额度记的是它付账的那个世界日的起点（当天 05:00），不是按下的那一分钟。
+        self.assertEqual(current["allowance_from_sim"], DAY0.isoformat())
         _reload(state)
 
 
@@ -376,20 +379,24 @@ class RestoreAndCatchUpTests(unittest.TestCase):
         runtime.advance(10)  # 19:10 停机
         restored, scheduler, runtime = _restore(state, calls, at=wall(660))
         # 补跑途中、时钟还在前一天 19:10，按下 Start：生效分钟是次日 06:00。
+        # TODO 43 起，这份额度付的是时钟所在的那一天（补跑要处理的到期属于它），
+        # 补跑越过 05:00 时照常续；Start 之前的到期仍由 backlog 挡成不可用。
         runtime.start_cognition(2, wall=wall(660))
         self.assertEqual(restored.world_state.clock, sim(10))
-        self.assertEqual(restored.cognition.current.allowance_from_sim, sim(660))
+        self.assertEqual(restored.cognition.current.allowance_from_sim, DAY0)
         runtime.advance_to_anchor(wall(2041))
-        self.assertEqual(_renewals(restored), [B2])
+        self.assertEqual(_renewals(restored), [B1, B2])
         _reload(restored)
 
     def test_a_start_exactly_on_the_boundary_renews_tomorrow(self):
         calls = _Calls()
         state, _, runtime = _new_world(calls)
         runtime.advance(600)
+        # 时钟停在 05:00（到了、还没离开）：这一分钟的到期属于前一天，Start 付的是
+        # 前一天剩下的；离开 05:00 照常续满（TODO 43，ena 复审 P2 的反例 1）。
         runtime.start_cognition(2, wall=wall(600))
         runtime.advance(1441)
-        self.assertEqual(_renewals(state), [B2])
+        self.assertEqual(_renewals(state), [B1, B2])
 
     def test_renewal_during_a_fault_keeps_the_fault(self):
         calls = _Calls()
@@ -722,7 +729,7 @@ class StatusTests(unittest.TestCase):
         status = runtime.cognition_status(wall())
         self.assertEqual(status["renewal"], POLICY)
         self.assertEqual(status["renews_at"], B1.isoformat())
-        self.assertEqual(status["day_start"], SIM.isoformat())
+        self.assertEqual(status["day_start"], DAY0.isoformat())
         runtime.advance(601)
         status = runtime.cognition_status(wall(601))
         self.assertEqual(status["renews_at"], B2.isoformat())

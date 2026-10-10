@@ -52,6 +52,7 @@ from pns.models.cognition import (
     CognitionTimeline,
     allowance_used_on_day,
     consumes_allowance,
+    day_end,
     unavailable_causes,
 )
 from pns.models.event import Event, EventType
@@ -743,14 +744,23 @@ class AutonomousRuntime:
         def change(state: SessionState) -> None:
             timeline = self._timeline(state)
             sim = self._anchor_minute(wall)
-            allowance, day_allowance = run_allowance, None
+            allowance, day_allowance, day_start = run_allowance, None, None
             if renewal is not None:
+                # 这次授权从哪一天开始付账，看**时钟**而不是锚点：时钟停在边界、或补跑
+                # 还没追上时，接下来要处理的到期仍属于时钟所在的那一天（ena 复审 P2）。
+                end = day_end(renewal, self.clock)
+                outbox = state.activation_outbox
                 used = allowance_used_on_day(
-                    timeline.intervals, state.agency.records(), renewal=renewal, at=sim
+                    timeline.intervals,
+                    state.agency.records(),
+                    lambda record: outbox.get(record.due_id).fired_at,
+                    renewal=renewal,
+                    end=end,
                 )
                 if used >= run_allowance:
                     raise AllowanceSpentToday(used, run_allowance)
                 allowance, day_allowance = run_allowance - used, run_allowance
+                day_start = end - timedelta(days=1)
             state.set_cognition(
                 timeline.started(
                     log_length=len(state.agency),
@@ -759,6 +769,7 @@ class AutonomousRuntime:
                     run_allowance=allowance,
                     renewal=renewal,
                     day_allowance=day_allowance,
+                    day_start=day_start,
                 )
             )
 

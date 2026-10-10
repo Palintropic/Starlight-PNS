@@ -149,6 +149,46 @@ class SameDayStartTests(unittest.TestCase):
         )
 
 
+class OldDayDuesTests(unittest.TestCase):
+    """ena 复审 P2 的两个反例：直接再按 Start（不 Stop）时，旧日待处理的到期不能花新日的额度。"""
+
+    def _old_day_spent_one(self):
+        calls = _Calls()
+        state, scheduler, runtime = _new_world(calls)
+        runtime.start_cognition(2, wall=wall())
+        _schedule(scheduler, "a", sim(10))
+        runtime.advance(11)
+        self.assertEqual(calls.n, 1)
+        return calls, state, scheduler, runtime
+
+    def test_a_restart_parked_on_the_boundary_pays_from_the_old_day(self):
+        calls, state, scheduler, runtime = self._old_day_spent_one()
+        _schedule(scheduler, "b1", B1)
+        _schedule(scheduler, "b2", B1, "ena")
+        runtime.advance(590, max_results=0)  # 停在 05:00，两条整点到期待处理
+        self.assertEqual(state.world_state.clock, B1)
+        runtime.start_cognition(2, wall=wall(600))  # 不 Stop，直接再按
+        self.assertEqual(state.cognition.current.run_allowance, 1)
+        runtime.advance(1)
+        self.assertEqual(calls.n, 2, "旧日合计不能超过 N=2")
+        renewed = [i for i in state.cognition.intervals if i.opened_by is K.ALLOWANCE_RENEWED]
+        self.assertEqual([i.opened_at_sim for i in renewed], [B1])
+        self.assertEqual(renewed[0].run_allowance, 2)
+        _reload(state)
+
+    def test_a_restart_during_catch_up_pays_from_the_clock_day(self):
+        calls, state, scheduler, runtime = self._old_day_spent_one()
+        _schedule(scheduler, "late1", sim(590))  # 04:50
+        _schedule(scheduler, "late2", B1, "ena")  # 05:00，仍是旧日
+        # 时钟还在前一天 19:11，锚点已经到次日 06:00：直接再按 Start。
+        runtime.start_cognition(2, wall=wall(660))
+        self.assertEqual(state.world_state.clock, sim(11))
+        self.assertEqual(state.cognition.current.run_allowance, 1)
+        runtime.advance_to_anchor(wall(661))
+        self.assertEqual(calls.n, 2, "旧日合计不能超过 N=2")
+        _reload(state)
+
+
 def _make_old(payload, *, refill_same_day):
     """把存档改成 day_allowance 出现之前的样子。
 
@@ -156,9 +196,16 @@ def _make_old(payload, *, refill_same_day):
     """
     intervals = payload["cognition"]["intervals"]
     starts = 0
+    day_start = None
     for interval in intervals:
         if interval["opened_by"] == "started":
             starts += 1
+            # 旧规则下 Start 的额度起点是按下的那一分钟。
+            day_start = interval["opened_at_sim"]
+        elif interval["opened_by"] in ("restored", "allowance_renewed"):
+            day_start = None
+        if day_start is not None and "allowance_from_sim" in interval:
+            interval["allowance_from_sim"] = day_start
         if refill_same_day and starts >= 2 and "day_allowance" in interval:
             interval["run_allowance"] = interval["day_allowance"]
         interval.pop("day_allowance", None)
@@ -190,6 +237,17 @@ class CompatibilityAndTamperTests(unittest.TestCase):
         with self.assertRaises(SessionStateError) as caught:
             SessionState.from_dict(payload)
         self.assertIn("这一天之前已用 2 次", str(caught.exception))
+
+    def test_dropping_the_field_after_it_appeared_is_rejected(self):
+        # ena 复审 P3：删掉新 Start 的每日上限、把额度改回整份，想退回旧规则。
+        payload = self._same_day_restart()
+        last = payload["cognition"]["intervals"][-1]
+        del last["day_allowance"]
+        last["run_allowance"] = N
+        last["allowance_from_sim"] = last["opened_at_sim"]
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(payload)
+        self.assertIn("没写每日上限", str(caught.exception))
 
     def test_a_day_limit_below_the_allowance_is_rejected(self):
         payload = self._same_day_restart()

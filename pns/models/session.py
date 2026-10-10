@@ -20,6 +20,7 @@ from pns.models.cognition import (
     TransitionKind,
     allowance_used_on_day,
     consumes_allowance,
+    next_boundary,
     unavailable_causes,
 )
 from pns.models.authored import AuthoredTextError, GenerationAudit
@@ -1438,14 +1439,26 @@ def _validate_cognition(state: "SessionState") -> None:
     # 同一世界日再 Start（TODO 43）：写明了每日上限的 Start，装的必须正是 N 减去
     # 那一刻之前这一天已用掉的。少记已用就等于白送额度，所以按日志重算、对不上就拒。
     # 没写每日上限的旧 Start（字段出现之前的存档）按旧规则，不追溯。
+    seen_day_allowance = False
     for interval in timeline.intervals[1:]:
-        if interval.opened_by is not TransitionKind.STARTED or interval.day_allowance is None:
+        if interval.opened_by is not TransitionKind.STARTED:
             continue
+        if interval.day_allowance is None:
+            # 新规则出现之后再出现旧形状的续额 Start，只可能是删了字段想要回整份额度
+            # （ena 复审 P3：收窄，不是根治——整段改回旧形状仍挡不住）。
+            if seen_day_allowance and interval.renewal is not None:
+                raise SessionStateError(
+                    f"认知区间 {interval.index} 的续额 Start 没写每日上限，"
+                    f"但之前的 Start 已经写过"
+                )
+            continue
+        seen_day_allowance = True
         used = allowance_used_on_day(
             timeline.intervals[: interval.index],
             records[: interval.from_log],
+            lambda record: outbox.get(record.due_id).fired_at,
             renewal=interval.renewal,
-            at=interval.opened_at_sim,
+            end=next_boundary(interval.renewal, interval.allowance_from_sim),
         )
         if interval.run_allowance != interval.day_allowance - used:
             raise SessionStateError(
@@ -1512,6 +1525,13 @@ def _validate_renewals(timeline, records, outbox, clock) -> None:
                 raise SessionStateError(
                     f"认知区间 {interval.index} 的续额晚于世界时钟"
                 )
+        elif (
+            interval.opened_by is TransitionKind.STARTED
+            and interval.day_allowance is not None
+        ):
+            # 写明每日上限的 Start 付的是 allowance_from_sim 起的那一天：记录不能早于
+            # 那一天（否则就是把旧日的到期挪进一份新的额度里）。TODO 43。
+            renewed_from = interval.allowance_from_sim
         elif (
             interval.opened_by is TransitionKind.STARTED
             or interval.allowance_from_sim is None
