@@ -38,8 +38,12 @@ export function speechSetting(
 ): SpeechSetting {
   const actor = event.actor;
   if (!isSpeech(event) || actor === null) return { kind: 'unknown' };
-  const checked = checkedFrom !== null && event.seq >= checkedFrom && event.participants.includes(actor);
-  const others = event.participants.filter((id) => id !== actor);
+  // The type says string[], but this is JSON from the backend: a missing or null list is
+  // unchecked, never "alone".
+  const participants: unknown = event.participants;
+  const list = Array.isArray(participants) ? (participants as string[]) : null;
+  const checked = list !== null && checkedFrom !== null && event.seq >= checkedFrom && list.includes(actor);
+  const others = (list ?? []).filter((id) => id !== actor);
   if (event.scope === 'channel') {
     if (event.channel_id === null) return { kind: 'unknown' };
     return { kind: 'online', others: checked ? others : null };

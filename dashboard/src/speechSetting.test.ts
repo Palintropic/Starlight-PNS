@@ -112,6 +112,14 @@ describe('speechSetting refuses what the record cannot support', () => {
     });
   });
 
+  it('claims nothing, and does not throw, when the participant list is missing (re-review P2)', () => {
+    for (const participants of [undefined, null]) {
+      const raw = { participants } as unknown as Partial<OverviewEvent>;
+      expect(speechSetting(speech(raw), NOT_TOGETHER, CHECKED)).toEqual({ kind: 'unknown' });
+      expect(speechSetting(online(raw), NOT_TOGETHER, CHECKED)).toEqual({ kind: 'online', others: null });
+    }
+  });
+
   it('claims nothing for a speech record without a speaker, or for non-speech events', () => {
     expect(speechSetting(speech({ actor: null }), NOT_TOGETHER, CHECKED)).toEqual({ kind: 'unknown' });
     expect(speechSetting(speech({ type: 'character.location_changed' }), NOT_TOGETHER, CHECKED)).toEqual({
