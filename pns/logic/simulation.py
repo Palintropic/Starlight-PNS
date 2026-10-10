@@ -77,12 +77,14 @@ def call_character(
         )
         choice = response.choices[0]
         content = choice.message.content
-        if not content:
-            raise ValueError(f"API返回空内容，finish_reason: {choice.finish_reason}")
+        # 先看是不是撞了上限，再看有没有内容：推理模型可能把整个预算都花在
+        # 思考上、一个字的正文都没有，那也是截断，不是"返回空内容"。
         if getattr(choice, "finish_reason", None) == "length":
             raise GenerationTruncated(
                 f"模型在 max_tokens={max_tokens} 处被截断，这一句没说完"
             )
+        if not content:
+            raise ValueError(f"API返回空内容，finish_reason: {choice.finish_reason}")
         return _strip_prefix(content.strip(), char_name)
     else:
         response = client.messages.create(
@@ -90,12 +92,13 @@ def call_character(
             system=system, messages=history,
             **router_mod.anthropic_sampling(temperature),
         )
-        text = _strip_prefix(router_mod.extract_anthropic_text(response), char_name)
+        # 顺序同上：MiMo 会把整个预算花在 thinking 块上，只剩思考没有正文。
+        # 先取正文的话，这种截断会被当成"没有文本块"的普通失败记下来。
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise GenerationTruncated(
                 f"模型在 max_tokens={max_tokens} 处被截断，这一句没说完"
             )
-        return text
+        return _strip_prefix(router_mod.extract_anthropic_text(response), char_name)
 
 
 async def call_character_async(

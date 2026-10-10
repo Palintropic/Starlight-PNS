@@ -239,6 +239,20 @@ class MeterWiringTest(unittest.TestCase):
         self.assertEqual(row.operation, "truncated")
         self.assertIsNotNone(row.cost_yuan)
 
+    def test_budget_spent_on_thinking_alone_is_truncation(self):
+        # MiMo 把整个 max_tokens 花在 thinking 块上：没有正文，但这是截断，
+        # 不是"通了但结果不能用"。
+        thinking_only = SimpleNamespace(
+            content=[SimpleNamespace(type="thinking", thinking="嗯……")],
+            stop_reason="max_tokens", usage=_usage(out=1024), model=KEY,
+        )
+        self.client.behaviour["generate"] = thinking_only
+        with self.assertRaises(GenerationError) as caught:
+            self.generate()
+        self.assertTrue(caught.exception.retryable)
+        (row,) = self.rows()
+        self.assertEqual(row.operation, "truncated")
+
     def test_response_passes_through_unchanged(self):
         self.assertEqual(self.generate(), "今天也在这里哦")
         self.assertEqual(self.audit()["drift_type"], "无")
