@@ -120,6 +120,20 @@ describe('speechSetting refuses what the record cannot support', () => {
     }
   });
 
+  it('treats a missing anchor like a null one, never as alone or online (re-review P2)', () => {
+    const missing = (key: keyof OverviewEvent) => {
+      const raw = speech({});
+      delete (raw as Partial<OverviewEvent>)[key];
+      return raw;
+    };
+    expect(speechSetting(missing('location_id'), NOT_TOGETHER, CHECKED)).toEqual({ kind: 'unknown' });
+    expect(speechSetting(missing('channel_id'), NOT_TOGETHER, CHECKED)).toEqual({ kind: 'unknown' });
+    expect(speechSetting(missing('actor'), NOT_TOGETHER, CHECKED)).toEqual({ kind: 'unknown' });
+    const channel = online({});
+    delete (channel as Partial<OverviewEvent>).channel_id;
+    expect(speechSetting(channel, NOT_TOGETHER, CHECKED)).toEqual({ kind: 'unknown' });
+  });
+
   it('claims nothing for a speech record without a speaker, or for non-speech events', () => {
     expect(speechSetting(speech({ actor: null }), NOT_TOGETHER, CHECKED)).toEqual({ kind: 'unknown' });
     expect(speechSetting(speech({ type: 'character.location_changed' }), NOT_TOGETHER, CHECKED)).toEqual({

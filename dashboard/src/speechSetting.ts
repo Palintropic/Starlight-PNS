@@ -36,21 +36,24 @@ export function speechSetting(
   notTogether: ReadonlySet<string>,
   checkedFrom: number | null,
 ): SpeechSetting {
-  const actor = event.actor;
-  if (!isSpeech(event) || actor === null) return { kind: 'unknown' };
-  // The type says string[], but this is JSON from the backend: a missing or null list is
-  // unchecked, never "alone".
+  // The types say every field is present, but this is JSON from the backend: an anchor that is
+  // missing (undefined) or null is treated as absent, and a missing participant list as
+  // unchecked, never as "alone".
+  const actor: unknown = event.actor;
+  if (!isSpeech(event) || typeof actor !== 'string') return { kind: 'unknown' };
+  const channelId: unknown = event.channel_id;
+  const locationId: unknown = event.location_id;
   const participants: unknown = event.participants;
   const list = Array.isArray(participants) ? (participants as string[]) : null;
   const checked = list !== null && checkedFrom !== null && event.seq >= checkedFrom && list.includes(actor);
   const others = (list ?? []).filter((id) => id !== actor);
   if (event.scope === 'channel') {
-    if (event.channel_id === null) return { kind: 'unknown' };
+    if (typeof channelId !== 'string') return { kind: 'unknown' };
     return { kind: 'online', others: checked ? others : null };
   }
   if (event.scope !== 'location') return { kind: 'unknown' };
-  if (event.location_id === null || event.channel_id !== null || !checked) return { kind: 'unknown' };
+  if (typeof locationId !== 'string' || channelId !== null || !checked) return { kind: 'unknown' };
   if (others.length === 0) return { kind: 'alone' };
-  if (notTogether.has(event.location_id)) return { kind: 'unknown' };
+  if (notTogether.has(locationId)) return { kind: 'unknown' };
   return { kind: 'together', others };
 }

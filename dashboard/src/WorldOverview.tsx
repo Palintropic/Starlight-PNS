@@ -90,7 +90,8 @@ function durationText(minutes: number): string {
 function minutesBetween(a: string, b: string): number {
   return Math.round((parseClock(b).getTime() - parseClock(a).getTime()) / 60000);
 }
-const textOf = (e: OverviewEvent) => (typeof e.payload.text === 'string' ? e.payload.text : '');
+// The payload is backend JSON and may be missing or null on odd records; render nothing rather than throw.
+const textOf = (e: OverviewEvent) => (typeof e.payload?.text === 'string' ? e.payload.text : '');
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -287,7 +288,7 @@ export default function WorldOverview() {
       case 'character.location_changed':
         return <>{who} 到了 {locationName(e.location_id)}</>;
       case 'character.activity_changed':
-        return <>{who} 开始{activityLabel(String(e.payload.activity ?? ''))}</>;
+        return <>{who} 开始{activityLabel(String(e.payload?.activity ?? ''))}</>;
       case 'presence.joined_channel':
         return <>{who} 进入 {channelName(e.channel_id)}</>;
       case 'presence.left_channel':
