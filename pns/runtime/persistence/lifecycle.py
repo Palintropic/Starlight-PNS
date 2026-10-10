@@ -154,6 +154,9 @@ class RuntimeAdapters:
     # 从这里取新居民的作息、授予与冷图——跟作息导演、生成闭包同一份快照，所以
     # "入住用的内容"与"世界跑的内容"不会是两份。不给就不能做 WORLD-2 操作。
     content: Optional[object] = None
+    # 提示词缓存续命（COST-2，pns/interfaces/cache_warmer.py）。跟判分器同一档：
+    # 是代码和配置，挂在这个世界自己的模型 client 上，存档里不存它。不给就不续。
+    warmer: Optional[object] = None
     name: str = "autonomy"
 
     def __post_init__(self) -> None:
@@ -403,8 +406,11 @@ class PersistentWorld:
         baseline: Optional[Tuple] = None,
         content: Optional[object] = None,
         content_revision: int = 0,
+        warmer: Optional[object] = None,
     ) -> None:
         self._world_id = world_id
+        # 提示词缓存续命（COST-2）。时钟 worker 从这里取；没有就不续。
+        self.warmer = warmer
         self._content = content
         self._content_revision = content_revision
         self._store = store
@@ -911,6 +917,7 @@ class WorldLifecycleService:
                 snapshot_timeout=snapshot_timeout,
                 content=adapters.content,
                 content_revision=adapters.content_revision,
+                warmer=adapters.warmer,
             )
             # 组装完成：从这里起不能再整段换存档或重绑服务。发布先于第一次写盘：
             # 发布时的整体校验没过的状态，一个字节都不许落到磁盘上。
@@ -1015,6 +1022,7 @@ class WorldLifecycleService:
                 baseline=baseline,
                 content=adapters.content,
                 content_revision=adapters.content_revision,
+                warmer=adapters.warmer,
             )
             # 先发布（整体校验），再写任何东西：绑定期间通过公开接口形成的不一致
             # 必须在落盘之前被拒绝，失败的恢复不许把原本合法的存档写坏。

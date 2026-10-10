@@ -16,7 +16,13 @@
 #
 # 这一层对调用结果是透明的：同一个响应原样返回，同一个异常原样抛出（不包装、
 # 不改消息）。从异常里只拿 `classify_failure` 给的枚举值。
-from contextlib import contextmanager
+#
+# COST-2：这里也是续命（cache_warmer.py）唯一的取样点和发送闸门。发送那一刻
+# 捕获请求的完整参数，operation 判定为可用之后才交给续命；同一个世界的真实
+# 请求与续命请求在 `send_lock` 里串行，不靠"只有一个线程会调"的约定（没有续命
+# 的 meter 不加锁）。
+import threading
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, List, Mapping, Optional
@@ -56,6 +62,9 @@ class Operation:
     protocol: str
     calls: List[_Call] = field(default_factory=list)
     outcome: Optional[str] = None
+    # 这次 operation 最后一次真实发出的请求（COST-2）。只有 outcome 是 ok 才会
+    # 被交给续命。
+    prefix: Optional[Any] = None
 
     @property
     def transport_failed(self) -> bool:
@@ -84,11 +93,25 @@ class UsageMeter:
         world_id: str,
         protocol: str,
         prices: Mapping[str, Prices],
+        warmer: Optional[Any] = None,
     ) -> None:
         self._ledger = ledger
         self._world_id = world_id
         self._protocol = protocol
         self._prices = prices
+        self._warmer = warmer
+        # 只有挂了续命的世界才串行发送：续命请求与真实请求不交错。没有续命的
+        # client（研究会话、bench）对并发保持完全透明，跟 COST-1 时一样。
+        # 可重入：续命在持锁时再确认一次准入，然后经同一个 MeteredClient 发送。
+        self._send_lock: Any = threading.RLock() if warmer is not None else nullcontext()
+
+    @property
+    def warmer(self) -> Optional[Any]:
+        return self._warmer
+
+    @property
+    def send_lock(self) -> Any:
+        return self._send_lock
 
     @property
     def protocol(self) -> str:
@@ -113,6 +136,29 @@ class UsageMeter:
         finally:
             _CURRENT.reset(token)
             self._write(op)
+            if (
+                self._warmer is not None
+                and op.prefix is not None
+                and op.outcome == OPERATION_OK
+            ):
+                try:
+                    self._warmer.promote(op.prefix)
+                except Exception:  # 续命的簿记不许影响调用结果
+                    pass
+
+    def capture(self, request: Mapping[str, Any]) -> None:
+        """一次真实请求就要发出：交给续命记下它的完整参数（没有续命或上下文就什么都不做）。"""
+        op = _CURRENT.get()
+        if op is None or self._warmer is None:
+            return
+        try:
+            prefix = self._warmer.capture(
+                op.path, op.character_id, str(request.get("model", op.model)), request
+            )
+        except Exception:
+            return
+        if prefix is not None:
+            op.prefix = prefix
 
     def _write(self, op: Operation) -> None:
         if not op.calls:
@@ -168,7 +214,11 @@ class _MeteredMethod:
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         try:
-            response = self._method(*args, **kwargs)
+            with self._meter.send_lock:
+                # seq 在锁里分配：它的顺序就是真实发送的顺序（实现审 P2）。
+                if not args:
+                    self._meter.capture(kwargs)
+                response = self._method(*args, **kwargs)
         except Exception as e:
             self._meter.record_error(e)
             raise

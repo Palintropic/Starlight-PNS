@@ -89,6 +89,7 @@ from pns.runtime.usage_ledger import (
 from pns.world.scene_compat import SceneMappingError
 
 from .paths import DATA_DIR
+from .cache_warmer import CacheWarmer
 from .usage_meter import MeteredClient, UsageMeter
 
 # 存档根是**服务器配置**，不是浏览器能传的路径。环境变量在调用时才读，不在
@@ -116,6 +117,10 @@ WORLD_ACTION_CAP_ENV = "PNS_AUTONOMY_WORLD_ACTION_CAP"
 # 前置门冷却（模拟分钟）：醒着、独处、没有新的外部观察时最多多久想一次；
 # 睡着时一次都不想。0 = 关（每个节拍都问策略）。
 QUIET_COOLDOWN_ENV = "PNS_AUTONOMY_QUIET_COOLDOWN_MINUTES"
+# 提示词缓存续命（COST-2）：最后一次真实调用之后多少秒内续、每隔多少秒续一次。
+# 窗口填 0 = 关。
+WARM_WINDOW_ENV = "PNS_CACHE_WARM_WINDOW_SECONDS"
+WARM_INTERVAL_ENV = "PNS_CACHE_WARM_INTERVAL_SECONDS"
 # 正式世界的开局时刻。不设 = 正式世界定义里写的时刻（夜明け前是东京 19:00）；
 # `now` = 按下开局的那一分钟，世界时间从第一分钟起就与现实对齐。认不出来的值
 # 让开局响亮失败，不悄悄回落。
@@ -210,6 +215,11 @@ class AutonomySettings:
     # 停机不该被一次慢模型调用无限期拖住，而真正挡住"晚到的提交"的是 P11
     # 的终局 stop()，不是这次等待。
     shutdown_timeout_seconds: float = 3.0
+    # 提示词缓存续命（COST-2，实施单 §1 的账本模拟）：最后一次真实调用后 20 分钟
+    # 内、每 3 分钟续一次。3 分钟是给 mimo-v2.5 的（它的缓存 5 分钟上下就凉）；
+    # v2.6 实测 8 分钟还在，迁过去之后可以放宽。窗口 0 = 不续命。
+    warm_window_seconds: float = 1200.0
+    warm_interval_seconds: float = 180.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.clock, ClockConfig):
@@ -247,6 +257,14 @@ class AutonomySettings:
                 f"world_action_cap 必须落在 1–{MAX_WORLD_ACTION_CAP}，"
                 f"收到 {self.world_action_cap}"
             )
+        for name in ("warm_window_seconds", "warm_interval_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise CompositionError(f"{name} 必须是数字，收到 {value!r}")
+        if not 0 <= float(self.warm_window_seconds) <= 6 * 3600:
+            raise CompositionError("warm_window_seconds 必须落在 0–21600（0 = 不续命）")
+        if not 30 <= float(self.warm_interval_seconds) <= 3600:
+            raise CompositionError("warm_interval_seconds 必须落在 30–3600")
         try:
             self.agency_budget()
         except AgencyError as e:
@@ -284,6 +302,8 @@ class AutonomySettings:
             reply_delay_minutes=_env_number(REPLY_DELAY_ENV, 1, int) or None,
             reply_burst_lines=_env_number(REPLY_BURST_ENV, 8, int),
             quiet_cooldown_minutes=_env_number(QUIET_COOLDOWN_ENV, 60, int) or None,
+            warm_window_seconds=_env_number(WARM_WINDOW_ENV, 1200.0, float),
+            warm_interval_seconds=_env_number(WARM_INTERVAL_ENV, 180.0, float),
         )
 
     def agency_budget(self) -> AgencyBudget:
@@ -308,7 +328,22 @@ class AutonomySettings:
             "temperature": float(self.temperature),
             "world_action_cap": self.world_action_cap,
             "quiet_cooldown_minutes": self.quiet_cooldown_minutes,
+            "cache_warm": {
+                "window_seconds": float(self.warm_window_seconds),
+                "interval_seconds": float(self.warm_interval_seconds),
+            },
         }
+
+
+def _without_retries(client):
+    """同一个 provider client，但不自动重试（SDK 默认重试 2 次）。
+
+    anthropic / openai 的 client 都有 `with_options`；没有的（测试替身）原样用。
+    """
+    with_options = getattr(client, "with_options", None)
+    if callable(with_options):
+        return with_options(max_retries=0)
+    return client
 
 
 def _new_session_id(world_id: str) -> str:
@@ -517,13 +552,34 @@ class WorldControlPlane:
         # 生成和判分共用这一个 client，所以计量挂在这里两条路都过（COST-1）。
         # 传输层由 MeteredClient 在 SDK 调用点记；操作层由下面两个闭包各开
         # 一个 operation，说明这次最后有没有产出能用的东西。
+        # 续命状态属于这个世界、挂在这个 client 上（COST-2）：研究会话和 bench 的
+        # client 不经过这里，所以永远不会续命。W/I 在这里从冻结的冷配置里取定，
+        # worker 不再回头读环境变量。
+        warmer = (
+            CacheWarmer(
+                window_seconds=self._autonomy.warm_window_seconds,
+                interval_seconds=self._autonomy.warm_interval_seconds,
+                protocol=models.api_format,
+            )
+            if self._autonomy.warm_window_seconds > 0
+            else None
+        )
         meter = UsageMeter(
             self._usage_ledger,
             world_id=world_id,
             protocol=models.api_format,
             prices=registry.price_table(),
+            warmer=warmer,
         )
         client = MeteredClient(raw_client, meter)
+        if warmer is not None:
+            # 续命用一份关掉 SDK 自动重试的 client：它的超时就是总时长上限，
+            # 时钟不会被一次续命的重试拖住。同一个 meter：同一本账、同一把锁。
+            # 第一次真要续命时才建，建 adapters 本身不碰 provider client。
+            warmer.attach(
+                None, meter,
+                client_factory=lambda: MeteredClient(_without_retries(raw_client), meter),
+            )
 
         def judge(request: AuditRequest) -> object:
             with meter.operation(
@@ -634,6 +690,7 @@ class WorldControlPlane:
             content=registry,
             seed=seed,
             allowance_renewal=allowance_renewal,
+            warmer=warmer,
         )
 
     # ── 生命周期操作 ────────────────────────────────────────────────────
