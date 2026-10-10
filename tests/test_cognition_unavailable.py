@@ -75,7 +75,7 @@ def _dues(scheduler, *characters, minutes=10):
     for index, character_id in enumerate(characters):
         scheduler.schedule(
             ScheduledActivation(
-                activation_id=f"wake-{index}",
+                activation_id=f"wake-{index}-{scheduler.clock.isoformat()}",
                 kind=ActivationKind.CHARACTER_ACTIVATION,
                 due_at=scheduler.clock + timedelta(minutes=minutes),
                 character_id=character_id,

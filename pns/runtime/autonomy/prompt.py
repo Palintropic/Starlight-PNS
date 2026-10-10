@@ -322,6 +322,8 @@ def render_situation(
             )
         )
 
+    for arrangement in context.arrangement_cues:
+        parts.append(f"【安排·推定计划】{arrangement['cue']}")
     cue = context.activation.cue
     if cue:
         # 内容作者显式声明为角色可见的那一句。排期簿记的其余部分在

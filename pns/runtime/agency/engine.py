@@ -94,6 +94,8 @@ def free_closure_kind(plan) -> Optional[str]:
     决定（PLAN-1 实现复核 R3）。
     """
     verdict = plan.verdict
+    if verdict is AgencyOutcome.LAPSED:
+        return "arrangement_lapsed"
     if verdict is AgencyOutcome.QUIET:
         return "quiet"
     reason = plan.detail.get("reason") if isinstance(plan.detail, Mapping) else None
@@ -330,6 +332,7 @@ class AgencyEngine:
         # 都不能再以"没问策略"的免费形状结案。只活在进程里（进程重启之后，
         # 那次没提交成的认知本来也就没有记录可依）。
         self._asked: Set[str] = set()
+        self._carried: Dict[str, Tuple] = {}
         # 绑定只允许一次。两个引擎会给同一条到期两个互相看不见的结论，
         # 而其中一个的审计记录会说"我处理过了"。
         try:
@@ -384,7 +387,7 @@ class AgencyEngine:
         所以这一行就是全部的取数逻辑，可以一眼审查完。
         """
         character_id = self._require_character(due)
-        return build_agency_context(
+        context = build_agency_context(
             self.world,
             character_id,
             due,
@@ -392,6 +395,10 @@ class AgencyEngine:
             max_legal_actions=self._budget.max_legal_actions,
             max_observations=self._budget.max_observations,
         )
+        carried = self._state.arrangements.carried(
+            character_id, self.clock, self._state.catch_up_target or self.clock
+        )
+        return replace(context, arrangement_cues=self._state.arrangements.cues(carried))
 
     # ── 前置门 ──────────────────────────────────────────────────────────
     def _plan(self, due: ActivationDue, character_id: str, context: AgencyContext) -> PlanProposal:
@@ -447,6 +454,18 @@ class AgencyEngine:
         if due.due_id in self._asked and not after_cognition:
             return None
         proposed_at = self.clock
+        lapse = self._state.arrangements.lapse(
+            due, self.clock, self._state.catch_up_target or self.clock
+        )
+        if lapse is not None:
+            return ProposalPlan(
+                due=due,
+                character_id=character_id,
+                policy="",
+                proposed_at=proposed_at,
+                verdict=AgencyOutcome.LAPSED,
+                detail=lapse,
+            )
         if character_id not in self.world.known_characters():
             return ProposalPlan(
                 due=due,
@@ -586,6 +605,13 @@ class AgencyEngine:
                 ),
             )
         try:
+            carried = self._state.arrangements.carried(
+                character_id, self.clock, self._state.catch_up_target or self.clock
+            )
+            context = replace(
+                context, arrangement_cues=self._state.arrangements.cues(carried)
+            )
+            self._carried[due.due_id] = carried
             self._asked.add(due.due_id)
             decision = self._policy.decide(context)
         except AgencyPolicyError as e:
@@ -640,9 +666,7 @@ class AgencyEngine:
                 detail=refusal,
                 rationale=decision.rationale,
             )
-        return plan(
-            AgencyOutcome.ACTED, proposal=proposal, rationale=decision.rationale
-        )
+        return plan(AgencyOutcome.ACTED, proposal=proposal, rationale=decision.rationale)
 
     def _refuse_proposal(
         self, context: AgencyContext, proposal: ActionProposal
@@ -766,6 +790,9 @@ class AgencyEngine:
                 proposal=plan.proposal if verdict.acted else None,
                 event_id=event_id,
                 detail=detail,
+                arrangements_carried=(
+                    self._carried.get(due.due_id, ()) if due.due_id in self._asked else ()
+                ),
             )
             try:
                 state.agency._append(record)
@@ -778,6 +805,8 @@ class AgencyEngine:
                 state.activation_outbox._acknowledge(due.due_id)
             except ActivationOutboxError as e:
                 raise AgencyEngineError(str(e)) from e
+
+            state.arrangements = state.arrangements.offer(record)
 
             # 额度与上限的转换跟触发它的这条记录在**同一个**事务里：两者之间
             # 插不进另一条提交（R4-3）。
@@ -884,6 +913,13 @@ class AgencyEngine:
         timeline = self._state.cognition
         interval = timeline.current if timeline is not None else None
 
+        if plan.verdict is AgencyOutcome.LAPSED:
+            self._require_still_closed(plan)
+            detail = dict(plan.detail)
+            if interval is not None:
+                detail["cognition_interval"] = interval.index
+            return AgencyOutcome.LAPSED, detail, ""
+
         if interval is not None:
             causes = unavailable_causes(interval, due.fired_at)
             if causes:
@@ -916,6 +952,15 @@ class AgencyEngine:
                 )
             detail["observation_cursor"] = cursor
             detail["planning"] = plan.planning.provenance()
+        carried = self._carried.get(due.due_id, ())
+        if carried and not self._state.arrangements.valid_carried(
+            carried,
+            plan.character_id,
+            self.clock,
+            self._state.catch_up_target or self.clock,
+        ):
+            verdict = AgencyOutcome.REJECTED_STALE
+            detail.update(reason="arrangement_stale")
         if verdict.acted:
             refusal = self._commit_refusal(plan)
             if refusal is not None:
@@ -964,7 +1009,7 @@ class AgencyEngine:
         """
         due_id = getattr(plan.due, "due_id", None)
         outbox = self._state.activation_outbox
-        for table in (self._planned, self._asked):
+        for table in (self._planned, self._asked, self._carried):
             for stale in [
                 key
                 for key in table
@@ -1024,8 +1069,14 @@ class AgencyEngine:
         kind = free_closure_kind(plan)
         current = self._closure(plan.due, plan.character_id)
         current_kind = free_closure_kind(current) if current is not None else None
-        if current_kind != kind or (
-            kind == "quiet" and current.planning.reason is not plan.planning.reason
+        if (
+            (
+                kind == "arrangement_lapsed"
+                and current is not None
+                and dict(current.detail) != dict(plan.detail)
+            )
+            or current_kind != kind
+            or (kind == "quiet" and current.planning.reason is not plan.planning.reason)
         ):
             raise AgencyEngineError(
                 f"收尾条件已经变了：签发时是 {kind}"

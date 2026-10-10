@@ -878,7 +878,10 @@ class CommitmentHorizonTests(unittest.TestCase):
 
         path = Path(__file__).resolve().parent / "fixtures" / "mem2_pre_horizon_session.json"
         raw = json.loads(path.read_text(encoding="utf-8"))
-        restored = SessionState.from_dict(raw)
+        from pns.runtime.persistence import WorldArchive
+        archive = WorldArchive.from_state_payload('legacy-mem2', raw, revision=1).to_dict()
+        archive['version'] = 3
+        restored = WorldArchive.from_dict(archive).restore_state()
         self.assertEqual(
             len(restored.memories), len(raw["memory"]["store"]["records"])
         )

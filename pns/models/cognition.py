@@ -804,6 +804,9 @@ def consumes_allowance(record) -> bool:
     """
     outcome = getattr(record, "outcome", record)
     value = getattr(outcome, "value", outcome)
+    if value == "lapsed":
+        from pns.models.arrangement import legitimate_lapsed
+        return not legitimate_lapsed(record)
     if value == "rejected_unavailable":
         return False
     detail = getattr(record, "detail", None)

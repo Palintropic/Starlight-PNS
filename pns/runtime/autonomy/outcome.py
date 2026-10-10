@@ -89,6 +89,7 @@ _FROM_AGENCY = {
     AgencyOutcome.REJECTED_POLICY_ERROR: ActivationOutcome.REJECTED,
     AgencyOutcome.REJECTED_UNAVAILABLE: ActivationOutcome.REJECTED,
     AgencyOutcome.QUIET: ActivationOutcome.QUIET,
+    AgencyOutcome.LAPSED: ActivationOutcome.REJECTED,
 }
 
 

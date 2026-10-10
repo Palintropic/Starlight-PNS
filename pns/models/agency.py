@@ -69,6 +69,7 @@ class AgencyOutcome(str, Enum):
     REJECTED_POLICY_ERROR = "rejected_policy_error"
     REJECTED_UNAVAILABLE = "rejected_unavailable"
     QUIET = "quiet"
+    LAPSED = "lapsed"
 
     @property
     def acted(self) -> bool:
@@ -147,7 +148,9 @@ class AgencyBudget:
         if delay is not None and (
             isinstance(delay, bool) or not isinstance(delay, int) or not 1 <= delay <= 1440
         ):
-            raise AgencyError(f"reply_delay_minutes 必须是 1–1440 的整数或不设，收到 {delay!r}")
+            raise AgencyError(
+                f"reply_delay_minutes 必须是 1–1440 的整数或不设，收到 {delay!r}"
+            )
         cooldown = self.quiet_cooldown_minutes
         if cooldown is not None and (
             isinstance(cooldown, bool)
@@ -199,6 +202,7 @@ class AgencyRecord:
     proposal: Optional[ActionProposal] = None
     event_id: Optional[str] = None
     detail: Mapping = field(default_factory=dict)
+    arrangements_carried: Tuple = ()
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -254,6 +258,23 @@ class AgencyRecord:
             "detail",
             freeze_json_value(self.detail, path="detail", error=AgencyError),
         )
+        set_(
+            self,
+            "arrangements_carried",
+            freeze_json_value(self.arrangements_carried, error=AgencyError),
+        )
+        if not isinstance(self.arrangements_carried, tuple):
+            raise AgencyError("arrangements_carried 必须是数组")
+        if self.outcome is AgencyOutcome.LAPSED:
+            from pns.models.arrangement import legitimate_lapsed
+
+            if not legitimate_lapsed(self):
+                raise AgencyError("LAPSED 缺少合法安排失效证据")
+        if (
+            self.outcome in (AgencyOutcome.QUIET, AgencyOutcome.LAPSED)
+            and self.arrangements_carried
+        ):
+            raise AgencyError("问策略前结案不能带提供证据")
         if self.outcome is AgencyOutcome.REJECTED_UNAVAILABLE:
             self._require_unavailable_detail()
         if self.outcome is AgencyOutcome.QUIET:
@@ -321,13 +342,20 @@ class AgencyRecord:
             "proposal": self.proposal.to_dict() if self.proposal is not None else None,
             "event_id": self.event_id,
             "detail": thaw_json_value(self.detail),
+            "arrangements_carried": thaw_json_value(self.arrangements_carried),
         }
 
     @classmethod
     def from_dict(cls, payload: Dict) -> "AgencyRecord":
         if not isinstance(payload, Mapping):
             raise AgencyError("Agency 记录必须是字典")
-        for required in ("due_id", "character_id", "decided_at", "outcome"):
+        for required in (
+            "due_id",
+            "character_id",
+            "decided_at",
+            "outcome",
+            "arrangements_carried",
+        ):
             if required not in payload:
                 raise AgencyError(f"Agency 记录缺少必填字段: {required}")
         decided_at = payload["decided_at"]
@@ -354,6 +382,7 @@ class AgencyRecord:
             proposal=proposal,
             event_id=payload.get("event_id"),
             detail=payload.get("detail", {}),
+            arrangements_carried=payload["arrangements_carried"],
         )
 
 

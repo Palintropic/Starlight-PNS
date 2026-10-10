@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
+from pns.models.arrangement import ARRANGEMENT_PREFIX
 from pns.models.action import ActionId, LegalAction
 from pns.models.observation import Observation
 
@@ -151,6 +152,7 @@ class GenerationContext:
     observations_truncated: bool = False
     legal_actions_truncated: bool = False
     recall_truncated: bool = False
+    arrangement_cues: Tuple[Mapping, ...] = ()
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -223,6 +225,7 @@ class GenerationContext:
             "observations": [_perceived(o) for o in self.observations],
             "observed_lines": list(self.observed_lines),
             "recalled": list(self.recalled),
+            "arrangement_cues": [dict(item) for item in self.arrangement_cues],
             "legal_actions": [legal.to_dict() for legal in self.legal_actions],
             "observations_truncated": self.observations_truncated,
             "legal_actions_truncated": self.legal_actions_truncated,
@@ -269,7 +272,16 @@ def build_generation_context(
     return GenerationContext(
         character_id=character_id,
         # 收窄就是这一行：整条到期记录在这里变成角色看得见的那一点点。
-        activation=ActivationCue.from_due(agency_context.activation),
+        activation=(
+            ActivationCue.from_due(agency_context.activation)
+            if not agency_context.activation.activation_id.startswith(
+                ARRANGEMENT_PREFIX
+            )
+            else ActivationCue(
+                agency_context.activation.kind.value, agency_context.activation.fired_at
+            )
+        ),
+        arrangement_cues=tuple(getattr(agency_context, "arrangement_cues", ())),
         now=agency_context.observed_at,
         action_id=choice.action_id,
         target_id=choice.target_id,

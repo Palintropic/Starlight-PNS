@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Mapping, Optional, Tuple
 
+from pns.models.arrangement import ARRANGEMENT_PREFIX, ArrangementDefinition
 from pns.models.cognition import REPLY_ACTIVATION_PREFIX
 from pns.models.time_events import QuietTime
 from pns.models.activation import (
@@ -189,11 +190,25 @@ class PersistentScheduler:
         这个世界里、ID 有没有撞车。任何一条不过，队列一个字节都不动。
         """
         if isinstance(activation, ScheduledActivation) and activation.activation_id.startswith(
-            REPLY_ACTIVATION_PREFIX
+            (REPLY_ACTIVATION_PREFIX, ARRANGEMENT_PREFIX)
         ):
             raise SchedulerError(
-                f"'{REPLY_ACTIVATION_PREFIX}' 开头的激活 ID 保留给回话机会，只能由系统排入"
+                "回话和安排的激活前缀是保留身份，只能由系统排入"
             )
+        return self._append_checked(activation)
+
+    def _schedule_arrangement(self, activation):
+        if not self._state.transaction_is_mine or not activation.activation_id.startswith(
+            ARRANGEMENT_PREFIX
+        ):
+            raise SchedulerError("安排只由维护或触发事务排入")
+        expected = self._state.arrangements.scheduled(
+            self._state.arrangements.to_dict()["current"][
+                activation.payload["arrangement_id"]
+            ]
+        )
+        if expected != activation:
+            raise SchedulerError("安排排期不匹配")
         return self._append_checked(activation)
 
     def _schedule_reply(self, activation: ScheduledActivation) -> int:
@@ -209,6 +224,8 @@ class PersistentScheduler:
         self._state.require_writable()
         if not isinstance(activation, ScheduledActivation):
             raise SchedulerError("只能排入 ScheduledActivation")
+        if not activation.is_recurring and any(d.activation_id == activation.activation_id for d in self.outbox.records()):
+            raise SchedulerError("一次性 activation 已触发，不能再入队")
         self._require_future(activation)
         self._require_known_character(activation)
         try:
@@ -247,7 +264,7 @@ class PersistentScheduler:
             target = self.clock + timedelta(minutes=minutes)
         except OverflowError:
             raise SchedulerError("推进后的模拟时间超出可表示的时间范围") from None
-        return self._tick(target, minutes)
+        return self._advance_arrangements(target, minutes)
 
     def advance_to(self, target: datetime) -> TickResult:
         """把模拟时间推进到 target。
@@ -266,7 +283,7 @@ class PersistentScheduler:
             raise SchedulerError(
                 f"目标时间必须与当前时钟相差整分钟，收到 {target.isoformat()}"
             )
-        return self._tick(target, delta // _MINUTE)
+        return self._advance_arrangements(target, delta // _MINUTE)
 
     def _advance_quietly(self, target: datetime) -> TickResult:
         """安静的一步：推到 target，不写时间事件。只给协调器的时钟步用。
@@ -278,7 +295,7 @@ class PersistentScheduler:
         delta = target - self.clock
         if delta <= timedelta(0) or delta % _MINUTE:
             raise SchedulerError(f"安静的一步必须严格向前、按整分钟推进：{target.isoformat()}")
-        return self._tick(target, delta // _MINUTE, record=False)
+        return self._advance_arrangements(target, delta // _MINUTE, record=False)
 
     def advance_to_next_due(self) -> Optional[TickResult]:
         """推进到下一条激活到期的那一刻；队列为空就返回 None，不动时钟。"""
@@ -296,7 +313,7 @@ class PersistentScheduler:
                 "调度器状态被绕过公共接口修改了"
             )
         minutes = delta // _MINUTE + (1 if delta % _MINUTE else 0)
-        return self._tick(self.clock + timedelta(minutes=minutes), minutes)
+        return self._advance_arrangements(self.clock + timedelta(minutes=minutes), minutes)
 
     # ── 事务本体 ────────────────────────────────────────────────────────
     def claim_clock_for_rhythm(self) -> None:
@@ -330,6 +347,35 @@ class PersistentScheduler:
                 "这个世界由作息或续额授权驱动：时间只能经由运行时推进（runtime.advance() "
                 "或时钟 worker），直接推调度器会跳过作息、行程、频道与续额的后果"
             )
+
+    def _advance_arrangements(
+        self, target: datetime, minutes: int, *, record: bool = True
+    ) -> TickResult:
+        # 安排逐条登记，任何子步失败都回滚整个公开推进调用。
+        original = self.clock
+        records = []
+        result = None
+        with self._state.atomic_commit():
+            while self.clock < target:
+                boundary = min(
+                    [
+                        a.due_at
+                        for a in self.queue.pending()
+                        if a.activation_id.startswith(ARRANGEMENT_PREFIX)
+                        and a.due_at <= target
+                    ]
+                    or [target]
+                )
+                result = self._tick(
+                    boundary,
+                    int((boundary - self.clock).total_seconds() // 60),
+                    record=record,
+                )
+                records.extend(result.due)
+            self._state.arrangements = self._state.arrangements.expire(
+                self.clock, self._state.catch_up_target or self.clock
+            )
+        return TickResult(original, self.clock, minutes, result.event, tuple(records))
 
     def _tick(self, target: datetime, minutes: int, *, record: bool = True) -> TickResult:
         """一次推进 = 一条 world.time_advanced 事件 + 队列变更，同生共死。
@@ -403,10 +449,23 @@ class PersistentScheduler:
 
         返回 (sequence, 到期的激活, 下一次的激活或 None, 被跨过的次数)。
         """
-        plan: List[
-            Tuple[int, ScheduledActivation, Optional[ScheduledActivation], int]
-        ] = []
+        plan: List[Tuple[int, ScheduledActivation, Optional[ScheduledActivation], int]] = []
         for sequence, activation in self.queue.due_at_or_before(target):
+            if activation.activation_id.startswith(ARRANGEMENT_PREFIX):
+                entry = self._state.arrangements.to_dict()["current"][
+                    activation.payload["arrangement_id"]
+                ]
+                following_at = ArrangementDefinition(entry["definition"]).next_after(
+                    activation.due_at
+                )
+                following = self._state.arrangements.scheduled(
+                    {
+                        **entry,
+                        "next_due_at": following_at.isoformat() if following_at else None,
+                    }
+                )
+                plan.append((sequence, activation, following, 0))
+                continue
             if not activation.is_recurring:
                 plan.append((sequence, activation, None, 0))
                 continue
@@ -429,7 +488,8 @@ class PersistentScheduler:
         """
         records: List[ActivationDue] = []
         for sequence, activation, following, missed in plan:
-            if following is None:
+            arrangement = activation.activation_id.startswith(ARRANGEMENT_PREFIX)
+            if following is None or arrangement:
                 self.queue._remove(activation.activation_id)
             else:
                 self.queue._reschedule(following)
@@ -447,6 +507,13 @@ class PersistentScheduler:
                 )
             )
         for record in records:
+            if record.activation_id.startswith(ARRANGEMENT_PREFIX):
+                activation = next(a for _, a, _, _ in plan if a.activation_id == record.activation_id)
+                self._state.arrangements = self._state.arrangements.fire(activation, record)
+                entry = self._state.arrangements.to_dict()['current'][activation.payload['arrangement_id']]
+                following = self._state.arrangements.scheduled(entry)
+                if following is not None:
+                    self._schedule_arrangement(following)
             try:
                 self.outbox._append(record)
             except ActivationOutboxError as e:
