@@ -740,20 +740,20 @@ def day_end(renewal: str, moment) -> datetime:
 
 
 def allowance_used_on_day(intervals, records, fired_at, *, renewal: str, end: datetime) -> int:
-    """以 `end` 结束的那个世界日里，带续额策略 `renewal` 的授权已经用掉了几次认知。
+    """以 `end` 结束的那个世界日（按策略 `renewal` 的边界划分）里已经用掉了几次认知。
 
     按**每条记录自己的触发时刻**归日（`fired_at(record)`），不按记录落在哪次 Start
     之后：一次 Start 可能在时钟还停在边界、或者补跑还没追上时按下，那时待处理的
-    到期仍属于旧的一天，必须花旧日的额度（ena 复审 P2）。只数带这个策略的授权
-    覆盖到的记录；恢复、Stop 之间那些没有授权的区间里的记录本来就不计费。
+    到期仍属于旧的一天，必须花旧日的额度（ena 复审 P2）。任何授权
+    之下的记录都算；恢复、Stop 之间那些没有授权的区间里的记录本来就不计费。
     `intervals` / `records` 可以是前缀（存档复核按"那次 Start 之前"来算）。运行时
     Start 和存档复核调用的都是这一个函数。
     """
     intervals = tuple(intervals)
     used = 0
+    # 不按区间的策略挑：任何一份授权下用掉的认知都算这一天的（ena 复审 P3——
+    # 只数续额区间的话，把一次 Start 改成不续额的形状就能让它的消耗不进账）。
     for position, interval in enumerate(intervals):
-        if interval.renewal != renewal:
-            continue
         stop = (
             intervals[position + 1].from_log if position + 1 < len(intervals) else len(records)
         )

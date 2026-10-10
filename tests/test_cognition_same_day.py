@@ -21,10 +21,17 @@ import unittest
 from pathlib import Path
 
 from test_clock_runtime import _Calls, _records, _schedule, sim, wall
-from test_cognition_renewal import B1, _new_world, _reload, _restore
+from test_cognition_renewal import B1, DAY0, POLICY, _new_world, _reload, _restore
 
 from pns.models.agency import AgencyOutcome
-from pns.models.cognition import CognitionCause as C, TransitionKind as K
+from dataclasses import replace
+
+from pns.models.cognition import (
+    CognitionCause as C,
+    CognitionTimeline,
+    TransitionKind as K,
+    allowance_used_on_day,
+)
 from pns.models.session import SessionState, SessionStateError
 from pns.runtime.autonomy.coordinator import AllowanceSpentToday
 
@@ -248,6 +255,65 @@ class CompatibilityAndTamperTests(unittest.TestCase):
         with self.assertRaises(SessionStateError) as caught:
             SessionState.from_dict(payload)
         self.assertIn("没写每日上限", str(caught.exception))
+
+    def test_a_start_moved_back_a_day_cannot_renew_the_same_boundary_twice(self):
+        # ena 复审 P2（第二轮）：05:00 已续额、05:10 用过一次，05:12 伪造一次 Start 把
+        # 额度记回前一天，再接一次 05:00 续额——同一天就多出一整份。
+        calls = _Calls()
+        state, scheduler, runtime = _new_world(calls)
+        runtime.start_cognition(N, wall=wall())
+        runtime.advance(605)  # 越过 05:00，续额
+        _schedule(scheduler, "a", sim(610))
+        runtime.advance(7)  # 05:12
+        self.assertEqual(calls.n, 1)
+        payload = state.to_dict()
+        timeline = CognitionTimeline.from_dict(payload["cognition"])
+        forged = timeline.started(
+            log_length=len(state.agency),
+            sim=sim(612),
+            wall=wall(612).isoformat(),
+            run_allowance=N,
+            renewal=POLICY,
+            day_allowance=N,
+            day_start=DAY0,
+        ).allowance_renewed(log_length=len(state.agency), sim=B1, wall=wall(612).isoformat())
+        payload["cognition"] = forged.to_dict()
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(payload)
+        self.assertIn("早于此前已提交", str(caught.exception))
+
+    def test_a_later_start_forged_into_a_non_renewing_shape_is_rejected(self):
+        # ena 复审 P3（第二轮）：只把后面一次 Start 改成有限、不续额的形状，消耗就不进账。
+        _, state, _, _ = _spend_two()
+        payload = state.to_dict()
+        timeline = CognitionTimeline.from_dict(payload["cognition"])
+        forged = timeline.started(
+            log_length=len(state.agency), sim=sim(12), wall=wall(12).isoformat(), run_allowance=N
+        )
+        payload["cognition"] = forged.to_dict()
+        with self.assertRaises(SessionStateError) as caught:
+            SessionState.from_dict(payload)
+        self.assertIn("没写每日上限", str(caught.exception))
+
+    def test_usage_under_any_authorization_counts_for_the_day(self):
+        # 不续额形状的授权下用掉的认知也算进这一天（P3 的计账一半）。
+        _, state, _, _ = _spend_two()
+        records = state.agency.records()
+        outbox = state.activation_outbox
+        intervals = [
+            replace(interval, renewal=None, allowance_from_sim=None, day_allowance=None)
+            if interval.opened_by is K.STARTED
+            else interval
+            for interval in state.cognition.intervals
+        ]
+        used = allowance_used_on_day(
+            intervals,
+            records,
+            lambda record: outbox.get(record.due_id).fired_at,
+            renewal=POLICY,
+            end=B1,
+        )
+        self.assertEqual(used, 2)
 
     def test_a_day_limit_below_the_allowance_is_rejected(self):
         payload = self._same_day_restart()
