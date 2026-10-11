@@ -1043,6 +1043,53 @@ class TerminalOutcomeTests(unittest.TestCase):
         )
         self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
 
+    def test_inspecting_a_hostile_exception_cannot_escape_cleaning(self):
+        from pns.runtime.autonomy.generation import _FailureReason, _LocalGenerationError
+
+        secret = "test-provider-credential-canary"
+
+        class Hostile:
+            @property
+            def __class__(self):
+                raise ValueError(secret)
+
+        def tampered_reason(context):
+            e = _LocalGenerationError(_FailureReason.PROVIDER)
+            e.reason = Hostile()
+            raise e
+
+        class HostileRetry(GenerationError):
+            @property
+            def retryable(self):
+                raise ValueError(secret)
+
+            @retryable.setter
+            def retryable(self, value):
+                pass
+
+        def hostile_retry(context):
+            raise HostileRetry("x")
+
+        class Meta(type):
+            def __getattribute__(cls, name):
+                if name == "__module__":
+                    raise ValueError(secret)
+                return super().__getattribute__(name)
+
+        foreign = Meta("Foreign", (ValueError,), {})
+
+        def hostile_module(context):
+            raise foreign("x")
+
+        for entry, prefix in (
+            (tampered_reason, "生成失败:"),
+            (hostile_retry, "生成失败:"),
+            (hostile_module, "生成器调用失败:"),
+        ):
+            with self.subTest(prefix=prefix, entry=entry.__name__):
+                state, _, _ = self._generation_failure_record(entry, prefix)
+                self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
     def test_invalid_generation_records_model_and_wall_time(self):
         _, _, record = self._generation_failure_record("おはよう", "生成输出不合法:")
         self.assertIn("日文假名", record.detail["error"])

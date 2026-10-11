@@ -98,12 +98,18 @@ class _LocalGenerationError(GenerationError):
         self.reason = reason
 
 
+# 下面三个函数都在读外来异常对象，读的过程本身也可能抛错（property、元类）。
+# 它们自己绝不能抛：一抛，外来异常的原文就绕过清洗、连同丢失的元数据一起落盘。
+
 def _trusted_reason(e: GenerationError) -> str:
     """内部固定类别的说明；其余一律不可信。"""
-    reason = getattr(e, "reason", None) if type(e) is _LocalGenerationError else None
-    # reason 是可写属性：只认枚举成员本身，改成别的对象就当外来异常。
-    if isinstance(reason, _FailureReason):
-        return reason.value
+    try:
+        reason = getattr(e, "reason", None) if type(e) is _LocalGenerationError else None
+        # reason 是可写属性：只认枚举成员本身，改成别的对象就当外来异常。
+        if isinstance(reason, _FailureReason):
+            return reason.value
+    except Exception:
+        pass
     return "GenerationError（异常原文不外传）"
 
 
@@ -113,8 +119,20 @@ def _safe_type_name(e: BaseException) -> str:
     类型名是分辨"provider 挂了"和"我们自己的代码错了"（比如 SDK 不收某个参数的
     TypeError）的线索；但外来类型的名字可以随便起，也就可能夹带原文。
     """
-    kind = type(e)
-    return kind.__name__ if kind.__module__ == "builtins" else "外部异常"
+    try:
+        kind = type(e)
+        if kind.__module__ == "builtins":
+            return kind.__name__
+    except Exception:
+        pass
+    return "外部异常"
+
+
+def _safe_retryable(e: GenerationError) -> bool:
+    try:
+        return bool(e.retryable)
+    except Exception:
+        return False
 
 
 def parse_line(raw, context: GenerationContext) -> str:
@@ -294,7 +312,7 @@ class AuthoredLinePolicy(AgencyPolicy):
         except GenerationError as e:
             # 只有内部固定类别保留诊断。公开 GenerationError 的消息不可信。
             raise self._generation_failure(
-                f"生成失败: {_trusted_reason(e)}", retryable=e.retryable
+                f"生成失败: {_trusted_reason(e)}", retryable=_safe_retryable(e)
             ) from e
         except Exception as e:
             # 生成器背后是网络和模型，什么都可能发生。说不清楚的失败按可重试
