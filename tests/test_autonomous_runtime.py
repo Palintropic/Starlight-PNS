@@ -24,7 +24,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -110,6 +110,7 @@ def _rig(
     auditor=None,
     chooser=None,
     names=None,
+    generator_model="",
     retry=None,
     start=True,
 ):
@@ -120,7 +121,11 @@ def _rig(
             lines if lines is not None else {"mizuki": "在的哦", "ena": "……嗯"}
         )
     policy = AuthoredLinePolicy(
-        generator, recall=MemoryRecall(state), chooser=chooser, names=names
+        generator,
+        recall=MemoryRecall(state),
+        chooser=chooser,
+        names=names,
+        generator_model=generator_model,
     )
     runtime = AutonomousRuntime(
         state,
@@ -965,6 +970,59 @@ class FullLoopTests(unittest.TestCase):
 
 # ── AC6 终局、重复与重试 ────────────────────────────────────────────────
 class TerminalOutcomeTests(unittest.TestCase):
+    def _generation_failure_record(self, entry, prefix):
+        state, scheduler, runtime = _rig(
+            lines={"mizuki": entry},
+            generator_model="test-generator-v26",
+            retry=RetryPolicy(max_attempts=1),
+        )
+        due = _due(scheduler)
+        wall = datetime(2026, 10, 11, 7, 55, 12, 123456, tzinfo=timezone.utc)
+        with patch("pns.runtime.autonomy.generation.datetime") as clock:
+            clock.now.return_value = wall
+            runtime.process_due(due)
+            clock.now.assert_called_once_with(timezone.utc)
+        record = state.agency.get(due.due_id)
+        self.assertIs(record.outcome, AgencyOutcome.REJECTED_POLICY_ERROR)
+        self.assertTrue(record.detail["error"].startswith(prefix))
+        self.assertEqual(record.detail["generator_model"], "test-generator-v26")
+        self.assertEqual(record.detail["failed_at"], wall.isoformat())
+        self.assertNotEqual(record.decided_at, wall)
+        payload = json.loads(json.dumps(state.to_dict()))
+        restored = SessionState.from_dict(payload)
+        self.assertEqual(restored.agency.get(due.due_id).detail, record.detail)
+        return state, due, record
+
+    def test_generation_failure_records_model_and_wall_time(self):
+        def broken(context):
+            raise GenerationError("提示词模板坏了")
+
+        self._generation_failure_record(broken, "生成失败:")
+
+    def test_generator_call_failure_records_model_and_wall_time_without_provider_text(self):
+        secret = "test-provider-credential-canary"
+
+        def broken(context):
+            raise TypeError(secret)
+
+        state, _, record = self._generation_failure_record(broken, "生成器调用失败:")
+        self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+        # The type name stays: it is what told a TypeError apart from a provider outage.
+        self.assertIn("TypeError", record.detail["error"])
+
+    def test_invalid_generation_records_model_and_wall_time(self):
+        _, _, record = self._generation_failure_record("おはよう", "生成输出不合法:")
+        self.assertIn("日文假名", record.detail["error"])
+
+    def test_legacy_generation_failure_record_loads_without_metadata(self):
+        state, due, _ = self._generation_failure_record("おはよう", "生成输出不合法:")
+        payload = json.loads(json.dumps(state.to_dict()))
+        detail = payload["agency"]["log"]["records"][0]["detail"]
+        del detail["generator_model"]
+        del detail["failed_at"]
+        restored = SessionState.from_dict(payload)
+        self.assertEqual(dict(restored.agency.get(due.due_id).detail), detail)
+
     def test_every_due_reaches_a_terminal_outcome_or_stays_pending(self):
         state, scheduler, runtime = _rig()
         _dues_together(scheduler, *((f"a{index}", "mizuki") for index in range(3)))

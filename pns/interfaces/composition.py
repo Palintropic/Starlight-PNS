@@ -666,7 +666,10 @@ class WorldControlPlane:
             # （收窄那一行在 AuthoredLinePolicy._generation_context 里）。
             # 显示名来自冻结内容包，绝不来自模型输出。
             return AuthoredLinePolicy(
-                generator, recall=MemoryRecall(state), names=names
+                generator,
+                recall=MemoryRecall(state),
+                names=names,
+                generator_model=models.generator_model,
             )
 
         return RuntimeAdapters(

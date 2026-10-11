@@ -34,9 +34,11 @@ class AgencyPolicyError(ValueError):
     失败按"别再试了"处理，免得一个永远失败的策略把一条到期资格卡死在待处理。
     """
 
-    def __init__(self, *args, retryable: bool = False):
+    def __init__(self, *args, retryable: bool = False, detail: Optional[Mapping] = None):
         super().__init__(*args)
         self.retryable = bool(retryable)
+        # 仅由运行时提供的审计元数据；不从底层异常复制属性。
+        self.detail = dict(detail or {})
 
 
 @dataclass(frozen=True)

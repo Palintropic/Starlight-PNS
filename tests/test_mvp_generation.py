@@ -776,6 +776,17 @@ class ProviderLeakTests(MvpTestCase):
             self.assertNotIn(CANARY, blob, f"{where} 里出现了那把 key")
         # 留下的是那句固定的话，而且它确实被记下来了 —— 不是被吞掉。
         self.assertIn(PROVIDER_FAILURE, blobs["agency"])
+        failures = [
+            record
+            for record in world.state.agency
+            if record.detail.get("reason") == "policy_error"
+        ]
+        self.assertTrue(failures)
+        for record in failures:
+            self.assertEqual(
+                record.detail["generator_model"],
+                self.plane.registry().models.generator_model,
+            )
 
     def test_the_provider_failure_message_is_a_constant(self):
         """它不是模板：换一个异常，那句话逐字不变。"""

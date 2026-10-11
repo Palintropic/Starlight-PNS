@@ -22,6 +22,7 @@
 # 确定性适配器（ScriptedLineGenerator）跟真实模型适配器走的是同一条通道 ——
 # 这是"完整回路可以不联网跑完"的全部实现方式，不需要在运行时里埋测试分支。
 import re
+from datetime import datetime, timezone
 from typing import Callable, Mapping, Optional, Tuple
 
 from pns.models.action import ActionError, ActionProposal, LegalAction
@@ -192,6 +193,7 @@ class AuthoredLinePolicy(AgencyPolicy):
         recall=None,
         chooser: Optional[Callable[[AgencyContext], Optional[LegalAction]]] = None,
         names: Optional[Mapping[str, str]] = None,
+        generator_model: str = "",
         name: Optional[str] = None,
     ):
         if not callable(getattr(generator, "generate", None)):
@@ -203,6 +205,7 @@ class AuthoredLinePolicy(AgencyPolicy):
         if names is not None and not isinstance(names, Mapping):
             raise AgencyPolicyError("names 必须是字典")
         self._generator = generator
+        self._generator_model = generator_model
         self._recall = recall
         self._chooser = chooser if chooser is not None else first_authored_action
         self._names = dict(names or {})
@@ -214,6 +217,16 @@ class AuthoredLinePolicy(AgencyPolicy):
     @property
     def generator(self) -> LineGenerator:
         return self._generator
+
+    def _generation_failure(self, message: str, *, retryable: bool) -> AgencyPolicyError:
+        return AgencyPolicyError(
+            message,
+            retryable=retryable,
+            detail={
+                "generator_model": self._generator_model,
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
     def decide(self, context: AgencyContext) -> PolicyDecision:
         choice = self._chooser(context)
@@ -242,19 +255,21 @@ class AuthoredLinePolicy(AgencyPolicy):
         try:
             raw = self._generator.generate(generation_context)
         except GenerationError as e:
-            raise AgencyPolicyError(f"生成失败: {e}", retryable=e.retryable) from e
+            raise self._generation_failure(f"生成失败: {e}", retryable=e.retryable) from e
         except Exception as e:
             # 生成器背后是网络和模型，什么都可能发生。说不清楚的失败按可重试
             # 处理 —— 这一档由上层的重试预算兜底，不会无限试下去。
-            raise AgencyPolicyError(
-                f"生成器调用失败: {type(e).__name__}: {e}", retryable=True
+            raise self._generation_failure(
+                # 只留异常类型名：类型名不带凭据，却是分辨"provider 挂了"和
+                # "我们自己的代码错了"（比如 SDK 不收某个参数的 TypeError）的唯一线索。
+                f"生成器调用失败: {type(e).__name__}（异常原文不外传）", retryable=True
             ) from e
 
         try:
             text = parse_line(raw, generation_context)
         except GenerationError as e:
             # 输出结构不对是**不可重试**的：同一个坏模板会一直吐同样的垃圾。
-            raise AgencyPolicyError(f"生成输出不合法: {e}", retryable=False) from e
+            raise self._generation_failure(f"生成输出不合法: {e}", retryable=False) from e
 
         if text == ABSTAIN_TOKEN:
             return PolicyDecision(rationale="model chose silence")

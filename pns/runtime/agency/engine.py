@@ -592,6 +592,7 @@ class AgencyEngine:
             return plan(
                 AgencyOutcome.REJECTED_POLICY_ERROR,
                 detail={
+                    **e.detail,
                     "reason": "policy_error",
                     "error": str(e),
                     # 策略自述这次失败是不是暂时的。它只是记录，不是权限：
