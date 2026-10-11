@@ -31,6 +31,7 @@ import yaml
 from dotenv import dotenv_values, load_dotenv
 
 from pns.models.channel import ChannelRegistry
+from pns.models.arrangement import ArrangementDefinition, ArrangementError, parse_arrangements
 from pns.models.frozen import freeze_json_value, thaw_json_value
 from pns.models.location import LocationGraph
 from pns.runtime.usage_ledger import Prices, parse_price_table
@@ -237,6 +238,7 @@ class CharacterContent:
     # 作者写下的日常作息表（`daily_rhythm`）。没写就是 None —— 没有作息表是
     # 正常的，它是逐个角色补的内容，不是每个角色都必须有的字段。
     rhythm: Optional[DailyRhythm] = None
+    arrangements: Tuple[ArrangementDefinition, ...] = ()
     # 作者声明的静态授予（`access_grants`）。没写就是 None —— 这个角色只能出现在
     # 公开地点，也不是任何频道的成员。
     grants: Optional[CharacterGrants] = None
@@ -285,6 +287,13 @@ def _build_character(
             )
 
     try:
+        arrangements = parse_arrangements(info.get("arrangements"))
+    except ArrangementError as e:
+        raise ConfigValidationError(
+            f"角色 {character_id} 的 arrangements 不合法：{e}"
+        ) from e
+
+    try:
         # 作息表在**构建内容快照**时就解析并校验完：它引用的地点属于 cold 结构，
         # 而它自己是可重载内容，两者对不上必须在切换之前暴露，而不是等到某天
         # 凌晨那一段作息真的到点、提交事件时才炸。
@@ -318,6 +327,7 @@ def _build_character(
 
     return CharacterContent(
         character_id=character_id,
+        arrangements=arrangements,
         # 角色元数据里有 list（别名、标签等），浅冻结挡不住 append —— 深冻。
         metadata=freeze_json_value(
             info, path=f"角色 {character_id} 的元数据", error=ConfigValidationError

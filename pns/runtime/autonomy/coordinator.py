@@ -206,6 +206,7 @@ class AutonomousRuntime:
         # 同一个线程再进来必须放行，否则那次提交会把自己锁死在半截 ——
         # 而那正是这把锁本来要防的事。
         self._gate = threading.RLock()
+        self._agency._proposal_gate = self._gate
         self._started = False
         self._running = False
         self._stop_reason: Optional[str] = None
@@ -515,6 +516,10 @@ class AutonomousRuntime:
             # 判定与提交在同一次持锁里：时间线的转换也走这把闸门，查完到写入
             # 之间它变不了。
             with self._gate:
+                if self._running and self._state.arrangements.lapse(due, self.clock, self._state.catch_up_target or self.clock):
+                    closure = self._agency.closure_plan(due)
+                    if closure is not None:
+                        return self._record(self._commit_admitted(due, closure, attempt))
                 if self._running and self._agency.unavailable_causes_for(due):
                     return self._record(
                         self._commit_admitted(
@@ -848,6 +853,69 @@ class AutonomousRuntime:
         wall = wall if wall is not None else utc_now()
         self._ledger(lambda state: state.set_anchor(anchor.rebased(wall, rate)))
 
+    def maintain_arrangement(
+        self,
+        action,
+        character_id,
+        *,
+        definition=None,
+        arrangement_id=None,
+        expected_version=None,
+        checkpoint=None
+    ):
+        """独立维护入口：采用、修订、撤销与排期共用提交闸门。"""
+        published_error = None
+        result = None
+        with self._gate, self._state.maintenance_boundary():
+            state = self._state
+            with state.atomic_commit():
+                if (
+                    character_id not in state.characters
+                    or character_id not in self.world.known_characters()
+                ):
+                    raise AutonomyError("安排目标不是住民")
+                state.arrangements = state.arrangements.expire(
+                    self.clock, state.catch_up_target or self.clock
+                )
+                aid = definition["id"] if definition is not None else arrangement_id
+                old = state.arrangements.to_dict()["current"].get(aid)
+                old_scheduled = (
+                    state.arrangements.scheduled(old) if old is not None else None
+                )
+                state.arrangements = state.arrangements.operate(
+                    action,
+                    character_id,
+                    self.clock,
+                    definition,
+                    arrangement_id,
+                    expected_version,
+                )
+                if old_scheduled is not None:
+                    self.scheduler._cancel_arrangement(old_scheduled.activation_id)
+                entry = state.arrangements.to_dict()["current"][aid]
+                scheduled = state.arrangements.scheduled(entry)
+                if scheduled is not None:
+                    self.scheduler._schedule_arrangement(scheduled)
+                for due in self.agency.pending_due():
+                    if due.due_id not in self._in_flight and state.arrangements.lapse(
+                        due, self.clock, state.catch_up_target or self.clock
+                    ):
+                        closure = self.agency.closure_plan(due)
+                        if closure is not None:
+                            self.agency.commit(closure)
+            if checkpoint is not None:
+                try:
+                    result = checkpoint()
+                except BaseException as e:
+                    # P12 的未耐久异常证明已经发布；其它异常由句柄的 revision 判据处理。
+                    if getattr(e, "arrangement_published", False):
+                        published_error = e
+                    else:
+                        raise
+        if published_error is not None:
+            raise published_error
+        return result
+
     def decide_content(self, conflict_id: str, decision: str, *, wall: Optional[datetime] = None) -> None:
         """记一次项目所有者对内容冲突的决定（见 pns/models/content_ledger.py）。"""
         stamp = self._wall(wall)
@@ -1050,6 +1118,16 @@ class AutonomousRuntime:
         更晚的世界。额度（`max_results`）用完、可重试失败、别的线程正拿着——
         无论哪种原因没处理完，时钟都停在这一刻，等下一次调用先把它们处理掉。
         """
+        with self._gate, self._state.atomic_commit():
+            old_target = self._state.catch_up_target
+            if old_target is not None and target < old_target:
+                raise AutonomyError("不能缩小未完成补跑目标")
+            if self._state.arrangements.sequence or old_target is not None:
+                self._state.register_catch_up_target(target)
+            self._state.arrangements = self._state.arrangements.expire(self.clock, target)
+        checkpoint = getattr(self, "_target_checkpoint", None)
+        if checkpoint is not None and self._state.arrangements.sequence:
+            checkpoint()
         from_clock = self.world.clock
         due_ids: List[str] = []
         rhythm_events: List[str] = []
@@ -1090,6 +1168,13 @@ class AutonomousRuntime:
             rhythm_events.extend(record["event_id"] for record in transitions)
             process(tick)
         to_clock = self.world.clock
+        with self._gate, self._state.atomic_commit():
+            if (
+                to_clock == target
+                and self._state.catch_up_target == target
+                and not self._agency.pending_due()
+            ):
+                self._state.complete_catch_up_target()
         return {
             "from_clock": from_clock.isoformat(),
             "to_clock": to_clock.isoformat(),
@@ -1271,6 +1356,11 @@ class AutonomousRuntime:
         if self._state.cognition is None:
             return
         for due in dues:
+            if self._state.arrangements.lapse(due, self.clock, self._state.catch_up_target or self.clock):
+                closure = self._agency.closure_plan(due)
+                if closure is not None:
+                    self._agency.commit(closure)
+                    continue
             if self._agency.unavailable_causes_for(due):
                 self._agency._close_unavailable(due)
 

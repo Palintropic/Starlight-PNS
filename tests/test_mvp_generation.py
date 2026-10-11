@@ -1008,7 +1008,7 @@ class ReplyBurstTests(MvpTestCase):
         mizuki_line = said[0].event_id
         ena_line = said[1].event_id
         clock = world.state.world_state.clock
-        for cid, source in (("mizuki", ena_line), ("ena", mizuki_line)):
+        for cid, source in (("mizuki", ena_line), ("ena", ena_line)):
             # 两次都是真的回话身份（_offer_replies 会排出的那种格式）。
             if any(
                 a.activation_id == reply_activation_id(cid, source)

@@ -50,9 +50,9 @@ from pns.runtime.world2_replay import WorldReplayError, verify_world2_history
 # 一律响亮拒绝，绝不"尽量读读看"。
 #
 # 版本 3：事件历史分卷（见文件头）。版本 2 就是"没有分卷的存档"，原样可读；
-# 它被读回来之后的下一次保存写成版本 3。
-WORLD_ARCHIVE_VERSION = 3
-READABLE_ARCHIVE_VERSIONS = frozenset({2, 3})
+# 版本 4 增加安排簿、提供证据与补跑目标；版本 2/3 显式迁移后统一写版本 4。
+WORLD_ARCHIVE_VERSION = 4
+READABLE_ARCHIVE_VERSIONS = frozenset({2, 3, 4})
 # 版本 1 是 WORLD-1 之前的存档（旧 nightcord / deploy-smoke 世界）。2026-09-26 这些
 # 世界已退役：存档保留、不改写、不迁移，本进程明确拒绝加载它们。
 RETIRED_ARCHIVE_VERSIONS = frozenset({1})
@@ -412,6 +412,52 @@ def _legacy_time_events(payload: Dict, clock: datetime) -> None:
     payload["time_events"] = TimeEventPolicy(legacy_epoch(steps, clock)).to_dict()
 
 
+def _migrate_arrangement_fields(payload):
+    from pns.models.arrangement import ArrangementBook, ARRANGEMENT_PREFIX
+
+    # 只核对专用身份与证据，不把普通台词中的字符串当成排期。
+    scheduler = payload.get("scheduler", {})
+    queued = scheduler.get("queue", {}).get("activations", [])
+    dues = scheduler.get("outbox", {}).get("records", [])
+    records = payload.get("agency", {}).get("log", {}).get("records", [])
+    if (
+        any(
+            str(item.get("activation_id", "")).startswith(ARRANGEMENT_PREFIX)
+            for item in queued + dues
+        )
+        or any(
+            str(item.get("due_id", "")).startswith(ARRANGEMENT_PREFIX)
+            or item.get("outcome") == "lapsed"
+            for item in records
+        )
+        or payload.get("arrangements", ArrangementBook().to_dict())
+        != ArrangementBook().to_dict()
+        or payload.get("catch_up_target") is not None
+        or payload.get("catch_up_operations", []) != []
+    ):
+        raise ArchiveError("旧格式夹带安排记录")
+    payload["arrangements"] = ArrangementBook().to_dict()
+    payload["catch_up_target"] = None
+    payload["catch_up_operations"] = []
+    for record in payload["agency"]["log"]["records"]:
+        if "arrangements_carried" in record and record["arrangements_carried"] != []:
+            raise ArchiveError("旧格式夹带安排提供证据")
+        record["arrangements_carried"] = []
+
+
+def _migrate_v2_state(payload, clock):
+    if payload.get("time_events") is None:
+        _legacy_time_events(payload, clock)
+    _migrate_arrangement_fields(payload)
+
+
+def _migrate_v3_state(payload, clock):
+    _migrate_arrangement_fields(payload)
+
+
+_STATE_MIGRATIONS = {2: _migrate_v2_state, 3: _migrate_v3_state}
+
+
 @dataclass(frozen=True)
 class WorldArchive:
     """一个世界某一刻的完整存档，连同它的身份与版本。"""
@@ -421,7 +467,7 @@ class WorldArchive:
     revision: int
     clock: datetime
     saved_at: str
-    # state.events 里只有活动段（版本 3）；版本 2 与没封存过的世界里就是全部。
+    # state.events 里只有活动段（版本 3/4）；版本 2 与没封存过的世界里就是全部。
     state: Dict = field(default_factory=dict)
     version: int = WORLD_ARCHIVE_VERSION
     # 分卷清单：已经封存、不再改动的历史。
@@ -685,9 +731,10 @@ class WorldArchive:
                 "events": deepcopy(list(self.sealed_events))
                 + list(payload["events"].get("events", [])),
             }
-        if self.version == 2 and payload.get("time_events") is None:
-            _legacy_time_events(payload, self.clock)
         try:
+            migration = _STATE_MIGRATIONS.get(self.version)
+            if migration is not None:
+                migration(payload, self.clock)
             state = SessionState.from_dict(payload)
         except ArchiveError:
             raise

@@ -15,7 +15,7 @@
 # 不是"现在没有"，是"以后也不许有"。
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Mapping, Dict, Optional, Sequence, Tuple
 
 from pns.models.action import LegalAction
 from pns.models.activation import ActivationDue
@@ -55,6 +55,7 @@ class AgencyContext:
     legal_actions: Tuple[LegalAction, ...] = ()
     legal_actions_truncated: bool = False
     observations_truncated: bool = False
+    arrangement_cues: Tuple[Mapping, ...] = ()
 
     def has_legal(self, action_id, target_id: Optional[str] = None) -> bool:
         candidate = LegalAction(action_id=action_id, target_id=target_id)

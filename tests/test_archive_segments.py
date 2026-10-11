@@ -467,7 +467,7 @@ class DamagedHistoryTests(SegmentTestCase):
 
 # ── 4. 版本 ─────────────────────────────────────────────────────────────
 class VersionTests(SegmentTestCase):
-    def test_a_version_2_archive_is_readable_and_is_next_written_as_version_3(self):
+    def test_a_version_2_archive_is_readable_and_is_next_written_as_version_4(self):
         world = self.created()
         self.advance_hours(world, 30)
         before = _ids(world.state)
@@ -486,7 +486,7 @@ class VersionTests(SegmentTestCase):
         self.assertEqual(_ids(restored.state), before)
         restored.checkpoint()
         payload = self.archive_json()
-        self.assertEqual(payload["version"], 3)
+        self.assertEqual(payload["version"], 4)
         self.assertEqual(len(payload["segments"]), 1)
         self.assertEqual(_ids(self.reopen(restored).state), before)
 

@@ -2369,3 +2369,55 @@ The current architecture can be summarized in five statements:
 5. **Router protects character integrity but does not own perception, agency, memory or world truth.**
 
 These decisions should remain the default until an implementation constraint provides a concrete reason to revisit them.
+
+### CAL-1A: adopted arrangements
+
+Arrangements are adopted configuration and runtime eligibility audit, separate from World History.
+Character YAML may declare `arrangements` with a session-unique `id`, a plan `cue`, `source:
+inferred`, evidence, exactly one of `weekly: {weekday, at}` or `once: {date, at}`, and a positive
+`window_minutes` (default 120). Weekdays use Python's Monday=0 convention; times are naive simulation
+minutes. Relative date words and `day_filter` are rejected. Definitions never fill themselves from
+current content during restore. The first occurrence is strictly later than adoption or revision.
+
+`ArrangementBook` belongs to `SessionState`. Its append-only operations explain adopted snapshots,
+versions and permanent revocation tombstones. Each occurrence has its own reserved activation ID,
+canonical date and rendered cue, trigger/due identity, terminal evidence and offered evidence.
+Weekly recurrence is calendar arithmetic, not an interval or an Agency-success callback. Triggering,
+opening, rescheduling and due creation share the time-step transaction; public multi-occurrence
+scheduler advances share an outer rollback boundary. An already-triggered one-shot activation cannot
+be queued again. Due acknowledgement does not close the occurrence.
+
+Every admissible policy invocation sees all its resident's open arrangements, sorted by start, ID
+and version. This projection creates no observations or memories and bypasses no cognition, sleep,
+cooldown or allowance gate. The engine records the actual input identities and projection fingerprints
+in the committed Agency record and in the book, once per due. Policy errors and post-call unavailable
+closures retain that input. Commit rechecks all carried occurrences; any invalidated cue rejects the
+whole result as stale. Historical input remains verifiable after later revision or revocation.
+
+An arrangement due that expires or is revoked before a policy call closes with signed `LAPSED` and ack
+in one transaction. Only its complete, validated arrangement failure evidence is free under
+`consumes_allowance`; it cannot set the last charged cognition cursor. Calls already started close
+as stale and retain their input. Maintenance skips in-flight dues, allowing their one existing call
+to settle without a second record. A committed action remains after later maintenance.
+
+Offline catch-up uses one persisted total target T, including for pending dues saved before shutdown.
+Partial work retains T; a later target may expand it but cannot shrink it. Target registration and
+expiry evaluation are checkpointed before pending processing in persistent worlds. Reaching T and
+settling pending clears the target. Expiry requires eligibility strictly greater than the window's
+right boundary. Terminal audit keeps actual simulation time and the separate evaluated-until target.
+Statistics derive from occurrences; missed means expired with no committed offered opportunity.
+
+Archive v4 requires an explicit book, catch-up target and Agency input evidence, even when empty.
+Versions 2 and 3 use explicit empty migration and reject arrangement records smuggled into old shapes;
+v2's time-event migration remains. Version 1 remains retired. Direct SessionState loading never fills
+missing new fields. Restore replays operations and reconstructs all expected occurrences, triggers,
+dues and future queue entries, then verifies acknowledgements and offered evidence in both directions
+before clock startup. Old adopted definitions never depend on current YAML.
+
+`PersistentWorld.maintain_arrangement` is the durable maintenance API. It uses the coordinator gate,
+an outer rollback snapshot, an atomic mutation transaction, and then checkpoint outside that
+transaction. Prepublication errors restore the full state. Published but unproven durability retains
+the published revision under P12 and raises an error. `scripts/arrangement_decisions.py WORLD` lists
+pending YAML definitions without writing; `--action adopted|revised|revoked --character ID --id ID`
+performs cold maintenance, with `--version N` required for revision/revocation. Deleting YAML never
+revokes an adopted arrangement. No initial resident content or CAL-1A2 action chooser is included.

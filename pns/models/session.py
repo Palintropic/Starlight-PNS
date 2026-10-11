@@ -8,6 +8,7 @@ from typing import Dict, FrozenSet, Iterator, List, Mapping, Optional, Sequence
 from pns.models.activation import ActivationError
 from pns.models.activation_outbox import ActivationOutbox, ActivationOutboxError
 from pns.models.activation_queue import ActivationQueue, ActivationQueueError
+from pns.models.arrangement import ArrangementBook, sim, verify_arrangements
 from pns.models.action import ActionEventMismatch, verify_agency_event
 from pns.models.agency import AgencyError, AgencyLog, AgencyOutcome
 from pns.models.clock_anchor import ClockAnchor, ClockAnchorError
@@ -231,6 +232,9 @@ class SessionState:
     # 跟排期状态同一种归属 —— 它归会话所有，引擎只是它上面的服务。它是审计
     # 记录而不是世界真相：世界真相只有 events。
     agency: AgencyLog = field(default_factory=AgencyLog)
+    arrangements: ArrangementBook = field(default_factory=ArrangementBook)
+    catch_up_target: Optional[datetime] = None
+    catch_up_operations: tuple = field(default_factory=tuple)
     # 角色主观记忆。它跟观察是两件事：观察是"感知到了什么"，记忆是"留下了
     # 什么"。同一种归属 —— 存储归会话所有，编码器只是它上面的服务。世界真相
     # 仍然只有 events，记忆改不动它，也改不动观察。
@@ -333,6 +337,7 @@ class SessionState:
         _validate_memories_against_session(self, self.memories, clock)
         _validate_cognition(self)
         _validate_time_gaps(self)
+        verify_arrangements(self)
         if self.content is not None:
             try:
                 self.content.check_genesis(
@@ -681,6 +686,42 @@ class SessionState:
         self.require_writable()
         self.record_turn(turn)
 
+    def register_catch_up_target(self, target):
+        """登记或扩大总目标；追加证据与快照在同一事务中更新。"""
+        if not self.transaction_is_mine:
+            raise SessionStateError("补跑目标登记必须在事务内")
+        target = sim(target)
+        old = self.catch_up_target
+        if target < self.world_state.clock or (old is not None and target < old):
+            raise SessionStateError("不能缩小未完成补跑目标")
+        if target == old:
+            return
+        self._append_catch_up_operation("registered" if old is None else "expanded", target)
+        self.catch_up_target = target
+
+    def complete_catch_up_target(self):
+        if not self.transaction_is_mine:
+            raise SessionStateError("补跑完成必须在事务内")
+        target = self.catch_up_target
+        if (
+            target is None
+            or target != self.world_state.clock
+            or self.activation_outbox.pending()
+        ):
+            raise SessionStateError("补跑尚未完成")
+        self._append_catch_up_operation("completed", target)
+        self.catch_up_target = None
+
+    def _append_catch_up_operation(self, action, target):
+        self.catch_up_operations += (
+            {
+                "sequence": len(self.catch_up_operations) + 1,
+                "action": action,
+                "at": self.world_state.clock.isoformat(),
+                "target": target.isoformat(),
+            },
+        )
+
     @contextmanager
     def atomic_commit(self) -> Iterator["SessionState"]:
         """把一次提交里的会话可变状态绑成一个整体。
@@ -713,6 +754,15 @@ class SessionState:
                 self._commit_depth -= 1
                 if self._commit_depth == 0:
                     self._commit_thread = None
+
+    @contextmanager
+    def maintenance_boundary(self):
+        """事务后写盘的维护边界。调用方须持有协调器闸门。"""
+        if self.transaction_is_mine:
+            raise TransactionBoundaryError("维护必须从最外层进入")
+        with self._commit_gate:
+            self.require_writable()
+            yield from self._atomic_commit_locked()
 
     def _atomic_commit_locked(self) -> Iterator["SessionState"]:
         """atomic_commit() 的本体。调用方已经持着这份状态的独占边界。"""
@@ -748,11 +798,17 @@ class SessionState:
         dispositions = self.rhythm_dispositions
         anchor = self.anchor
         content = self.content
+        arrangements = self.arrangements
+        catch_up_target = self.catch_up_target
+        catch_up_operations = self.catch_up_operations
         time_events = self.time_events
         try:
             yield self
         except BaseException:
             self.content = content
+            self.arrangements = arrangements
+            self.catch_up_target = catch_up_target
+            self.catch_up_operations = catch_up_operations
             self.time_events = time_events
             self.cognition = cognition
             self.rhythm_dispositions = dispositions
@@ -1139,6 +1195,9 @@ class SessionState:
             "scheduler",
             "agency",
             "memory",
+            "arrangements",
+            "catch_up_target",
+            "catch_up_operations",
         ):
             if required not in payload:
                 if required == "memory":
@@ -1218,6 +1277,11 @@ class SessionState:
         state.exposures = ExposureLog.from_dict(dict(payload.get("exposures", {})))
         _validate_history_against_clock(state, clock)
 
+        state.arrangements = ArrangementBook(payload["arrangements"])
+        state.catch_up_target = sim(payload["catch_up_target"]) if payload["catch_up_target"] is not None else None
+        if not isinstance(payload["catch_up_operations"], list):
+            raise SessionStateError("补跑操作必须是列表")
+        state.catch_up_operations = tuple(deepcopy(payload["catch_up_operations"]))
         state.restore_scheduler_archive(payload["scheduler"])
         # Agency 审计放在后面恢复：它的校验要同时看得见投递箱和事件历史。
         state.restore_agency_archive(payload["agency"])
@@ -1278,6 +1342,7 @@ class SessionState:
         state.status = payload.get("status", "created")
         state.last_error = payload.get("last_error")
         state.metadata = deepcopy(dict(payload.get("metadata", {})))
+        verify_arrangements(state)
         return state
 
     def to_dict(self, *, events_from: int = 0) -> Dict:
@@ -1298,6 +1363,9 @@ class SessionState:
             "events": self.events.to_dict(events_from),
             "observations": self.observations.to_dict(),
             "exposures": self.exposures.to_dict(),
+            "arrangements": self.arrangements.to_dict(),
+            "catch_up_target": self.catch_up_target.isoformat() if self.catch_up_target else None,
+            "catch_up_operations": deepcopy(list(self.catch_up_operations)),
             "scheduler": self.scheduler_archive(),
             "agency": self.agency_archive(),
             "memory": self.memory_archive(),
@@ -1402,6 +1470,10 @@ def _validate_cognition(state: "SessionState") -> None:
         due = outbox.get(record.due_id)
         causes = unavailable_causes(interval, due.fired_at)
         unavailable = record.outcome is AgencyOutcome.REJECTED_UNAVAILABLE
+        if record.outcome is AgencyOutcome.LAPSED:
+            if record.detail.get("cognition_interval") != interval.index:
+                raise SessionStateError("LAPSED 认知区间不匹配")
+            continue
         if bool(causes) != unavailable:
             raise SessionStateError(
                 f"Agency 记录 '{record.due_id}'（位置 {position}）与认知时间线区间 "
@@ -1646,6 +1718,8 @@ def _validate_schedule_against_clock(activations, outbox, clock) -> None:
             raise SessionStateError("没有世界状态的会话不能持有排期或到期记录")
         return
     for activation in activations.pending():
+        if not activation.is_recurring and any(record.activation_id == activation.activation_id and record.next_due_at is None for record in outbox.records()):
+            raise SessionStateError("已触发的一次性 activation 不能再次排队")
         if activation.due_at <= clock:
             raise SessionStateError(
                 f"排期 '{activation.activation_id}' 的到期时间 "

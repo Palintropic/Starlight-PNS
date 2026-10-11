@@ -357,6 +357,9 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
         state.anchor.to_dict() if state.anchor is not None else None,
         state.content.to_dict() if state.content is not None else None,
         state.time_events.to_dict() if state.time_events is not None else None,
+        state.arrangements.to_dict(),
+        state.catch_up_target,
+        state.catch_up_operations,
         digest,
     )
 
@@ -424,6 +427,7 @@ class PersistentWorld:
         self._store = store
         self._state = state
         self._runtime = runtime
+        runtime._target_checkpoint = lambda: self.checkpoint('arrangement_catch_up_target')
         self._ownership = ownership
         self._revision = revision
         self._saved_at = saved_at
@@ -506,6 +510,23 @@ class PersistentWorld:
     def held(self) -> Optional[Dict]:
         """作息门不齐、运行时已终局停止时的报告；正常世界是 None。"""
         return _held_report(self._held)
+
+    def maintain_arrangement(self, action, character_id, **kwargs):
+        """维护采用快照并写盘。未发布失败恢复内存，已发布失败保持 P12 结果。"""
+
+        def checkpoint():
+            revision = self._revision
+            try:
+                return self.checkpoint("arrangement_" + action)
+            except BaseException as error:
+                if self._revision != revision:
+                    error.arrangement_published = True
+                raise
+
+        with self._lock:
+            return self._runtime.maintain_arrangement(
+                action, character_id, checkpoint=checkpoint, **kwargs
+            )
 
     # ── checkpoint ──────────────────────────────────────────────────────
     def checkpoint(self, reason: str = "manual") -> Dict:
@@ -1035,6 +1056,13 @@ class WorldLifecycleService:
             # 先发布（整体校验），再写任何东西：绑定期间通过公开接口形成的不一致
             # 必须在落盘之前被拒绝，失败的恢复不许把原本合法的存档写坏。
             state.publish()
+            if clock is not None and not held and state.arrangements.sequence:
+                with runtime._gate, state.atomic_commit():
+                    target = max(state.world_state.clock, state.anchor.minute_at(now),
+                                 state.catch_up_target or state.world_state.clock)
+                    state.register_catch_up_target(target)
+                    state.arrangements = state.arrangements.expire(state.world_state.clock, target)
+                world.checkpoint('arrangement_restore_target')
             if state.content is not content_on_disk:
                 # 恢复时识别出了新的内容冲突：它声称"已经记下"，就要在恢复成功之前
                 # 真的落盘。存不下去就是恢复失败（下面的 except 归还所有权）。

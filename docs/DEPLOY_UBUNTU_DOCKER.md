@@ -824,3 +824,15 @@ docker compose logs --tail 30
   谁能以角色身份发言。Sekai Times 的 service principal 是 `ST-1` 的事，这里只把 principal、
   scope 和审计词汇准备好。
 - **Sekai Times / WordPress 集成不在这里**，那是 `ST-1`。
+
+### CAL-1A 安排维护
+
+CAL-1A 写出的存档为 v4；旧代码不能读取。部署前保存完整存档备份，回滚时连同该备份恢复。
+v2/v3 恢复只补空安排簿，不采用当前 YAML。首批住民安排的星期、钟点和日期须由内容维护者明确决定。
+
+先关闭服务器中对应世界，再在同一部署环境执行 `python scripts/arrangement_decisions.py WORLD` 只读列出待采用定义。
+采用使用 `--action adopted --character CHARACTER --id ARRANGEMENT`；修订使用 `--action revised`，
+撤销使用 `--action revoked`，后二者都加 `--version CURRENT_VERSION`。撤销不要求定义仍在 YAML 中。
+每笔操作写盘并关闭后重读核对；退出码 0 和 `durable: true` 才表示本次操作完成。
+出现已发布未耐久错误时保留已发布版本并报错，不能把同一操作当成未发生重做；先读回当前簿和版本。
+CAL-1A 只提供认知上下文资格，不改变 Nightcord 动作选择或作息重新加入规则。
