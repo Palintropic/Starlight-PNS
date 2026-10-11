@@ -359,6 +359,7 @@ def _fingerprint(state: SessionState) -> Optional[Tuple]:
         state.time_events.to_dict() if state.time_events is not None else None,
         state.arrangements.to_dict(),
         state.catch_up_target,
+        state.catch_up_operations,
         digest,
     )
 
@@ -1059,7 +1060,7 @@ class WorldLifecycleService:
                 with runtime._gate, state.atomic_commit():
                     target = max(state.world_state.clock, state.anchor.minute_at(now),
                                  state.catch_up_target or state.world_state.clock)
-                    state.catch_up_target = target
+                    state.register_catch_up_target(target)
                     state.arrangements = state.arrangements.expire(state.world_state.clock, target)
                 world.checkpoint('arrangement_restore_target')
             if state.content is not content_on_disk:

@@ -256,7 +256,7 @@ class BRestoreTests(unittest.TestCase):
 
     def test_new_shape_requires_book_target_and_carried(self):
         payload = self.make_payload()
-        for key in ("arrangements", "catch_up_target"):
+        for key in ("arrangements", "catch_up_target", "catch_up_operations"):
             broken = deepcopy(payload)
             del broken[key]
             self.assert_broken(broken)
@@ -1233,3 +1233,233 @@ class AMaintenanceInterfaceTests(unittest.TestCase):
             plane.service.store.load("cold-test").restore_state().arrangements.sequence,
             0,
         )
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    def test_public_cancel_refuses_arrangement_identity(self):
+        state, scheduler, runtime = rig()
+        adopt(runtime)
+        before = state.to_dict()
+        with self.assertRaises(SchedulerError):
+            scheduler.cancel(scheduler.pending()[0].activation_id)
+        self.assertEqual(state.to_dict(), before)
+        runtime.advance(20)
+        self.assertEqual(len(state.arrangements.to_dict()["occurrences"]), 1)
+        SessionState.from_dict(state.to_dict())
+
+    def test_revoke_between_precheck_and_snapshot_is_stale(self):
+        policy = CapturePolicy(action=True)
+        policy.block = True
+        state, scheduler, runtime = rig(policy)
+        adopt(runtime)
+        scheduler.advance_by(10)
+        due = runtime.agency.pending_due()[0]
+        checked = threading.Event()
+        release = threading.Event()
+        real = runtime.agency._closure
+        calls = 0
+
+        def closure(*args, **kwargs):
+            nonlocal calls
+            result = real(*args, **kwargs)
+            calls += 1
+            if calls == 2 and result is None:
+                checked.set()
+                self.assertTrue(release.wait(5))
+            return result
+
+        errors = []
+
+        def process():
+            try:
+                runtime.process_due(due)
+            except BaseException as exc:
+                errors.append(exc)
+
+        revoked = threading.Event()
+
+        def revoke():
+            runtime.maintain_arrangement(
+                "revoked", "mizuki", arrangement_id="test-plan", expected_version=1
+            )
+            revoked.set()
+
+        with patch.object(runtime.agency, "_closure", side_effect=closure):
+            worker = threading.Thread(target=process)
+            worker.start()
+            self.assertTrue(checked.wait(5))
+            maintainer = threading.Thread(target=revoke)
+            maintainer.start()
+            # Without the gate, maintenance finishes before snapshot construction.
+            revoked.wait(0.1)
+            release.set()
+            self.assertTrue(policy.entered.wait(5))
+            self.assertTrue(revoked.wait(5))
+            policy.release.set()
+            worker.join(5)
+            maintainer.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        record = state.agency.records()[-1]
+        self.assertEqual(record.outcome, AgencyOutcome.REJECTED_STALE)
+        self.assertEqual(len(record.arrangements_carried), 1)
+        self.assertIsNone(record.event_id)
+        self.assertNotIn("nightcord", state.world_state.channels_for("mizuki"))
+        self.assertTrue(consumes_allowance(record))
+        SessionState.from_dict(state.to_dict())
+
+    def test_restore_rejects_lowered_or_cleared_unstarted_target(self):
+        state, scheduler, runtime = rig(anchored=True)
+        adopt(runtime, window=2)
+        target = CLOCK + timedelta(minutes=60)
+        reach_goal(runtime, target, max_steps=0)
+        self.assertEqual(state.catch_up_target, target)
+        self.assertFalse(state.arrangements.to_dict()["occurrences"])
+        for replacement in (None, (CLOCK + timedelta(minutes=10)).isoformat()):
+            with self.subTest(target=replacement):
+                broken = deepcopy(state.to_dict())
+                broken["catch_up_target"] = replacement
+                with self.assertRaises(ValueError):
+                    SessionState.from_dict(broken)
+
+    def test_commit_rechecks_due_even_without_carried_cues(self):
+        policy = CapturePolicy(action=True)
+        policy.block = True
+        state, scheduler, runtime = rig(policy)
+        adopt(runtime)
+        scheduler.advance_by(10)
+        due = scheduler.pending_due()[0]
+        errors = []
+
+        def work():
+            try:
+                runtime.process_due(due)
+            except BaseException as exc:
+                errors.append(exc)
+
+        # Fault injection: input projection returns an empty set. The dedicated
+        # due identity must still be checked independently at commit.
+        with patch.object(ArrangementBook, "carried", return_value=()):
+            worker = threading.Thread(target=work)
+            worker.start()
+            try:
+                self.assertTrue(policy.entered.wait(5))
+                runtime.maintain_arrangement(
+                    "revoked", "mizuki", arrangement_id="test-plan", expected_version=1
+                )
+            finally:
+                policy.release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        record = state.agency.get(due.due_id)
+        self.assertEqual(record.outcome, AgencyOutcome.REJECTED_STALE)
+        self.assertFalse(record.arrangements_carried)
+        self.assertTrue(consumes_allowance(record))
+        self.assertNotIn("nightcord", state.world_state.channels_for("mizuki"))
+        SessionState.from_dict(state.to_dict())
+
+    def test_target_registration_expansion_completion_replay(self):
+        state, _, runtime = rig(anchored=True)
+        adopt(runtime, window=2)
+        first = CLOCK + timedelta(minutes=30)
+        target = CLOCK + timedelta(minutes=60)
+        reach_goal(runtime, first, max_steps=0)
+        reach_goal(runtime, first, max_steps=0)
+        self.assertEqual(len(state.catch_up_operations), 1)
+        reach_goal(runtime, target, max_steps=0)
+        restored = SessionState.from_dict(state.to_dict())
+        restarted = AutonomousRuntime(restored, auditor=ScriptedAuditor())
+        restarted.start()
+        reach_goal(restarted, target)
+        self.assertIsNone(restored.catch_up_target)
+        self.assertEqual(
+            [op["action"] for op in restored.catch_up_operations],
+            ["registered", "expanded", "completed"],
+        )
+        SessionState.from_dict(restored.to_dict())
+        for change in ("sequence", "target", "action", "completion", "missing"):
+            with self.subTest(change=change):
+                broken = deepcopy(restored.to_dict())
+                log = broken["catch_up_operations"]
+                if change == "sequence":
+                    log[0]["sequence"] = True
+                elif change == "target":
+                    log[1]["target"] = first.isoformat()
+                elif change == "action":
+                    log[1]["action"] = "registered"
+                elif change == "completion":
+                    log[-1]["at"] = CLOCK.isoformat()
+                else:
+                    del broken["catch_up_operations"]
+                with self.assertRaises(ValueError):
+                    SessionState.from_dict(broken)
+
+    def test_target_operations_rollback_with_transaction(self):
+        state, _, runtime = rig(anchored=True)
+        adopt(runtime)
+        before = state.to_dict()
+        with runtime._gate, self.assertRaises(RuntimeError):
+            with state.atomic_commit():
+                state.register_catch_up_target(CLOCK + timedelta(minutes=60))
+                raise RuntimeError("injected failure")
+        self.assertEqual(state.to_dict(), before)
+
+    def test_revoke_before_input_gate_lapses_without_policy(self):
+        policy = CapturePolicy(action=True)
+        state, scheduler, runtime = rig(policy)
+        adopt(runtime)
+        scheduler.advance_by(10)
+        due = scheduler.pending_due()[0]
+        waiting = threading.Event()
+        release = threading.Event()
+        original = runtime.agency.propose
+        errors = []
+
+        def delayed(due):
+            waiting.set()
+            if not release.wait(5):
+                raise RuntimeError("test timeout")
+            return original(due)
+
+        def work():
+            try:
+                runtime.process_due(due)
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch.object(runtime.agency, "propose", side_effect=delayed):
+            worker = threading.Thread(target=work)
+            worker.start()
+            try:
+                self.assertTrue(waiting.wait(5))
+                runtime.maintain_arrangement(
+                    "revoked", "mizuki", arrangement_id="test-plan", expected_version=1
+                )
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(policy.contexts, [])
+        record = state.agency.get(due.due_id)
+        self.assertEqual(record.outcome, AgencyOutcome.LAPSED)
+        self.assertFalse(consumes_allowance(record))
+        self.assertFalse(record.arrangements_carried)
+        SessionState.from_dict(state.to_dict())
+
+    def test_dedicated_cancel_requires_transaction_and_book_change(self):
+        state, scheduler, runtime = rig()
+        adopt(runtime)
+        identity = scheduler.pending()[0].activation_id
+        before = state.to_dict()
+        with self.assertRaises(SchedulerError):
+            scheduler._cancel_arrangement(identity)
+        with state.atomic_commit(), self.assertRaises(SchedulerError):
+            scheduler._cancel_arrangement(identity)
+        self.assertEqual(state.to_dict(), before)
+        runtime.maintain_arrangement(
+            "revoked", "mizuki", arrangement_id="test-plan", expected_version=1
+        )
+        self.assertFalse(scheduler.pending())
+        SessionState.from_dict(state.to_dict())

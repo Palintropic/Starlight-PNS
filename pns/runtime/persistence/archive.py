@@ -433,10 +433,12 @@ def _migrate_arrangement_fields(payload):
         or payload.get("arrangements", ArrangementBook().to_dict())
         != ArrangementBook().to_dict()
         or payload.get("catch_up_target") is not None
+        or payload.get("catch_up_operations", []) != []
     ):
         raise ArchiveError("旧格式夹带安排记录")
     payload["arrangements"] = ArrangementBook().to_dict()
     payload["catch_up_target"] = None
+    payload["catch_up_operations"] = []
     for record in payload["agency"]["log"]["records"]:
         if "arrangements_carried" in record and record["arrangements_carried"] != []:
             raise ArchiveError("旧格式夹带安排提供证据")

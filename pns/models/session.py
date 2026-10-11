@@ -234,6 +234,7 @@ class SessionState:
     agency: AgencyLog = field(default_factory=AgencyLog)
     arrangements: ArrangementBook = field(default_factory=ArrangementBook)
     catch_up_target: Optional[datetime] = None
+    catch_up_operations: tuple = field(default_factory=tuple)
     # 角色主观记忆。它跟观察是两件事：观察是"感知到了什么"，记忆是"留下了
     # 什么"。同一种归属 —— 存储归会话所有，编码器只是它上面的服务。世界真相
     # 仍然只有 events，记忆改不动它，也改不动观察。
@@ -685,6 +686,42 @@ class SessionState:
         self.require_writable()
         self.record_turn(turn)
 
+    def register_catch_up_target(self, target):
+        """登记或扩大总目标；追加证据与快照在同一事务中更新。"""
+        if not self.transaction_is_mine:
+            raise SessionStateError("补跑目标登记必须在事务内")
+        target = sim(target)
+        old = self.catch_up_target
+        if target < self.world_state.clock or (old is not None and target < old):
+            raise SessionStateError("不能缩小未完成补跑目标")
+        if target == old:
+            return
+        self._append_catch_up_operation("registered" if old is None else "expanded", target)
+        self.catch_up_target = target
+
+    def complete_catch_up_target(self):
+        if not self.transaction_is_mine:
+            raise SessionStateError("补跑完成必须在事务内")
+        target = self.catch_up_target
+        if (
+            target is None
+            or target != self.world_state.clock
+            or self.activation_outbox.pending()
+        ):
+            raise SessionStateError("补跑尚未完成")
+        self._append_catch_up_operation("completed", target)
+        self.catch_up_target = None
+
+    def _append_catch_up_operation(self, action, target):
+        self.catch_up_operations += (
+            {
+                "sequence": len(self.catch_up_operations) + 1,
+                "action": action,
+                "at": self.world_state.clock.isoformat(),
+                "target": target.isoformat(),
+            },
+        )
+
     @contextmanager
     def atomic_commit(self) -> Iterator["SessionState"]:
         """把一次提交里的会话可变状态绑成一个整体。
@@ -763,6 +800,7 @@ class SessionState:
         content = self.content
         arrangements = self.arrangements
         catch_up_target = self.catch_up_target
+        catch_up_operations = self.catch_up_operations
         time_events = self.time_events
         try:
             yield self
@@ -770,6 +808,7 @@ class SessionState:
             self.content = content
             self.arrangements = arrangements
             self.catch_up_target = catch_up_target
+            self.catch_up_operations = catch_up_operations
             self.time_events = time_events
             self.cognition = cognition
             self.rhythm_dispositions = dispositions
@@ -1158,6 +1197,7 @@ class SessionState:
             "memory",
             "arrangements",
             "catch_up_target",
+            "catch_up_operations",
         ):
             if required not in payload:
                 if required == "memory":
@@ -1239,6 +1279,9 @@ class SessionState:
 
         state.arrangements = ArrangementBook(payload["arrangements"])
         state.catch_up_target = sim(payload["catch_up_target"]) if payload["catch_up_target"] is not None else None
+        if not isinstance(payload["catch_up_operations"], list):
+            raise SessionStateError("补跑操作必须是列表")
+        state.catch_up_operations = tuple(deepcopy(payload["catch_up_operations"]))
         state.restore_scheduler_archive(payload["scheduler"])
         # Agency 审计放在后面恢复：它的校验要同时看得见投递箱和事件历史。
         state.restore_agency_archive(payload["agency"])
@@ -1322,6 +1365,7 @@ class SessionState:
             "exposures": self.exposures.to_dict(),
             "arrangements": self.arrangements.to_dict(),
             "catch_up_target": self.catch_up_target.isoformat() if self.catch_up_target else None,
+            "catch_up_operations": deepcopy(list(self.catch_up_operations)),
             "scheduler": self.scheduler_archive(),
             "agency": self.agency_archive(),
             "memory": self.memory_archive(),

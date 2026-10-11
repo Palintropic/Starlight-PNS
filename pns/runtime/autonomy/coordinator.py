@@ -206,6 +206,7 @@ class AutonomousRuntime:
         # 同一个线程再进来必须放行，否则那次提交会把自己锁死在半截 ——
         # 而那正是这把锁本来要防的事。
         self._gate = threading.RLock()
+        self._agency._proposal_gate = self._gate
         self._started = False
         self._running = False
         self._stop_reason: Optional[str] = None
@@ -878,10 +879,9 @@ class AutonomousRuntime:
                 )
                 aid = definition["id"] if definition is not None else arrangement_id
                 old = state.arrangements.to_dict()["current"].get(aid)
-                if old is not None:
-                    scheduled = state.arrangements.scheduled(old)
-                    if scheduled is not None:
-                        self.scheduler.cancel(scheduled.activation_id)
+                old_scheduled = (
+                    state.arrangements.scheduled(old) if old is not None else None
+                )
                 state.arrangements = state.arrangements.operate(
                     action,
                     character_id,
@@ -890,6 +890,8 @@ class AutonomousRuntime:
                     arrangement_id,
                     expected_version,
                 )
+                if old_scheduled is not None:
+                    self.scheduler._cancel_arrangement(old_scheduled.activation_id)
                 entry = state.arrangements.to_dict()["current"][aid]
                 scheduled = state.arrangements.scheduled(entry)
                 if scheduled is not None:
@@ -1121,7 +1123,7 @@ class AutonomousRuntime:
             if old_target is not None and target < old_target:
                 raise AutonomyError("不能缩小未完成补跑目标")
             if self._state.arrangements.sequence or old_target is not None:
-                self._state.catch_up_target = target
+                self._state.register_catch_up_target(target)
             self._state.arrangements = self._state.arrangements.expire(self.clock, target)
         checkpoint = getattr(self, "_target_checkpoint", None)
         if checkpoint is not None and self._state.arrangements.sequence:
@@ -1172,7 +1174,7 @@ class AutonomousRuntime:
                 and self._state.catch_up_target == target
                 and not self._agency.pending_due()
             ):
-                self._state.catch_up_target = None
+                self._state.complete_catch_up_target()
         return {
             "from_clock": from_clock.isoformat(),
             "to_clock": to_clock.isoformat(),

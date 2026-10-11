@@ -246,6 +246,24 @@ class PersistentScheduler:
         self._state.require_writable()
         if not isinstance(activation_id, str) or not activation_id:
             raise SchedulerError("activation_id 必须是非空字符串")
+        if activation_id.startswith(ARRANGEMENT_PREFIX):
+            raise SchedulerError("安排排期只能通过维护事务取消")
+        if not self.queue.has(activation_id):
+            return False
+        self.queue._remove(activation_id)
+        return True
+
+    def _cancel_arrangement(self, activation_id: str) -> bool:
+        """仅在已更新采用日志和当前簿的事务内摘除旧排期。"""
+        self._state.require_writable()
+        if not self._state.transaction_is_mine:
+            raise SchedulerError("安排取消必须在维护事务内")
+        if not activation_id.startswith(ARRANGEMENT_PREFIX):
+            raise SchedulerError("不是安排身份")
+        for entry in self._state.arrangements.to_dict()["current"].values():
+            scheduled = self._state.arrangements.scheduled(entry)
+            if scheduled is not None and scheduled.activation_id == activation_id:
+                raise SchedulerError("当前安排仍要求此排期")
         if not self.queue.has(activation_id):
             return False
         self.queue._remove(activation_id)

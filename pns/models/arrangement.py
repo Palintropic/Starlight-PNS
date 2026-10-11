@@ -502,10 +502,63 @@ def legitimate_lapsed(record):
         return False
 
 
+def verify_catch_up_target(state):
+    """重放登记高水位，不依赖是否已经开启 occurrence。"""
+    clock = state.world_state.clock if state.world_state else None
+    active = None
+    previous_at = None
+    high_water = None
+    for index, op in enumerate(state.catch_up_operations, 1):
+        if not isinstance(op, dict) or set(op) != {
+            "sequence",
+            "action",
+            "at",
+            "target",
+        }:
+            raise ArrangementError("补跑操作字段不完整")
+        if type(op["sequence"]) is not int or op["sequence"] != index:
+            raise ArrangementError("补跑操作序号不连续")
+        at, target = sim(op["at"]), sim(op["target"])
+        if (
+            clock is None
+            or at > clock
+            or target < at
+            or (previous_at is not None and at < previous_at)
+        ):
+            raise ArrangementError("补跑操作时间不合法")
+        action = op["action"]
+        if action == "registered":
+            if active is not None or (high_water is not None and target < high_water):
+                raise ArrangementError("补跑登记降低高水位或重复登记")
+            active = target
+        elif action == "expanded":
+            if active is None or target <= active:
+                raise ArrangementError("补跑扩大没有提高目标")
+            active = target
+        elif action == "completed":
+            if active != target or at != target:
+                raise ArrangementError("补跑完成没有到达目标")
+            # 当时的全部 due 必须已结案，不能伪造一次清空。
+            records = {r.due_id: r for r in state.agency.records()}
+            for due in state.activation_outbox.records():
+                if due.fired_at <= at:
+                    record = records.get(due.due_id)
+                    if record is None or record.decided_at > at:
+                        raise ArrangementError("补跑完成仍有未结案 due")
+            active = None
+        else:
+            raise ArrangementError("未知补跑操作")
+        previous_at = at
+        high_water = target
+    if active != state.catch_up_target:
+        raise ArrangementError("补跑目标与登记高水位不一致")
+
+
 def verify_arrangements(state):
     """从操作和时间历史重建应有集合，再双向核对持久化投影与提供证据。"""
     from pns.models.event import EventType
 
+    verify_catch_up_target(state)
     raw = state.arrangements.to_dict()
     operations = raw["operations"]
     clock = state.world_state.clock if state.world_state else None

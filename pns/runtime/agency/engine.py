@@ -26,6 +26,7 @@
 #
 # 归属跟调度器一样：审计日志归 SessionState 所有，引擎是它上面的服务，一个
 # 会话只能绑一个。存档里的 agency 段就是那份日志。
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Dict, Mapping, Optional, Set, Tuple
@@ -532,79 +533,79 @@ class AgencyEngine:
         一份签发过的计划，策略（以及策略里的生成）一次都不调。propose() 唯一
         会写的东西是引擎进程内的签发表，不是世界状态。
         """
-        self._require_handoff(due)
-        character_id = self._require_character(due)
-        proposed_at = self.clock
-        planning: Optional[PlanProposal] = None
+        with getattr(self, "_proposal_gate", nullcontext()):
+            self._require_handoff(due)
+            character_id = self._require_character(due)
+            proposed_at = self.clock
+            planning: Optional[PlanProposal] = None
 
-        def plan(verdict, proposal=None, detail=None, rationale="") -> ProposalPlan:
-            return ProposalPlan(
-                due=due,
-                character_id=character_id,
-                policy=getattr(self._policy, "name", ""),
-                proposed_at=proposed_at,
-                verdict=verdict,
-                proposal=proposal,
-                detail=dict(detail or {}),
-                rationale=rationale,
-                planning=planning,
-            )
+            def plan(verdict, proposal=None, detail=None, rationale="") -> ProposalPlan:
+                return ProposalPlan(
+                    due=due,
+                    character_id=character_id,
+                    policy=getattr(self._policy, "name", ""),
+                    proposed_at=proposed_at,
+                    verdict=verdict,
+                    proposal=proposal,
+                    detail=dict(detail or {}),
+                    rationale=rationale,
+                    planning=planning,
+                )
 
-        closure = self._closure(due, character_id)
-        if closure is not None:
-            # 在问策略之前收尾：没有生成、没有判分，也就不花单次额度
-            # （见 consumes_allowance）。策略名留空，记录自己说明"没问过策略"。
-            return self._issue(closure)
-        # 这次不免费收尾：先前给这条到期签发过的（如果有）作废。
-        self._issued.pop(due.due_id, None)
+            closure = self._closure(due, character_id)
+            if closure is not None:
+                # 在问策略之前收尾：没有生成、没有判分，也就不花单次额度
+                # （见 consumes_allowance）。策略名留空，记录自己说明"没问过策略"。
+                return self._issue(closure)
+            # 这次不免费收尾：先前给这条到期签发过的（如果有）作废。
+            self._issued.pop(due.due_id, None)
 
-        if due.due_id in self._asked:
-            late = self._closure(due, character_id, after_cognition=True)
-            if late is not None:
-                # 这条到期之前问过策略（那次没提交成），现在才变成收尾条件：
-                # 认知已经发生过，计费结案，带着那次的结论与游标。
-                planning = self._planned.get(due.due_id)
+            if due.due_id in self._asked:
+                late = self._closure(due, character_id, after_cognition=True)
+                if late is not None:
+                    # 这条到期之前问过策略（那次没提交成），现在才变成收尾条件：
+                    # 认知已经发生过，计费结案，带着那次的结论与游标。
+                    planning = self._planned.get(due.due_id)
+                    return plan(
+                        AgencyOutcome.REJECTED_STALE,
+                        detail={
+                            "reason": CLOSED_AFTER_COGNITION,
+                            "closure": free_closure_kind(late),
+                            "closure_reason": late.detail.get("reason"),
+                        },
+                    )
+
+            context = self.context_for(due)
+            planning = self._plan(due, character_id, context)
+            self._planned[due.due_id] = planning
+
+            reply_medium = None
+            if _reply_source(due) is not None:
+                reply_medium, _ = self._reply_gate(due, character_id)
+
+            committed = self._state.agency.committed_actions()
+            if committed >= self._budget.max_committed_actions_per_session:
                 return plan(
-                    AgencyOutcome.REJECTED_STALE,
+                    AgencyOutcome.REJECTED_BUDGET,
                     detail={
-                        "reason": CLOSED_AFTER_COGNITION,
-                        "closure": free_closure_kind(late),
-                        "closure_reason": late.detail.get("reason"),
+                        "reason": "max_committed_actions_per_session",
+                        "committed": committed,
+                        "limit": self._budget.max_committed_actions_per_session,
                     },
                 )
 
-        context = self.context_for(due)
-        planning = self._plan(due, character_id, context)
-        self._planned[due.due_id] = planning
-
-        reply_medium = None
-        if _reply_source(due) is not None:
-            reply_medium, _ = self._reply_gate(due, character_id)
-
-        committed = self._state.agency.committed_actions()
-        if committed >= self._budget.max_committed_actions_per_session:
-            return plan(
-                AgencyOutcome.REJECTED_BUDGET,
-                detail={
-                    "reason": "max_committed_actions_per_session",
-                    "committed": committed,
-                    "limit": self._budget.max_committed_actions_per_session,
-                },
-            )
-
-        if reply_medium is not None:
-            # 回话只能回到来源那句话的媒介里。收窄的是合法枚举本身，所以策略
-            # 选不出别的动作，提案期的 has_legal 检查也会拒绝任何别的动作。
-            action_id, target_id = _reply_action(reply_medium)
-            context = replace(
-                context,
-                legal_actions=tuple(
-                    legal
-                    for legal in context.legal_actions
-                    if legal.action_id is action_id and legal.target_id == target_id
-                ),
-            )
-        try:
+            if reply_medium is not None:
+                # 回话只能回到来源那句话的媒介里。收窄的是合法枚举本身，所以策略
+                # 选不出别的动作，提案期的 has_legal 检查也会拒绝任何别的动作。
+                action_id, target_id = _reply_action(reply_medium)
+                context = replace(
+                    context,
+                    legal_actions=tuple(
+                        legal
+                        for legal in context.legal_actions
+                        if legal.action_id is action_id and legal.target_id == target_id
+                    ),
+                )
             carried = self._state.arrangements.carried(
                 character_id, self.clock, self._state.catch_up_target or self.clock
             )
@@ -613,6 +614,7 @@ class AgencyEngine:
             )
             self._carried[due.due_id] = carried
             self._asked.add(due.due_id)
+        try:
             decision = self._policy.decide(context)
         except AgencyPolicyError as e:
             return plan(
@@ -953,11 +955,20 @@ class AgencyEngine:
             detail["observation_cursor"] = cursor
             detail["planning"] = plan.planning.provenance()
         carried = self._carried.get(due.due_id, ())
-        if carried and not self._state.arrangements.valid_carried(
-            carried,
-            plan.character_id,
-            self.clock,
-            self._state.catch_up_target or self.clock,
+        due_lapsed = (
+            due.due_id in self._asked
+            and self._state.arrangements.lapse(
+                due, self.clock, self._state.catch_up_target or self.clock
+            ) is not None
+        )
+        if due_lapsed or (
+            carried
+            and not self._state.arrangements.valid_carried(
+                carried,
+                plan.character_id,
+                self.clock,
+                self._state.catch_up_target or self.clock,
+            )
         ):
             verdict = AgencyOutcome.REJECTED_STALE
             detail.update(reason="arrangement_stale")
