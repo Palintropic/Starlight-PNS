@@ -1016,6 +1016,33 @@ class TerminalOutcomeTests(unittest.TestCase):
         # The type name stays: it is what told a TypeError apart from a provider outage.
         self.assertIn("TypeError", record.detail["error"])
 
+    def test_tampered_local_reason_is_not_trusted(self):
+        from types import SimpleNamespace
+        from pns.runtime.autonomy.generation import _FailureReason, _LocalGenerationError
+
+        secret = "test-provider-credential-canary"
+
+        def broken(context):
+            e = _LocalGenerationError(_FailureReason.PROVIDER)
+            e.reason = SimpleNamespace(value=secret)
+            raise e
+
+        state, _, record = self._generation_failure_record(broken, "生成失败:")
+        self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_foreign_exception_type_name_is_not_archived(self):
+        secret = "test_provider_credential_canary"
+        foreign = type(secret, (ValueError,), {})
+
+        class Exploding(dict):
+            def get(self, key, default=None):
+                raise foreign("ordinary message")
+
+        state, _, record = self._generation_failure_record(
+            lambda context: Exploding(text="一句话"), "生成输出解析失败:"
+        )
+        self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
     def test_invalid_generation_records_model_and_wall_time(self):
         _, _, record = self._generation_failure_record("おはよう", "生成输出不合法:")
         self.assertIn("日文假名", record.detail["error"])

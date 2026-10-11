@@ -98,6 +98,25 @@ class _LocalGenerationError(GenerationError):
         self.reason = reason
 
 
+def _trusted_reason(e: GenerationError) -> str:
+    """内部固定类别的说明；其余一律不可信。"""
+    reason = getattr(e, "reason", None) if type(e) is _LocalGenerationError else None
+    # reason 是可写属性：只认枚举成员本身，改成别的对象就当外来异常。
+    if isinstance(reason, _FailureReason):
+        return reason.value
+    return "GenerationError（异常原文不外传）"
+
+
+def _safe_type_name(e: BaseException) -> str:
+    """只放行 Python 内置异常的类型名。
+
+    类型名是分辨"provider 挂了"和"我们自己的代码错了"（比如 SDK 不收某个参数的
+    TypeError）的线索；但外来类型的名字可以随便起，也就可能夹带原文。
+    """
+    kind = type(e)
+    return kind.__name__ if kind.__module__ == "builtins" else "外部异常"
+
+
 def parse_line(raw, context: GenerationContext) -> str:
     """把生成器交回来的**原始形状**变成一句台词。
 
@@ -274,33 +293,27 @@ class AuthoredLinePolicy(AgencyPolicy):
             raw = self._generator.generate(generation_context)
         except GenerationError as e:
             # 只有内部固定类别保留诊断。公开 GenerationError 的消息不可信。
-            reason = (
-                e.reason.value if type(e) is _LocalGenerationError
-                else "GenerationError（异常原文不外传）"
-            )
-            raise self._generation_failure(f"生成失败: {reason}", retryable=e.retryable) from e
+            raise self._generation_failure(
+                f"生成失败: {_trusted_reason(e)}", retryable=e.retryable
+            ) from e
         except Exception as e:
             # 生成器背后是网络和模型，什么都可能发生。说不清楚的失败按可重试
             # 处理 —— 这一档由上层的重试预算兜底，不会无限试下去。
             raise self._generation_failure(
-                # 只留异常类型名：类型名不带凭据，却是分辨"provider 挂了"和
-                # "我们自己的代码错了"（比如 SDK 不收某个参数的 TypeError）的唯一线索。
-                f"生成器调用失败: {type(e).__name__}（异常原文不外传）", retryable=True
+                f"生成器调用失败: {_safe_type_name(e)}（异常原文不外传）", retryable=True
             ) from e
 
         try:
             text = parse_line(raw, generation_context)
         except GenerationError as e:
             # 输出结构不对是**不可重试**的：同一个坏模板会一直吐同样的垃圾。
-            reason = (
-                e.reason.value if type(e) is _LocalGenerationError
-                else "GenerationError（异常原文不外传）"
-            )
-            raise self._generation_failure(f"生成输出不合法: {reason}", retryable=False) from e
+            raise self._generation_failure(
+                f"生成输出不合法: {_trusted_reason(e)}", retryable=False
+            ) from e
         except Exception as e:
             # 包括公开 Mapping 接口的迭代/get 失败；仍记录生成模型和失败时间。
             raise self._generation_failure(
-                f"生成输出解析失败: {type(e).__name__}（异常原文不外传）",
+                f"生成输出解析失败: {_safe_type_name(e)}（异常原文不外传）",
                 retryable=False,
             ) from e
 
