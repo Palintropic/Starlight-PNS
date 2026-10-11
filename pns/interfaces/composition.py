@@ -54,7 +54,9 @@ from pns.models.world_state import ActivityKind
 from pns.runtime.autonomy.audit import AuditRequest, RouterAuditor
 from pns.runtime.autonomy.clock_worker import ClockConfig, ClockWorkerError
 from pns.runtime.autonomy.coordinator import AutonomyError
-from pns.runtime.autonomy.generation import AuthoredLinePolicy, GenerationError
+from pns.runtime.autonomy.generation import (
+    AuthoredLinePolicy, GenerationError, _FailureReason, _LocalGenerationError,
+)
 from pns.runtime.autonomy.prompt import PromptedLineGenerator
 from pns.runtime.autonomy.seeding import (
     ActivationCadence,
@@ -648,8 +650,13 @@ class WorldControlPlane:
                 # 就拦掉：提交下去就是让角色说了一句它没说完的话。可重试 ——
                 # 下一次采样很可能就说得完。消息是我们自己的话，不含 provider
                 # 那侧的任何东西。
-                raise GenerationError(
-                    "模型输出在长度上限处被截断，这一句没说完", retryable=True
+                raise _LocalGenerationError(
+                    _FailureReason.TRUNCATED, retryable=True
+                ) from e
+            except GenerationError as e:
+                # 来自实际 provider 的异常，即便使用内部异常类也不信任消息。
+                raise _LocalGenerationError(
+                    _FailureReason.PROVIDER, retryable=e.retryable
                 ) from e
 
         # 显示名整份从冻结内容包取一次：生成上下文里出现的每一个名字都来自
@@ -666,7 +673,10 @@ class WorldControlPlane:
             # （收窄那一行在 AuthoredLinePolicy._generation_context 里）。
             # 显示名来自冻结内容包，绝不来自模型输出。
             return AuthoredLinePolicy(
-                generator, recall=MemoryRecall(state), names=names
+                generator,
+                recall=MemoryRecall(state),
+                names=names,
+                generator_model=models.generator_model,
             )
 
         return RuntimeAdapters(

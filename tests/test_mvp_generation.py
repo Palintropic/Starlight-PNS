@@ -776,12 +776,51 @@ class ProviderLeakTests(MvpTestCase):
             self.assertNotIn(CANARY, blob, f"{where} 里出现了那把 key")
         # 留下的是那句固定的话，而且它确实被记下来了 —— 不是被吞掉。
         self.assertIn(PROVIDER_FAILURE, blobs["agency"])
+        failures = [
+            record
+            for record in world.state.agency
+            if record.detail.get("reason") == "policy_error"
+        ]
+        self.assertTrue(failures)
+        for record in failures:
+            self.assertEqual(
+                record.detail["generator_model"],
+                self.plane.registry().models.generator_model,
+            )
+
+    def test_provider_generation_error_canary_is_cleaned_before_archive_and_restore(self):
+        self.provider = FakeProvider(generate_error=GenerationError(CANARY, retryable=True))
+        self.plane = WorldControlPlane(
+            root=self.root,
+            client_factory=lambda *a, **k: self.provider,
+            autonomy=self.autonomy,
+        )
+        world = self.create()
+        self.advance(world, 5)
+        for _ in range(world.runtime.retry.max_attempts):
+            world.runtime.process_pending()
+        failures = [r for r in world.state.agency if r.detail.get("reason") == "policy_error"]
+        self.assertTrue(failures)
+        for record in failures:
+            self.assertIn(PROVIDER_FAILURE, record.detail["error"])
+            self.assertEqual(record.detail["generator_model"], self.registry.models.generator_model)
+            self.assertIsNotNone(datetime.fromisoformat(record.detail["failed_at"]).tzinfo)
+        self.assertEqual(len(self.provider.generations), world.runtime.retry.max_attempts)
+        before = world.state.agency.to_dict()
+        self.plane.close("nightcord")
+        archive = (self.root / "nightcord" / "world.json").read_text(encoding="utf-8")
+        self.assertNotIn(CANARY, archive)
+        self.plane.restore("nightcord")
+        restored = self.plane.service.opened("nightcord")
+        self.assertEqual(restored.state.agency.to_dict(), before)
+        self.assertNotIn(CANARY, json.dumps(restored.state.to_dict(), ensure_ascii=False))
 
     def test_the_provider_failure_message_is_a_constant(self):
         """它不是模板：换一个异常，那句话逐字不变。"""
         messages = set()
         for error in (
             RuntimeError(CANARY),
+            GenerationError(CANARY, retryable=True),
             type(CANARY, (ValueError,), {})("boom"),
             TimeoutError("timed out"),
         ):

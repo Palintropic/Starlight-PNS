@@ -34,13 +34,15 @@ from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 from pns.models.action import ActionId
 from pns.runtime.autonomy.context import DIALOGUE_OUTPUT_RULES, GenerationContext
-from pns.runtime.autonomy.generation import GenerationError, LineGenerator
+from pns.runtime.autonomy.generation import (
+    GenerationError, LineGenerator, _FailureReason, _LocalGenerationError,
+)
 from pns.world.context import render_world_context
 
 # 对外那句固定的失败原文。它们是**常量**，不是模板 —— 没有任何 provider 侧
 # 的数据能拼进来。
-PROVIDER_FAILURE = "生成模型调用失败；请检查服务器侧的 provider 与凭据配置"
-PROMPT_FAILURE = "角色提示词渲染失败；请检查内容包里这个角色的提示词模板"
+PROVIDER_FAILURE = _FailureReason.PROVIDER.value
+PROMPT_FAILURE = _FailureReason.PROMPT.value
 
 # 交给模型的情境里，最多列几条观察 / 几条回忆。上下文预算，不是审美：
 # 一份无限长的情境会把一次生成的成本变成世界活跃度的函数。
@@ -434,35 +436,36 @@ class PromptedLineGenerator(LineGenerator):
             situation = render_situation(
                 context, view=view, channels=self._channels, names=self._names
             )
-        except GenerationError:
-            raise
         except Exception as e:
             # 渲染这一侧的失败是**不可重试**的：同一份上下文再渲染一百次也是
             # 同样的结果。消息固定 —— 模板片段和内容包内部结构不该跟着策略
             # 失败一起被写进存档。
-            raise GenerationError(PROMPT_FAILURE, retryable=False) from e
+            raise _LocalGenerationError(_FailureReason.PROMPT, retryable=False) from e
 
         history = [{"role": "user", "content": situation}]
         try:
             return self._call(context.character_id, view, history)
-        except GenerationError:
-            # 接线层自己已经把这次失败翻译成了一句安全的话（比如"被 max_tokens
-            # 截断"）。原样放行，不要再盖成一句更笼统的 —— 盖掉之后"半句话"
-            # 和"连不上 provider"就分不开了。
-            raise
+        except _LocalGenerationError as e:
+            # 接线层在 provider 边界清洗后产生的固定类别；重建，不引用消息。
+            raise _LocalGenerationError(e.reason, retryable=e.retryable) from e
+        except GenerationError as e:
+            # 异常类型不能证明消息安全，provider 原文一律丢弃。
+            raise _LocalGenerationError(
+                _FailureReason.PROVIDER, retryable=e.retryable
+            ) from e
         except PromptScopeError as e:
             # 有人向这份角色作用域的投影问了越界的问题（渲染层在真正发请求
             # 之前就会问）。这不是 provider 故障，也不会自己好起来：它是一次
             # 需要改代码的作用域违规，所以**不可重试**，而且要跟 provider
             # 故障区分开，免得被当成"网络抖了一下"重试三次。
-            raise GenerationError(
-                "生成提示词越界：有人向角色作用域的世界投影问了全知问题",
+            raise _LocalGenerationError(
+                _FailureReason.SCOPE,
                 retryable=False,
             ) from e
         except Exception as e:
             # provider 那侧什么都可能发生，而**它收到过 API Key**，所以从它
             # 出来的一切都是不可信数据 —— 异常本身也是。这句话完全固定。
-            raise GenerationError(PROVIDER_FAILURE, retryable=True) from e
+            raise _LocalGenerationError(_FailureReason.PROVIDER, retryable=True) from e
 
 
 __all__ = [

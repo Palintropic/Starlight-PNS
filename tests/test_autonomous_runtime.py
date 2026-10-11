@@ -24,7 +24,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -110,6 +110,7 @@ def _rig(
     auditor=None,
     chooser=None,
     names=None,
+    generator_model="",
     retry=None,
     start=True,
 ):
@@ -120,7 +121,11 @@ def _rig(
             lines if lines is not None else {"mizuki": "在的哦", "ena": "……嗯"}
         )
     policy = AuthoredLinePolicy(
-        generator, recall=MemoryRecall(state), chooser=chooser, names=names
+        generator,
+        recall=MemoryRecall(state),
+        chooser=chooser,
+        names=names,
+        generator_model=generator_model,
     )
     runtime = AutonomousRuntime(
         state,
@@ -756,6 +761,12 @@ class UntrustedOutputTests(unittest.TestCase):
         with self.assertRaises(GenerationError):
             parse_line({"text": "hi", "character_id": "ena"}, self.context)
 
+    def test_non_string_output_keys_raise_generation_error(self):
+        for key in (1, None, ("unexpected",)):
+            with self.subTest(key=key):
+                with self.assertRaises(GenerationError):
+                    parse_line({"text": "一句话", key: "unexpected"}, self.context)
+
     def test_an_overlong_line_is_refused(self):
         with self.assertRaises(GenerationError):
             parse_line("啊" * (MAX_LINE_CHARS + 1), self.context)
@@ -965,6 +976,195 @@ class FullLoopTests(unittest.TestCase):
 
 # ── AC6 终局、重复与重试 ────────────────────────────────────────────────
 class TerminalOutcomeTests(unittest.TestCase):
+    def _generation_failure_record(self, entry, prefix):
+        state, scheduler, runtime = _rig(
+            lines={"mizuki": entry},
+            generator_model="test-generator-v26",
+            retry=RetryPolicy(max_attempts=1),
+        )
+        due = _due(scheduler)
+        wall = datetime(2026, 10, 11, 7, 55, 12, 123456, tzinfo=timezone.utc)
+        with patch("pns.runtime.autonomy.generation.datetime") as clock:
+            clock.now.return_value = wall
+            runtime.process_due(due)
+            clock.now.assert_called_once_with(timezone.utc)
+        record = state.agency.get(due.due_id)
+        self.assertIs(record.outcome, AgencyOutcome.REJECTED_POLICY_ERROR)
+        self.assertTrue(record.detail["error"].startswith(prefix))
+        self.assertEqual(record.detail["generator_model"], "test-generator-v26")
+        self.assertEqual(record.detail["failed_at"], wall.isoformat())
+        self.assertNotEqual(record.decided_at, wall)
+        payload = json.loads(json.dumps(state.to_dict()))
+        restored = SessionState.from_dict(payload)
+        self.assertEqual(restored.agency.get(due.due_id).detail, record.detail)
+        return state, due, record
+
+    def test_generation_failure_records_model_and_wall_time(self):
+        def broken(context):
+            raise GenerationError("提示词模板坏了")
+
+        self._generation_failure_record(broken, "生成失败:")
+
+    def test_generator_call_failure_records_model_and_wall_time_without_provider_text(self):
+        secret = "test-provider-credential-canary"
+
+        def broken(context):
+            raise TypeError(secret)
+
+        state, _, record = self._generation_failure_record(broken, "生成器调用失败:")
+        self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+        # The type name stays: it is what told a TypeError apart from a provider outage.
+        self.assertIn("TypeError", record.detail["error"])
+
+    def test_tampered_local_reason_is_not_trusted(self):
+        from types import SimpleNamespace
+        from pns.runtime.autonomy.generation import _FailureReason, _LocalGenerationError
+
+        secret = "test-provider-credential-canary"
+
+        def broken(context):
+            e = _LocalGenerationError(_FailureReason.PROVIDER)
+            e.reason = SimpleNamespace(value=secret)
+            raise e
+
+        state, _, record = self._generation_failure_record(broken, "生成失败:")
+        self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_foreign_exception_type_name_is_not_archived(self):
+        secret = "test_provider_credential_canary"
+        foreign = type(secret, (ValueError,), {})
+
+        class Exploding(dict):
+            def get(self, key, default=None):
+                raise foreign("ordinary message")
+
+        state, _, record = self._generation_failure_record(
+            lambda context: Exploding(text="一句话"), "生成输出解析失败:"
+        )
+        self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_inspecting_a_hostile_exception_cannot_escape_cleaning(self):
+        from pns.runtime.autonomy.generation import _FailureReason, _LocalGenerationError
+
+        secret = "test-provider-credential-canary"
+
+        class Hostile:
+            @property
+            def __class__(self):
+                raise ValueError(secret)
+
+        def tampered_reason(context):
+            e = _LocalGenerationError(_FailureReason.PROVIDER)
+            e.reason = Hostile()
+            raise e
+
+        class HostileRetry(GenerationError):
+            @property
+            def retryable(self):
+                raise ValueError(secret)
+
+            @retryable.setter
+            def retryable(self, value):
+                pass
+
+        def hostile_retry(context):
+            raise HostileRetry("x")
+
+        class Meta(type):
+            def __getattribute__(cls, name):
+                if name == "__module__":
+                    raise ValueError(secret)
+                return super().__getattribute__(name)
+
+        foreign = Meta("Foreign", (ValueError,), {})
+
+        def hostile_module(context):
+            raise foreign("x")
+
+        class HostileText(str):
+            def strip(self, *args):
+                return self
+
+            def __eq__(self, other):
+                raise ValueError(secret)
+
+            __hash__ = str.__hash__
+
+        line = HostileText("今天就到这里吧")
+        for raw in (line, {"text": line}):
+            with self.subTest(raw=type(raw).__name__):
+                state, scheduler, runtime = _rig(
+                    lines={"mizuki": lambda context, raw=raw: raw}
+                )
+                runtime.process_due(_due(scheduler))
+                self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
+        for entry, prefix in (
+            (tampered_reason, "生成失败:"),
+            (hostile_retry, "生成失败:"),
+            (hostile_module, "生成器调用失败:"),
+        ):
+            with self.subTest(prefix=prefix, entry=entry.__name__):
+                state, _, _ = self._generation_failure_record(entry, prefix)
+                self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_invalid_generation_records_model_and_wall_time(self):
+        _, _, record = self._generation_failure_record("おはよう", "生成输出不合法:")
+        self.assertIn("日文假名", record.detail["error"])
+
+    def test_generation_error_message_is_not_trusted(self):
+        canary = "CANARY-GENERATOR-RAW-OUTPUT"
+
+        def broken(context):
+            raise GenerationError(canary, retryable=True)
+
+        state, _, record = self._generation_failure_record(broken, "生成失败:")
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
+        self.assertIn("GenerationError", record.detail["error"])
+
+    def test_undeclared_output_key_is_not_archived(self):
+        canary = "CANARY-UNDECLARED-RAW-OUTPUT-KEY"
+        state, _, record = self._generation_failure_record(
+            {"text": "一句话", canary: "unexpected"}, "生成输出不合法:"
+        )
+        self.assertIn("未声明的键", record.detail["error"])
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_non_string_output_keys_record_model_and_wall_time(self):
+        for key in (1, None, ("unexpected",)):
+            with self.subTest(key=key):
+                self._generation_failure_record(
+                    {"text": "一句话", key: "unexpected"}, "生成输出不合法:"
+                )
+
+    def test_parser_generation_error_message_is_not_trusted(self):
+        canary = "CANARY-MAPPING-GENERATION-ERROR"
+        class BrokenMapping(dict):
+            def get(self, key, default=None):
+                raise GenerationError(canary)
+
+        state, _, record = self._generation_failure_record(
+            BrokenMapping(text="一句话"), "生成输出不合法:"
+        )
+        self.assertIn("GenerationError", record.detail["error"])
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_unexpected_parser_failure_records_metadata_without_raw_text(self):
+        canary = "CANARY-PARSER-RAW-OUTPUT"
+        with patch("pns.runtime.autonomy.generation.parse_line", side_effect=TypeError(canary)):
+            state, _, record = self._generation_failure_record("一句话", "生成输出解析失败:")
+        self.assertIn("TypeError", record.detail["error"])
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_legacy_generation_failure_record_loads_without_metadata(self):
+        state, due, _ = self._generation_failure_record("おはよう", "生成输出不合法:")
+        payload = json.loads(json.dumps(state.to_dict()))
+        detail = payload["agency"]["log"]["records"][0]["detail"]
+        del detail["generator_model"]
+        del detail["failed_at"]
+        restored = SessionState.from_dict(payload)
+        self.assertEqual(dict(restored.agency.get(due.due_id).detail), detail)
+
     def test_every_due_reaches_a_terminal_outcome_or_stays_pending(self):
         state, scheduler, runtime = _rig()
         _dues_together(scheduler, *((f"a{index}", "mizuki") for index in range(3)))
