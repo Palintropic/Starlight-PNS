@@ -761,6 +761,12 @@ class UntrustedOutputTests(unittest.TestCase):
         with self.assertRaises(GenerationError):
             parse_line({"text": "hi", "character_id": "ena"}, self.context)
 
+    def test_non_string_output_keys_raise_generation_error(self):
+        for key in (1, None, ("unexpected",)):
+            with self.subTest(key=key):
+                with self.assertRaises(GenerationError):
+                    parse_line({"text": "一句话", key: "unexpected"}, self.context)
+
     def test_an_overlong_line_is_refused(self):
         with self.assertRaises(GenerationError):
             parse_line("啊" * (MAX_LINE_CHARS + 1), self.context)
@@ -1013,6 +1019,50 @@ class TerminalOutcomeTests(unittest.TestCase):
     def test_invalid_generation_records_model_and_wall_time(self):
         _, _, record = self._generation_failure_record("おはよう", "生成输出不合法:")
         self.assertIn("日文假名", record.detail["error"])
+
+    def test_generation_error_message_is_not_trusted(self):
+        canary = "CANARY-GENERATOR-RAW-OUTPUT"
+
+        def broken(context):
+            raise GenerationError(canary, retryable=True)
+
+        state, _, record = self._generation_failure_record(broken, "生成失败:")
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
+        self.assertIn("GenerationError", record.detail["error"])
+
+    def test_undeclared_output_key_is_not_archived(self):
+        canary = "CANARY-UNDECLARED-RAW-OUTPUT-KEY"
+        state, _, record = self._generation_failure_record(
+            {"text": "一句话", canary: "unexpected"}, "生成输出不合法:"
+        )
+        self.assertIn("未声明的键", record.detail["error"])
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_non_string_output_keys_record_model_and_wall_time(self):
+        for key in (1, None, ("unexpected",)):
+            with self.subTest(key=key):
+                self._generation_failure_record(
+                    {"text": "一句话", key: "unexpected"}, "生成输出不合法:"
+                )
+
+    def test_parser_generation_error_message_is_not_trusted(self):
+        canary = "CANARY-MAPPING-GENERATION-ERROR"
+        class BrokenMapping(dict):
+            def get(self, key, default=None):
+                raise GenerationError(canary)
+
+        state, _, record = self._generation_failure_record(
+            BrokenMapping(text="一句话"), "生成输出不合法:"
+        )
+        self.assertIn("GenerationError", record.detail["error"])
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
+
+    def test_unexpected_parser_failure_records_metadata_without_raw_text(self):
+        canary = "CANARY-PARSER-RAW-OUTPUT"
+        with patch("pns.runtime.autonomy.generation.parse_line", side_effect=TypeError(canary)):
+            state, _, record = self._generation_failure_record("一句话", "生成输出解析失败:")
+        self.assertIn("TypeError", record.detail["error"])
+        self.assertNotIn(canary, json.dumps(state.to_dict(), ensure_ascii=False))
 
     def test_legacy_generation_failure_record_loads_without_metadata(self):
         state, due, _ = self._generation_failure_record("おはよう", "生成输出不合法:")

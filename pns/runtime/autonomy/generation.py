@@ -23,6 +23,7 @@
 # 这是"完整回路可以不联网跑完"的全部实现方式，不需要在运行时里埋测试分支。
 import re
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Callable, Mapping, Optional, Tuple
 
 from pns.models.action import ActionError, ActionProposal, LegalAction
@@ -73,6 +74,30 @@ class GenerationError(ValueError):
         self.retryable = bool(retryable)
 
 
+class _FailureReason(Enum):
+    PROVIDER = "生成模型调用失败；请检查服务器侧的 provider 与凭据配置"
+    PROMPT = "角色提示词渲染失败；请检查内容包里这个角色的提示词模板"
+    TRUNCATED = "模型输出在长度上限处被截断，这一句没说完"
+    SCOPE = "生成提示词越界：有人向角色作用域的世界投影问了全知问题"
+    NON_STRING_KEY = "生成输出的键必须是字符串"
+    UNDECLARED_KEY = "生成输出里有未声明的键"
+    OUTPUT_TYPE = "生成输出必须是字符串或 {'text': ...}"
+    EMPTY = "生成输出是空的 —— 没说出口的话不是一句台词"
+    MIXED_ABSTAIN = f"生成输出把台词和 {ABSTAIN_TOKEN} 混在一起，意图不明，不当台词处理"
+    STAGE_DIRECTION = "生成输出不能以括号动作或舞台说明开头"
+    KANA = "生成输出包含日文假名；自主中文对话只接受简体中文"
+    OVERLONG = f"生成输出超过 {MAX_LINE_CHARS} 字，不接受截断：截断会把一句被砍掉一半的话当成角色说完了"
+
+
+class _LocalGenerationError(GenerationError):
+    """仅承载内部固定类别；不能把外来异常消息标成安全文本。"""
+
+    def __init__(self, reason: _FailureReason, *, retryable: bool = False):
+        reason = _FailureReason(reason)
+        super().__init__(reason.value, retryable=retryable)
+        self.reason = reason
+
+
 def parse_line(raw, context: GenerationContext) -> str:
     """把生成器交回来的**原始形状**变成一句台词。
 
@@ -85,33 +110,26 @@ def parse_line(raw, context: GenerationContext) -> str:
     决定自己是谁、或者往事件 payload 里塞未声明的键。两者都必须响亮失败。
     """
     if isinstance(raw, Mapping):
-        extra = sorted(set(raw) - _ALLOWED_KEYS)
-        if extra:
-            raise GenerationError(
-                f"生成输出里有未声明的键: {', '.join(extra)}"
-            )
+        if any(not isinstance(key, str) for key in raw):
+            raise _LocalGenerationError(_FailureReason.NON_STRING_KEY)
+        if any(key not in _ALLOWED_KEYS for key in raw):
+            # 键名也是模型原始输出，不能跟着解析错误进入 detail / 存档。
+            raise _LocalGenerationError(_FailureReason.UNDECLARED_KEY)
         raw = raw.get("text")
     if isinstance(raw, str):
         text = raw.strip()
     else:
-        raise GenerationError(
-            f"生成输出必须是字符串或 {{'text': ...}}，收到 {type(raw).__name__}"
-        )
+        raise _LocalGenerationError(_FailureReason.OUTPUT_TYPE)
     if not text:
-        raise GenerationError("生成输出是空的 —— 没说出口的话不是一句台词")
+        raise _LocalGenerationError(_FailureReason.EMPTY)
     if ABSTAIN_TOKEN in text and text != ABSTAIN_TOKEN:
-        raise GenerationError(
-            f"生成输出把台词和 {ABSTAIN_TOKEN} 混在一起，意图不明，不当台词处理"
-        )
+        raise _LocalGenerationError(_FailureReason.MIXED_ABSTAIN)
     if _LEADING_STAGE_DIRECTION.match(text):
-        raise GenerationError("生成输出不能以括号动作或舞台说明开头")
+        raise _LocalGenerationError(_FailureReason.STAGE_DIRECTION)
     if _JAPANESE_KANA.search(text):
-        raise GenerationError("生成输出包含日文假名；自主中文对话只接受简体中文")
+        raise _LocalGenerationError(_FailureReason.KANA)
     if len(text) > MAX_LINE_CHARS:
-        raise GenerationError(
-            f"生成输出超过 {MAX_LINE_CHARS} 字（收到 {len(text)}），"
-            "不接受截断：截断会把一句被砍掉一半的话当成角色说完了"
-        )
+        raise _LocalGenerationError(_FailureReason.OVERLONG)
     return text
 
 
@@ -255,7 +273,12 @@ class AuthoredLinePolicy(AgencyPolicy):
         try:
             raw = self._generator.generate(generation_context)
         except GenerationError as e:
-            raise self._generation_failure(f"生成失败: {e}", retryable=e.retryable) from e
+            # 只有内部固定类别保留诊断。公开 GenerationError 的消息不可信。
+            reason = (
+                e.reason.value if type(e) is _LocalGenerationError
+                else "GenerationError（异常原文不外传）"
+            )
+            raise self._generation_failure(f"生成失败: {reason}", retryable=e.retryable) from e
         except Exception as e:
             # 生成器背后是网络和模型，什么都可能发生。说不清楚的失败按可重试
             # 处理 —— 这一档由上层的重试预算兜底，不会无限试下去。
@@ -269,7 +292,17 @@ class AuthoredLinePolicy(AgencyPolicy):
             text = parse_line(raw, generation_context)
         except GenerationError as e:
             # 输出结构不对是**不可重试**的：同一个坏模板会一直吐同样的垃圾。
-            raise self._generation_failure(f"生成输出不合法: {e}", retryable=False) from e
+            reason = (
+                e.reason.value if type(e) is _LocalGenerationError
+                else "GenerationError（异常原文不外传）"
+            )
+            raise self._generation_failure(f"生成输出不合法: {reason}", retryable=False) from e
+        except Exception as e:
+            # 包括公开 Mapping 接口的迭代/get 失败；仍记录生成模型和失败时间。
+            raise self._generation_failure(
+                f"生成输出解析失败: {type(e).__name__}（异常原文不外传）",
+                retryable=False,
+            ) from e
 
         if text == ABSTAIN_TOKEN:
             return PolicyDecision(rationale="model chose silence")
