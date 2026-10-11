@@ -154,7 +154,9 @@ def parse_line(raw, context: GenerationContext) -> str:
             raise _LocalGenerationError(_FailureReason.UNDECLARED_KEY)
         raw = raw.get("text")
     if isinstance(raw, str):
-        text = raw.strip()
+        # 归一成普通 str：子类可以改写 strip / __eq__，在解析边界之外再抛错，
+        # 把原文带出清洗。str.__str__ 对子类返回一个精确的 str 副本。
+        text = str.__str__(raw).strip()
     else:
         raise _LocalGenerationError(_FailureReason.OUTPUT_TYPE)
     if not text:

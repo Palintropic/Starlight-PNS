@@ -1081,6 +1081,24 @@ class TerminalOutcomeTests(unittest.TestCase):
         def hostile_module(context):
             raise foreign("x")
 
+        class HostileText(str):
+            def strip(self, *args):
+                return self
+
+            def __eq__(self, other):
+                raise ValueError(secret)
+
+            __hash__ = str.__hash__
+
+        line = HostileText("今天就到这里吧")
+        for raw in (line, {"text": line}):
+            with self.subTest(raw=type(raw).__name__):
+                state, scheduler, runtime = _rig(
+                    lines={"mizuki": lambda context, raw=raw: raw}
+                )
+                runtime.process_due(_due(scheduler))
+                self.assertNotIn(secret, json.dumps(state.to_dict(), ensure_ascii=False))
+
         for entry, prefix in (
             (tampered_reason, "生成失败:"),
             (hostile_retry, "生成失败:"),
