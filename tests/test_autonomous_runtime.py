@@ -606,6 +606,36 @@ class GenerationScopeTests(unittest.TestCase):
         for key in ("provenance", "drift_score", "correlation_id", "causation_id"):
             self.assertNotIn(key, blob)
 
+    def test_recalled_memories_name_people_not_ids(self):
+        # 生产 10-09 起台词里冒出 "minori""mizuki"：召回行把 about / by 的
+        # 角色 ID 原样拼进了提示词，模型照着念。召回来自另一份状态，这样那句
+        # 话不在本次观察窗口里，会作为记忆出现。
+        remembered, remembered_scheduler, remembered_runtime = _rig()
+        remembered_runtime.process_due(
+            _due(remembered_scheduler, "e1", character_id="ena")
+        )
+        captured = []
+
+        def spy(context):
+            captured.append(context)
+            return "在的哦"
+
+        state = _session(session_id="s2")
+        scheduler = PersistentScheduler(state)
+        policy = AuthoredLinePolicy(
+            ScriptedLineGenerator({"mizuki": spy}),
+            recall=MemoryRecall(remembered),
+            names={"ena": "绘名", "mizuki": "瑞希"},
+        )
+        runtime = AutonomousRuntime(state, policy=policy, auditor=ScriptedAuditor())
+        runtime.start()
+        runtime.process_due(_due(scheduler, "m1", character_id="mizuki"))
+        recalled = captured[-1].recalled
+        self.assertTrue(recalled)
+        self.assertTrue(any("绘名" in line for line in recalled), recalled)
+        for line in recalled:
+            self.assertNotRegex(line, r"(?<![A-Za-z])ena(?![A-Za-z])")
+
     def test_a_recent_observation_is_not_repeated_as_a_memory(self):
         self.runtime.process_due(_due(self.scheduler, "e1", character_id="ena"))
         context = self._mizuki_context()

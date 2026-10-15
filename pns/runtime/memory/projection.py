@@ -14,7 +14,7 @@
 #
 # 别人的记忆更不可能出现在这里：召回本身就只接受单个角色的记忆，这一层拿到的
 # 就已经是收窄过的结果。
-from typing import Dict, List, Mapping, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from pns.models.memory import MemoryClass, MemoryRecord
 from pns.runtime.memory.recall import RecallResult
@@ -43,11 +43,20 @@ def _age_phrase(minutes: int) -> str:
     return f"{minutes // 1440} 天前"
 
 
-def _fact_body(content: Mapping, owner_id: str) -> str:
+def _name(names: Mapping[str, str], entity_id: str) -> str:
+    """角色 ID → 显示名。提示词里不能出现 ID：模型会把它原样念出来。"""
+    return names.get(entity_id, entity_id)
+
+
+def _fact_body(content: Mapping, owner_id: str, names: Mapping[str, str]) -> str:
     """世界事实渲染成一句人话。fact 的身份形状由 memory_content 声明。"""
-    about = content.get("about") or "某人"
+    about = content.get("about")
     if about == owner_id:
         about = "我"
+    elif about:
+        about = _name(names, about)
+    else:
+        about = "某人"
     fact = content.get("fact") or ""
     value = content.get("value")
     if fact.startswith("location:"):
@@ -62,7 +71,7 @@ def _fact_body(content: Mapping, owner_id: str) -> str:
     return f"{about}：{value}"
 
 
-def _body(record: MemoryRecord) -> str:
+def _body(record: MemoryRecord, names: Mapping[str, str]) -> str:
     """一条记忆在提示词里的正文。只读内容里被显式点名的那几个键。
 
     摘要本身不带行动者（谁做的在 about / by 里），在这里拼回去。这样同一条
@@ -70,7 +79,7 @@ def _body(record: MemoryRecord) -> str:
     """
     content = record.content
     if record.memory_class is MemoryClass.SEMANTIC:
-        return _fact_body(content, record.owner_id)
+        return _fact_body(content, record.owner_id, names)
     summary = content.get("summary") or ""
     if not summary:
         return ""
@@ -85,11 +94,14 @@ def _body(record: MemoryRecord) -> str:
         # 那个 self 标记：短时痕迹不带这个标记，只看标记会让同一条经历渲染成
         # 两行（"我说了…"和"ena说了…"），而它们本来是同一件事。
         return f"我{summary}"
-    return f"{actor or '某人'} {summary}"
+    return f"{_name(names, actor) if actor else '某人'} {summary}"
 
 
 def recalled_lines(
-    result: RecallResult, *, exclude_source_event_ids=()
+    result: RecallResult,
+    *,
+    exclude_source_event_ids=(),
+    names: Optional[Mapping[str, str]] = None,
 ) -> Tuple[str, ...]:
     """召回结果渲染成提示词里的那几行，顺序就是召回顺序。
 
@@ -100,10 +112,14 @@ def recalled_lines(
 
     `exclude_source_event_ids` 只影响提示组合：同一事件仍在近期观察窗口时，
     显示完整观察，不紧接着再显示一份记忆摘要；存储和召回结果本身都不改变。
+
+    `names` 是角色 ID → 显示名。记忆内容里存的是 ID（about / by），渲染时
+    换成名字；没给或查不到时退回 ID 本身。
     """
     if not isinstance(result, RecallResult):
         raise TypeError("recalled_lines() 需要一个 RecallResult")
     excluded = frozenset(exclude_source_event_ids)
+    names = names or {}
     now = result.query.now
     order: List[str] = []
     grouped: Dict[str, Dict] = {}
@@ -111,7 +127,7 @@ def recalled_lines(
         record = scored.record
         if record.source_event_id in excluded:
             continue
-        body = _body(record)
+        body = _body(record, names)
         if not body:
             continue
         tag = _TAGS[record.memory_class]
@@ -128,10 +144,15 @@ def recalled_lines(
     )
 
 
-def prompt_block(result: RecallResult, title: str = PROMPT_TITLE) -> str:
+def prompt_block(
+    result: RecallResult,
+    title: str = PROMPT_TITLE,
+    *,
+    names: Optional[Mapping[str, str]] = None,
+) -> str:
     """提示词里那一段。没想起任何东西就返回空字符串 —— 不编一段"我什么都
     不记得"塞进去，空就是空。"""
-    lines = recalled_lines(result)
+    lines = recalled_lines(result, names=names)
     if not lines:
         return ""
     return "\n".join([title, *lines])

@@ -376,7 +376,9 @@ class AuthoredLinePolicy(AgencyPolicy):
                 observation.source_event_id for observation in context.observations
             }
             recalled = recalled_lines(
-                result, exclude_source_event_ids=observed_event_ids
+                result,
+                exclude_source_event_ids=observed_event_ids,
+                names=self._names,
             )
             truncated = result.truncated
         return build_generation_context(
