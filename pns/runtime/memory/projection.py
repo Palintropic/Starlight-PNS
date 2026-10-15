@@ -14,7 +14,7 @@
 #
 # 别人的记忆更不可能出现在这里：召回本身就只接受单个角色的记忆，这一层拿到的
 # 就已经是收窄过的结果。
-from typing import Dict, List, Mapping, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from pns.models.memory import MemoryClass, MemoryRecord
 from pns.runtime.memory.recall import RecallResult
@@ -43,17 +43,42 @@ def _age_phrase(minutes: int) -> str:
     return f"{minutes // 1440} 天前"
 
 
-def _fact_body(content: Mapping, owner_id: str) -> str:
+def _name(names: Mapping[str, str], entity_id: str) -> str:
+    """ID → 显示名。提示词里不能出现 ID：模型会把它原样念出来。
+
+    记忆内容里存的仍然是 ID —— 它要能从观察原样重新推导（P10），显示名只在
+    这里换上。查不到就退回 ID 本身：显示名是装饰，不该让一次生成失败。
+    """
+    return names.get(entity_id, entity_id)
+
+
+class _Names:
+    """渲染时用的三张显示名表：角色、地点、频道。"""
+
+    __slots__ = ("characters", "locations", "channels")
+
+    def __init__(self, characters=None, locations=None, channels=None):
+        self.characters = dict(characters or {})
+        self.locations = dict(locations or {})
+        self.channels = dict(channels or {})
+
+
+def _fact_body(content: Mapping, owner_id: str, names: _Names) -> str:
     """世界事实渲染成一句人话。fact 的身份形状由 memory_content 声明。"""
-    about = content.get("about") or "某人"
+    about = content.get("about")
     if about == owner_id:
         about = "我"
+    elif about:
+        about = _name(names.characters, about)
+    else:
+        about = "某人"
     fact = content.get("fact") or ""
     value = content.get("value")
     if fact.startswith("location:"):
-        return f"{about} 在 {value}"
+        return f"{about} 在 {_name(names.locations, value) if value else value}"
     if fact.startswith("channel:"):
         channel = fact.split(":", 2)[2] if fact.count(":") >= 2 else ""
+        channel = _name(names.channels, channel) if channel else channel
         return (
             f"{about} 在频道 {channel} 里"
             if value == "in"
@@ -62,7 +87,29 @@ def _fact_body(content: Mapping, owner_id: str) -> str:
     return f"{about}：{value}"
 
 
-def _body(record: MemoryRecord) -> str:
+# describe_observation() 里写进摘要的那几种固定句式：（前缀，where 里的键，用哪张表）。
+_PLACE_SUMMARIES = (
+    ("去了 ", "location_id", "locations"),
+    ("进入了频道 ", "channel_id", "channels"),
+    ("离开了频道 ", "channel_id", "channels"),
+)
+
+
+def _place_summary(summary: str, content: Mapping, names: _Names) -> str:
+    """把摘要里那个地点 / 频道 ID 换成显示名。
+
+    只认整句正好等于"前缀 + where 里记下的 ID"的摘要：台词摘要里的引文一个
+    字都不动，存储里的摘要也不改（它要能从观察重新推导）。
+    """
+    where = content.get("where") or {}
+    for prefix, key, table in _PLACE_SUMMARIES:
+        entity_id = where.get(key)
+        if entity_id and summary == prefix + entity_id:
+            return prefix + _name(getattr(names, table), entity_id)
+    return summary
+
+
+def _body(record: MemoryRecord, names: _Names) -> str:
     """一条记忆在提示词里的正文。只读内容里被显式点名的那几个键。
 
     摘要本身不带行动者（谁做的在 about / by 里），在这里拼回去。这样同一条
@@ -70,10 +117,11 @@ def _body(record: MemoryRecord) -> str:
     """
     content = record.content
     if record.memory_class is MemoryClass.SEMANTIC:
-        return _fact_body(content, record.owner_id)
+        return _fact_body(content, record.owner_id, names)
     summary = content.get("summary") or ""
     if not summary:
         return ""
+    summary = _place_summary(summary, content, names)
     actor = content.get("about") or content.get("by")
     mine = (
         bool(content.get("self"))
@@ -85,11 +133,16 @@ def _body(record: MemoryRecord) -> str:
         # 那个 self 标记：短时痕迹不带这个标记，只看标记会让同一条经历渲染成
         # 两行（"我说了…"和"ena说了…"），而它们本来是同一件事。
         return f"我{summary}"
-    return f"{actor or '某人'} {summary}"
+    return f"{_name(names.characters, actor) if actor else '某人'} {summary}"
 
 
 def recalled_lines(
-    result: RecallResult, *, exclude_source_event_ids=()
+    result: RecallResult,
+    *,
+    exclude_source_event_ids=(),
+    names: Optional[Mapping[str, str]] = None,
+    location_names: Optional[Mapping[str, str]] = None,
+    channel_names: Optional[Mapping[str, str]] = None,
 ) -> Tuple[str, ...]:
     """召回结果渲染成提示词里的那几行，顺序就是召回顺序。
 
@@ -100,10 +153,15 @@ def recalled_lines(
 
     `exclude_source_event_ids` 只影响提示组合：同一事件仍在近期观察窗口时，
     显示完整观察，不紧接着再显示一份记忆摘要；存储和召回结果本身都不改变。
+
+    `names` / `location_names` / `channel_names` 是角色、地点、频道的
+    ID → 显示名。记忆内容里存的是 ID，渲染时换成名字；没给或查不到时退回
+    ID 本身 —— 所以这一层**不担保**提示词里没有 ID，担保靠调用方给全名表。
     """
     if not isinstance(result, RecallResult):
         raise TypeError("recalled_lines() 需要一个 RecallResult")
     excluded = frozenset(exclude_source_event_ids)
+    tables = _Names(names, location_names, channel_names)
     now = result.query.now
     order: List[str] = []
     grouped: Dict[str, Dict] = {}
@@ -111,7 +169,7 @@ def recalled_lines(
         record = scored.record
         if record.source_event_id in excluded:
             continue
-        body = _body(record)
+        body = _body(record, tables)
         if not body:
             continue
         tag = _TAGS[record.memory_class]
@@ -128,16 +186,22 @@ def recalled_lines(
     )
 
 
-def prompt_block(result: RecallResult, title: str = PROMPT_TITLE) -> str:
+def prompt_block(
+    result: RecallResult,
+    title: str = PROMPT_TITLE,
+    **display_names: Optional[Mapping[str, str]],
+) -> str:
     """提示词里那一段。没想起任何东西就返回空字符串 —— 不编一段"我什么都
-    不记得"塞进去，空就是空。"""
-    lines = recalled_lines(result)
+    不记得"塞进去，空就是空。显示名表同 recalled_lines()。"""
+    lines = recalled_lines(result, **display_names)
     if not lines:
         return ""
     return "\n".join([title, *lines])
 
 
-def prompt_projection(result: RecallResult) -> Dict:
+def prompt_projection(
+    result: RecallResult, **display_names: Optional[Mapping[str, str]]
+) -> Dict:
     """提示投影的结构化形状，给测试和调试 UI 用。
 
     它跟 prompt_block() 渲染的是**同一批行**：投影里能看到的东西，就是提示词里
@@ -145,7 +209,7 @@ def prompt_projection(result: RecallResult) -> Dict:
     """
     return {
         "owner_id": result.query.owner_id,
-        "lines": list(recalled_lines(result)),
+        "lines": list(recalled_lines(result, **display_names)),
         "truncated": result.truncated,
     }
 

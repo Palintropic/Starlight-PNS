@@ -1546,6 +1546,20 @@ class PromptProjectionTests(unittest.TestCase):
         bodies = [line.split("：", 1)[-1] for line in lines]
         self.assertEqual(len(bodies), len(set(bodies)))
 
+    def test_other_people_read_as_their_display_names(self):
+        """记忆里存的是角色 ID，提示词里只能是名字：模型会把 ID 原样念出来。"""
+        names = {"ena": "绘名", "mizuki": "瑞希"}
+        lines = recalled_lines(self.result, names=names)
+        self.assertTrue(any("绘名 " in line for line in lines), lines)
+        for line in lines:
+            self.assertNotRegex(line, r"(?<![A-Za-z])ena(?![A-Za-z])")
+        self.assertIn("绘名 ", prompt_block(self.result, names=names))
+
+    def test_an_unknown_id_falls_back_to_the_id(self):
+        lines = recalled_lines(self.result, names={})
+        self.assertEqual(lines, recalled_lines(self.result))
+        self.assertTrue(any("ena " in line for line in lines), lines)
+
     def test_nothing_recalled_renders_nothing(self):
         empty = MemoryRecall(self.state).recall_for(
             "mizuki", classes=(MemoryClass.SEMANTIC,)

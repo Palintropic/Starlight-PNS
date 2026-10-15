@@ -412,6 +412,16 @@ def taste_contexts(store, world_id, registry, residents):
     budget = AgencyBudget()
     speech = {ActionId.SPEAK_HERE, ActionId.SEND_CHANNEL_MESSAGE}
     contexts = []
+    # 记忆里存的是 ID；召回行在这里就渲染完，生成器的名字表补不回来。
+    display = {
+        "names": {cid: registry.character_name(cid) for cid in sorted(registry.characters)},
+        "location_names": {
+            loc.location_id: loc.display for loc in registry.new_location_graph()
+        },
+        "channel_names": {
+            ch.channel_id: ch.display for ch in registry.new_channel_registry()
+        },
+    }
     for cid in residents or world.known_characters():
         due = ActivationDue(
             activation_id=f"model1-taste-{cid}",
@@ -425,7 +435,7 @@ def taste_contexts(store, world_id, registry, residents):
         )
         recalled = MemoryRecall(state).recall_for(cid)
         visible = {o.source_event_id for o in agency.observations}
-        lines = recalled_lines(recalled, exclude_source_event_ids=visible)
+        lines = recalled_lines(recalled, exclude_source_event_ids=visible, **display)
         for choice in agency.legal_actions:
             if choice.action_id not in speech:
                 continue
