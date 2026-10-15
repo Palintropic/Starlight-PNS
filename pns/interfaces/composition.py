@@ -664,6 +664,9 @@ class WorldControlPlane:
         names = {
             cid: registry.character_name(cid) for cid in sorted(registry.characters)
         }
+        # 记忆里存的是地点 / 频道 ID，召回渲染时换成同一份内容包里的显示名。
+        location_names = {loc.location_id: loc.display for loc in locations}
+        channel_names = {ch.channel_id: ch.display for ch in channels}
         generator = PromptedLineGenerator(
             call_model, locations=locations, channels=channels, names=names
         )
@@ -676,6 +679,8 @@ class WorldControlPlane:
                 generator,
                 recall=MemoryRecall(state),
                 names=names,
+                location_names=location_names,
+                channel_names=channel_names,
                 generator_model=models.generator_model,
             )
 

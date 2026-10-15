@@ -250,6 +250,8 @@ class AuthoredLinePolicy(AgencyPolicy):
         recall=None,
         chooser: Optional[Callable[[AgencyContext], Optional[LegalAction]]] = None,
         names: Optional[Mapping[str, str]] = None,
+        location_names: Optional[Mapping[str, str]] = None,
+        channel_names: Optional[Mapping[str, str]] = None,
         generator_model: str = "",
         name: Optional[str] = None,
     ):
@@ -259,13 +261,20 @@ class AuthoredLinePolicy(AgencyPolicy):
             raise AgencyPolicyError("召回服务必须提供 recall_for()")
         if chooser is not None and not callable(chooser):
             raise AgencyPolicyError("chooser 必须是可调用对象")
-        if names is not None and not isinstance(names, Mapping):
-            raise AgencyPolicyError("names 必须是字典")
+        for label, table in (
+            ("names", names),
+            ("location_names", location_names),
+            ("channel_names", channel_names),
+        ):
+            if table is not None and not isinstance(table, Mapping):
+                raise AgencyPolicyError(f"{label} 必须是字典")
         self._generator = generator
         self._generator_model = generator_model
         self._recall = recall
         self._chooser = chooser if chooser is not None else first_authored_action
         self._names = dict(names or {})
+        self._location_names = dict(location_names or {})
+        self._channel_names = dict(channel_names or {})
         if name is not None:
             if not isinstance(name, str) or not name:
                 raise AgencyPolicyError("name 必须是非空字符串")
@@ -379,6 +388,8 @@ class AuthoredLinePolicy(AgencyPolicy):
                 result,
                 exclude_source_event_ids=observed_event_ids,
                 names=self._names,
+                location_names=self._location_names,
+                channel_names=self._channel_names,
             )
             truncated = result.truncated
         return build_generation_context(
