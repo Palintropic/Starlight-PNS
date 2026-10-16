@@ -105,6 +105,10 @@ access_grants:
       role: household
     - location_id: miyamasuzaka_girls   # 宫益坂女子学园 3-B
       role: student
+    - location_id: miyamasuzaka_3b   # SCHOOL-3：教室
+      role: student
+    - location_id: miyamasuzaka_courtyard
+      role: student
   channels:
     - nightcord
 

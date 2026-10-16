@@ -793,7 +793,7 @@ def world2_execute(
     principal: RequestPrincipal = Depends(require_break_glass),
     plane: WorldControlPlane = Depends(get_control_plane),
 ):
-    """执行一笔（extension 或 admission）。同 operation_id 同请求的重试只查询或补存。"""
+    """执行一笔（extension、admission 或 grants）。同 operation_id 同请求的重试只查询或补存。"""
     with _world2_translated(plane, "world2_execute", world_id):
         return plane.world_admission(world_id, operator=principal.principal_id).execute(body)
 

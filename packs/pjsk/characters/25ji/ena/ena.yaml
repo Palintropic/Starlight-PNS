@@ -105,6 +105,10 @@ access_grants:
       role: household
     - location_id: kamiyama_high        # 神山高校夜间定时制 3-D
       role: student
+    - location_id: kamiyama_3d_evening   # SCHOOL-3：教室
+      role: student
+    - location_id: kamiyama_rooftop
+      role: student
   channels:
     - nightcord
 

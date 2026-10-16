@@ -35,7 +35,7 @@ from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint, rhy
 from pns.runtime.world2_baseline import build_baseline
 from pns.runtime.world2_seed import admission_seed
 from pns.world.extension import ExtensionError, extended_graph, graph_fingerprint
-from pns.world.grants import encode_grants, may_enter
+from pns.world.grants import encode_grants, grants_in_world, may_enter
 from pns.world.rhythm import encode_rhythm
 from pns.world.routing import plan_route
 
@@ -46,6 +46,8 @@ DURABLE = "durable"
 
 EXTENSION = "extension"
 ADMISSION = "admission"
+GRANTS = "grants"
+_KINDS = "extension、admission 或 grants"
 
 _OPERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 # 往后最多看几段找下一个可行窗口（两周的作息足够覆盖平日 / 休息日两张表）。
@@ -118,6 +120,27 @@ class AdmissionRequest:
         }
 
 
+@dataclass(frozen=True)
+class GrantsRequest:
+    """追加授予（SCHOOL-3）。要追加什么由内容快照推出来，请求只带预检时的指纹防过期。"""
+
+    operation_id: str
+    # 角色 → (追加前完整授予指纹, 追加后的)
+    fingerprints: Tuple[Tuple[str, str, str], ...]
+
+    kind = GRANTS
+
+    def canonical(self) -> Dict:
+        return {
+            "kind": GRANTS,
+            "operation_id": self.operation_id,
+            "fingerprints": {
+                cid: {"before": before, "after": after}
+                for cid, before, after in self.fingerprints
+            },
+        }
+
+
 def _text(body: Mapping, key: str) -> str:
     value = body.get(key)
     if not isinstance(value, str) or not value:
@@ -132,7 +155,7 @@ def _exact_keys(body, keys, label) -> None:
         )
 
 
-def parse_operation(body) -> "ExtensionRequest | AdmissionRequest":
+def parse_operation(body) -> "ExtensionRequest | AdmissionRequest | GrantsRequest":
     """执行请求体 → 类型化请求。字段严格，不认识的一律拒绝。"""
     if not isinstance(body, Mapping):
         raise AdmissionRejected("bad_request", "请求体必须是对象")
@@ -173,8 +196,21 @@ def parse_operation(body) -> "ExtensionRequest | AdmissionRequest":
             rhythm_fingerprint=_text(fingerprints, "rhythm"),
             grants_fingerprint=_text(fingerprints, "grants"),
         )
+    elif kind == GRANTS:
+        _exact_keys(body, {"kind", "operation_id", "fingerprints"}, "追加授予请求")
+        fingerprints = body["fingerprints"]
+        if not isinstance(fingerprints, Mapping) or not fingerprints:
+            raise AdmissionRejected("bad_request", "fingerprints 必须是非空的 角色 → 指纹")
+        rows = []
+        for cid in sorted(fingerprints):
+            if not isinstance(cid, str) or not cid:
+                raise AdmissionRejected("bad_request", "fingerprints 的键必须是角色 id")
+            pair = fingerprints[cid]
+            _exact_keys(pair, {"before", "after"}, f"fingerprints.{cid}")
+            rows.append((cid, _text(pair, "before"), _text(pair, "after")))
+        request = GrantsRequest(_operation_id(body), tuple(rows))
     else:
-        raise AdmissionRejected("bad_request", "kind 必须是 extension 或 admission")
+        raise AdmissionRejected("bad_request", f"kind 必须是 {_KINDS}")
     return request
 
 
@@ -322,7 +358,10 @@ class WorldAdmission:
         if kind == ADMISSION:
             _exact_keys(body, {"kind", "character_id", "roommates", "ordinal"}, "入住预检")
             return self._preflight_admission(body)
-        raise AdmissionRejected("bad_request", "kind 必须是 extension 或 admission")
+        if kind == GRANTS:
+            _exact_keys(body, {"kind"}, "追加授予预检")
+            return self._preflight_grants()
+        raise AdmissionRejected("bad_request", f"kind 必须是 {_KINDS}")
 
     def _preflight_extension(self) -> Dict:
         world = self._state.world_state
@@ -342,6 +381,18 @@ class WorldAdmission:
             "graph_before": graph_fingerprint(world.locations),
             "graph_after": graph_fingerprint(after),
         }
+        return report
+
+    def _preflight_grants(self) -> Dict:
+        report = {"kind": GRANTS, "feasible": False, "reasons": [], "proposal": None}
+        try:
+            additions, fingerprints = self._grants_definition(self._state)
+        except AdmissionRejected as e:
+            report["reasons"].append({"code": e.code, "message": str(e)})
+            return report
+        report["feasible"] = True
+        report["proposal"] = additions
+        report["fingerprints"] = fingerprints
         return report
 
     def _preflight_admission(self, body: Mapping) -> Dict:
@@ -461,7 +512,7 @@ class WorldAdmission:
         payload = event.payload
         return {
             "operation_id": payload["operation_id"],
-            "kind": EXTENSION if event.type is EventType.WORLD_LOCATIONS_EXTENDED else ADMISSION,
+            "kind": _KIND_OF[event.type],
             "found": True,
             "outcome": self._tier(sequence),
             "event_id": event.event_id,
@@ -505,6 +556,19 @@ class WorldAdmission:
                 "baseline": baseline,
             }
             kind = EventType.WORLD_LOCATIONS_EXTENDED
+        elif request.kind == GRANTS:
+            additions, fingerprints = self._grants_definition(state)
+            if fingerprints != request.canonical()["fingerprints"]:
+                raise AdmissionRejected(
+                    "stale_preflight", "居民授予或内容快照与预检时不同，重新预检"
+                )
+            payload = {
+                "operation_id": request.operation_id,
+                "envelope": envelope,
+                "grants": additions,
+                "fingerprints": fingerprints,
+            }
+            kind = EventType.WORLD_GRANTS_EXTENDED
         else:
             rhythm, grants = self._newcomer_content(request.character_id)
             segment = self._check_admission(state, request, rhythm, grants)
@@ -596,6 +660,50 @@ class WorldAdmission:
                 raise AdmissionRejected("unknown_occupancy", f"居民 '{resident}' 的位置未知")
         return segment
 
+    def _grants_definition(self, state: SessionState):
+        """内容快照里比世界多出来的地点授予：角色 → [[地点, 身份]]，以及每人前后指纹。
+
+        只认"追加"：世界里已有、内容里却没有或换了身份的授予，频道不一致，都按冲突
+        拒绝 —— 这条操作不删、不改，那种差异得另想办法，不能借它悄悄抹平。
+        """
+        world = state.world_state
+        content = self._content
+        additions: Dict[str, List[List[str]]] = {}
+        fingerprints: Dict[str, Dict[str, str]] = {}
+        for cid in sorted(state.characters):
+            wanted = content.grants(cid) if content.has_character(cid) else None
+            if wanted is None:
+                continue
+            have = grants_in_world(world, cid)
+            have_roles, wanted_roles = have.location_roles(), wanted.location_roles()
+            changed = sorted(
+                lid for lid, role in have_roles.items() if wanted_roles.get(lid) != role
+            )
+            if changed or have.channels != wanted.channels:
+                raise AdmissionRejected(
+                    "grants_conflict",
+                    f"'{cid}' 的世界授予与内容不只差追加"
+                    + (f"（{'、'.join(changed)}）" if changed else "（频道不同）"),
+                )
+            extra = sorted(
+                [lid, role] for lid, role in wanted_roles.items() if lid not in have_roles
+            )
+            if not extra:
+                continue
+            missing = [lid for lid, _ in extra if not world.locations.has(lid)]
+            if missing:
+                raise AdmissionRejected(
+                    "no_location", f"'{cid}' 要的地点这个世界还没有：{'、'.join(missing)}（先做地点扩展）"
+                )
+            additions[cid] = extra
+            fingerprints[cid] = {
+                "before": grants_fingerprint(have),
+                "after": grants_fingerprint(wanted),
+            }
+        if not additions:
+            raise AdmissionRejected("nothing_to_grant", "内容里没有比世界多出来的居民授予")
+        return additions, fingerprints
+
     def _extension_definition(self, graph):
         """冷图里比世界图多出来的节点，以及旧节点末尾追加的、连向它们的连接。"""
         cold = self._content.new_location_graph()
@@ -625,6 +733,13 @@ class WorldAdmission:
         return locations, appended, after
 
 
+_KIND_OF = {
+    EventType.WORLD_LOCATIONS_EXTENDED: EXTENSION,
+    EventType.WORLD_RESIDENT_ADMITTED: ADMISSION,
+    EventType.WORLD_GRANTS_EXTENDED: GRANTS,
+}
+
+
 def find_first_authority(state: SessionState) -> Optional[Event]:
     for event in state.events.events():
         if event.type in AUTHORITY_EVENT_TYPES:
@@ -637,6 +752,7 @@ __all__ = [
     "COMMITTED",
     "DURABLE",
     "EXTENSION",
+    "GRANTS",
     "REJECTED",
     "VISIBLE_NOT_DURABLE",
     "AdmissionRejected",

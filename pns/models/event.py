@@ -56,9 +56,11 @@ class EventType(str, Enum):
     WORLD_TIME_ADVANCED = "world.time_advanced"
     CHARACTER_LOCATION_CHANGED = "character.location_changed"
     CHARACTER_ACTIVITY_CHANGED = "character.activity_changed"
-    # WORLD-2：只能由世界的维护入口提交的两种权威操作。见 AUTHORITY_EVENT_TYPES。
+    # WORLD-2：只能由世界的维护入口提交的三种权威操作。见 AUTHORITY_EVENT_TYPES。
     WORLD_LOCATIONS_EXTENDED = "world.locations_extended"
     WORLD_RESIDENT_ADMITTED = "world.resident_admitted"
+    # SCHOOL-3：给已有居民追加地点授予（只增不改）。
+    WORLD_GRANTS_EXTENDED = "world.grants_extended"
 
 
 # 权威操作（WORLD-2）：世界开始以更高分辨率跟踪地点或居民。它们不是世界里发生的事，
@@ -66,7 +68,11 @@ class EventType(str, Enum):
 # actor 为空或 payload 不渲染（设计 D6）。只有维护入口能提交它们，Agency 与模型
 # 输出走的公共提交入口一律拒绝。
 AUTHORITY_EVENT_TYPES = frozenset(
-    {EventType.WORLD_LOCATIONS_EXTENDED, EventType.WORLD_RESIDENT_ADMITTED}
+    {
+        EventType.WORLD_LOCATIONS_EXTENDED,
+        EventType.WORLD_RESIDENT_ADMITTED,
+        EventType.WORLD_GRANTS_EXTENDED,
+    }
 )
 
 # character.location_changed 的 payload 里唯一允许的键：这一跳出发时 actor 所在
@@ -101,6 +107,21 @@ _ADMISSION_PAYLOAD_KEYS = frozenset(
         "seed",
     }
 )
+_GRANTS_EXTENSION_PAYLOAD_KEYS = frozenset(
+    {
+        "operation_id",
+        "envelope",
+        # 角色 → 要追加的 [[location_id, role], ...]
+        "grants",
+        # 角色 → {"before": 追加前完整授予的指纹, "after": 追加后的}
+        "fingerprints",
+    }
+)
+_AUTHORITY_PAYLOAD_KEYS = {
+    EventType.WORLD_LOCATIONS_EXTENDED: _EXTENSION_PAYLOAD_KEYS,
+    EventType.WORLD_RESIDENT_ADMITTED: _ADMISSION_PAYLOAD_KEYS,
+    EventType.WORLD_GRANTS_EXTENDED: _GRANTS_EXTENSION_PAYLOAD_KEYS,
+}
 
 
 # payload/provenance 只允许放 JSON 安全的值。这不是洁癖：任何别的对象都可能
@@ -294,11 +315,7 @@ class Event:
             raise EventError(f"{name} 的顶层 location_id / channel_id 必须为空")
         if self.scope is not EventScope.PUBLIC:
             raise EventError(f"{name} 的 scope 必须是 public（不可感知由类型决定）")
-        keys = (
-            _EXTENSION_PAYLOAD_KEYS
-            if self.type is EventType.WORLD_LOCATIONS_EXTENDED
-            else _ADMISSION_PAYLOAD_KEYS
-        )
+        keys = _AUTHORITY_PAYLOAD_KEYS[self.type]
         if set(self.payload) != keys:
             raise EventError(
                 f"{name} 的 payload 键必须正好是 {'、'.join(sorted(keys))}，"

@@ -348,13 +348,15 @@ class PackGrantTests(unittest.TestCase):
             dict(kanade.locations),
             {"kanade_home": "household", "kanade_home_room": "household"},
         )
-        # 真冬暂住宵崎家，与奏同属 household；学校只给她。
+        # 真冬暂住宵崎家，与奏同属 household；学校只给她（SCHOOL-3：3-B 教室与中庭）。
         self.assertEqual(
             dict(mafuyu.locations),
             {
                 "kanade_home": "household",
                 "kanade_home_room": "household",
                 "miyamasuzaka_girls": "student",
+                "miyamasuzaka_3b": "student",
+                "miyamasuzaka_courtyard": "student",
             },
         )
         self.assertEqual(kanade.channels, frozenset({"nightcord"}))
@@ -368,6 +370,8 @@ class PackGrantTests(unittest.TestCase):
             {
                 "clothing_store_floor": "staff",
                 "kamiyama_high": "student",
+                "kamiyama_2b": "student",
+                "kamiyama_rooftop": "student",
                 "mizuki_home": "household",
                 "mizuki_home_room": "household",
             },
@@ -378,6 +382,8 @@ class PackGrantTests(unittest.TestCase):
                 "ena_home": "household",
                 "ena_home_studio": "household",
                 "kamiyama_high": "student",
+                "kamiyama_3d_evening": "student",
+                "kamiyama_rooftop": "student",
             },
         )
         self.assertEqual(mizuki.channels, frozenset({"nightcord"}))
