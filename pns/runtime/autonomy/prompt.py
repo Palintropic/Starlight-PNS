@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 from pns.models.action import ActionId
+from pns.models.observation import DEPARTED_PERCEIVED_TYPE
 from pns.runtime.autonomy.context import DIALOGUE_OUTPUT_RULES, GenerationContext
 from pns.runtime.autonomy.generation import (
     GenerationError, LineGenerator, _FailureReason, _LocalGenerationError,
@@ -266,6 +267,18 @@ def render_situation(
     # 刻意不说"谁也听不见"：同处一地之外还有 audible_from 那条通道，那一句
     # 由这份上下文担保不了；也不说"你不是在回他们"，那是替角色判断意图。
     # "身边没人、频道里的人不在这里、这句话不进频道"三件事都是世界事实。
+    if context.recent_departures:
+        # 生产上见过（10-12 食堂）：两人走了，留下的人对着空座位说了二十分钟。
+        # 只说"刚才离开了"，不说去了哪 —— 离场观察里本来就没有去向；也不断言
+        # "听不到"（可闻范围这份上下文担保不了），只说别当成还能听见。
+        parts.append(
+            "【刚才离开了这里的】"
+            + "、".join(
+                f"{visible_names((actor,))}（{_ago(at, context.now)}）"
+                for actor, at in context.recent_departures
+            )
+            + "。他们现在不在你身边，别当成对方还能听见你。"
+        )
     if context.action_id is ActionId.SPEAK_HERE and not context.co_located_characters:
         parts.append(
             "【此刻你身边】没有别人。刚才跟你在线上频道里聊天的人也不在这里，"
@@ -298,7 +311,13 @@ def render_situation(
         )
 
     observed = _tail(
-        [o for o in context.observations if o.render_line() is not None], max_observed
+        [
+            o
+            for o in context.observations
+            if o.render_line() is not None
+            or o.perceived.get("type") == DEPARTED_PERCEIVED_TYPE
+        ],
+        max_observed,
     )
     if observed:
         parts.append(
@@ -382,6 +401,9 @@ def _observed_line(
         actor = perceived.get("actor_id")
         speaker = perceived.get("char_name") or (names or {}).get(actor, actor)
     tag = f"[{when} · {where}]" if where else f"[{when}]"
+    if perceived.get("type") == DEPARTED_PERCEIVED_TYPE:
+        # 离场不是一句话：只说谁离开了，锚点是出发地，没有去向。
+        return f"{tag} {speaker or '有人'}离开了"
     return f"{tag} {speaker}：{perceived['text']}" if speaker else f"{tag} {perceived['text']}"
 
 

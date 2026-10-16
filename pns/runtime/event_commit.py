@@ -15,7 +15,13 @@
 from typing import Dict, Optional, Tuple
 
 from pns.models.channel import ChannelKind
-from pns.models.event import AUTHORITY_EVENT_TYPES, Event, EventScope, EventType
+from pns.models.event import (
+    AUTHORITY_EVENT_TYPES,
+    MOVE_ORIGIN_KEY,
+    Event,
+    EventScope,
+    EventType,
+)
 from pns.models.event_store import EventStore
 from pns.models.location import access_admits
 from pns.models.observation import Observation
@@ -110,6 +116,17 @@ def validate_against_world(world: WorldState, event: Event) -> None:
     ):
         raise EventCommitError(
             f"角色 '{event.actor_id}' 已经位于 '{event.location_id}'"
+        )
+    if (
+        event.type is EventType.CHARACTER_LOCATION_CHANGED
+        and MOVE_ORIGIN_KEY in event.payload
+        and event.payload[MOVE_ORIGIN_KEY] != world.location_of(event.actor_id)
+    ):
+        # 出发地决定谁感知得到"ta 离开了"，写错就是把离开告诉一屋子不相干的人。
+        raise EventCommitError(
+            f"事件 '{event.event_id}' 声明的出发地 "
+            f"{event.payload[MOVE_ORIGIN_KEY]!r} 不是角色 '{event.actor_id}' 现在所在的 "
+            f"{world.location_of(event.actor_id)!r}"
         )
     if event.type in _SPEECH_TYPES:
         _require_complete_occupancy(world, event)
@@ -403,9 +420,10 @@ def _commit_event(world: WorldState, store: EventStore, event: Event) -> Dict:
 #   2. 判定结果和事件同生共死 —— 提交失败时观察不能留下。
 #
 # 判定跑在**状态效果应用之后**：事件被接受之后的世界才是它发生的那个世界。
-# 于是"某人进了房间"这件事由房间里现在的人感知到。反过来，"某人离开了"
-# 目前只有一条事件、一个落点，原地的人感知不到离开 —— 那需要一条独立的
-# 离开事件，属于后续阶段，不在这里偷偷补。
+# 于是"某人进了房间"这件事由房间里现在的人感知到。"某人离开了"靠同一条
+# 事件 payload 里的出发地：一条移动只挪 actor 一个人，提交后出发地剩下的
+# 就是当时的同处者，判定照样只看提交后的世界（FIX-46，见 exposure/rules.py）。
+# 没有出发地的旧事件，原地的人仍然感知不到离开。
 def _record_exposure(state: SessionState, event: Event) -> Tuple[Observation, ...]:
     decisions = evaluate_event_exposure(state.world_state, event)
     observations = observations_for(event, decisions)

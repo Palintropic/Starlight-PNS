@@ -16,7 +16,7 @@
 # 就已经是收窄过的结果。
 from typing import Dict, List, Mapping, Optional, Tuple
 
-from pns.models.memory import MemoryClass, MemoryRecord
+from pns.models.memory import FACT_STANCE_AWAY, MemoryClass, MemoryRecord
 from pns.runtime.memory.recall import RecallResult
 
 PROMPT_TITLE = "【想起来的事】"
@@ -75,7 +75,10 @@ def _fact_body(content: Mapping, owner_id: str, names: _Names) -> str:
     fact = content.get("fact") or ""
     value = content.get("value")
     if fact.startswith("location:"):
-        return f"{about} 在 {_name(names.locations, value) if value else value}"
+        place = _name(names.locations, value) if value else value
+        if content.get("stance") == FACT_STANCE_AWAY:
+            return f"{about} 不在 {place} 了"
+        return f"{about} 在 {place}"
     if fact.startswith("channel:"):
         channel = fact.split(":", 2)[2] if fact.count(":") >= 2 else ""
         channel = _name(names.channels, channel) if channel else channel
@@ -90,6 +93,7 @@ def _fact_body(content: Mapping, owner_id: str, names: _Names) -> str:
 # describe_observation() 里写进摘要的那几种固定句式：（前缀，where 里的键，用哪张表）。
 _PLACE_SUMMARIES = (
     ("去了 ", "location_id", "locations"),
+    ("离开了 ", "location_id", "locations"),
     ("进入了频道 ", "channel_id", "channels"),
     ("离开了频道 ", "channel_id", "channels"),
 )

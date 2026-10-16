@@ -69,6 +69,10 @@ AUTHORITY_EVENT_TYPES = frozenset(
     {EventType.WORLD_LOCATIONS_EXTENDED, EventType.WORLD_RESIDENT_ADMITTED}
 )
 
+# character.location_changed 的 payload 里唯一允许的键：这一跳出发时 actor 所在
+# 的地点。由世界派生（作息的逐跳位置、Agency 提交前的位置），从不来自模型提案。
+MOVE_ORIGIN_KEY = "from_location_id"
+
 _EXTENSION_PAYLOAD_KEYS = frozenset(
     {
         "operation_id",
@@ -243,6 +247,23 @@ class Event:
             self._require_actor()
             if self.location_id is None:
                 raise EventError("character.location_changed 必须有目标 location_id")
+            # 出发地是可选的：FIX-46 之前的历史里没有它，重放必须照样成立。
+            # 有它的时候，原地的人才能感知到"ta 离开了"（见 exposure/rules.py）。
+            extra = set(self.payload) - {MOVE_ORIGIN_KEY}
+            if extra:
+                raise EventError(
+                    "character.location_changed 的 payload 只能包含 "
+                    f"{MOVE_ORIGIN_KEY}，多了 {sorted(extra)}"
+                )
+            if MOVE_ORIGIN_KEY in self.payload:
+                origin = self.payload[MOVE_ORIGIN_KEY]
+                if not isinstance(origin, str) or not origin:
+                    raise EventError(
+                        f"character.location_changed 的 payload.{MOVE_ORIGIN_KEY} "
+                        "必须是非空字符串"
+                    )
+                if origin == self.location_id:
+                    raise EventError("character.location_changed 的出发地不能等于目的地")
         elif self.type is EventType.CHARACTER_ACTIVITY_CHANGED:
             self._require_actor()
             if self.scope is not EventScope.PRIVATE:

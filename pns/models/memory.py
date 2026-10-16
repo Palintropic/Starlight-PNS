@@ -23,7 +23,7 @@ from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 from pns.models.exposure import ExposureReason
 from pns.models.frozen import freeze_json_value, thaw_json_value
-from pns.models.observation import Observation
+from pns.models.observation import DEPARTED_PERCEIVED_TYPE, Observation
 
 # 记忆存档的格式版本。形状或派生规则一旦变化就必须进位，并在
 # docs/ARCHITECTURE.md 的迁移说明里写清楚旧存档怎么处理 —— 恢复时会核对
@@ -207,21 +207,26 @@ def describe_observation(observation: Observation) -> str:
         return f"离开了频道 {channel}" if channel else "下线了"
     if kind == "character.location_changed":
         return f"去了 {location}" if location else "换了地方"
+    if kind == DEPARTED_PERCEIVED_TYPE:
+        return f"离开了 {location}" if location else "离开了"
     return "那边有点动静"
 
 
 def world_fact(observation: Observation) -> Optional[Tuple[str, str]]:
     """这条观察里可以当成世界事实存下来的 (fact, value)；没有就返回 None。
 
-    事实的身份里带着它所描述的对象，值是当下的取值。同一个事实被重新观察到
-    同一个值不再产生新记忆（幂等），值变了才产生新的一条。
+    事实的身份里带着它所描述的对象，值是当下的取值。已经由一条不更旧的同值
+    记忆记下的不再产生新记忆；值变了、或者同值但来源更新，才产生新的一条
+    （fact_already_known）。同一事实只有最新那条算现在知道的（current_fact_ids）。
     """
     perceived = observation.perceived
     kind = perceived.get("type")
     actor = perceived.get("actor_id")
     if not actor:
         return None
-    if kind == "character.location_changed":
+    if kind in ("character.location_changed", DEPARTED_PERCEIVED_TYPE):
+        # 离场跟到场是同一个事实（ta 在哪）的两种读数：到场说"在这里"，离场说
+        # "不在这里了"（fact_stance）。同一个事实键，较新的那条盖过较旧的。
         location = perceived.get("location_id")
         return (f"location:{actor}", location) if location else None
     if kind in ("presence.joined_channel", "presence.left_channel"):
@@ -277,7 +282,11 @@ def memory_content(memory_class, observation: Observation) -> Dict:
         fact = world_fact(observation)
         if fact is None:
             raise MemoryError("这条观察里没有可以存成世界事实的东西")
-        return {"kind": "world_fact", "about": actor, "fact": fact[0], "value": fact[1]}
+        content = {"kind": "world_fact", "about": actor, "fact": fact[0], "value": fact[1]}
+        stance = fact_stance(observation)
+        if stance is not None:
+            content["stance"] = stance
+        return content
     if memory_class is MemoryClass.IDENTITY:
         return {
             "kind": "self_relevant",
@@ -317,6 +326,79 @@ COMMITMENT_MARKERS = (
 )
 
 # 情节记忆的门槛。低于它的观察只留短时痕迹 —— 听见路人说了句话，两小时后
+# 世界事实的另一种读数："不在 value 那里了"。不写 stance 的事实就是"在"。
+FACT_STANCE_AWAY = "away"
+
+
+def fact_stance(observation: Observation) -> Optional[str]:
+    """这条观察的世界事实是哪种读数；只有离场是"不在"。"""
+    if observation.perceived.get("type") == DEPARTED_PERCEIVED_TYPE:
+        return FACT_STANCE_AWAY
+    return None
+
+
+def fact_reading(record: "MemoryRecord") -> Optional[Tuple[str, object, Optional[str]]]:
+    """一条世界事实记忆的 (事实键, 取值, 读数)；不是世界事实就是 None。"""
+    content = record.content
+    if record.memory_class is not MemoryClass.SEMANTIC or content.get("kind") != "world_fact":
+        return None
+    return content.get("fact"), content.get("value"), content.get("stance")
+
+
+def _source_position(record: "MemoryRecord", source_order) -> int:
+    try:
+        return source_order(record.owner_id, record.source_event_id)
+    except (KeyError, ValueError) as e:
+        # 记忆指着一条观察日志里没有的观察：存档不一致，不是"当成最旧"。
+        raise MemoryError(
+            f"记忆 '{record.memory_id}' 的来源观察不在观察日志里: {e}"
+        ) from None
+
+
+def current_fact_ids(records: Iterable["MemoryRecord"], source_order) -> Dict:
+    """每个 (拥有者, 事实键) 此刻当真的那一条世界事实记忆的 ID。
+
+    "最新"= 来源观察在观察日志里的位置最大（source_order 就是
+    ObservationLog.position_of(观察者, 事件)）。日志按提交顺序追加、恢复时核对过，
+    所以这就是世界顺序，而且是这个角色自己经历的顺序 —— 召回层不碰世界历史。
+    不看记忆列表位置，也不看时间戳：延迟或逆序编码、存档里交换同刻记录，都会
+    让列表顺序跟世界顺序对不上，同一时刻多跳时间戳又分不出先后（FIX-46）。
+    编码去重、遗忘、召回三处都只经这里判先后。
+    """
+    best: Dict = {}
+    for record in records:
+        reading = fact_reading(record)
+        if reading is None:
+            continue
+        key = (record.owner_id, reading[0])
+        position = _source_position(record, source_order)
+        if key not in best or position > best[key][0]:
+            best[key] = (position, record.memory_id)
+    return {key: memory_id for key, (position, memory_id) in best.items()}
+
+
+def fact_already_known(
+    records: Iterable["MemoryRecord"], observation: Observation, source_order
+) -> bool:
+    """这条观察的世界事实是否已经被一条**不更旧**的同值记忆记下了。
+
+    只有已存的同 (事实键, 取值, 读数) 记录里有来源序号 ≥ 这条观察的，才算
+    已知。来源更新时即使取值相同也要再记一条：否则 A→B→A 按 A₁→A₂→B 的顺序
+    编码，A₂ 被当成重复跳过，之后最新的证据就只剩 B 了（ena 的 FIX-46 复核）。
+    """
+    fact = world_fact(observation)
+    if fact is None:
+        return False
+    wanted = (fact[0], fact[1], fact_stance(observation))
+    incoming = source_order(observation.observer_id, observation.source_event_id)
+    for record in records:
+        if record.owner_id != observation.observer_id or fact_reading(record) != wanted:
+            continue
+        if _source_position(record, source_order) >= incoming:
+            return True
+    return False
+
+
 # 想不起来是正常的。
 EPISODIC_THRESHOLD = 20
 
@@ -329,6 +411,7 @@ ENCODABLE_TYPES = (
     "presence.joined_channel",
     "presence.left_channel",
     "character.location_changed",
+    DEPARTED_PERCEIVED_TYPE,
 )
 
 

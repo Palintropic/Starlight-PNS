@@ -19,9 +19,20 @@
 # 就会把事件泄给一个已经不在场的角色。所以只有 private / participant 这两档
 # （participants 在语义上就是"被点名的人"）才认这个字段；channel / location /
 # public 一律回世界状态现算。
+#
+# 唯一一处有两个锚点的事件：location 档的 character.location_changed 可以在
+# payload 里带出发地（FIX-46）。目的地的人感知到"ta 来了"，出发地的人感知到
+# "ta 走了"（DEPARTED_FROM），到场优先。两头各自投影成只含自己那个锚点的观察，
+# 出发地那一头永远拿不到目的地。别的事件类型、别的 scope 都没有第二个锚点。
 from typing import Optional, Tuple
 
-from pns.models.event import AUTHORITY_EVENT_TYPES, Event, EventScope
+from pns.models.event import (
+    AUTHORITY_EVENT_TYPES,
+    MOVE_ORIGIN_KEY,
+    Event,
+    EventScope,
+    EventType,
+)
 from pns.models.exposure import ExposureDecision, ExposureReason
 from pns.models.world_state import Availability, WorldState
 
@@ -63,6 +74,29 @@ def _location_reason(
     if where is not None and where in _audible_from(world, event_location_id):
         return ExposureReason.AUDIBLE_FROM, detail
     return ExposureReason.WRONG_LOCATION, detail
+
+
+def _departure_reason(
+    world: WorldState, event: Event, character_id: str
+) -> Optional[Tuple[ExposureReason, dict]]:
+    """移动事件在出发地那一头的判定：看见 ta 走了，不知道 ta 去哪。
+
+    只有 location 档、带出发地的移动才有这一头（FIX-46）。判定仍只看提交后的
+    世界：一条移动只挪 actor 一个人，出发地此刻的在场者就是 ta 离开时的同处者。
+    到场优先 —— 调用方只在目的地那一头判为 WRONG_LOCATION 之后才问这里。
+    """
+    if event.type is not EventType.CHARACTER_LOCATION_CHANGED:
+        return None
+    origin = event.payload.get(MOVE_ORIGIN_KEY)
+    if origin is None:
+        return None
+    reason, detail = _location_reason(world, origin, character_id)
+    if reason not in (ExposureReason.SAME_LOCATION, ExposureReason.AUDIBLE_FROM):
+        return None
+    return ExposureReason.DEPARTED_FROM, {
+        "origin_location_id": origin,
+        "character_location_id": detail["character_location_id"],
+    }
 
 
 def _decide(world: WorldState, event: Event, character_id: str):
@@ -112,6 +146,10 @@ def _decide(world: WorldState, event: Event, character_id: str):
 
     if scope is EventScope.LOCATION:
         reason, detail = _location_reason(world, event.location_id, character_id)
+        if reason is ExposureReason.WRONG_LOCATION:
+            departed = _departure_reason(world, event, character_id)
+            if departed is not None:
+                return departed[0], {**base, **departed[1]}
         return reason, {**base, **detail}
 
     # public / ambient：公开只意味着**有可能**被看到，不等于自动知道。

@@ -14,12 +14,13 @@
 # 有一条 AST 测试盯着这个模块不出现 `.exposures` / `.events` 属性访问 ——
 # 不是"现在没有"，是"以后也不许有"。
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Mapping, Dict, Optional, Sequence, Tuple
 
 from pns.models.action import LegalAction
 from pns.models.activation import ActivationDue
-from pns.models.observation import Observation
+from pns.models.event import EventType
+from pns.models.observation import DEPARTED_PERCEIVED_TYPE, Observation
 from pns.models.world_state import WorldState
 from pns.runtime.agency.preconditions import legal_actions
 
@@ -56,6 +57,10 @@ class AgencyContext:
     legal_actions_truncated: bool = False
     observations_truncated: bool = False
     arrangement_cues: Tuple[Mapping, ...] = ()
+    # 最近一小时里从这个角色此刻所在地点离开、之后没再见到、此刻也不在身边
+    # 的人：(角色 ID, 看见 ta 走的时刻)。在观察被裁剪**之前**从完整的自己的
+    # 观察里派生，所以离场那条观察被数量预算挤掉了也还点得出名（FIX-46）。
+    recent_departures: Tuple[Tuple[str, datetime], ...] = ()
 
     def has_legal(self, action_id, target_id: Optional[str] = None) -> bool:
         candidate = LegalAction(action_id=action_id, target_id=target_id)
@@ -92,6 +97,10 @@ class AgencyContext:
             "legal_actions": [legal.to_dict() for legal in self.legal_actions],
             "legal_actions_truncated": self.legal_actions_truncated,
             "observations_truncated": self.observations_truncated,
+            "recent_departures": [
+                {"actor_id": actor, "at": at.isoformat()}
+                for actor, at in self.recent_departures
+            ],
         }
 
 
@@ -110,6 +119,54 @@ def _channel_characters(world: WorldState, character_id: str) -> Tuple[str, ...]
         found.update(world.channel_participants(channel_id))
     found.discard(character_id)
     return tuple(sorted(found))
+
+
+# 离场线索只回看这么久。更早的离场不能凭"裁剪前还在"进线索。
+RECENT_DEPARTURE_WINDOW = timedelta(hours=1)
+
+
+def recent_departures(
+    observations: Sequence[Observation],
+    *,
+    character_id: str,
+    location_id: Optional[str],
+    co_located: Sequence[str],
+    now: datetime,
+) -> Tuple[Tuple[str, datetime], ...]:
+    """从这个角色**自己的**完整观察里，派生"刚才从这里离开的人"。
+
+    按观察顺序（就是提交顺序）走一遍，记下每个别人最后一条到场 / 离场观察；
+    只留最后一条是离场、离开的就是此刻这个地点、发生在最近一小时内、此刻
+    又不在身边的人。只含 ID 与时刻，不含去向 —— 离场观察里本来就没有去向。
+    """
+    if location_id is None:
+        return ()
+    last = {}
+    for observation in observations:
+        if observation.observer_id != character_id:
+            raise AgencyContextError(
+                f"观察 '{observation.source_event_id}' 属于 "
+                f"'{observation.observer_id}'，不能进 '{character_id}' 的离场线索"
+            )
+        perceived = observation.perceived
+        kind = perceived.get("type")
+        actor = perceived.get("actor_id")
+        if not actor or actor == character_id:
+            continue
+        if kind in (DEPARTED_PERCEIVED_TYPE, EventType.CHARACTER_LOCATION_CHANGED.value):
+            last[actor] = (kind, perceived.get("location_id"), observation.observed_at)
+    present = set(co_located)
+    found = []
+    for actor in sorted(last):
+        kind, where, at = last[actor]
+        if (
+            kind == DEPARTED_PERCEIVED_TYPE
+            and where == location_id
+            and now - RECENT_DEPARTURE_WINDOW <= at <= now
+            and actor not in present
+        ):
+            found.append((actor, at))
+    return tuple(found)
 
 
 def build_agency_context(
@@ -151,6 +208,17 @@ def build_agency_context(
             )
         own.append(observation)
 
+    location_id = world.location_of(character_id)
+    co_located = _co_located_characters(world, character_id)
+    # 裁剪之前：离场线索看的是完整的自己的观察。
+    departures = recent_departures(
+        own,
+        character_id=character_id,
+        location_id=location_id,
+        co_located=co_located,
+        now=world.clock,
+    )
+
     observations_truncated = False
     if max_observations is not None and len(own) > max_observations:
         # 保留最新的那些：越近的感知越可能与"现在要不要动"有关。
@@ -159,7 +227,6 @@ def build_agency_context(
 
     legal, truncated = legal_actions(world, character_id, limit=max_legal_actions)
 
-    co_located = _co_located_characters(world, character_id)
     co_located_ids = set(co_located)
     channel = tuple(
         cid
@@ -183,7 +250,14 @@ def build_agency_context(
         legal_actions=legal,
         legal_actions_truncated=truncated,
         observations_truncated=observations_truncated,
+        recent_departures=departures,
     )
 
 
-__all__ = ["AgencyContext", "AgencyContextError", "build_agency_context"]
+__all__ = [
+    "AgencyContext",
+    "AgencyContextError",
+    "RECENT_DEPARTURE_WINDOW",
+    "build_agency_context",
+    "recent_departures",
+]

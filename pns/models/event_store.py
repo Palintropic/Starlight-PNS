@@ -7,7 +7,7 @@
 # 排序策略是显式的：事件的模拟时间不允许倒退，时间相同的事件按追加顺序排列。
 # 因此追加顺序本身就是确定的世界历史顺序，不需要事后再排序。
 from datetime import datetime
-from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from pns.models.event import Event
 
@@ -24,7 +24,9 @@ class EventStore:
 
     def __init__(self, events: Iterable[Event] = ()):
         self._events: List[Event] = []
-        self._ids: Set[str] = set()
+        # event_id → 序号。记忆层按来源事件的序号判事实先后（FIX-46），每次召回
+        # 都要问，线性扫描会让成本随世界寿命一起涨。
+        self._ids: Dict[str, int] = {}
         for event in events:
             self._append(event)
 
@@ -46,7 +48,7 @@ class EventStore:
         """提交边界内部追加一条已验证事件，返回它的序号。"""
         self._check_can_append(event)
         self._events.append(event)
-        self._ids.add(event.event_id)
+        self._ids[event.event_id] = len(self._events) - 1
         return len(self._events) - 1
 
     def _rollback_to(self, length: int) -> None:
@@ -60,7 +62,7 @@ class EventStore:
         if length < 0 or length > len(self._events):
             raise EventStoreError(f"回滚长度越界: {length}")
         for event in self._events[length:]:
-            self._ids.discard(event.event_id)
+            self._ids.pop(event.event_id, None)
         del self._events[length:]
 
     # ── 读取 ────────────────────────────────────────────────────────────
@@ -84,10 +86,10 @@ class EventStore:
         raise EventStoreError(f"未知的 event_id: {event_id}")
 
     def sequence_of(self, event_id: str) -> int:
-        for index, event in enumerate(self._events):
-            if event.event_id == event_id:
-                return index
-        raise EventStoreError(f"未知的 event_id: {event_id}")
+        try:
+            return self._ids[event_id]
+        except (KeyError, TypeError):
+            raise EventStoreError(f"未知的 event_id: {event_id}") from None
 
     def latest(self) -> Optional[Event]:
         return self._events[-1] if self._events else None

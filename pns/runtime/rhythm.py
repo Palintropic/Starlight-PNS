@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
-from pns.models.event import Event, EventScope, EventType
+from pns.models.event import MOVE_ORIGIN_KEY, Event, EventScope, EventType
 from pns.models.event_store import EventStore
 from pns.models.world_state import ActivityKind, WorldState
 from pns.runtime.event_commit import RHYTHM_PROVENANCE_KIND
@@ -344,6 +344,9 @@ class RhythmDirector:
                         scope=EventScope.LOCATION,
                         actor_id=character_id,
                         location_id=leg.to_id,
+                        # 出发地取逐跳推进的 location，不读世界：同一次规划里零分钟
+                        # 连接会连走多跳，规划时世界还停在第一跳之前。
+                        payload={MOVE_ORIGIN_KEY: location},
                         provenance=provenance(hops + index),
                         correlation_id=correlation_id,
                     )
