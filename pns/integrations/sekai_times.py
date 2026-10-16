@@ -14,6 +14,10 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pns.models.authored import GenerationAudit
 
+# Sent on every request. Cloudflare in front of the site rejects urllib's default
+# agent (error 1010); this one names the client honestly and does not pose as a browser.
+USER_AGENT = "StarlightPNS/1.0 (+https://25nightcord.com; Sekai Times outbound)"
+
 CHARACTERS = {
     "kanade": ("kanade", "宵崎奏"),
     "mafuyu": ("mafuyu", "朝比奈まふゆ"),
@@ -141,6 +145,7 @@ class WordPressPendingPosts:
                 "Authorization": self._authorization,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
             },
         )
         try:
