@@ -14,6 +14,7 @@ from pns.integrations.sekai_times import (
     DeliveryUncertain,
     PendingPost,
     PendingPostOutbox,
+    USER_AGENT,
     SubmissionError,
     WordPressPendingPosts,
 )
@@ -142,6 +143,18 @@ class SekaiTimesTests(unittest.TestCase):
                 for call in server.calls
             )
         )
+
+    def test_every_request_names_the_client_without_posing_as_a_browser(self):
+        # Cloudflare answered urllib's default agent with 1010 (10-14 live test).
+        server = FakeWordPress()
+        client = WordPressPendingPosts(
+            "http://127.0.0.1:8090", "pns_bot", "test", opener=server
+        )
+        client.submit_once(post())
+        agents = {call.get_header("User-agent") for call in server.calls}
+        self.assertEqual(agents, {USER_AGENT})
+        self.assertNotIn("Mozilla", USER_AGENT)
+        self.assertIn("25nightcord.com", USER_AGENT)
 
     def test_category_mismatch_prevents_write(self):
         server = FakeWordPress()
