@@ -13,11 +13,16 @@
 #                   会话与因果链编号，系统侧簿记。
 #   旁观者名单       channel / location 档里的 participants 是提交那一刻的
 #                   在场快照；把它给出去等于告诉一个路人整个频道的成员表。
+#
+# 观察的 perceived.type 通常就是事件类型。唯一的例外是离场（FIX-46）：同一条
+# character.location_changed 在出发地的人那里是另一件事，投影成感知类型
+# character.departed —— 它不是 EventType，不能被提交；存档校验按
+# pns.models.observation.PERCEIVED_EVENT_TYPES 把它对回移动事件。
 from typing import Dict, Optional, Sequence, Tuple
 
-from pns.models.event import Event, EventScope, EventType
+from pns.models.event import MOVE_ORIGIN_KEY, Event, EventScope, EventType
 from pns.models.exposure import ExposureDecision, ExposureReason
-from pns.models.observation import Observation
+from pns.models.observation import DEPARTED_PERCEIVED_TYPE, Observation
 
 # 每种事件类型里，角色感知得到的 payload 键。没登记的类型给空元组 ——
 # 新类型默认什么都不透出，要透出必须显式加一行。
@@ -66,6 +71,13 @@ def _anchor(event: Event, decision: ExposureDecision) -> Dict:
 
 def perceived_content(event: Event, decision: ExposureDecision) -> Dict:
     """构造这条观察里的可感知内容。"""
+    if decision.reason is ExposureReason.DEPARTED_FROM:
+        # 自己的白名单，不从普通移动投影改出来：那条路的默认锚点是目的地。
+        return {
+            "type": DEPARTED_PERCEIVED_TYPE,
+            "actor_id": event.actor_id,
+            "location_id": event.payload[MOVE_ORIGIN_KEY],
+        }
     perceived: Dict = {"type": event.type.value, "actor_id": event.actor_id}
     for key in _PERCEIVED_PAYLOAD_KEYS.get(event.type, ()):
         if key in event.payload:

@@ -39,6 +39,7 @@ class ExposureReason(Enum):
     SAME_LOCATION = "same_location"  # 就在事发地点
     AUDIBLE_FROM = "audible_from"  # 地点元数据声明的可闻范围
     PUBLIC_VISIBLE = "public_visible"  # 公开事件且当下就在感知范围内
+    DEPARTED_FROM = "departed_from"  # 在 actor 离开的那个地点（或其可闻范围），看见 ta 走
 
     # ── 判定为不可感知 ──────────────────────────────────────────────────
     PRIVATE_SCOPE_DENIED = "private_scope_denied"  # 私密事件，同处一地也不给
@@ -63,6 +64,7 @@ _EXPOSING_REASONS = frozenset(
         ExposureReason.SAME_LOCATION,
         ExposureReason.AUDIBLE_FROM,
         ExposureReason.PUBLIC_VISIBLE,
+        ExposureReason.DEPARTED_FROM,
     }
 )
 

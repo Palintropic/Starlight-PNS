@@ -27,7 +27,7 @@ from typing import Dict, Mapping, Optional, Tuple
 from uuid import uuid4
 
 from pns.models.authored import AuthoredTextError, GenerationAudit
-from pns.models.event import EventScope, EventType
+from pns.models.event import MOVE_ORIGIN_KEY, EventScope, EventType
 from pns.models.frozen import freeze_json_value, thaw_json_value
 
 
@@ -118,6 +118,9 @@ class ActionDefinition:
     optional_payload_keys: Tuple[str, ...] = ()
     # 事件的 participants 从哪儿来。构造和校验读的是同一条声明。
     participants_from: ParticipantSource = ParticipantSource.NONE
+    # 由世界派生、不来自提案的 payload 键（FIX-46：移动的出发地）。提案里出现
+    # 这些键一律拒绝；构造从世界取值，存档核验按规则约束后借用。
+    world_payload_keys: Tuple[str, ...] = ()
 
     @property
     def allowed_payload_keys(self) -> Tuple[str, ...]:
@@ -143,6 +146,7 @@ class ActionDefinition:
             "required_payload_keys": list(self.required_payload_keys),
             "optional_payload_keys": list(self.optional_payload_keys),
             "participants_from": self.participants_from.value,
+            "world_payload_keys": list(self.world_payload_keys),
             "requires_authored_text": self.requires_authored_text,
         }
 
@@ -216,6 +220,8 @@ _CATALOGUE: Dict[ActionId, ActionDefinition] = {
         # 目的地的在场名单在状态效果应用之后立刻作废，写一份注定过期的
         # 花名册不如不写 —— 于是它也是唯一一档可以被精确校验的。
         participants_from=ParticipantSource.NONE,
+        # 出发地让原地的人感知到"ta 走了"；它是提交前的世界状态，模型填不了。
+        world_payload_keys=(MOVE_ORIGIN_KEY,),
     ),
 }
 
@@ -497,6 +503,7 @@ def agency_event_fields(
     occurred_at,
     location_id: Optional[str],
     channel_id: Optional[str],
+    world_payload: Optional[Mapping] = None,
     participants: Tuple[str, ...] = (),
     policy: str = "",
     audit: Optional[GenerationAudit] = None,
@@ -509,9 +516,19 @@ def agency_event_fields(
 
     audit 是需要台词的动作的通行证：它进 provenance，因此"这句话被谁按什么
     阈值判成了多少分"跟事件同生共死，存档校验能按同一份声明重建它。
+
+    world_payload 是动作声明的世界派生键（world_payload_keys）的取值，由调用方
+    从世界里取（构造）或按规则约束后从事件借来（核验）；声明外的键一律拒绝。
     """
     definition = proposal.definition
     _require_committable(definition, proposal, audit)
+    world_payload = dict(world_payload or {})
+    undeclared = sorted(set(world_payload) - set(definition.world_payload_keys))
+    if undeclared:
+        raise ActionEventMismatch(
+            f"动作 '{definition.action_id.value}' 没有声明世界派生的 payload 键: "
+            f"{', '.join(undeclared)}"
+        )
     if definition.event_scope in (EventScope.PRIVATE, EventScope.PARTICIPANT):
         # 这两档的 participants 是授权依据，必须由动作显式声明收件人，不能从
         # 在场快照里推。目录现在没有这两档的动作。
@@ -528,7 +545,7 @@ def agency_event_fields(
         "participants": tuple(participants),
         "location_id": location_id,
         "channel_id": channel_id,
-        "payload": proposal.event_payload(),
+        "payload": {**proposal.event_payload(), **world_payload},
         # 系统侧簿记：这条事件是哪次到期、哪条提案、哪个策略产出的。
         # provenance 从不进任何角色的观察（P6 的投影白名单挡着）。
         "provenance": {
@@ -590,6 +607,24 @@ def _borrowed_anchor(definition: ActionDefinition, proposal, event):
     return event.location_id, None
 
 
+def _borrowed_world_payload(definition: ActionDefinition, proposal, event) -> Dict:
+    """世界派生的 payload 键：只借动作声明过的那几个，原样借用。
+
+    出发地是提交那一刻的世界状态，存档里算不出来（跟无目标动作的落点同一个
+    处境）。它的形状（非空字符串、不等于目的地）由 Event 模型自己校验，这里
+    不再写一份；这一层只管"借来的只能是声明过的键"—— 别的键留在实际 payload
+    里，跟重建出来的整体一比就对不上。
+    它是不是真的出发地，由提交时的校验和有 WORLD-2 基准时的历史重放来证明；
+    没有基准的会话，这一层证明不了，也不假装能证明。
+    键可以缺失：FIX-46 之前的存档里没有它。
+    """
+    return {
+        key: event.payload[key]
+        for key in definition.world_payload_keys
+        if key in event.payload
+    }
+
+
 def _borrowed_participants(
     definition: ActionDefinition, proposal, event
 ) -> Tuple[str, ...]:
@@ -645,12 +680,14 @@ def verify_agency_event(
     重建走的就是 agency_event_fields()，也就是当初构造它的那段代码，所以校验
     松不下来 —— 想放宽校验就得先放宽构造。
 
-    只有两处无法从存档重新推导：无目标动作的落点，以及提交那一刻的在场快照。
-    这两处先各自按规则约束（见上面两个辅助函数），再原样借用去重建。
+    只有三处无法从存档重新推导：无目标动作的落点、提交那一刻的在场快照、
+    世界派生的 payload（移动的出发地）。这三处先各自按规则约束（见上面三个
+    辅助函数），再原样借用去重建。
     """
     definition = proposal.definition
     location_id, channel_id = _borrowed_anchor(definition, proposal, event)
     participants = _borrowed_participants(definition, proposal, event)
+    world_payload = _borrowed_world_payload(definition, proposal, event)
 
     expected = agency_event_fields(
         session_id,
@@ -659,6 +696,7 @@ def verify_agency_event(
         occurred_at=occurred_at,
         location_id=location_id,
         channel_id=channel_id,
+        world_payload=world_payload,
         participants=participants,
         policy=policy,
         audit=audit,

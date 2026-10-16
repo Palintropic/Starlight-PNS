@@ -16,6 +16,22 @@ from pns.models.exposure import ExposureReason
 from pns.models.frozen import freeze_json_value, thaw_json_value
 
 
+# 离场的感知类型：一条 character.location_changed 在出发地的人那里的样子（FIX-46）。
+# 它只出现在观察里，不是 EventType，不能被提交。
+DEPARTED_PERCEIVED_TYPE = "character.departed"
+
+# 不等于自身事件类型的感知类型 → 它只能来自的那种事件类型。没登记的感知类型
+# 必须与事件类型相同；存档校验按这张表把观察对回事件。
+PERCEIVED_EVENT_TYPES: Dict[str, str] = {
+    DEPARTED_PERCEIVED_TYPE: "character.location_changed",
+}
+
+
+def event_type_for_perceived(perceived_type) -> Optional[str]:
+    """这个感知类型应该对应的事件类型；默认就是它自己。"""
+    return PERCEIVED_EVENT_TYPES.get(perceived_type, perceived_type)
+
+
 class ObservationError(ValueError):
     """观察记录自身不合法（缺 ID、未知理由码、perceived 非法等）。"""
 
@@ -117,7 +133,8 @@ class ObservationLog:
 
     def __init__(self, observations: Iterable[Observation] = ()):
         self._observations: List[Observation] = []
-        self._keys: Set[Tuple[str, str]] = set()
+        # (事件, 观察者) → 日志位置。记忆层按来源观察的位置判世界事实先后（FIX-46）。
+        self._keys: Dict[Tuple[str, str], int] = {}
         for observation in observations:
             self._append(observation)
 
@@ -133,7 +150,7 @@ class ObservationLog:
                 f"'{observation.observer_id}' 的观察"
             )
         self._observations.append(observation)
-        self._keys.add(key)
+        self._keys[key] = len(self._observations) - 1
         return len(self._observations) - 1
 
     def _rollback_to(self, length: int) -> None:
@@ -143,8 +160,8 @@ class ObservationLog:
             raise ObservationError(f"回滚长度越界: {length}")
         del self._observations[length:]
         self._keys = {
-            (observation.source_event_id, observation.observer_id)
-            for observation in self._observations
+            (observation.source_event_id, observation.observer_id): index
+            for index, observation in enumerate(self._observations)
         }
 
     # ── 读取 ────────────────────────────────────────────────────────────
@@ -174,6 +191,20 @@ class ObservationLog:
         return tuple(
             o for o in self._observations[position:] if o.observer_id == character_id
         )
+
+    def position_of(self, observer_id: str, source_event_id: str) -> int:
+        """这条观察在日志里的位置。
+
+        日志按提交顺序追加（会话恢复时核对来源事件序号单调不减），所以同一个
+        观察者的两条观察，位置大的那条就是后发生的那件事 —— 而且这是这个角色
+        自己的经历顺序，用它判先后不必去读全知的世界历史。
+        """
+        try:
+            return self._keys[(source_event_id, observer_id)]
+        except (KeyError, TypeError):
+            raise ObservationError(
+                f"观察日志里没有事件 '{source_event_id}' 对角色 '{observer_id}' 的观察"
+            ) from None
 
     def for_event(self, event_id: str) -> Tuple[Observation, ...]:
         return tuple(o for o in self._observations if o.source_event_id == event_id)

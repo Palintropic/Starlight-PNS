@@ -23,9 +23,16 @@
 # 变了而被改写。
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from pns.models.memory import MemoryClass, MemoryRecord, MemoryStore
+from pns.models.memory import (
+    MemoryClass,
+    MemoryError,
+    MemoryRecord,
+    MemoryStore,
+    current_fact_ids,
+    fact_reading,
+)
 from pns.models.session import SessionState
 
 
@@ -228,6 +235,8 @@ def recall(
     memories: Sequence[MemoryRecord],
     query: RecallQuery,
     budget: Optional[RecallBudget] = None,
+    *,
+    source_order: Callable[[str, str], int],
 ) -> RecallResult:
     """从**这个角色自己的**记忆里召回此刻想得起来的那些。
 
@@ -240,6 +249,24 @@ def recall(
     budget = budget if budget is not None else RecallBudget()
     if not isinstance(budget, RecallBudget):
         raise RecallError("budget 必须是 RecallBudget")
+
+    memories = tuple(memories)
+    for record in memories:
+        if not isinstance(record, MemoryRecord):
+            raise RecallError("memories 只能包含 MemoryRecord")
+        if record.owner_id != query.owner_id:
+            # 别人的记忆混进来就是一次泄漏，而且是最难发现的那种。
+            raise RecallError(
+                f"记忆 '{record.memory_id}' 属于 '{record.owner_id}'，"
+                f"不能进 '{query.owner_id}' 的召回"
+            )
+    # 同一个世界事实只有最新的那条算"现在知道的"：旧的"ta 在食堂"不能跟新的
+    # "ta 不在食堂了"一起进提示词，预算小时更不能只剩旧的那条。在评分和预算
+    # 之前就定下来，"最新"按来源观察在日志里的位置（current_fact_ids，FIX-46）。
+    try:
+        current = set(current_fact_ids(memories, source_order).values())
+    except MemoryError as e:
+        raise RecallError(str(e)) from None
 
     eligible: List[ScoredMemory] = []
     decayed = 0
@@ -262,6 +289,9 @@ def recall(
             continue
         if record.is_decayed_at(query.now):
             decayed += 1
+            continue
+        if fact_reading(record) is not None and record.memory_id not in current:
+            # 被同一事实更新的记录盖过了：不删，但不再当成现在的事实想起来。
             continue
         eligible.append(ScoredMemory(record=record, score=score_memory(record, query)))
 
@@ -380,6 +410,7 @@ class MemoryRecall:
             self.store.for_owner(query.owner_id),
             query,
             budget if budget is not None else self._budget,
+            source_order=self._state.observations.position_of,
         )
 
     def recall_for(self, owner_id: str, **kwargs) -> RecallResult:

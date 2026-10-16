@@ -26,9 +26,9 @@ from pns.models.cognition import (
     unavailable_causes,
 )
 from pns.models.authored import AuthoredTextError, GenerationAudit
-from pns.models.event import EventType
+from pns.models.event import MOVE_ORIGIN_KEY, EventType
 from pns.models.event_store import EventStore
-from pns.models.exposure import ExposureDecision, ExposureLog
+from pns.models.exposure import ExposureDecision, ExposureLog, ExposureReason
 from pns.models.memory import (
     MEMORY_ARCHIVE_VERSION,
     MemoryError,
@@ -37,7 +37,12 @@ from pns.models.memory import (
     MemoryStore,
     verify_memory_against_observation,
 )
-from pns.models.observation import Observation, ObservationLog
+from pns.models.observation import (
+    DEPARTED_PERCEIVED_TYPE,
+    Observation,
+    ObservationLog,
+    event_type_for_perceived,
+)
 from pns.models.world_state import ActivityKind, WorldState
 
 
@@ -1275,6 +1280,7 @@ class SessionState:
             dict(payload.get("observations", {}))
         )
         state.exposures = ExposureLog.from_dict(dict(payload.get("exposures", {})))
+        _validate_observation_order(state)
         _validate_history_against_clock(state, clock)
 
         state.arrangements = ArrangementBook(payload["arrangements"])
@@ -1952,6 +1958,28 @@ def _validate_memories_against_session(
             raise SessionStateError(str(e)) from e
 
 
+def _validate_observation_order(state: "SessionState") -> None:
+    """观察日志的顺序必须就是世界历史的顺序。
+
+    观察在提交事务里紧跟着它的事件追加，所以日志里来源事件的序号只会单调
+    不减。记忆层拿日志位置判"哪条世界事实更新"（FIX-46）；一份重排过的日志
+    会让角色把旧位置当成现在的位置，所以在这里拒绝，而不是让下游各自去猜。
+    """
+    previous = -1
+    for observation in state.observations:
+        if not state.events.has(observation.source_event_id):
+            # 来源事件不在历史里的观察，这里照旧不管（恢复一向容忍它）。它碍不着
+            # 事实排序：记忆恢复要求来源事件存在，指着它的记忆过不了那一关。
+            continue
+        sequence = state.events.sequence_of(observation.source_event_id)
+        if sequence < previous:
+            raise SessionStateError(
+                f"观察 '{observation.observation_id}' 排在比它更晚的事件的观察之后："
+                "观察日志的顺序与世界历史不一致"
+            )
+        previous = sequence
+
+
 def _validate_observation_against_event(observation, event) -> None:
     """一条观察里"记忆据以判定资格"的那几个字段，必须与它投影的那条事件一致。
 
@@ -1960,11 +1988,27 @@ def _validate_observation_against_event(observation, event) -> None:
     承诺重新变得"有资格"，而记忆与观察之间又完全自洽。
     """
     perceived = observation.perceived
-    if perceived.get("type") != event.type.value:
+    if event_type_for_perceived(perceived.get("type")) != event.type.value:
         raise SessionStateError(
             f"观察 '{observation.observation_id}' 记的类型 "
             f"{perceived.get('type')!r} 与事件的 '{event.type.value}' 不一致"
         )
+    if perceived.get("type") == DEPARTED_PERCEIVED_TYPE:
+        # 离场观察的锚点是出发地，必须就是事件里那个出发地；整条观察只许有
+        # 这三个键 —— 否则改存档就能伪造"ta 从别处离开"或夹带目的地。
+        if observation.reason is not ExposureReason.DEPARTED_FROM:
+            raise SessionStateError(
+                f"观察 '{observation.observation_id}' 是离场观察，理由码却是 "
+                f"{observation.reason.value}"
+            )
+        if set(perceived) != {"type", "actor_id", "location_id"}:
+            raise SessionStateError(
+                f"观察 '{observation.observation_id}' 的离场内容多了或少了字段"
+            )
+        if perceived.get("location_id") != event.payload.get(MOVE_ORIGIN_KEY):
+            raise SessionStateError(
+                f"观察 '{observation.observation_id}' 记的离开地点与事件的出发地不一致"
+            )
     if perceived.get("actor_id") != event.actor_id:
         raise SessionStateError(
             f"观察 '{observation.observation_id}' 记的行动者 "

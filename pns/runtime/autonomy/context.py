@@ -153,6 +153,8 @@ class GenerationContext:
     legal_actions_truncated: bool = False
     recall_truncated: bool = False
     arrangement_cues: Tuple[Mapping, ...] = ()
+    # Agency 在裁剪观察之前派生的"刚才从这里离开的人"：(角色 ID, 时刻)。
+    recent_departures: Tuple[Tuple[str, datetime], ...] = ()
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -182,6 +184,19 @@ class GenerationContext:
         for line in self.recalled:
             if not isinstance(line, str):
                 raise GenerationContextError("recalled 只能包含字符串")
+        departures = tuple(self.recent_departures)
+        for item in departures:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0]
+                or not isinstance(item[1], datetime)
+            ):
+                raise GenerationContextError(
+                    "recent_departures 只能包含 (角色 ID, datetime)"
+                )
+        set_(self, "recent_departures", departures)
 
     @property
     def observed_lines(self) -> Tuple[str, ...]:
@@ -230,6 +245,10 @@ class GenerationContext:
             "observations_truncated": self.observations_truncated,
             "legal_actions_truncated": self.legal_actions_truncated,
             "recall_truncated": self.recall_truncated,
+            "recent_departures": [
+                {"actor_id": actor, "at": at.isoformat()}
+                for actor, at in self.recent_departures
+            ],
         }
 
 
@@ -298,6 +317,7 @@ def build_generation_context(
         observations_truncated=agency_context.observations_truncated,
         legal_actions_truncated=agency_context.legal_actions_truncated,
         recall_truncated=bool(recall_truncated),
+        recent_departures=tuple(getattr(agency_context, "recent_departures", ())),
     )
 
 

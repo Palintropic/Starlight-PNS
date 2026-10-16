@@ -23,7 +23,7 @@ from pns.models.action import (
     agency_event_fields,
 )
 from pns.models.activation import ActivationDue
-from pns.models.event import Event
+from pns.models.event import MOVE_ORIGIN_KEY, Event
 from pns.models.event_store import EventStore
 from pns.models.world_state import WorldState
 
@@ -84,6 +84,21 @@ def _participants(
     raise AgencyEffectError(f"未知的在场名单来源: {source!r}")
 
 
+def _world_payload(world: WorldState, proposal: ActionProposal) -> Dict:
+    """动作声明的世界派生 payload 键，从提交前的世界里取值。
+
+    现在只有一个键：移动的出发地 = 执行者此刻所在的地点。显式逐键登记，
+    新声明一个键而这里没登记会响亮失败，而不是悄悄不写。
+    """
+    values: Dict = {}
+    for key in proposal.definition.world_payload_keys:
+        if key == MOVE_ORIGIN_KEY:
+            values[key] = world.location_of(proposal.character_id)
+            continue
+        raise AgencyEffectError(f"不知道怎么从世界派生 payload 键 {key!r}")
+    return values
+
+
 def event_for_proposal(
     world: WorldState,
     store: EventStore,
@@ -111,6 +126,7 @@ def event_for_proposal(
 
     location_id, channel_id = _anchor(world, proposal)
     participants = _participants(world, proposal, channel_id, location_id)
+    world_payload = _world_payload(world, proposal)
     latest = store.latest()
     return Event(
         **agency_event_fields(
@@ -120,6 +136,7 @@ def event_for_proposal(
             occurred_at=world.clock,
             location_id=location_id,
             channel_id=channel_id,
+            world_payload=world_payload,
             participants=participants,
             policy=policy,
             audit=audit,

@@ -31,7 +31,9 @@ from pns.models.memory import (
     MemoryError,
     MemoryRecord,
     MemoryStore,
+    current_fact_ids,
     derive_memory_id,
+    fact_already_known,
 )
 from pns.models.observation import Observation
 from pns.models.session import SessionState
@@ -245,9 +247,12 @@ class MemoryEncoder:
             )
         if draft.fact is not None:
             fact, value = draft.fact
-            if self._known_fact(owner, fact) == value:
-                # 这条世界事实已经知道了，取值没变 —— 再存一条只会让同一个
-                # 事实有两份副本。取值变了才是新事实。
+            if fact_already_known(
+                store.for_owner(owner), observation, self._source_order
+            ):
+                # 这条世界事实已经由一条不更旧的同值记忆记下了 —— 再存一条只会
+                # 让同一个事实有两份副本。来源更新时即使同值也要记（见
+                # fact_already_known）。
                 return skipped(
                     EncodingOutcome.SKIPPED_KNOWN_FACT, {"fact": fact, "value": value}
                 )
@@ -316,10 +321,10 @@ class MemoryEncoder:
           2. 其余非固定类别里，按"此刻不带线索的召回"排在最后的那条（得分
              最低，同分时更旧的先忘）—— 也就是这个角色最不可能想起来的那件事。
         此刻仍置顶的记忆（身份；没过置顶期限的约定）不忘；置顶过期的约定
-        跟普通记忆一样参加排序（MEM-2）。世界事实只有在被同一事实更新的取值
-        盖过之后才能忘：`_known_fact()` 读的是最新取值，忘掉被盖过的旧值它的
-        答案不变；忘掉唯一的那条，它就会以为自己从没知道过，同一个事实会被
-        重新记一遍。同一条观察刚长出来的兄弟记忆也不忘：为了记住一件事的
+        跟普通记忆一样参加排序（MEM-2）。世界事实只有在被同一事实更新的记录
+        盖过之后才能忘（"更新"按来源事件序号，见 current_fact_ids）：忘掉被
+        盖过的旧值，当前事实不变；忘掉当前那条，它就会以为自己从没知道过，
+        同一个事实会被重新记一遍。同一条观察刚长出来的兄弟记忆也不忘：为了记住一件事的
         某一面，忘掉它的另一面，没有意义。
         一条可忘的都没有就返回 None，调用方给出显式的 SKIPPED_BUDGET。
 
@@ -329,14 +334,13 @@ class MemoryEncoder:
         """
         query = RecallQuery(owner_id=owner_id, now=now)
         mine = self.store.for_owner(owner_id)
-        superseded = set()
-        latest_fact = {}
-        for record in mine:
-            if record.memory_class is MemoryClass.SEMANTIC:
-                fact = record.content.get("fact")
-                if fact in latest_fact:
-                    superseded.add(latest_fact[fact])
-                latest_fact[fact] = record.memory_id
+        current = set(current_fact_ids(mine, self._source_order).values())
+        superseded = {
+            record.memory_id
+            for record in mine
+            if record.memory_class is MemoryClass.SEMANTIC
+            and record.memory_id not in current
+        }
 
         def rank(record):
             if record.is_decayed_at(now):
@@ -361,17 +365,9 @@ class MemoryEncoder:
         self.store._forget(victim.memory_id)
         return victim.memory_id
 
-    def _known_fact(self, owner_id: str, fact: str) -> Optional[str]:
-        """这个角色目前记着的这条世界事实的取值；不知道就是 None。
-
-        从存储推导，不另存一张事实表：两份状态迟早会对不上，而存档里只有一份。
-        """
-        value = None
-        for record in self.store.for_owner(owner_id):
-            content = record.content
-            if content.get("kind") == "world_fact" and content.get("fact") == fact:
-                value = content.get("value")
-        return value
+    def _source_order(self, observer_id: str, source_event_id: str) -> int:
+        """来源观察在观察日志里的位置：世界事实"谁更新"的唯一依据。"""
+        return self._state.observations.position_of(observer_id, source_event_id)
 
     # ── 输入校验 ────────────────────────────────────────────────────────
     def _require_observation(self, observation) -> None:

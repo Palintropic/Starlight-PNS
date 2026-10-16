@@ -40,6 +40,7 @@ from pns.models.memory import (
     MemoryError,
     MemoryMismatch,
     MemoryRecord,
+    current_fact_ids,
     MemoryStore,
     derive_memory_id,
     derived_salience,
@@ -462,7 +463,7 @@ class RecallTests(unittest.TestCase):
         self.assertTrue(foreign)
         query = RecallQuery(owner_id="mizuki", now=self.state.world_state.clock)
         with self.assertRaises(RecallError):
-            recall(foreign, query)
+            recall(foreign, query, source_order=self.state.observations.position_of)
         mine = self.service.recall_for("mizuki")
         self.assertEqual(
             {s.record.owner_id for s in mine.memories}, {"mizuki"}
@@ -496,7 +497,11 @@ class RecallTests(unittest.TestCase):
 
     def test_a_memory_from_the_future_is_never_returned(self):
         query = RecallQuery(owner_id="mizuki", now=CLOCK - timedelta(minutes=1))
-        result = recall(self.state.memories.for_owner("mizuki"), query)
+        result = recall(
+            self.state.memories.for_owner("mizuki"),
+            query,
+            source_order=self.state.observations.position_of,
+        )
         self.assertEqual(result.memories, ())
 
 
@@ -516,6 +521,7 @@ class PersistenceAndDecayTests(unittest.TestCase):
         return recall(
             self.state.memories.for_owner("mizuki"),
             RecallQuery(owner_id="mizuki", now=CLOCK + timedelta(minutes=minutes)),
+            source_order=self.state.observations.position_of,
             **kwargs,
         )
 
@@ -593,12 +599,13 @@ class IdempotentEncodingTests(unittest.TestCase):
             if r.memory_class is MemoryClass.SEMANTIC
         ]
 
-    def test_a_world_fact_already_known_is_not_stored_twice(self):
-        """已经知道的事实不重复记。
+    def test_a_world_fact_seen_again_from_a_newer_source_is_kept(self):
+        """同值、但来源更新的事实要再记一条（FIX-46，ena 的 v3 复核）。
 
         ena 走进 mizuki 的房间（mizuki 记下"ena 在这儿"），中途走开时 mizuki
-        看不见（目的地不在它这儿），再回来时对 mizuki 来说事实没变 —— 它本来
-        就以为 ena 在这儿。于是不产生第二条。
+        看不见，再回来时取值没变。以前这里会跳过；但跳过会丢掉"最新的证据"：
+        A→B→A 按 A₁→A₂→B 编码时，A₂ 被跳过，最新的就只剩 B 了。所以第二次
+        到场照样记下，当前事实是它；召回时旧的那条被盖过，只想起一条。
         """
         state, encoder = _rig()
         encoder.commit_and_encode(_move(state, "ena", "mizuki_home_room", "m1"))
@@ -612,6 +619,36 @@ class IdempotentEncodingTests(unittest.TestCase):
         _, decisions = encoder.commit_and_encode(
             _move(state, "ena", "mizuki_home_room", "m3")
         )
+        outcomes = {(d.owner_id, d.memory_class): d.outcome for d in decisions}
+        self.assertEqual(
+            outcomes.get(("mizuki", MemoryClass.SEMANTIC)), EncodingOutcome.ENCODED
+        )
+        self.assertEqual(len(self._semantic(state, "mizuki")), 2)
+        current = current_fact_ids(
+            state.memories.for_owner("mizuki"), state.observations.position_of
+        )
+        self.assertEqual(
+            current[("mizuki", "location:ena")],
+            derive_memory_id("mizuki", "m3", MemoryClass.SEMANTIC),
+        )
+        recalled = MemoryRecall(state).recall_for(
+            "mizuki", classes=(MemoryClass.SEMANTIC,)
+        )
+        self.assertEqual(
+            [r.memory_id for r in recalled.records],
+            [derive_memory_id("mizuki", "m3", MemoryClass.SEMANTIC)],
+        )
+
+    def test_a_world_fact_from_an_older_source_is_not_stored_twice(self):
+        """已经由不更旧的同值记忆记下的事实不重复记：延后编码一条更旧的同值观察时跳过。"""
+        state, encoder = _rig()
+        commit_session_event(state, _move(state, "ena", "mizuki_home_room", "m1"))
+        state.world_state.advance_time(1)
+        commit_session_event(state, _move(state, "ena", "ena_home_studio", "m2"))
+        state.world_state.advance_time(1)
+        commit_session_event(state, _move(state, "ena", "mizuki_home_room", "m3"))
+        encoder.encode_event("m3")
+        decisions = encoder.encode_event("m1")
         outcomes = {(d.owner_id, d.memory_class): d.outcome for d in decisions}
         self.assertEqual(
             outcomes.get(("mizuki", MemoryClass.SEMANTIC)),
@@ -825,6 +862,7 @@ class CommitmentHorizonTests(unittest.TestCase):
             self.state.memories.for_owner("mizuki"),
             RecallQuery(owner_id="mizuki", now=self.state.world_state.clock),
             budget=RecallBudget(max_items=1, max_per_class=1, max_pinned=1),
+            source_order=self.state.observations.position_of,
         )
         self.assertEqual([r.memory_id for r in result.records], [fresh])
 
@@ -931,8 +969,16 @@ class CommitmentHorizonTests(unittest.TestCase):
         later = self.state.world_state.clock + timedelta(minutes=PROMISE_HORIZON_MINUTES * 3)
         query = RecallQuery(owner_id="mizuki", now=later)
         self.assertEqual(
-            recall(restored.memories.for_owner("mizuki"), query).to_dict(),
-            recall(self.state.memories.for_owner("mizuki"), query).to_dict(),
+            recall(
+                restored.memories.for_owner("mizuki"),
+                query,
+                source_order=restored.observations.position_of,
+            ).to_dict(),
+            recall(
+                self.state.memories.for_owner("mizuki"),
+                query,
+                source_order=self.state.observations.position_of,
+            ).to_dict(),
         )
 
 
@@ -1028,7 +1074,7 @@ class ForgettingTests(unittest.TestCase):
         )
 
     def test_the_only_record_of_a_world_fact_is_not_forgotten(self):
-        """ena 首审 P2：忘掉唯一的那条事实，_known_fact() 就以为自己从没
+        """ena 首审 P2：忘掉唯一的那条事实，当前事实就没了，编码器以为自己从没
         知道过，同一个事实会被重新记一遍。"""
         state, encoder = _rig(budget=MemoryBudget(max_records_per_owner=2))
         # ena 走进 mizuki 的房间：mizuki 记下事实 + 一条短时痕迹。
@@ -1072,8 +1118,12 @@ class ForgettingTests(unittest.TestCase):
                 )
             ],
         )
+        current = current_fact_ids(
+            state.memories.for_owner("mizuki"), state.observations.position_of
+        )
         self.assertEqual(
-            encoder._known_fact("mizuki", "location:mizuki"), "mizuki_home_room"
+            state.memories.get(current[("mizuki", "location:mizuki")]).content["value"],
+            "mizuki_home_room",
         )
 
     def test_the_store_is_present_tense(self):
