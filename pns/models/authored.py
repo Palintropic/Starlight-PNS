@@ -41,6 +41,16 @@ AUDIT_KIND = "router_audit"
 MIN_SCORE = 0.0
 MAX_SCORE = 10.0
 
+# 判分器标了"需人工复核"时怎么办（JUDGE-1，kickoff/JUDGE_1_REVIEW_FLAG_POLICY.md）。
+# strict：一律不接受 —— 旧记录、以及没写策略的记录都是它。
+# review-lenient-v1：判分器拿得准、只是顺手标了复核的低分台词可以接受，见 _lenient_override。
+REVIEW_STRICT = "strict"
+REVIEW_LENIENT_V1 = "review-lenient-v1"
+REVIEW_POLICIES = (REVIEW_STRICT, REVIEW_LENIENT_V1)
+# 宽松策略的两条分数线，都是严格小于。
+LENIENT_DRIFT_BELOW = 4.0
+LENIENT_INVENTION_BELOW = 3.0
+
 
 class AuthoredTextError(ValueError):
     """审计记录本身不合法（空台词、分数越界、带时区的时间、字段损坏等）。"""
@@ -93,6 +103,7 @@ class GenerationAudit:
     needs_human_review: bool = False
     dimensions: Mapping = field(default_factory=dict)
     dimensions_complete: bool = False
+    review_policy: str = REVIEW_STRICT
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
@@ -142,6 +153,8 @@ class GenerationAudit:
             raise AuthoredTextError("needs_human_review 必须是布尔值")
         if not isinstance(self.dimensions_complete, bool):
             raise AuthoredTextError("dimensions_complete 必须是布尔值")
+        if self.review_policy not in REVIEW_POLICIES:
+            raise AuthoredTextError(f"未知的复核策略: {self.review_policy!r}")
 
         if not isinstance(self.dimensions, Mapping):
             raise AuthoredTextError("dimensions 必须是字典")
@@ -178,19 +191,56 @@ class GenerationAudit:
         后者是刻意的：自主路径上没有人盯着，一句连判分器都说"我拿不准"的
         台词直接写进世界历史，等于把不确定性当成了确定性。研究路径不同 ——
         那里有人在看着屏幕，OOC 的一轮会被记下来并触发纠正。
+
+        唯一的例外由记录**自己的**策略决定（review_overridden）：同一份判分结果，
+        strict 下拒、review-lenient-v1 下可能接受，存档里的那份策略说了算。
         """
-        return not self.is_ooc and not self.needs_human_review
+        if self.is_ooc:
+            return False
+        return not self.needs_human_review or self.review_overridden
+
+    @property
+    def review_overridden(self) -> bool:
+        """这句话是不是**只因为宽松策略**才被接受的。现算，不存。"""
+        return (
+            self.review_policy == REVIEW_LENIENT_V1
+            and self.needs_human_review
+            and not self.is_ooc
+            and self._lenient_failure() is None
+        )
+
+    def _lenient_failure(self) -> Optional[str]:
+        """宽松策略下，这份标了复核的审计没过哪一条；全过返回 None。
+
+        判分调用失败的兜底结果（解析失败 / error）七维本来就不全，第一条就拦住。
+        """
+        if not self.dimensions_complete:
+            return "dimensions_incomplete"
+        if not self.drift_score < LENIENT_DRIFT_BELOW:
+            return "drift_score_not_below_4"
+        invention = self.dimensions.get("unsupported_invention")
+        score = invention.get("score") if isinstance(invention, Mapping) else None
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            return "invention_score_missing"
+        if not score < LENIENT_INVENTION_BELOW:
+            return "unsupported_invention_not_below_3"
+        return None
 
     def refusal(self) -> Optional[Dict]:
         """不被接受的原因；被接受就返回 None。"""
         if self.accepted:
             return None
-        return {
+        refusal = {
             "drift_score": self.drift_score,
             "threshold": self.threshold,
             "is_ooc": self.is_ooc,
             "needs_human_review": self.needs_human_review,
         }
+        if self.review_policy != REVIEW_STRICT:
+            refusal["review_policy"] = self.review_policy
+            if self.needs_human_review and not self.is_ooc:
+                refusal["review_rule_failed"] = self._lenient_failure()
+        return refusal
 
     # ── 绑定 ────────────────────────────────────────────────────────────
     def binds(self, proposal) -> bool:
@@ -247,6 +297,16 @@ class GenerationAudit:
             "needs_human_review": self.needs_human_review,
             "dimensions": thaw_json_value(self.dimensions),
             "dimensions_complete": self.dimensions_complete,
+            # 严格策略不写这两个键：Agency 事件的 provenance 里存着这份投影，恢复时
+            # 逐项比对 —— 旧记录（全是 strict）的形状必须一个字节都不变。
+            **(
+                {
+                    "review_policy": self.review_policy,
+                    "review_overridden": self.review_overridden,
+                }
+                if self.review_policy != REVIEW_STRICT
+                else {}
+            ),
         }
 
     @classmethod
@@ -288,6 +348,8 @@ class GenerationAudit:
             needs_human_review=payload.get("needs_human_review", False),
             dimensions=payload.get("dimensions", {}),
             dimensions_complete=payload.get("dimensions_complete", False),
+            # 没写策略的旧记录就是 strict：旧存档里被拒的，重新加载仍是被拒。
+            review_policy=payload.get("review_policy", REVIEW_STRICT),
         )
 
 
@@ -297,4 +359,7 @@ __all__ = [
     "GenerationAudit",
     "MAX_SCORE",
     "MIN_SCORE",
+    "REVIEW_LENIENT_V1",
+    "REVIEW_POLICIES",
+    "REVIEW_STRICT",
 ]

@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Callable, Dict, Mapping, Optional
 
 from pns.models.action import ActionId
-from pns.models.authored import AuthoredTextError, GenerationAudit
+from pns.models.authored import REVIEW_LENIENT_V1, AuthoredTextError, GenerationAudit
 
 # 默认漂移阈值。跟 pns.logic.router 的口径一致：达到阈值即视为 OOC。
 DEFAULT_THRESHOLD = 5.0
@@ -136,6 +136,8 @@ def _audit_from(
             needs_human_review=needs_human_review,
             dimensions=dimensions or {},
             dimensions_complete=dimensions_complete,
+            # 自主路径没人复核：判分器拿得准、只是顺手标了复核的低分台词按宽松策略接受（JUDGE-1）。
+            review_policy=REVIEW_LENIENT_V1,
         )
     except AuthoredTextError as e:
         raise AuditError(f"判分结果不合法: {e}") from e
