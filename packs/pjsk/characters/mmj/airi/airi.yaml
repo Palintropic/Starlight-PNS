@@ -162,6 +162,10 @@ access_grants:
       role: participant
     - location_id: miyamasuzaka_girls
       role: student
+    - location_id: miyamasuzaka_3e   # SCHOOL-3：教室
+      role: student
+    - location_id: miyamasuzaka_courtyard
+      role: student
     - location_id: mmj_airi_worksite
       role: worker
   channels: []

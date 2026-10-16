@@ -293,6 +293,15 @@ def validate_grants_against(grants: CharacterGrants, locations, channels) -> Non
     )
 
 
+def grants_in_world(world, character_id: str) -> CharacterGrants:
+    """这个角色此刻在 WorldState 里的完整授予（地点 + 频道），跟内容侧同一个形状。"""
+    return CharacterGrants(
+        character_id=character_id,
+        locations=tuple(sorted(world.location_grants.get(character_id, {}).items())),
+        channels=frozenset(world.channel_grants.get(character_id, set())),
+    )
+
+
 def install_grants(world, grants: CharacterGrants) -> None:
     """把一个角色的授予装进 WorldState：建世界时，以及 WORLD-2 入住事件的状态效果。"""
     for location_id, role in grants.locations:
@@ -307,6 +316,7 @@ __all__ = [
     "GrantError",
     "decode_grants",
     "encode_grants",
+    "grants_in_world",
     "install_grants",
     "may_enter",
     "parse_access_grants",

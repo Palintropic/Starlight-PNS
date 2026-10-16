@@ -100,6 +100,10 @@ access_grants:
       role: household
     - location_id: kamiyama_high        # 神山高校 2-B
       role: student
+    - location_id: kamiyama_2b   # SCHOOL-3：教室
+      role: student
+    - location_id: kamiyama_rooftop
+      role: student
     - location_id: clothing_store_floor # 服装店店员
       role: staff
   channels:

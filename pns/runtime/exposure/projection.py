@@ -37,6 +37,7 @@ _PERCEIVED_PAYLOAD_KEYS: Dict[EventType, Tuple[str, ...]] = {
     # 权威操作本来就不会被曝光；这里显式登记为什么都不透出，防的是将来有人改了规则。
     EventType.WORLD_LOCATIONS_EXTENDED: (),
     EventType.WORLD_RESIDENT_ADMITTED: (),
+    EventType.WORLD_GRANTS_EXTENDED: (),
 }
 
 # participants 只有在这两档里才表示"被点名的人"，也只有这两档的收件人

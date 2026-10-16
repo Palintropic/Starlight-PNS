@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WORLD-2 运维脚本：地点扩展与居民入住。
+"""WORLD-2 运维脚本：地点扩展、居民入住与追加授予。
 
 只调用服务器的三个 WORLD-2 接口，不读存档文件、不另起 writer：
 
@@ -14,9 +14,11 @@
     # 预检
     admit_residents.py preflight extension
     admit_residents.py preflight admission --character airi --roommates minori,haruka,shizuku --ordinal 0
+    admit_residents.py preflight grants        # 已有居民：内容里比世界多出来的授予
 
     # 执行：先预检，把要发出的请求体写进 --record 文件，再发送
     admit_residents.py execute extension --operation-id mmj-ext-1
+    admit_residents.py execute grants --operation-id school3-grants
     admit_residents.py execute admission --operation-id mmj-airi --character airi \\
         --roommates minori,haruka,shizuku --ordinal 0
 
@@ -88,8 +90,8 @@ class World2Client:
 
 
 def preflight_body(args) -> Dict:
-    if args.kind == "extension":
-        return {"kind": "extension"}
+    if args.kind in ("extension", "grants"):
+        return {"kind": args.kind}
     return {
         "kind": "admission",
         "character_id": args.character,
@@ -106,6 +108,12 @@ def execute_body(args, preflight: Dict) -> Dict:
     """由一次可行的预检结果拼出执行请求。只拷预检给出的字段，不自己算任何东西。"""
     if args.kind == "extension":
         return {"kind": "extension", "operation_id": args.operation_id, **preflight["fingerprints"]}
+    if args.kind == "grants":
+        return {
+            "kind": "grants",
+            "operation_id": args.operation_id,
+            "fingerprints": preflight["fingerprints"],
+        }
     proposal = preflight["proposal"]
     return {
         "kind": "admission",
@@ -131,13 +139,13 @@ def _outcome_code(status: int, payload) -> int:
 
 
 def run(argv, *, send: Optional[Sender] = None) -> int:
-    parser = argparse.ArgumentParser(description="WORLD-2 地点扩展与居民入住（运维）")
+    parser = argparse.ArgumentParser(description="WORLD-2 地点扩展、居民入住与追加授予（运维）")
     parser.add_argument("--base-url", default=os.environ.get("PNS_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--world", default=DEFAULT_WORLD)
     sub = parser.add_subparsers(dest="command", required=True)
 
     def kind_args(p, *, optional=False):
-        p.add_argument("kind", choices=("extension", "admission"), nargs="?" if optional else None)
+        p.add_argument("kind", choices=("extension", "admission", "grants"), nargs="?" if optional else None)
         p.add_argument("--character")
         p.add_argument("--roommates", help="逗号分隔的室友 id")
         p.add_argument("--ordinal", type=int)

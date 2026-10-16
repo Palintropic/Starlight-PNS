@@ -12,6 +12,7 @@
 #
 # 另一条边界同样重要：只有被接受的结果才走到这里。生成失败、判分失败、
 # 漂移记录写盘失败的候选输出留在审计/错误历史里，永远不进世界历史。
+from itertools import permutations
 from typing import Dict, Optional, Tuple
 
 from pns.models.channel import ChannelKind
@@ -36,10 +37,12 @@ from pns.world.grants import (
     CharacterGrants,
     GrantError,
     decode_grants,
+    grants_in_world,
     install_grants,
     validate_grants_against,
 )
 from pns.world.rhythm import DailyRhythm, RhythmError, decode_rhythm
+from pns.world.routing import plan_route
 
 
 class EventCommitError(ValueError):
@@ -145,9 +148,11 @@ def validate_against_world(world: WorldState, event: Event) -> None:
         _extension_of(world, event)
     if event.type is EventType.WORLD_RESIDENT_ADMITTED:
         _admission_of(world, event)
+    if event.type is EventType.WORLD_GRANTS_EXTENDED:
+        _grants_extension_of(world, event)
 
 
-# ── WORLD-2 的两种权威操作 ──────────────────────────────────────────────
+# ── WORLD-2 的三种权威操作 ──────────────────────────────────────────────
 #
 # 校验与应用都从 payload 重新推导同一份结果（新图 / 作息与授予），所以"校验过的"
 # 和"生效的"不可能是两样东西。这里只判"这一笔对这个世界是否成立"；入住窗口、
@@ -171,6 +176,90 @@ def _extension_of(world: WorldState, event: Event):
                 f"已有角色 '{character_id}' 持有新地点的授予：扩展不能改变已有居民的可进入范围"
             )
     return graph
+
+
+def _grants_extension_of(world: WorldState, event: Event) -> Dict[str, CharacterGrants]:
+    """追加授予（SCHOOL-3）：给已有居民多几个能进的地点，只增不改。返回每人追加后的完整授予。
+
+    逐条拒绝的都是"这一笔会改掉已有东西"的情形：换身份、删授予、给新人入住、
+    改变去旧地方的路线。整笔成立才应用 —— 任何一条不成立，什么都不装。
+    """
+    payload = event.payload
+    additions = payload["grants"]
+    fingerprints = payload["fingerprints"]
+    if not hasattr(additions, "keys") or not additions:
+        raise EventCommitError("追加授予的 grants 必须是非空的 角色 → 地点列表")
+    if not hasattr(fingerprints, "keys") or set(fingerprints) != set(additions):
+        raise EventCommitError("追加授予的 fingerprints 必须正好覆盖 grants 里的角色")
+    known = set(world.known_characters())
+    results: Dict[str, CharacterGrants] = {}
+    for character_id in sorted(additions):
+        if character_id not in known or character_id not in world.location_grants:
+            raise EventCommitError(
+                f"'{character_id}' 不是已有居民：追加授予不能替首次入住"
+            )
+        before = grants_in_world(world, character_id)
+        roles = dict(before.locations)
+        entries = additions[character_id]
+        if isinstance(entries, (str, bytes)) or not isinstance(entries, (list, tuple)) or not entries:
+            raise EventCommitError(f"'{character_id}' 的追加授予必须是非空列表")
+        for entry in entries:
+            if (
+                not isinstance(entry, (list, tuple))
+                or len(entry) != 2
+                or not all(isinstance(item, str) and item for item in entry)
+            ):
+                raise EventCommitError("追加授予的每一项必须是 [location_id, role]")
+            location_id, role = entry
+            if location_id in roles:
+                # 世界里原有的，或者这一笔里写了两次：两种都不是"追加"。
+                raise EventCommitError(
+                    f"'{character_id}' 已经有（或这一笔里重复写了）'{location_id}' 的授予："
+                    "追加授予不换身份、不重复"
+                )
+            if not world.locations.has(location_id):
+                raise EventCommitError(f"追加授予引用了这个世界里没有的地点：{location_id!r}")
+            access = world.locations.get(location_id).access
+            if access.get("public") is True:
+                raise EventCommitError(f"'{location_id}' 是公开地点，不需要授予")
+            if not access_admits(access, role):
+                raise EventCommitError(f"'{location_id}' 不接受身份 {role!r}")
+            roles[location_id] = role
+        after = CharacterGrants(
+            character_id=character_id,
+            locations=tuple(sorted(roles.items())),
+            channels=before.channels,
+        )
+        expected = {"before": grants_fingerprint(before), "after": grants_fingerprint(after)}
+        stated = fingerprints[character_id]
+        if not hasattr(stated, "keys") or dict(stated) != expected:
+            raise EventCommitError(f"'{character_id}' 的追加授予指纹与世界当前授予 / 追加结果不符")
+        _require_routes_unchanged(world, character_id, before, after)
+        results[character_id] = after
+    return results
+
+
+def _require_routes_unchanged(world: WorldState, character_id: str, before, after) -> None:
+    """追加前能进的地点两两之间的路线，追加后逐对不变。
+
+    这是本操作的产品限制，不是"只增权限"的必然推论：一条授予出去的走廊可以正当地
+    让旧路线变短，那种追加要另审（SCHOOL-3 设计 §4.2 第 5 条）。
+    """
+    graph = world.locations
+    old_roles, new_roles = before.location_roles(), after.location_roles()
+
+    def old(location_id):
+        return access_admits(graph.get(location_id).access, old_roles.get(location_id))
+
+    def new(location_id):
+        return access_admits(graph.get(location_id).access, new_roles.get(location_id))
+
+    reachable = sorted(lid for lid in graph.ids() if old(lid))
+    for a, b in permutations(reachable, 2):
+        if plan_route(graph, new, a, b) != plan_route(graph, old, a, b):
+            raise EventCommitError(
+                f"给 '{character_id}' 的追加授予改变了 '{a}' → '{b}' 的路线"
+            )
 
 
 def _admission_of(world: WorldState, event: Event) -> Tuple[DailyRhythm, CharacterGrants]:
@@ -311,6 +400,11 @@ def _apply_locations_extended(world: WorldState, event: Event) -> None:
     world._replace_locations(_extension_of(world, event))
 
 
+def _apply_grants_extended(world: WorldState, event: Event) -> None:
+    for character_id, grants in _grants_extension_of(world, event).items():
+        install_grants(world, grants)
+
+
 def _apply_resident_admitted(world: WorldState, event: Event) -> None:
     # 顺序固定：先装授予（放置要靠它），再放置、设活动、入频道。
     _, grants = _admission_of(world, event)
@@ -332,6 +426,7 @@ _APPLY = {
     EventType.CHARACTER_ACTIVITY_CHANGED: _apply_activity_changed,
     EventType.WORLD_LOCATIONS_EXTENDED: _apply_locations_extended,
     EventType.WORLD_RESIDENT_ADMITTED: _apply_resident_admitted,
+    EventType.WORLD_GRANTS_EXTENDED: _apply_grants_extended,
 }
 
 
@@ -511,7 +606,8 @@ def _check_baseline_order(state: SessionState, event: Event) -> None:
     ):
         raise EventCommitError(f"operation_id '{operation_id}' 已经被另一笔 WORLD-2 操作用过")
     first = not any(e.type in AUTHORITY_EVENT_TYPES for e in state.events)
-    if event.type is EventType.WORLD_RESIDENT_ADMITTED:
+    if event.type is not EventType.WORLD_LOCATIONS_EXTENDED:
+        # 入住、追加授予都不带基准，也都不能是第一笔。
         if first:
             raise EventCommitError("世界上第一笔 WORLD-2 操作必须是带重放基准的地点扩展")
         return
