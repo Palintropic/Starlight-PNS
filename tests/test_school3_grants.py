@@ -244,6 +244,17 @@ class PhaseATests(School3TestCase):
         self.assertFalse(pre["feasible"])
         self.assertEqual(pre["reasons"][0]["code"], "grants_conflict")
 
+    def test_preflight_runs_the_commit_checks(self):
+        # ena 实现审 P3：预检不能把提交层注定拒绝的一笔（比如改变旧路线）报成可行。
+        self.extend()
+        with patch(
+            "pns.runtime.event_commit._require_routes_unchanged",
+            side_effect=EventCommitError("改变了路线"),
+        ):
+            pre = self.admission.preflight({"kind": GRANTS})
+        self.assertFalse(pre["feasible"])
+        self.assertEqual(pre["reasons"][0]["code"], "refused")
+
     def test_a_stale_preflight_is_refused(self):
         self.extend()
         _, body = self.grants_body()

@@ -30,7 +30,7 @@ from pns.models.content_ledger import content_fingerprint
 from pns.models.event import AUTHORITY_EVENT_TYPES, Event, EventScope, EventType
 from pns.models.session import SessionState
 from pns.models.world_state import ActivityKind, Availability
-from pns.runtime.event_commit import EventCommitError
+from pns.runtime.event_commit import EventCommitError, validate_against_world
 from pns.runtime.formal_world import grants_fingerprint, rhythm_fingerprint, rhythm_subject
 from pns.runtime.world2_baseline import build_baseline
 from pns.runtime.world2_seed import admission_seed
@@ -387,8 +387,28 @@ class WorldAdmission:
         report = {"kind": GRANTS, "feasible": False, "reasons": [], "proposal": None}
         try:
             additions, fingerprints = self._grants_definition(self._state)
+            # 提交层的纯校验也在这里过一遍（旧路线不变等），免得预检说可行、提交注定被拒。
+            world = self._state.world_state
+            validate_against_world(
+                world,
+                Event(
+                    event_id="world2:preflight",
+                    type=EventType.WORLD_GRANTS_EXTENDED,
+                    occurred_at=world.clock,
+                    scope=EventScope.PUBLIC,
+                    payload={
+                        "operation_id": "preflight",
+                        "envelope": {},
+                        "grants": additions,
+                        "fingerprints": fingerprints,
+                    },
+                ),
+            )
         except AdmissionRejected as e:
             report["reasons"].append({"code": e.code, "message": str(e)})
+            return report
+        except EventCommitError as e:
+            report["reasons"].append({"code": "refused", "message": str(e)})
             return report
         report["feasible"] = True
         report["proposal"] = additions
