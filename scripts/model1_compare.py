@@ -13,6 +13,11 @@ never writes under --world-root.
         --models mimo-v2.5-pro,mimo-v2.6-pro --samples 3 --budget-yuan 2 \
         --out taste.jsonl --sheet taste_blind.md
 
+    # thinking: same model, generation with thinking on vs disabled, every
+    # line judged by the production auditor; one --world-root per clock
+    python scripts/model1_compare.py thinking --world-root /tmp/a --world-root /tmp/b \
+        --world yoake-mae --samples 3 --budget-yuan 3 --out thinking.jsonl --sheet t.md
+
     # offline summary of a judge run
     python scripts/model1_compare.py summary judge.jsonl
 
@@ -75,6 +80,9 @@ class Meter:
         # so callers must check this flag rather than rely on the raise.
         self.exhausted = False
         self.messages = self
+        # Request fields merged into every call while set (the thinking arm
+        # sets {"thinking": {"type": "disabled"}} around generation only).
+        self.extra = None
 
     def create(self, **request):
         if self.spent_yuan >= self.budget_yuan:
@@ -82,6 +90,8 @@ class Meter:
             raise BudgetExceeded(
                 f"estimated spend {self.spent_yuan:.4f} reached --budget-yuan {self.budget_yuan}"
             )
+        if self.extra:
+            request = {**request, **self.extra}
         self.last_usage = None
         response = self._client.messages.create(**request)
         usage = getattr(response, "usage", None)
@@ -545,6 +555,220 @@ def cmd_taste(args):
     return 0
 
 
+# ── thinking ───────────────────────────────────────────────────────────
+THINKING_ARMS = ("thinking-on", "thinking-off")
+
+
+def audit_request_for(state, item, text, now):
+    """The AuditRequest the coordinator would build for this line at `now`."""
+    from pns.models.action import ActionId
+    from pns.runtime.autonomy.audit import AuditRequest
+    from pns.runtime.autonomy.context import DIALOGUE_OUTPUT_RULES
+    from pns.runtime.autonomy.coordinator import _AUDIT_RECENT_LINES
+
+    world = state.world_state
+    actor = item["character_id"]
+    recent = [
+        line for line in (
+            o.render_line() for o in state.observations.for_character(actor)
+        ) if line is not None
+    ]
+    # The judge reads only the text; acceptance never looks at the payload.
+    payload = {"text": text}
+    location, activity, channels = (
+        {cid: world.location_of(cid) for cid in world.known_characters()},
+        {cid: world.activity_of(cid).kind.value for cid in world.known_characters()},
+        {cid: set(world.channels_for(cid)) for cid in world.known_characters()},
+    )
+    return AuditRequest(
+        character_id=actor,
+        proposal_id=f"thinking-{actor}",
+        payload=payload,
+        action_id=ActionId(item["action_id"]),
+        target_id=item["target_id"],
+        now=now,
+        recent_lines=tuple(recent[-_AUDIT_RECENT_LINES:]),
+        task_instructions=DIALOGUE_OUTPUT_RULES,
+        situation_facts=situation_facts(actor, now, location, activity, channels),
+    )
+
+
+def cmd_thinking(args):
+    """Same model and contexts; generation with thinking on vs disabled.
+
+    Every line that parses is judged by the production RouterAuditor (and so
+    the production acceptance rule), so the comparison is in lines that would
+    have entered the world, not in raw generations.
+    """
+    from pns.interfaces.composition import AutonomySettings
+    from pns.logic import router as router_mod
+    from pns.logic.simulation import GenerationTruncated, call_character
+    from pns.runtime.autonomy.audit import AuditError, RouterAuditor
+    from pns.runtime.autonomy.generation import ABSTAIN_TOKEN, GenerationError, parse_line
+    from pns.runtime.autonomy.prompt import PromptedLineGenerator
+    from pns.runtime.persistence import FileWorldStore
+
+    for root in args.world_root:
+        guard_output([args.out, args.sheet], root)
+    residents = [c.strip() for c in args.residents.split(",")] if args.residents else None
+    # Explicit, not from the local .env: the point is to price production's setup.
+    registry = load_registry(
+        generator_model=args.generator_model, evaluator_model=args.evaluator_model
+    )
+    models = registry.models
+    worlds = []
+    for root in args.world_root:
+        archive, now, contexts = taste_contexts(
+            FileWorldStore(root), args.world, registry, residents
+        )
+        state = archive.restore_state()
+        for c in contexts:
+            c["context_id"] = f"{now.strftime('%H%M')}:{c['context_id']}"
+        worlds.append((root, archive, now, state, contexts))
+    total = sum(len(w[4]) for w in worlds)
+    print(f"{total} contexts x {len(THINKING_ARMS)} arms x {args.samples} samples, "
+          f"generator {models.generator_model}, judge {models.evaluator_model}, "
+          f"max_tokens {args.max_tokens}", file=sys.stderr)
+    if args.dry_run:
+        for _, _, now, _, contexts in worlds:
+            for c in contexts:
+                print(json.dumps({k: v for k, v in c.items() if k != "context"},
+                                 ensure_ascii=False))
+        return 0
+    autonomy = AutonomySettings.from_env()
+    meter = make_meter(registry, args.budget_yuan)
+    names = {cid: registry.character_name(cid) for cid in sorted(registry.characters)}
+
+    def call_model(cid, view, history):
+        try:
+            return call_character(
+                meter, cid, history, view, models.generator_model,
+                args.max_tokens, autonomy.temperature, registry=registry,
+            )
+        except GenerationTruncated as e:
+            raise GenerationError("truncated at max_tokens", retryable=True) from e
+
+    generator = PromptedLineGenerator(
+        call_model, locations=registry.new_location_graph(),
+        channels=registry.new_channel_registry(), names=names,
+    )
+
+    def judge(request):
+        return router_mod.judge(
+            meter, request.character_id, request.text, 0,
+            recent_history=[{"role": "assistant", "content": line}
+                            for line in request.recent_lines],
+            original_request="\n".join(request.task_instructions),
+            situation_facts=list(request.situation_facts),
+            registry=registry,
+        )
+
+    auditor = RouterAuditor(
+        judge, threshold=models.ooc_threshold,
+        evaluator_model=models.evaluator_model, evaluator_provider=models.provider,
+        generator_model=models.generator_model, generator_provider=models.provider,
+    )
+    rng = random.Random(args.seed)
+    samples, all_contexts = {}, []
+    with open(args.out, "a", encoding="utf-8") as fh:
+        try:
+            for root, archive, now, state, contexts in worlds:
+                all_contexts.extend(contexts)
+                for item in contexts:
+                    schedule = [(arm, i) for arm in THINKING_ARMS for i in range(args.samples)]
+                    rng.shuffle(schedule)
+                    for arm, i in schedule:
+                        started = time.monotonic()
+                        line, error = None, None
+                        meter.extra = (
+                            {"thinking": {"type": "disabled"}} if arm == "thinking-off" else None
+                        )
+                        try:
+                            raw = generator.generate(item["context"])
+                            line = parse_line(raw, item["context"])
+                        except GenerationError as e:
+                            error = str(e)
+                        finally:
+                            meter.extra = None
+                        gen_usage = meter.last_usage
+                        gen_stop, gen_blocks = meter.last_stop_reason, meter.last_block_types
+                        if meter.exhausted:
+                            raise BudgetExceeded("budget reached")
+                        audit, judge_usage, judge_error = None, None, None
+                        if line is not None and line != ABSTAIN_TOKEN:
+                            meter.last_usage = None
+                            try:
+                                audit = auditor.audit(audit_request_for(state, item, line, now))
+                            except AuditError as e:
+                                judge_error = str(e)
+                            judge_usage = meter.last_usage
+                            if meter.exhausted:
+                                raise BudgetExceeded("budget reached")
+                        record = {
+                            "kind": "thinking",
+                            "world_root": str(root),
+                            "archive_revision": archive.revision,
+                            "world_clock": now.isoformat(),
+                            **{k: v for k, v in item.items() if k != "context"},
+                            "model": arm,
+                            "generator_model": models.generator_model,
+                            "sample": i,
+                            "line": line,
+                            "abstained": line == ABSTAIN_TOKEN,
+                            "error": error,
+                            "usage": gen_usage,
+                            "stop_reason": gen_stop,
+                            "block_types": gen_blocks,
+                            "judge_usage": judge_usage,
+                            "judge_error": judge_error,
+                            "accepted": None if audit is None else audit.accepted,
+                            "drift_score": None if audit is None else audit.drift_score,
+                            "needs_human_review": None if audit is None else audit.needs_human_review,
+                            # Audit dimensions are read-only mappings, nested.
+                            "dimensions": None if audit is None else json.loads(
+                                json.dumps(audit.dimensions, default=dict)
+                            ),
+                            "seconds": round(time.monotonic() - started, 2),
+                        }
+                        write_record(fh, record)
+                        samples.setdefault(item["context_id"], []).append(record)
+                        verdict = "" if audit is None else (
+                            " ACCEPT" if audit.accepted else f" reject({audit.drift_score})"
+                        )
+                        print(f"[{meter.calls}] {arm} {item['context_id']} "
+                              f"{line or error}{verdict} spent~{meter.spent_yuan:.3f}",
+                              file=sys.stderr)
+        except BudgetExceeded as e:
+            print(f"stopped: {e}", file=sys.stderr)
+    if args.sheet:
+        write_blind_sheet(args.sheet, all_contexts, samples, list(THINKING_ARMS), rng)
+    print(f"calls={meter.calls} estimated_yuan={meter.spent_yuan:.4f}", file=sys.stderr)
+    return 0
+
+
+def summarize_thinking(rows):
+    def yuan(rs, field):
+        return sum(estimate_yuan(r.get(field)) for r in rs)
+
+    print(f"\nthinking: {len({r['context_id'] for r in rows})} contexts")
+    for arm in THINKING_ARMS:
+        rs = [r for r in rows if r["model"] == arm]
+        if not rs:
+            continue
+        accepted = sum(bool(r["accepted"]) for r in rs)
+        judged = [r for r in rs if r["accepted"] is not None]
+        spent = yuan(rs, "usage") + yuan(rs, "judge_usage")
+        print(f"- {arm}: {len(rs)} generations, {sum(bool(r['error']) for r in rs)} errors, "
+              f"{sum(r['abstained'] for r in rs)} abstained, {len(judged)} judged, "
+              f"{accepted} accepted, {sum(bool(r['judge_error']) for r in rs)} judge errors")
+        print(f"  generation {_usage_line(rs)}")
+        print(f"  yuan: generation {yuan(rs, 'usage'):.4f} + judge {yuan(rs, 'judge_usage'):.4f}"
+              f" = {spent:.4f}; per generation {spent / len(rs):.4f}; "
+              f"per accepted line {spent / max(accepted, 1):.4f}")
+        print(f"  stop_reasons {dict(Counter(r.get('stop_reason') for r in rs))} "
+              f"blocks {dict(Counter(tuple(r.get('block_types') or ()) for r in rs))}")
+
+
 def write_blind_sheet(path, contexts, samples, models, rng):
     """A/B per context with the model hidden; the key goes to a separate file."""
     sheet, key = ["# MODEL-1 blind taste sheet", ""], {}
@@ -582,12 +806,17 @@ def cmd_summary(args):
         rows = [json.loads(line) for line in fh if line.strip()]
     judge = [r for r in rows if r["kind"] == "judge"]
     taste = [r for r in rows if r["kind"] == "taste"]
-    spent = sum(estimate_yuan(r.get("usage")) for r in rows)
-    print(f"calls={len(rows)} estimated_yuan={spent:.4f}")
+    thinking = [r for r in rows if r["kind"] == "thinking"]
+    spent = sum(
+        estimate_yuan(r.get("usage")) + estimate_yuan(r.get("judge_usage")) for r in rows
+    )
+    print(f"records={len(rows)} estimated_yuan={spent:.4f}")
     if judge:
         summarize_judge(judge)
     if taste:
         summarize_taste(taste)
+    if thinking:
+        summarize_thinking(thinking)
     return 0
 
 
@@ -675,6 +904,23 @@ def main(argv=None):
     t.add_argument("--sheet")
     t.add_argument("--dry-run", action="store_true")
     t.set_defaults(func=cmd_taste)
+
+    k = sub.add_parser("thinking")
+    k.add_argument("--world-root", required=True, action="append",
+                   help="repeat for several checkpoint copies (one clock each)")
+    k.add_argument("--world", required=True)
+    k.add_argument("--residents")
+    # Production since 10-10: v2.6 for both paths, PNS_AUTONOMY_MAX_TOKENS=2048.
+    k.add_argument("--generator-model", default="mimo-v2.6-pro")
+    k.add_argument("--evaluator-model", default="mimo-v2.6-pro")
+    k.add_argument("--max-tokens", type=int, default=2048)
+    k.add_argument("--samples", type=int, default=3)
+    k.add_argument("--budget-yuan", type=float, required=True)
+    k.add_argument("--seed", type=int, default=1)
+    k.add_argument("--out", required=True)
+    k.add_argument("--sheet")
+    k.add_argument("--dry-run", action="store_true")
+    k.set_defaults(func=cmd_thinking)
 
     s = sub.add_parser("summary")
     s.add_argument("path")
