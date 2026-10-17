@@ -556,7 +556,17 @@ def cmd_taste(args):
 
 
 # ── thinking ───────────────────────────────────────────────────────────
-THINKING_ARMS = ("thinking-on", "thinking-off")
+# Arm name -> request fields overlaid on generation calls only.
+THINKING_ARMS = {
+    "thinking-on": None,
+    "thinking-off": {"thinking": {"type": "disabled"}},
+    # With thinking on, MiMo forces temperature 1.0; off, the configured 0.85
+    # applies. This arm separates the two (temperature rides in extra_body,
+    # see router.anthropic_sampling).
+    "thinking-off-t1": {"thinking": {"type": "disabled"}, "extra_body": {"temperature": 1.0}},
+    # A budget_tokens arm was tried on 10-17: MiMo ignores it (256 asked,
+    # ~900 output tokens), matching its docs (enabled/disabled only).
+}
 
 
 def audit_request_for(state, item, text, now):
@@ -626,7 +636,11 @@ def cmd_thinking(args):
             c["context_id"] = f"{now.strftime('%H%M')}:{c['context_id']}"
         worlds.append((root, archive, now, state, contexts))
     total = sum(len(w[4]) for w in worlds)
-    print(f"{total} contexts x {len(THINKING_ARMS)} arms x {args.samples} samples, "
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    unknown = [a for a in arms if a not in THINKING_ARMS]
+    if unknown or not arms:
+        raise SystemExit(f"--arms takes some of {', '.join(THINKING_ARMS)}")
+    print(f"{total} contexts x {len(arms)} arms x {args.samples} samples, "
           f"generator {models.generator_model}, judge {models.evaluator_model}, "
           f"max_tokens {args.max_tokens}", file=sys.stderr)
     if args.dry_run:
@@ -675,14 +689,12 @@ def cmd_thinking(args):
             for root, archive, now, state, contexts in worlds:
                 all_contexts.extend(contexts)
                 for item in contexts:
-                    schedule = [(arm, i) for arm in THINKING_ARMS for i in range(args.samples)]
+                    schedule = [(arm, i) for arm in arms for i in range(args.samples)]
                     rng.shuffle(schedule)
                     for arm, i in schedule:
                         started = time.monotonic()
                         line, error = None, None
-                        meter.extra = (
-                            {"thinking": {"type": "disabled"}} if arm == "thinking-off" else None
-                        )
+                        meter.extra = THINKING_ARMS[arm]
                         try:
                             raw = generator.generate(item["context"])
                             line = parse_line(raw, item["context"])
@@ -740,8 +752,8 @@ def cmd_thinking(args):
                               file=sys.stderr)
         except BudgetExceeded as e:
             print(f"stopped: {e}", file=sys.stderr)
-    if args.sheet:
-        write_blind_sheet(args.sheet, all_contexts, samples, list(THINKING_ARMS), rng)
+    if args.sheet and len(arms) == 2:
+        write_blind_sheet(args.sheet, all_contexts, samples, arms, rng)
     print(f"calls={meter.calls} estimated_yuan={meter.spent_yuan:.4f}", file=sys.stderr)
     return 0
 
@@ -914,6 +926,8 @@ def main(argv=None):
     k.add_argument("--generator-model", default="mimo-v2.6-pro")
     k.add_argument("--evaluator-model", default="mimo-v2.6-pro")
     k.add_argument("--max-tokens", type=int, default=2048)
+    k.add_argument("--arms", default="thinking-on,thinking-off",
+                   help=f"comma list of: {', '.join(THINKING_ARMS)}")
     k.add_argument("--samples", type=int, default=3)
     k.add_argument("--budget-yuan", type=float, required=True)
     k.add_argument("--seed", type=int, default=1)
