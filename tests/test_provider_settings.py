@@ -745,7 +745,8 @@ class RealSdkTwoLineTests(_SettingsDir):
         suffix = "/anthropic" if api_format == "anthropic" else "/v1"
         return f"http://127.0.0.1:{server.server_port}{suffix}"
 
-    def _run_session(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200):
+    def _run_session(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200,
+                     follow=False):
         gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」", status=status, raw=gen_raw)
         judge_server, judge_seen = _fake_provider(VERDICT, status=status, raw=judge_raw)
         for server in (gen_server, judge_server):
@@ -755,10 +756,11 @@ class RealSdkTwoLineTests(_SettingsDir):
         self.write(PROVIDER_FILE, _panel_file(
             generation={**panel["generation"], "api_format": gen_format,
                         "base_url": self._url(gen_server, gen_format)},
-            judge={**panel["judge"], "api_format": judge_format,
-                   "base_url": self._url(judge_server, judge_format)},
+            judge={"follow": LINE_GENERATION} if follow else {
+                **panel["judge"], "api_format": judge_format,
+                "base_url": self._url(judge_server, judge_format)},
         ))
-        out = self.dir.parent / f"out-{gen_format}-{judge_format}"
+        out = self.dir.parent / f"out-{gen_format}-{judge_format}-{follow}"
         with patch.object(content_registry, "SETTINGS_DIR", self.dir):
             registry = build_content_registry()
         runtime = SessionRuntime.create(
@@ -787,6 +789,14 @@ class RealSdkTwoLineTests(_SettingsDir):
                 )
                 self.assertNotIn(GEN_KEY, text)
                 self.assertNotIn(JUDGE_KEY, text)
+
+    def test_a_following_judge_goes_to_the_generation_provider(self):
+        messages, gen_seen, judge_seen, _ = self._run_session("anthropic", None, follow=True)
+        self.assertNotIn("error", [m.get("type") for m in messages])
+        self.assertEqual(judge_seen, [])
+        # 一次生成 + 一次判分，都打到生成那台，用生成的 key 和模型。
+        self.assertEqual(len(gen_seen), 2)
+        self.assertEqual({(key, model) for _, key, model in gen_seen}, {(GEN_KEY, "gen-model")})
 
     def test_upstream_failures_carrying_the_key_stay_inside(self):
         echo = json.dumps({"error": {"type": "invalid_request_error",
