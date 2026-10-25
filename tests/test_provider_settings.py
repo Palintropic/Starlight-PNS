@@ -382,6 +382,24 @@ class RegistryBuildTests(_SettingsDir):
         self.assertEqual(result.status, "failed")
         self.assertNotIn(GEN_KEY, exposed)
 
+    def test_the_reload_endpoints_do_not_publish_the_url(self):
+        from fastapi.testclient import TestClient
+
+        from pns.interfaces.app import create_app
+
+        bad = f"https://u:{GEN_KEY}@bad\u2100.example/v1"
+        self.write(ACCOUNTS_FILE, _accounts_file())
+        self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+        client = TestClient(create_app(WorldControlPlane(root=self.dir.parent / "worlds")))
+        before = BOUNDARY.active()
+        with patch.object(content_registry, "SETTINGS_DIR", self.dir):
+            posted = client.post("/api/config/reload")
+        status = client.get("/api/config/reload")
+        self.assertEqual(posted.status_code, 400, posted.text)
+        self.assertIs(BOUNDARY.active(), before)  # 失败的重载不换快照
+        for response in (posted, status):
+            self.assertNotIn(GEN_KEY, response.text)
+
     def test_without_a_panel_file_the_registry_is_env_derived(self):
         with patch.object(content_registry, "SETTINGS_DIR", self.dir):
             registry = build_content_registry()
