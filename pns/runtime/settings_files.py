@@ -8,8 +8,10 @@
 #     不能再说"原文件不变"；调用方要按"已经发生"处理（走事务恢复）。
 #   * 正常返回 —— 已耐久（或这个平台不提供目录同步，返回值说明）。
 #
-# 目录不存在时顺手建出来，并把每一层新目录在父目录里的目录项也刷下去；
-# 只刷目标所在目录证明不了新目录本身还在。
+# 目录链从一个已知耐久的锚点（默认是目标往上两层，即 data/）算起：每次写入
+# 都把锚点到目标之间每一层在父目录里的目录项刷一遍，缺的顺手建出来。"目录
+# 已经存在"不等于"目录项已经耐久"——上次同步失败后的重试、别人刚建好还没
+# 刷的目录，看起来都是"存在"。只刷目标所在目录证明不了这一层本身还在。
 #
 # 删除同样三档：unlink 失败 = 没删；unlink 成功、目录同步失败 = 已删但不耐久。
 #
@@ -62,26 +64,29 @@ def sync_dir(directory: Path) -> bool:
     return True
 
 
-def _ensure_dir(directory: Path) -> bool:
-    """建出缺的各层目录并刷父目录项。返回目录同步是否被平台支持；失败抛 OSError。"""
-    missing = []
-    current = directory
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+def _ensure_dir_chain(directory: Path, anchor: Path) -> bool:
+    """建出锚点之下缺的各层，并刷每一层的父目录项。返回同步是否都被平台支持；失败抛 OSError。"""
+    parts = directory.relative_to(anchor).parts
     supported = True
-    for created in reversed(missing):
-        supported = sync_dir(created.parent) and supported
+    for depth in range(1, len(parts) + 1):
+        current = anchor.joinpath(*parts[:depth])
+        current.mkdir(mode=0o700, exist_ok=True)
+        supported = sync_dir(current.parent) and supported
     return supported
 
 
-def durable_write(path: Path, payload: bytes) -> bool:
-    """按三档合同写一个 0600 文件。返回目录同步是否被平台支持。"""
+def durable_write(path: Path, payload: bytes, *, anchor: Path = None) -> bool:
+    """按三档合同写一个 0600 文件。返回目录同步是否被平台支持。
+
+    anchor 是调用方保证已经耐久存在的目录（默认目标往上两层），必须是目标的祖先。
+    """
     path = Path(path)
     directory = path.parent
+    anchor = directory.parent if anchor is None else Path(anchor)
+    if anchor != directory and anchor not in directory.parents:
+        raise ValueError("anchor 必须是目标文件的祖先目录")
     try:
-        supported = _ensure_dir(directory)
+        supported = _ensure_dir_chain(directory, anchor)
         fd, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=f".{path.name}.", suffix=".tmp")
     except OSError:
         raise NotPublished(f"{path.name} 的临时文件建不出来") from None

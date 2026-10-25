@@ -14,8 +14,9 @@
 #   7. 生产启动：面板两条线路 token 齐全时不再要求 env 的旧 key；
 #   8. 真 SDK 打两个回环假服务器，经 SessionRuntime.create()/run() 跑完一轮：
 #      每台服务器只收到自己那条线路的 key 和模型，协议对调也一样，消息和落盘
-#      文件里没有 key；上游报错 / 非 JSON 响应 / 建 client 失败时，key 也不进消息、
-#      落盘文件、stdout、stderr 和日志；
+#      文件里没有 key；上游报错 / 非 JSON 响应时，key 也不进消息、落盘文件、
+#      stdout、stderr 和日志；建 client 失败时，抛出的异常只有固定文案（消息和
+#      类型名都不带 key —— 这一条只查异常本身）；跟随时判分真的判完；
 #   9. 世界那一半同理：经 HTTP 建世界、开认知，生成走 A、判分走 B，账本两行协议
 #      各自对；上游回显 key 时状态接口、存档、账本、输出里都没有它。
 #
@@ -321,18 +322,26 @@ class PanelFileTests(_SettingsDir):
             self.load()
 
     def test_an_unparseable_url_is_refused_without_echoing_it(self):
-        # U+2100 在 NFKC 下变出 "/"，urlsplit 的 ValueError 会带上整段 netloc。
-        bad = f"https://u:{GEN_KEY}@bad\u2100.example/v1"
-        self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
-        with self.assertRaises(ProviderSettingsError) as caught:
-            self.load()
-        self.assertIsNone(caught.exception.__cause__)
-        self.assertNotIn(GEN_KEY, str(caught.exception))
-        line = Line(
-            name=LINE_GENERATION, account="a", api_format="anthropic",
-            base_url=bad, model="m", token=Secret(GEN_KEY),
-        )
-        self.assertEqual(line.host, "")
+        bad_urls = {
+            # U+2100 在 NFKC 下变出 "/"，urlsplit 当场抛，消息里是整段 netloc。
+            "nfkc": f"https://u:{GEN_KEY}@bad\u2100.example/v1",
+            # urlsplit 和 hostname 都成功，读 port 时才抛，消息里是端口原文。
+            "lazy port": f"https://host.example:{GEN_KEY}/v1",
+            "port out of range": "https://host.example:99999/v1",
+            "bad ipv6": f"https://[{GEN_KEY}/v1",
+        }
+        for name, bad in bad_urls.items():
+            with self.subTest(name):
+                self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+                with self.assertRaises(ProviderSettingsError) as caught:
+                    self.load()
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertNotIn(GEN_KEY, str(caught.exception))
+                line = Line(
+                    name=LINE_GENERATION, account="a", api_format="anthropic",
+                    base_url=bad, model="m", token=Secret(GEN_KEY),
+                )
+                self.assertEqual(line.host, "")
 
     def test_a_valid_panel_is_not_vetoed_by_a_broken_env(self):
         self.write(PROVIDER_FILE, _panel_file())
@@ -387,18 +396,19 @@ class RegistryBuildTests(_SettingsDir):
 
         from pns.interfaces.app import create_app
 
-        bad = f"https://u:{GEN_KEY}@bad\u2100.example/v1"
         self.write(ACCOUNTS_FILE, _accounts_file())
-        self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
         client = TestClient(create_app(WorldControlPlane(root=self.dir.parent / "worlds")))
-        before = BOUNDARY.active()
-        with patch.object(content_registry, "SETTINGS_DIR", self.dir):
-            posted = client.post("/api/config/reload")
-        status = client.get("/api/config/reload")
-        self.assertEqual(posted.status_code, 400, posted.text)
-        self.assertIs(BOUNDARY.active(), before)  # 失败的重载不换快照
-        for response in (posted, status):
-            self.assertNotIn(GEN_KEY, response.text)
+        for bad in (f"https://u:{GEN_KEY}@bad\u2100.example/v1", f"https://host.example:{GEN_KEY}/v1"):
+            with self.subTest(bad=bad.replace(GEN_KEY, "<key>")):
+                self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+                before = BOUNDARY.active()
+                with patch.object(content_registry, "SETTINGS_DIR", self.dir):
+                    posted = client.post("/api/config/reload")
+                status = client.get("/api/config/reload")
+                self.assertEqual(posted.status_code, 400, posted.text)
+                self.assertIs(BOUNDARY.active(), before)  # 失败的重载不换快照
+                for response in (posted, status):
+                    self.assertNotIn(GEN_KEY, response.text)
 
     def test_without_a_panel_file_the_registry_is_env_derived(self):
         with patch.object(content_registry, "SETTINGS_DIR", self.dir):
@@ -466,7 +476,15 @@ class DurableWriteTests(_SettingsDir):
     def test_a_directory_sync_failure_is_published_but_not_durable(self):
         path = self.dir / "x.json"
         path.write_bytes(b"old")
-        with patch.object(settings_files, "sync_dir", side_effect=OSError(5, "EIO")):
+        real = settings_files.sync_dir
+
+        def fail_after_rename(directory):
+            # 目录链（data/ 里的 settings 目录项）刷成了，rename 之后刷 settings/ 失败。
+            if Path(directory) == self.dir:
+                raise OSError(5, "EIO")
+            return real(directory)
+
+        with patch.object(settings_files, "sync_dir", side_effect=fail_after_rename):
             with self.assertRaises(settings_files.PublishedNotDurable):
                 settings_files.durable_write(path, b"new")
         self.assertEqual(path.read_bytes(), b"new")
@@ -474,7 +492,7 @@ class DurableWriteTests(_SettingsDir):
     def test_new_directories_are_synced_into_their_parents(self):
         path = self.dir / "a" / "b" / "x.json"
         with patch.object(settings_files, "sync_dir", wraps=settings_files.sync_dir) as sync:
-            settings_files.durable_write(path, b"{}")
+            settings_files.durable_write(path, b"{}", anchor=self.dir)
         synced = {Path(call.args[0]) for call in sync.call_args_list}
         self.assertEqual(synced, {self.dir, self.dir / "a", self.dir / "a" / "b"})
 
@@ -484,6 +502,73 @@ class DurableWriteTests(_SettingsDir):
             with self.assertRaises(settings_files.NotPublished):
                 settings_files.durable_write(path, b"{}")
         self.assertFalse(path.exists())
+
+    def test_a_retry_after_a_failed_parent_sync_resyncs_the_chain(self):
+        path = self.dir / "a" / "b" / "x.json"
+        real = settings_files.sync_dir
+
+        def fail_deepest(directory):
+            if Path(directory) == self.dir / "a":  # b 建好了，刷它在 a 里的目录项失败
+                raise OSError(5, "EIO")
+            return real(directory)
+
+        with patch.object(settings_files, "sync_dir", side_effect=fail_deepest):
+            with self.assertRaises(settings_files.NotPublished):
+                settings_files.durable_write(path, b"first", anchor=self.dir)
+        self.assertTrue(path.parent.is_dir())  # 目录留下来了，但目录项没刷成
+        with patch.object(settings_files, "sync_dir", return_value=True) as sync:
+            self.assertIs(settings_files.durable_write(path, b"second", anchor=self.dir), True)
+        synced = [Path(call.args[0]) for call in sync.call_args_list]
+        for directory in (self.dir, self.dir / "a", self.dir / "a" / "b"):
+            self.assertIn(directory, synced)
+
+    def test_a_retry_does_not_forget_an_unsupported_parent_sync(self):
+        path = self.dir / "new" / "x.json"
+        real = settings_files.sync_dir
+        with patch.object(
+            settings_files, "sync_dir", side_effect=lambda d: False if Path(d) == self.dir else real(d)
+        ):
+            self.assertIs(settings_files.durable_write(path, b"first"), False)
+            self.assertIs(settings_files.durable_write(path, b"second"), False)
+
+    def test_a_concurrent_writer_does_not_ride_on_an_unsynced_directory(self):
+        # A 建好目录、卡在刷父目录项上；B 这时看到目录"已存在"，也必须自己刷一遍。
+        path = self.dir / "new" / "x.json"
+        real = settings_files.sync_dir
+        a_waiting, release = threading.Event(), threading.Event()
+        synced = []
+
+        def sync(directory):
+            directory = Path(directory)
+            synced.append((threading.current_thread().name, directory))
+            if threading.current_thread().name == "writer-a" and directory == self.dir:
+                a_waiting.set()
+                release.wait(5)
+                raise OSError(5, "EIO")
+            return real(directory)
+
+        outcome = {}
+
+        def writer_a():
+            try:
+                settings_files.durable_write(path, b"a")
+            except settings_files.NotPublished:
+                outcome["a"] = "not published"
+
+        with patch.object(settings_files, "sync_dir", side_effect=sync):
+            thread = threading.Thread(target=writer_a, name="writer-a")
+            thread.start()
+            self.assertTrue(a_waiting.wait(5))
+            self.assertIs(settings_files.durable_write(path, b"b"), True)
+            release.set()
+            thread.join(5)
+        self.assertIn((threading.current_thread().name, self.dir), synced)
+        self.assertEqual(outcome, {"a": "not published"})
+        self.assertEqual(path.read_bytes(), b"b")
+
+    def test_the_anchor_must_be_an_ancestor(self):
+        with self.assertRaises(ValueError):
+            settings_files.durable_write(self.dir / "x.json", b"{}", anchor=self.dir / "elsewhere")
 
     def test_unsupported_parent_sync_is_reported(self):
         path = self.dir / "new" / "x.json"
@@ -688,7 +773,8 @@ class ProductionStartupTests(unittest.TestCase):
 def _fake_provider(reply, *, status=200, raw=None):
     """一台只认 POST 的假 provider：按路径回 anthropic 或 openai 格式，记下认证头和模型。
 
-    给了 raw 就原样回这段字节（配 status），用来模拟上游报错和坏响应。
+    给了 raw 就原样回这段字节（配 status），用来模拟上游报错和坏响应。reply 可以是
+    函数（收请求体、回文本），一台服务器同时扮生成和判分时用。
     """
     seen = []
 
@@ -702,6 +788,7 @@ def _fake_provider(reply, *, status=200, raw=None):
                 self.headers.get("authorization") or ""
             ).removeprefix("Bearer ")
             seen.append((self.path, key, body.get("model")))
+            text = reply(body) if callable(reply) else reply
             if raw is not None:
                 self.send_response(status)
                 self.send_header("content-type", "application/json")
@@ -712,14 +799,14 @@ def _fake_provider(reply, *, status=200, raw=None):
             if self.path.endswith("/messages"):
                 out = {
                     "id": "m", "type": "message", "role": "assistant", "model": body["model"],
-                    "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": text}], "stop_reason": "end_turn",
                     "stop_sequence": None, "usage": {"input_tokens": 3, "output_tokens": 2},
                 }
             else:
                 out = {
                     "id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
                     "choices": [{
-                        "index": 0, "message": {"role": "assistant", "content": reply},
+                        "index": 0, "message": {"role": "assistant", "content": text},
                         "finish_reason": "stop",
                     }],
                     "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
@@ -747,7 +834,13 @@ class RealSdkTwoLineTests(_SettingsDir):
 
     def _run_session(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200,
                      follow=False):
-        gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」", status=status, raw=gen_raw)
+        def gen_reply(body):
+            # 跟随时判分请求也打到这台：认出 Router 的提示词就回判分 JSON。
+            if follow and "Router" in json.dumps(body, ensure_ascii=False):
+                return VERDICT
+            return "「……嗯，今天也画完了。」"
+
+        gen_server, gen_seen = _fake_provider(gen_reply, status=status, raw=gen_raw)
         judge_server, judge_seen = _fake_provider(VERDICT, status=status, raw=judge_raw)
         for server in (gen_server, judge_server):
             self.addCleanup(server.server_close)
@@ -791,12 +884,19 @@ class RealSdkTwoLineTests(_SettingsDir):
                 self.assertNotIn(JUDGE_KEY, text)
 
     def test_a_following_judge_goes_to_the_generation_provider(self):
-        messages, gen_seen, judge_seen, _ = self._run_session("anthropic", None, follow=True)
-        self.assertNotIn("error", [m.get("type") for m in messages])
-        self.assertEqual(judge_seen, [])
-        # 一次生成 + 一次判分，都打到生成那台，用生成的 key 和模型。
-        self.assertEqual(len(gen_seen), 2)
-        self.assertEqual({(key, model) for _, key, model in gen_seen}, {(GEN_KEY, "gen-model")})
+        for gen_format in ("anthropic", "openai"):
+            with self.subTest(generation=gen_format):
+                messages, gen_seen, judge_seen, _ = self._run_session(gen_format, None, follow=True)
+                self.assertNotIn("error", [m.get("type") for m in messages])
+                self.assertEqual(judge_seen, [])
+                # 一次生成 + 一次判分，都打到生成那台，用生成的 key 和模型。
+                self.assertEqual(len(gen_seen), 2)
+                self.assertEqual({(key, model) for _, key, model in gen_seen}, {(GEN_KEY, "gen-model")})
+                turns = [m for m in messages if m.get("type") == "turn"]
+                self.assertEqual(len(turns), 1)
+                # 判分真的判完了，不是解析失败后的降级结果。
+                self.assertTrue(turns[0]["dimensions_complete"])
+                self.assertNotIn(turns[0]["drift_type"], ("解析失败", "error"))
 
     def test_upstream_failures_carrying_the_key_stay_inside(self):
         echo = json.dumps({"error": {"type": "invalid_request_error",
