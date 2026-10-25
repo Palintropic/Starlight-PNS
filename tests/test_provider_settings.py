@@ -15,7 +15,9 @@
 #   8. 真 SDK 打两个回环假服务器，经 SessionRuntime.create()/run() 跑完一轮：
 #      每台服务器只收到自己那条线路的 key 和模型，协议对调也一样，消息和落盘
 #      文件里没有 key；上游报错 / 非 JSON 响应 / 建 client 失败时，key 也不进消息、
-#      落盘文件、stdout、stderr 和日志。
+#      落盘文件、stdout、stderr 和日志；
+#   9. 世界那一半同理：经 HTTP 建世界、开认知，生成走 A、判分走 B，账本两行协议
+#      各自对；上游回显 key 时状态接口、存档、账本、输出里都没有它。
 #
 # 运行: python -m unittest tests.test_provider_settings -v
 import asyncio
@@ -815,6 +817,105 @@ class RealSdkTwoLineTests(_SettingsDir):
                             history_dir=self.dir.parent / "h", drift_scores_file=self.dir.parent / "d.jsonl",
                         )
                 text = str(caught.exception) + type(caught.exception).__name__
+                self.assertNotIn(GEN_KEY, text)
+                self.assertNotIn(JUDGE_KEY, text)
+
+
+# ── 9. 世界：真 SDK 走回环 ──────────────────────────────────────────────
+class WorldRealSdkTwoLineTests(_SettingsDir):
+    _url = RealSdkTwoLineTests._url
+
+    def setUp(self):
+        super().setUp()
+        self.write(ACCOUNTS_FILE, _accounts_file())
+        from tests.autonomy_support import clock_threads
+
+        self.clock_threads = clock_threads
+        self.before = set(clock_threads())
+
+    def _run_world(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200):
+        from fastapi.testclient import TestClient
+
+        from pns.interfaces.app import create_app
+        from pns.interfaces.composition import AutonomySettings
+        from pns.runtime.autonomy.clock_worker import ClockConfig
+        from pns.runtime.autonomy.seeding import ActivationCadence
+        from tests.autonomy_support import wait_for
+
+        gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」", status=status, raw=gen_raw)
+        judge_server, judge_seen = _fake_provider(VERDICT, status=status, raw=judge_raw)
+        for server in (gen_server, judge_server):
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+        panel = _panel_file()
+        self.write(PROVIDER_FILE, _panel_file(
+            generation={**panel["generation"], "api_format": gen_format,
+                        "base_url": self._url(gen_server, gen_format)},
+            judge={**panel["judge"], "api_format": judge_format,
+                   "base_url": self._url(judge_server, judge_format)},
+        ))
+        with patch.object(content_registry, "SETTINGS_DIR", self.dir):
+            registry = build_content_registry()
+        out = self.dir.parent / f"world-{gen_format}-{judge_format}-{status}-{bool(gen_raw)}-{bool(judge_raw)}"
+        plane = WorldControlPlane(
+            root=out / "worlds", registry_provider=lambda: registry,
+            usage_ledger=ul.UsageLedger(out / "usage"),
+            autonomy=AutonomySettings(
+                clock=ClockConfig(rate=3000.0, interval_seconds=0.01, stop_timeout_seconds=2.0),
+                cadence=ActivationCadence(), shutdown_timeout_seconds=1.0,
+                reply_delay_minutes=None,
+            ),
+        )
+        client = TestClient(create_app(plane))
+        try:
+            created = client.post("/api/persistent-worlds", json={
+                "world_id": "nightcord", "scene": "nightcord", "characters": ["mizuki", "ena"],
+            })
+            self.assertEqual(created.status_code, 201, created.text)
+            client.post("/api/persistent-worlds/nightcord/autonomy/start")
+            if gen_raw is None:
+                wait_for(lambda: judge_seen, timeout=15.0, what="至少判过一次分")
+            else:
+                wait_for(lambda: gen_seen, timeout=15.0, what="至少试过一次生成")
+            client.post("/api/persistent-worlds/nightcord/autonomy/stop")
+            body = client.get("/api/persistent-worlds/nightcord").text
+        finally:
+            plane.service.release_all()
+            wait_for(lambda: not (set(self.clock_threads()) - self.before), what="worker 退出")
+        rows = [
+            json.loads(line)
+            for path in sorted((out / "usage").rglob("*.jsonl"))
+            for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        return body, rows, gen_seen, judge_seen, out
+
+    def test_world_lines_reach_their_own_providers(self):
+        for gen_format, judge_format in (("anthropic", "openai"), ("openai", "anthropic")):
+            with self.subTest(generation=gen_format, judge=judge_format):
+                body, rows, gen_seen, judge_seen, _ = self._run_world(gen_format, judge_format)
+                self.assertEqual({(key, model) for _, key, model in gen_seen}, {(GEN_KEY, "gen-model")})
+                self.assertEqual({(key, model) for _, key, model in judge_seen}, {(JUDGE_KEY, "judge-model")})
+                protocols = {(row["path"], row["protocol"], row["model"]) for row in rows}
+                self.assertIn(("generation", gen_format, "gen-model"), protocols)
+                self.assertIn(("judge", judge_format, "judge-model"), protocols)
+                self.assertNotIn(GEN_KEY, body)
+                self.assertNotIn(JUDGE_KEY, body)
+
+    def test_world_upstream_failures_carrying_the_key_stay_inside(self):
+        echo = json.dumps({"error": {"type": "invalid_request_error",
+                                     "message": f"bad key {GEN_KEY} / {JUDGE_KEY}"}}).encode()
+        for name, kwargs in (("生成 401 回显", {"gen_raw": echo, "status": 401}),
+                             ("判分 400 回显", {"judge_raw": echo, "status": 400})):
+            with self.subTest(name):
+                stdout, stderr, logs = io.StringIO(), io.StringIO(), io.StringIO()
+                handler = logging.StreamHandler(logs)
+                logging.getLogger().addHandler(handler)
+                self.addCleanup(logging.getLogger().removeHandler, handler)
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    body, rows, _, _, out = self._run_world("anthropic", "openai", **kwargs)
+                text = body + json.dumps(rows, ensure_ascii=False) + "".join(
+                    path.read_text(errors="ignore") for path in out.rglob("*") if path.is_file()
+                ) + stdout.getvalue() + stderr.getvalue() + logs.getvalue()
                 self.assertNotIn(GEN_KEY, text)
                 self.assertNotIn(JUDGE_KEY, text)
 
