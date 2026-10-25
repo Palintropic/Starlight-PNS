@@ -11,9 +11,13 @@
 #   5. 写盘合同三档：rename 前失败目标不变；目录同步失败报"已发布未耐久"；
 #   6. 两条线路真的分开走：生成走 A（anthropic）、判分走 B（openai），各自的
 #      地址、key、模型、账本协议都对；研究会话也是两个 client；
-#   7. 生产启动：面板两条线路 token 齐全时不再要求 env 的旧 key。
+#   7. 生产启动：面板两条线路 token 齐全时不再要求 env 的旧 key；
+#   8. 真 SDK 打两个回环假服务器，经 SessionRuntime.create()/run() 跑完一轮：
+#      每台服务器只收到自己那条线路的 key 和模型，协议对调也一样，消息和落盘
+#      文件里没有 key。
 #
 # 运行: python -m unittest tests.test_provider_settings -v
+import asyncio
 import copy
 import json
 import os
@@ -21,8 +25,10 @@ import pickle
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -652,6 +658,100 @@ class ProductionStartupTests(unittest.TestCase):
             self.start(replace(registry, models=models, accounts=catalog))
         self.assertIn("判分线路", str(caught.exception))
         self.assertNotIn(GEN_KEY, str(caught.exception))
+
+
+# ── 8. 真 SDK 走回环 ────────────────────────────────────────────────────
+def _fake_provider(reply):
+    """一台只认 POST 的假 provider：按路径回 anthropic 或 openai 格式，记下认证头和模型。"""
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            key = self.headers.get("x-api-key") or (
+                self.headers.get("authorization") or ""
+            ).removeprefix("Bearer ")
+            seen.append((self.path, key, body.get("model")))
+            if self.path.endswith("/messages"):
+                out = {
+                    "id": "m", "type": "message", "role": "assistant", "model": body["model"],
+                    "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn",
+                    "stop_sequence": None, "usage": {"input_tokens": 3, "output_tokens": 2},
+                }
+            else:
+                out = {
+                    "id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
+                    "choices": [{
+                        "index": 0, "message": {"role": "assistant", "content": reply},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                }
+            data = json.dumps(out, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+class RealSdkTwoLineTests(_SettingsDir):
+    def setUp(self):
+        super().setUp()
+        self.write(ACCOUNTS_FILE, _accounts_file())
+
+    def _url(self, server, api_format):
+        suffix = "/anthropic" if api_format == "anthropic" else "/v1"
+        return f"http://127.0.0.1:{server.server_port}{suffix}"
+
+    def _run_session(self, gen_format, judge_format):
+        gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」")
+        judge_server, judge_seen = _fake_provider(VERDICT)
+        self.addCleanup(gen_server.shutdown)
+        self.addCleanup(judge_server.shutdown)
+        panel = _panel_file()
+        self.write(PROVIDER_FILE, _panel_file(
+            generation={**panel["generation"], "api_format": gen_format,
+                        "base_url": self._url(gen_server, gen_format)},
+            judge={**panel["judge"], "api_format": judge_format,
+                   "base_url": self._url(judge_server, judge_format)},
+        ))
+        out = self.dir.parent / f"out-{gen_format}-{judge_format}"
+        with patch.object(content_registry, "SETTINGS_DIR", self.dir):
+            registry = build_content_registry()
+        runtime = SessionRuntime.create(
+            {"max_turns": 1, "api_delay": 0, "characters": ["mizuki", "ena"]},
+            registry=registry, supervisor=SessionSupervisor(),
+            history_dir=out / "history", drift_scores_file=out / "drift.jsonl",
+        )
+
+        async def consume():
+            return [message async for message in runtime.run()]
+
+        messages = asyncio.run(consume())
+        return messages, gen_seen, judge_seen, out
+
+    def test_each_provider_only_sees_its_own_line(self):
+        for gen_format, judge_format in (("anthropic", "openai"), ("openai", "anthropic"),
+                                         ("anthropic", "anthropic")):
+            with self.subTest(generation=gen_format, judge=judge_format):
+                messages, gen_seen, judge_seen, out = self._run_session(gen_format, judge_format)
+                self.assertNotIn("error", [m.get("type") for m in messages])
+                self.assertTrue(gen_seen and judge_seen)
+                self.assertEqual({(key, model) for _, key, model in gen_seen}, {(GEN_KEY, "gen-model")})
+                self.assertEqual({(key, model) for _, key, model in judge_seen}, {(JUDGE_KEY, "judge-model")})
+                text = json.dumps(messages, ensure_ascii=False, default=str) + "".join(
+                    path.read_text(errors="ignore") for path in out.rglob("*") if path.is_file()
+                )
+                self.assertNotIn(GEN_KEY, text)
+                self.assertNotIn(JUDGE_KEY, text)
 
 
 if __name__ == "__main__":
