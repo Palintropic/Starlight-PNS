@@ -64,7 +64,7 @@ from pns.runtime.provider_settings import (  # noqa: E402
     load_accounts,
     load_model_settings,
 )
-from pns.runtime.reload import BOUNDARY, SessionSupervisor  # noqa: E402
+from pns.runtime.reload import BOUNDARY, ConfigBoundary, SessionSupervisor  # noqa: E402
 from pns.runtime.session_runtime import SessionRuntime  # noqa: E402
 
 GEN_KEY = "sk-gen-canary-0123456789abcdef"
@@ -308,6 +308,31 @@ class PanelFileTests(_SettingsDir):
         with self.assertRaises(ProviderSettingsError):
             self.load()
 
+    def test_an_unparseable_url_is_refused_without_echoing_it(self):
+        # U+2100 在 NFKC 下变出 "/"，urlsplit 的 ValueError 会带上整段 netloc。
+        bad = f"https://u:{GEN_KEY}@bad\u2100.example/v1"
+        self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+        with self.assertRaises(ProviderSettingsError) as caught:
+            self.load()
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertNotIn(GEN_KEY, str(caught.exception))
+        line = Line(
+            name=LINE_GENERATION, account="a", api_format="anthropic",
+            base_url=bad, model="m", token=Secret(GEN_KEY),
+        )
+        self.assertEqual(line.host, "")
+
+    def test_a_valid_panel_is_not_vetoed_by_a_broken_env(self):
+        self.write(PROVIDER_FILE, _panel_file())
+        for env in ({"API_FORMAT": "grpc"}, {"BASE_URL": ""}, {"PNS_API_KEY_NAME": ""}):
+            with self.subTest(env=env):
+                settings, _ = self.load(env)
+                self.assertEqual(settings.source, SOURCE_PANEL)
+                self.assertFalse(settings.env_complete)
+                self.assertEqual(
+                    (settings.generator_model, settings.evaluator_model), ("gen-model", "judge-model")
+                )
+
     def test_panel_tokens_do_not_need_the_env_key(self):
         self.write(PROVIDER_FILE, _panel_file())
         with patch.dict(os.environ, {"MIMO_API_KEY": ""}):
@@ -331,6 +356,19 @@ class RegistryBuildTests(_SettingsDir):
             with self.assertRaises(ConfigValidationError) as caught:
                 build_content_registry()
             self.assertNotIn(GEN_KEY, str(caught.exception))
+
+    def test_a_failed_reload_does_not_publish_the_url(self):
+        bad = f"https://u:{GEN_KEY}@bad\u2100.example/v1"
+        self.write(ACCOUNTS_FILE, _accounts_file())
+        self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+        boundary = ConfigBoundary(SessionSupervisor())
+        with patch.object(content_registry, "SETTINGS_DIR", self.dir):
+            result = boundary.reload()
+            exposed = json.dumps(
+                {"result": result.to_dict(), "status": boundary.status()}, ensure_ascii=False
+            )
+        self.assertEqual(result.status, "failed")
+        self.assertNotIn(GEN_KEY, exposed)
 
     def test_without_a_panel_file_the_registry_is_env_derived(self):
         with patch.object(content_registry, "SETTINGS_DIR", self.dir):
@@ -402,6 +440,28 @@ class DurableWriteTests(_SettingsDir):
             with self.assertRaises(settings_files.PublishedNotDurable):
                 settings_files.durable_write(path, b"new")
         self.assertEqual(path.read_bytes(), b"new")
+
+    def test_new_directories_are_synced_into_their_parents(self):
+        path = self.dir / "a" / "b" / "x.json"
+        with patch.object(settings_files, "sync_dir", wraps=settings_files.sync_dir) as sync:
+            settings_files.durable_write(path, b"{}")
+        synced = {Path(call.args[0]) for call in sync.call_args_list}
+        self.assertEqual(synced, {self.dir, self.dir / "a", self.dir / "a" / "b"})
+
+    def test_an_unsynced_new_directory_is_not_published(self):
+        path = self.dir / "new" / "x.json"
+        with patch.object(settings_files, "sync_dir", side_effect=OSError(5, "EIO")):
+            with self.assertRaises(settings_files.NotPublished):
+                settings_files.durable_write(path, b"{}")
+        self.assertFalse(path.exists())
+
+    def test_unsupported_parent_sync_is_reported(self):
+        path = self.dir / "new" / "x.json"
+        real = settings_files.sync_dir
+        with patch.object(
+            settings_files, "sync_dir", side_effect=lambda d: False if Path(d) == self.dir else real(d)
+        ):
+            self.assertFalse(settings_files.durable_write(path, b"{}"))
 
     def test_unlink_has_the_same_three_outcomes(self):
         path = self.dir / "x.json"

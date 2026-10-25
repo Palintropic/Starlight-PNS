@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from pns.runtime.settings_files import durable_write
 
@@ -308,7 +308,8 @@ class Line:
 
     @property
     def host(self) -> str:
-        return urlsplit(self.base_url).hostname or ""
+        parts = _split_url(self.base_url)
+        return (parts.hostname or "") if parts is not None else ""
 
     def public_dict(self) -> Dict[str, Any]:
         return {
@@ -377,6 +378,18 @@ class ModelSettings:
         }
 
     to_dict = public_dict
+
+
+def _split_url(url: str) -> Optional[SplitResult]:
+    """解析失败返回 None。urlsplit 的 ValueError 会把整段 netloc（可能夹着凭据）
+    拼进消息，所以原异常一律不往外传。"""
+    try:
+        parts = urlsplit(url)
+        # 这几个属性是惰性解析的，坏端口之类在这里才抛。
+        parts.hostname, parts.port, parts.username, parts.password
+    except ValueError:
+        return None
+    return parts
 
 
 def env_settings(env: Mapping[str, str]) -> Tuple[str, str, str, str]:
@@ -449,8 +462,8 @@ def validate_line(line: Line, catalog: AccountCatalog, *, require_token: bool = 
     label = "生成线路" if line.name == LINE_GENERATION else "判分线路"
     if line.api_format not in API_FORMATS:
         raise ProviderSettingsError(f"{label} 的协议必须是 {'/'.join(API_FORMATS)} 之一")
-    parts = urlsplit(line.base_url)
-    if not parts.hostname:
+    parts = _split_url(line.base_url)
+    if parts is None or not parts.hostname:
         raise ProviderSettingsError(f"{label} 的 Base URL 不合法")
     if parts.scheme != "https" and not (
         parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS
@@ -483,13 +496,12 @@ def load_model_settings(
     面板文件做完整的结构校验（坏文件 = 配置不通过）；token 是否为空也在这里
     拦，因为面板线路的 token 只可能来自这个文件。env 派生只做改动前那几项
     检查 —— key 缺不缺由生产启动检查和建世界的地方分别把关，开发环境没有 key
-    也要能起来。
+    也要能起来。面板文件存在时不校验 env（它只决定 env_complete）。
     """
     catalog = load_accounts(settings_dir)
-    env_derived = ModelSettings.from_env(env, ooc_threshold=ooc_threshold)
     raw = _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
     if raw is None:
-        return env_derived, catalog
+        return ModelSettings.from_env(env, ooc_threshold=ooc_threshold), catalog
     if raw.get("version") != PROVIDER_VERSION:
         raise ProviderSettingsError("线路配置的版本不认识")
     generation = _parse_line(LINE_GENERATION, raw.get("generation"), catalog)
@@ -508,7 +520,9 @@ def load_model_settings(
     settings = ModelSettings(
         generation=generation, judge=judge, judge_follows=follows,
         source=SOURCE_PANEL, ooc_threshold=ooc_threshold,
-        env_complete=env_derived.env_complete, env_key_name=env_derived.env_key_name,
+        # 旧 env 不完整只影响能不能回滚，不否决当前合法的面板线路。
+        env_complete=env_is_complete(env),
+        env_key_name=env.get("PNS_API_KEY_NAME", "MIMO_API_KEY"),
     )
     validate_settings(settings, catalog)
     return settings, catalog

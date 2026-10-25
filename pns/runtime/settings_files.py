@@ -8,6 +8,9 @@
 #     不能再说"原文件不变"；调用方要按"已经发生"处理（走事务恢复）。
 #   * 正常返回 —— 已耐久（或这个平台不提供目录同步，返回值说明）。
 #
+# 目录不存在时顺手建出来，并把每一层新目录在父目录里的目录项也刷下去；
+# 只刷目标所在目录证明不了新目录本身还在。
+#
 # 删除同样三档：unlink 失败 = 没删；unlink 成功、目录同步失败 = 已删但不耐久。
 #
 # 异常消息是固定措辞：这些文件里装着 token，任何从文件内容派生的文字都不过边界。
@@ -59,12 +62,26 @@ def sync_dir(directory: Path) -> bool:
     return True
 
 
+def _ensure_dir(directory: Path) -> bool:
+    """建出缺的各层目录并刷父目录项。返回目录同步是否被平台支持；失败抛 OSError。"""
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    supported = True
+    for created in reversed(missing):
+        supported = sync_dir(created.parent) and supported
+    return supported
+
+
 def durable_write(path: Path, payload: bytes) -> bool:
     """按三档合同写一个 0600 文件。返回目录同步是否被平台支持。"""
     path = Path(path)
     directory = path.parent
     try:
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        supported = _ensure_dir(directory)
         fd, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=f".{path.name}.", suffix=".tmp")
     except OSError:
         raise NotPublished(f"{path.name} 的临时文件建不出来") from None
@@ -82,7 +99,7 @@ def durable_write(path: Path, payload: bytes) -> bool:
             pass
         raise NotPublished(f"{path.name} 没写成，磁盘上还是之前的样子") from None
     try:
-        return sync_dir(directory)
+        return sync_dir(directory) and supported
     except OSError:
         raise PublishedNotDurable(f"{path.name} 已经写上，但耐久性无法证实") from None
 
