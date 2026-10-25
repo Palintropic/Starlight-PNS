@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pns.logic.router as router_mod
 from pns.logic.simulation import (
+    GenerationTruncated,
     append_drift_record,
     call_character_async,
     judge_async,
@@ -69,8 +70,12 @@ _FAILURE_TEXT = {
 }
 
 
-def _call_failure_message(stage: str, exc: BaseException) -> str:
-    reason = _FAILURE_TEXT.get(classify_failure(exc), "未知原因，详情见服务器侧")
+def _call_failure_message(stage: str, exc: BaseException, max_tokens: int) -> str:
+    # 截断是本地判出来的（stop_reason / finish_reason），不读异常文本也知道
+    # 该怎么办：调大 max_tokens。上限用会话自己的参数，不从异常里取。
+    if isinstance(exc, GenerationTruncated):
+        return f"{stage}被截断：max_tokens={max_tokens} 不够，这一句没说完"
+    reason = _FAILURE_TEXT.get(classify_failure(exc), "未知原因")
     return f"{stage}调用失败：{reason}"
 
 
@@ -340,7 +345,7 @@ class SessionRuntime:
                 }
                 break
             except Exception as e:
-                message = _call_failure_message("生成", e)
+                message = _call_failure_message("生成", e, self.max_tokens)
                 self.state.record_error(message)
                 yield {"type": "error", "turn": turn, "message": message}
                 break
@@ -360,7 +365,7 @@ class SessionRuntime:
                     registry=self.registry,
                 )
             except Exception as e:
-                message = _call_failure_message("判分", e)
+                message = _call_failure_message("判分", e, self.max_tokens)
                 self.state.record_error(message)
                 yield {"type": "error", "turn": turn, "message": message}
                 break

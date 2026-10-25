@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import anthropic
@@ -187,7 +188,7 @@ class SessionRuntimeRunTests(RuntimeTestBase):
 
         types = [m["type"] for m in messages]
         self.assertEqual(types, ["start", "generating", "error", "done"])
-        self.assertEqual(messages[-2]["message"], "生成调用失败：未知原因，详情见服务器侧")
+        self.assertEqual(messages[-2]["message"], "生成调用失败：未知原因")
         self.assertEqual(messages[-1]["stats"]["total_turns"], 0)
         # 没有任何轮次落地，history 不应该被写出
         self.assertIsNone(messages[-1]["history_file"])
@@ -219,7 +220,7 @@ class SessionRuntimeRunTests(RuntimeTestBase):
             messages = await _run(runtime)
 
         self.assertEqual([m["type"] for m in messages], ["start", "generating", "judging", "error", "done"])
-        self.assertEqual(messages[-2]["message"], "判分调用失败：未知原因，详情见服务器侧")
+        self.assertEqual(messages[-2]["message"], "判分调用失败：未知原因")
         self.assertEqual(messages[-1]["stats"]["total_turns"], 0)
 
     async def test_drift_failure_does_not_publish_turn(self):
@@ -433,6 +434,24 @@ class SessionSecretBoundaryTests(RuntimeTestBase):
                 messages = await _run(runtime)
                 error = next(m for m in messages if m["type"] == "error")
                 self.assertEqual(error["message"], expected)
+
+    async def test_truncation_through_the_real_generation_path_says_so(self):
+        # 走真实的 call_character_async → call_character：客户端返回撞了上限的
+        # 响应，截断要报成截断（附会话自己的 max_tokens），而不是"未知原因"。
+        class _TruncatingMessages:
+            def create(self, **kwargs):
+                return SimpleNamespace(stop_reason="max_tokens", content=[])
+
+        self._client_patch.stop()
+        try:
+            client = SimpleNamespace(messages=_TruncatingMessages())
+            with patch("pns.runtime.session_runtime.router_mod.create_client", return_value=client):
+                runtime = self._create(max_tokens=64)
+            messages = await _run(runtime)
+        finally:
+            self._client_patch.start()
+        error = next(m for m in messages if m["type"] == "error")
+        self.assertEqual(error["message"], "生成被截断：max_tokens=64 不够，这一句没说完")
 
     def test_client_factory_failure_is_a_fixed_setup_error(self):
         self._client_patch.stop()
