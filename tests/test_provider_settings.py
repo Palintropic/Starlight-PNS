@@ -14,12 +14,16 @@
 #   7. 生产启动：面板两条线路 token 齐全时不再要求 env 的旧 key；
 #   8. 真 SDK 打两个回环假服务器，经 SessionRuntime.create()/run() 跑完一轮：
 #      每台服务器只收到自己那条线路的 key 和模型，协议对调也一样，消息和落盘
-#      文件里没有 key。
+#      文件里没有 key；上游报错 / 非 JSON 响应 / 建 client 失败时，key 也不进消息、
+#      落盘文件、stdout、stderr 和日志。
 #
 # 运行: python -m unittest tests.test_provider_settings -v
 import asyncio
+import contextlib
 import copy
+import io
 import json
+import logging
 import os
 import pickle
 import stat
@@ -71,7 +75,7 @@ from pns.runtime.provider_settings import (  # noqa: E402
     load_model_settings,
 )
 from pns.runtime.reload import BOUNDARY, ConfigBoundary, SessionSupervisor  # noqa: E402
-from pns.runtime.session_runtime import SessionRuntime  # noqa: E402
+from pns.runtime.session_runtime import SessionRuntime, SessionSetupError  # noqa: E402
 
 GEN_KEY = "sk-gen-canary-0123456789abcdef"
 JUDGE_KEY = "sk-judge-canary-fedcba9876543210"
@@ -661,8 +665,11 @@ class ProductionStartupTests(unittest.TestCase):
 
 
 # ── 8. 真 SDK 走回环 ────────────────────────────────────────────────────
-def _fake_provider(reply):
-    """一台只认 POST 的假 provider：按路径回 anthropic 或 openai 格式，记下认证头和模型。"""
+def _fake_provider(reply, *, status=200, raw=None):
+    """一台只认 POST 的假 provider：按路径回 anthropic 或 openai 格式，记下认证头和模型。
+
+    给了 raw 就原样回这段字节（配 status），用来模拟上游报错和坏响应。
+    """
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -675,6 +682,13 @@ def _fake_provider(reply):
                 self.headers.get("authorization") or ""
             ).removeprefix("Bearer ")
             seen.append((self.path, key, body.get("model")))
+            if raw is not None:
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             if self.path.endswith("/messages"):
                 out = {
                     "id": "m", "type": "message", "role": "assistant", "model": body["model"],
@@ -711,11 +725,12 @@ class RealSdkTwoLineTests(_SettingsDir):
         suffix = "/anthropic" if api_format == "anthropic" else "/v1"
         return f"http://127.0.0.1:{server.server_port}{suffix}"
 
-    def _run_session(self, gen_format, judge_format):
-        gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」")
-        judge_server, judge_seen = _fake_provider(VERDICT)
-        self.addCleanup(gen_server.shutdown)
-        self.addCleanup(judge_server.shutdown)
+    def _run_session(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200):
+        gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」", status=status, raw=gen_raw)
+        judge_server, judge_seen = _fake_provider(VERDICT, status=status, raw=judge_raw)
+        for server in (gen_server, judge_server):
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
         panel = _panel_file()
         self.write(PROVIDER_FILE, _panel_file(
             generation={**panel["generation"], "api_format": gen_format,
@@ -750,6 +765,56 @@ class RealSdkTwoLineTests(_SettingsDir):
                 text = json.dumps(messages, ensure_ascii=False, default=str) + "".join(
                     path.read_text(errors="ignore") for path in out.rglob("*") if path.is_file()
                 )
+                self.assertNotIn(GEN_KEY, text)
+                self.assertNotIn(JUDGE_KEY, text)
+
+    def test_upstream_failures_carrying_the_key_stay_inside(self):
+        echo = json.dumps({"error": {"type": "invalid_request_error",
+                                     "message": f"bad key {GEN_KEY} / {JUDGE_KEY}"}}).encode()
+        not_json = f"<html>upstream {GEN_KEY} {JUDGE_KEY}</html>".encode()
+        cases = (
+            ("生成 400 回显", {"gen_raw": echo, "status": 400}),
+            ("生成 401 回显", {"gen_raw": echo, "status": 401}),
+            ("生成非 JSON", {"gen_raw": not_json}),
+            ("判分 400 回显", {"judge_raw": echo, "status": 400}),
+            ("判分非 JSON", {"judge_raw": not_json}),
+        )
+        for gen_format, judge_format in (("anthropic", "openai"), ("openai", "anthropic")):
+            for name, kwargs in cases:
+                with self.subTest(name, generation=gen_format, judge=judge_format):
+                    stdout, stderr, logs = io.StringIO(), io.StringIO(), io.StringIO()
+                    handler = logging.StreamHandler(logs)
+                    logging.getLogger().addHandler(handler)
+                    self.addCleanup(logging.getLogger().removeHandler, handler)
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        messages, _, _, out = self._run_session(gen_format, judge_format, **kwargs)
+                    text = json.dumps(messages, ensure_ascii=False, default=str) + "".join(
+                        path.read_text(errors="ignore") for path in out.rglob("*") if path.is_file()
+                    ) + stdout.getvalue() + stderr.getvalue() + logs.getvalue()
+                    self.assertNotIn(GEN_KEY, text)
+                    self.assertNotIn(JUDGE_KEY, text)
+
+    def test_client_construction_failures_use_fixed_text(self):
+        import anthropic
+        import openai
+
+        self.write(PROVIDER_FILE, _panel_file())  # 生成 anthropic、判分 openai
+        with patch.object(content_registry, "SETTINGS_DIR", self.dir):
+            registry = build_content_registry()
+        failures = (
+            ("第一个 client", anthropic, "Anthropic", RuntimeError(GEN_KEY)),
+            ("第二个 client", openai, "OpenAI", type(JUDGE_KEY, (RuntimeError,), {})("rejected")),
+        )
+        for name, module, attr, error in failures:
+            with self.subTest(name):
+                with patch.object(module, attr, side_effect=error):
+                    with self.assertRaises(SessionSetupError) as caught:
+                        SessionRuntime.create(
+                            {"max_turns": 1, "characters": ["mizuki", "ena"]},
+                            registry=registry, supervisor=SessionSupervisor(),
+                            history_dir=self.dir.parent / "h", drift_scores_file=self.dir.parent / "d.jsonl",
+                        )
+                text = str(caught.exception) + type(caught.exception).__name__
                 self.assertNotIn(GEN_KEY, text)
                 self.assertNotIn(JUDGE_KEY, text)
 
