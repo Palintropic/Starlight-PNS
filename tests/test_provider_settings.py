@@ -15,8 +15,8 @@
 #   8. 真 SDK 打两个回环假服务器，经 SessionRuntime.create()/run() 跑完一轮：
 #      每台服务器只收到自己那条线路的 key 和模型，协议对调也一样，消息和落盘
 #      文件里没有 key；上游报错 / 非 JSON 响应时，key 也不进消息、落盘文件、
-#      stdout、stderr 和日志；建 client 失败时，抛出的异常只有固定文案（消息和
-#      类型名都不带 key —— 这一条只查异常本身）；跟随时判分真的判完；
+#      stdout、stderr 和日志；建 client 失败时，研究会话抛的异常、世界的 HTTP
+#      响应、stdout、stderr、日志都只有固定文案；跟随时判分真的判完；
 #   9. 世界那一半同理：经 HTTP 建世界、开认知，生成走 A、判分走 B，账本两行协议
 #      各自对；上游回显 key 时状态接口、存档、账本、输出里都没有它。
 #
@@ -974,16 +974,45 @@ class RealSdkTwoLineTests(_SettingsDir):
             ("第一个 client", anthropic, "Anthropic", RuntimeError(GEN_KEY)),
             ("第二个 client", openai, "OpenAI", type(JUDGE_KEY, (RuntimeError,), {})("rejected")),
         )
+        from fastapi.testclient import TestClient
+
+        from pns.interfaces.app import create_app
+
         for name, module, attr, error in failures:
             with self.subTest(name):
-                with patch.object(module, attr, side_effect=error):
+                stdout, stderr, logs = io.StringIO(), io.StringIO(), io.StringIO()
+                handler = logging.StreamHandler(logs)
+                logging.getLogger().addHandler(handler)
+                self.addCleanup(logging.getLogger().removeHandler, handler)
+                plane = WorldControlPlane(
+                    root=self.dir.parent / f"worlds-{attr}", registry_provider=lambda: registry,
+                    usage_ledger=ul.UsageLedger(self.dir.parent / f"usage-{attr}"),
+                )
+                client = TestClient(create_app(plane))
+                with patch.object(module, attr, side_effect=error), \
+                        contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    # 研究会话：create() 抛固定文案。
                     with self.assertRaises(SessionSetupError) as caught:
                         SessionRuntime.create(
                             {"max_turns": 1, "characters": ["mizuki", "ena"]},
                             registry=registry, supervisor=SessionSupervisor(),
                             history_dir=self.dir.parent / "h", drift_scores_file=self.dir.parent / "d.jsonl",
                         )
-                text = str(caught.exception) + type(caught.exception).__name__
+                    # 世界：建世界、开认知时建 client，HTTP 响应同样只有固定文案。
+                    responses = [
+                        client.post("/api/persistent-worlds", json={
+                            "world_id": "nightcord", "scene": "nightcord", "characters": ["mizuki", "ena"],
+                        }),
+                        client.post("/api/persistent-worlds/nightcord/autonomy/start"),
+                        client.get("/api/persistent-worlds/nightcord"),
+                    ]
+                    plane.service.release_all()
+                self.assertTrue(any(r.status_code >= 400 for r in responses), [r.status_code for r in responses])
+                text = (
+                    str(caught.exception) + type(caught.exception).__name__
+                    + "".join(r.text for r in responses)
+                    + stdout.getvalue() + stderr.getvalue() + logs.getvalue()
+                )
                 self.assertNotIn(GEN_KEY, text)
                 self.assertNotIn(JUDGE_KEY, text)
 
