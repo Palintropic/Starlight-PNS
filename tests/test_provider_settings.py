@@ -1000,7 +1000,8 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
         self.clock_threads = clock_threads
         self.before = set(clock_threads())
 
-    def _run_world(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200):
+    def _run_world(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200,
+                   follow=False):
         from fastapi.testclient import TestClient
 
         from pns.interfaces.app import create_app
@@ -1009,7 +1010,12 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
         from pns.runtime.autonomy.seeding import ActivationCadence
         from tests.autonomy_support import wait_for
 
-        gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」", status=status, raw=gen_raw)
+        def gen_reply(body):
+            if follow and "Router" in json.dumps(body, ensure_ascii=False):
+                return VERDICT
+            return "「……嗯，今天也画完了。」"
+
+        gen_server, gen_seen = _fake_provider(gen_reply, status=status, raw=gen_raw)
         judge_server, judge_seen = _fake_provider(VERDICT, status=status, raw=judge_raw)
         for server in (gen_server, judge_server):
             self.addCleanup(server.server_close)
@@ -1018,12 +1024,15 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
         self.write(PROVIDER_FILE, _panel_file(
             generation={**panel["generation"], "api_format": gen_format,
                         "base_url": self._url(gen_server, gen_format)},
-            judge={**panel["judge"], "api_format": judge_format,
-                   "base_url": self._url(judge_server, judge_format)},
+            judge={"follow": LINE_GENERATION} if follow else {
+                **panel["judge"], "api_format": judge_format,
+                "base_url": self._url(judge_server, judge_format)},
         ))
         with patch.object(content_registry, "SETTINGS_DIR", self.dir):
             registry = build_content_registry()
-        out = self.dir.parent / f"world-{gen_format}-{judge_format}-{status}-{bool(gen_raw)}-{bool(judge_raw)}"
+        out = self.dir.parent / (
+            f"world-{gen_format}-{judge_format}-{status}-{bool(gen_raw)}-{bool(judge_raw)}-{follow}"
+        )
         plane = WorldControlPlane(
             root=out / "worlds", registry_provider=lambda: registry,
             usage_ledger=ul.UsageLedger(out / "usage"),
@@ -1040,7 +1049,15 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
             })
             self.assertEqual(created.status_code, 201, created.text)
             client.post("/api/persistent-worlds/nightcord/autonomy/start")
-            if gen_raw is None:
+            if follow:
+                from pns.models.event import EventType
+
+                # 判分通过的台词才会作为 message.sent 进世界；判分解析失败会被审计拦下。
+                wait_for(
+                    lambda: plane.service.opened("nightcord").state.events.by_type(EventType.MESSAGE_SENT),
+                    timeout=15.0, what="跟随判分通过、说上一句",
+                )
+            elif gen_raw is None:
                 wait_for(lambda: judge_seen, timeout=15.0, what="至少判过一次分")
             else:
                 wait_for(lambda: gen_seen, timeout=15.0, what="至少试过一次生成")
@@ -1079,12 +1096,31 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                 logging.getLogger().addHandler(handler)
                 self.addCleanup(logging.getLogger().removeHandler, handler)
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                    body, rows, _, _, out = self._run_world("anthropic", "openai", **kwargs)
+                    body, rows, gen_seen, judge_seen, out = self._run_world("anthropic", "openai", **kwargs)
+                # 先确认真的走进了失败路径：目标服务器被打到，账本里那条线有失败行。
+                failed_path = "generation" if "gen_raw" in kwargs else "judge"
+                self.assertTrue(gen_seen if failed_path == "generation" else judge_seen)
+                self.assertTrue(any(row["path"] == failed_path and row["failure"] for row in rows), rows)
                 text = body + json.dumps(rows, ensure_ascii=False) + "".join(
                     path.read_text(errors="ignore") for path in out.rglob("*") if path.is_file()
                 ) + stdout.getvalue() + stderr.getvalue() + logs.getvalue()
                 self.assertNotIn(GEN_KEY, text)
                 self.assertNotIn(JUDGE_KEY, text)
+
+    def test_a_following_judge_in_the_world_goes_to_the_generation_provider(self):
+        for gen_format in ("anthropic", "openai"):
+            with self.subTest(generation=gen_format):
+                # _run_world 等到 message.sent 才返回：判分真的判完并通过了。
+                _, rows, gen_seen, judge_seen, _ = self._run_world(gen_format, None, follow=True)
+                self.assertEqual(judge_seen, [])
+                self.assertEqual({(key, model) for _, key, model in gen_seen}, {(GEN_KEY, "gen-model")})
+                judged = [row for row in rows if row["path"] == "judge"]
+                self.assertTrue(judged)
+                # 判分按生成线路的协议、模型记账，而且是成功的那种。
+                self.assertTrue(all(
+                    (row["protocol"], row["model"], row["failure"]) == (gen_format, "gen-model", None)
+                    for row in judged
+                ), judged)
 
 
 if __name__ == "__main__":
