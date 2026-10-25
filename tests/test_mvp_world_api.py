@@ -68,7 +68,7 @@ class WorldApiTestCase(unittest.TestCase):
         self.registry = BOUNDARY.active()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name) / "worlds"
-        self._env = patch.dict(os.environ, {self.registry.models.key_name: CANARY})
+        self._env = patch.dict(os.environ, {self.registry.models.env_key_name: CANARY})
         self._env.start()
         self.provider = BlockingProvider()
         self.plane = WorldControlPlane(
@@ -521,7 +521,7 @@ class LeakTests(WorldApiTestCase):
         ):
             response = self.client.get(path)
             self.assert_no_canary(response.text)
-            self.assertNotIn(self.registry.models.key_name, response.text)
+            self.assertNotIn(self.registry.models.env_key_name, response.text)
         self.assert_no_canary(
             (self.root / "nightcord" / "world.json").read_text(encoding="utf-8")
         )

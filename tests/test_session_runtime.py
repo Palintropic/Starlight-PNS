@@ -42,7 +42,7 @@ class SessionSetupTests(unittest.TestCase):
         with self.assertRaises(SessionSetupError):
             SessionRuntime.create({"characters": ["mizuki", "not_a_real_character"]})
 
-    @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="")
+    @patch("pns.runtime.provider_settings.read_env_key", return_value="")
     def test_rejects_missing_api_key(self, _mock_key):
         with self.assertRaises(SessionSetupError):
             SessionRuntime.create({"characters": ["mizuki", "ena"]})
@@ -57,7 +57,7 @@ class SessionSetupTests(unittest.TestCase):
             with self.subTest(params=params), self.assertRaises(SessionSetupError):
                 SessionRuntime.create(params)
 
-    @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
+    @patch("pns.runtime.provider_settings.read_env_key", return_value="test-key")
     @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
     def test_scene_without_a_world_mapping_is_a_setup_error(self, _mock_client, _mock_key):
         # 正常路径下这种场景根本进不了 registry（build_content_registry 会因为
@@ -72,7 +72,7 @@ class SessionSetupTests(unittest.TestCase):
                 )
         self.assertIn("user_authored", str(ctx.exception))
 
-    @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
+    @patch("pns.runtime.provider_settings.read_env_key", return_value="test-key")
     @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
     def test_unknown_scene_id_still_falls_back_to_the_default_scene(
         self, _mock_client, _mock_key
@@ -85,7 +85,7 @@ class SessionSetupTests(unittest.TestCase):
             runtime.world.characters_at("kamiyama_high_gate"), ["ena", "mizuki"]
         )
 
-    @patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
+    @patch("pns.runtime.provider_settings.read_env_key", return_value="test-key")
     @patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
     def test_session_ids_are_unique(self, _mock_client, _mock_key):
         params = {"characters": ["mizuki", "ena"]}
@@ -104,7 +104,7 @@ class RuntimeTestBase(unittest.IsolatedAsyncioTestCase):
         self.drift_file.parent.mkdir(parents=True, exist_ok=True)
         self.drift_file.touch()
 
-        self._key_patch = patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key")
+        self._key_patch = patch("pns.runtime.provider_settings.read_env_key", return_value="test-key")
         self._client_patch = patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object())
         self._key_patch.start()
         self._client_patch.start()

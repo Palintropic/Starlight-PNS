@@ -776,7 +776,7 @@ class MaintenanceScriptTests(PlaneTestCase):
     def run_script(self, *args):
         env = dict(os.environ)
         env[WORLD_ROOT_ENV] = str(self.root)
-        env[self.registry.models.key_name] = CANARY
+        env[self.registry.models.env_key_name] = CANARY
         return subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "content_decisions.py"), "yoake-mae", *args],
             capture_output=True,
@@ -827,7 +827,7 @@ class MaintenanceScriptTests(PlaneTestCase):
             handle.write("\n".join(site) + "\n")
         env = dict(os.environ)
         env[WORLD_ROOT_ENV] = str(self.root)
-        env[self.registry.models.key_name] = CANARY
+        env[self.registry.models.env_key_name] = CANARY
         env["PYTHONPATH"] = os.pathsep.join(
             [tmp.name, str(REPO_ROOT), str(REPO_ROOT / "scripts")]
         )

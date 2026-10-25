@@ -80,6 +80,10 @@ data/accounts.sqlite3-journal
 # 它装的是一个跑着的世界的权威状态和一把进程锁，不是源码。
 data/worlds/
 
+# ─── 面板存的模型线路与计费账户（CFG-1）───────────────────────
+# provider.json 和它的 .prev 里有 access token 明文，绝不能进仓库。
+data/settings/
+
 # ─── 开工/规划文档（给 CC 用，不进仓库）────────────────────
 /kickoff/
 /research/

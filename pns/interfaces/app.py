@@ -25,6 +25,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from pns.runtime.provider_settings import (
+    SOURCE_ENV,
+    ProviderSettingsError,
+    validate_settings,
+)
+
 from . import accounts_api
 from . import auth as auth_routes
 from . import config, health, persistent_worlds, review, simulate, usage, world
@@ -100,13 +106,21 @@ def _verify_production_config(
         registry = registry_provider()
     except Exception as e:  # 配置根本构建不出来，也是一次启动失败
         raise DeploymentConfigError(f"生产模式下配置构建失败：{e}") from e
-    models = getattr(registry, "models", None)
-    key_name = getattr(models, "key_name", None) or "API Key"
-    if not getattr(models, "api_key", ""):
-        raise DeploymentConfigError(
-            f"生产模式必须注入模型凭据 {key_name}；生产不接受从浏览器写 .env，"
-            f"缺了它这台服务器建得出世界却一动就失败"
+    models = registry.models
+    try:
+        # 两条线路都要有效（§6）：env 派生时就是那一套 env 凭据，面板存过时是
+        # 面板里的 —— 面板两条线路的 token 齐全时不再要求 env 的旧 key。
+        validate_settings(models, registry.accounts)
+    except ProviderSettingsError as e:
+        where = (
+            f"（线路来自 .env，key 变量 {models.env_key_name}）"
+            if models.source == SOURCE_ENV
+            else "（线路来自面板设置）"
         )
+        raise DeploymentConfigError(
+            f"生产模式要求生成与判分两条模型线路都有效：{e}{where}；生产不接受"
+            f"从浏览器写 .env，缺了它这台服务器建得出世界却一动就失败"
+        ) from None
 
 
 def _account_db_path(settings: DeploymentSettings) -> Path:

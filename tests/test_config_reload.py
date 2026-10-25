@@ -188,7 +188,7 @@ class BuildEntryPointTests(BoundaryTestBase):
         self.disk.write_env(EVALUATOR_MODEL="another-model")
         registry = build_content_registry()
         self.assertEqual(registry.models.evaluator_model, "another-model")
-        self.assertEqual(registry.models.key_name, "TEST_API_KEY")
+        self.assertEqual(registry.models.env_key_name, "TEST_API_KEY")
 
     def test_the_authored_rhythms_are_part_of_the_snapshot(self):
         registry = build_content_registry()
@@ -289,7 +289,7 @@ class FailedReloadTests(BoundaryTestBase):
         self.boundary.reload()
 
         self.assertTrue(self.supervisor.accepting)
-        with patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="k"), \
+        with patch("pns.runtime.provider_settings.read_env_key", return_value="k"), \
              patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object()):
             runtime = SessionRuntime.create(
                 {"characters": ["mizuki", "ena"]},
@@ -353,7 +353,7 @@ class ConcurrentReloadTests(BoundaryTestBase):
 class AdmissionTests(BoundaryTestBase):
     def test_the_gate_refuses_new_sessions_while_it_is_closed(self):
         self.supervisor.close_gate()
-        with patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="k"), \
+        with patch("pns.runtime.provider_settings.read_env_key", return_value="k"), \
              patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object()):
             with self.assertRaises(SessionRefusedError):
                 SessionRuntime.create(
@@ -379,7 +379,7 @@ class AdmissionTests(BoundaryTestBase):
         self.boundary.reload()
         self.assertIsNot(self.boundary.active(), stale)
 
-        with patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="k"), \
+        with patch("pns.runtime.provider_settings.read_env_key", return_value="k"), \
              patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object()), \
              patch("pns.runtime.session_runtime.BOUNDARY.active", return_value=stale):
             with self.assertRaises(SessionRefusedError):
@@ -420,7 +420,7 @@ class RunningSessionTests(unittest.IsolatedAsyncioTestCase):
         self.disk = DiskFixture(tmp)
         self._patches = [
             *self.disk.patches(),
-            patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="k"),
+            patch("pns.runtime.provider_settings.read_env_key", return_value="k"),
             patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object()),
             patch("pns.runtime.session_runtime.call_character_async", _reply),
             patch("pns.runtime.session_runtime.judge_async", _judge),

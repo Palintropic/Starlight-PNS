@@ -519,8 +519,8 @@ class WorldControlPlane:
         一份带播种器的恢复（见 `WorldLifecycleService.restore`）。
         """
         models = registry.models
-        api_key = models.api_key
-        if not api_key:
+        generation, judge_line = models.generation, models.judge
+        if not (generation.token and judge_line.token):
             raise AdaptersUnavailable(
                 "还没有配置模型 API Key，判分器建不起来；请先在设置里完成配置"
             )
@@ -529,7 +529,12 @@ class WorldControlPlane:
                 "还没有配置生成模型，角色开不了口；请先在设置里完成配置"
             )
         try:
-            raw_client = self._client_factory(api_key, settings=models)
+            raw_client = self._client_factory(
+                generation.token.reveal(), settings=generation
+            )
+            raw_judge_client = self._client_factory(
+                judge_line.token.reveal(), settings=judge_line
+            )
         except Exception as e:
             # 这个工厂**收到过 API Key**，所以从它这里出来的任何东西都是不可信
             # 数据 —— 包括异常本身。
@@ -551,17 +556,18 @@ class WorldControlPlane:
                 "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置"
             ) from e
 
-        # 生成和判分共用这一个 client，所以计量挂在这里两条路都过（COST-1）。
-        # 传输层由 MeteredClient 在 SDK 调用点记；操作层由下面两个闭包各开
-        # 一个 operation，说明这次最后有没有产出能用的东西。
-        # 续命状态属于这个世界、挂在这个 client 上（COST-2）：研究会话和 bench 的
-        # client 不经过这里，所以永远不会续命。W/I 在这里从冻结的冷配置里取定，
-        # worker 不再回头读环境变量。
+        # 生成和判分各走各的线路、各有一个 client 和一个计量器（COST-1）：两条
+        # 线路的协议可以不同，计量器的协议决定怎么读 usage，所以不能共用一个。
+        # 两个计量器写同一本账。传输层由 MeteredClient 在 SDK 调用点记；操作层
+        # 由下面两个闭包各开一个 operation，说明这次最后有没有产出能用的东西。
+        # 续命状态属于这个世界、只挂在生成线路的 client 上（COST-2）：研究会话和
+        # bench 的 client 不经过这里，所以永远不会续命。W/I 在这里从冻结的冷配置
+        # 里取定，worker 不再回头读环境变量。
         warmer = (
             CacheWarmer(
                 window_seconds=self._autonomy.warm_window_seconds,
                 interval_seconds=self._autonomy.warm_interval_seconds,
-                protocol=models.api_format,
+                protocol=generation.api_format,
             )
             if self._autonomy.warm_window_seconds > 0
             else None
@@ -569,11 +575,18 @@ class WorldControlPlane:
         meter = UsageMeter(
             self._usage_ledger,
             world_id=world_id,
-            protocol=models.api_format,
+            protocol=generation.api_format,
             prices=registry.price_table(),
             warmer=warmer,
         )
+        judge_meter = UsageMeter(
+            self._usage_ledger,
+            world_id=world_id,
+            protocol=judge_line.api_format,
+            prices=registry.price_table(),
+        )
         client = MeteredClient(raw_client, meter)
+        judge_client = MeteredClient(raw_judge_client, judge_meter)
         if warmer is not None:
             # 续命用一份关掉 SDK 自动重试的 client：它的超时就是总时长上限，
             # 时钟不会被一次续命的重试拖住。同一个 meter：同一本账、同一把锁。
@@ -584,7 +597,7 @@ class WorldControlPlane:
             )
 
         def judge(request: AuditRequest) -> object:
-            with meter.operation(
+            with judge_meter.operation(
                 PATH_JUDGE, request.character_id, models.evaluator_model
             ) as op:
                 result = _judge(request)
@@ -603,7 +616,7 @@ class WorldControlPlane:
             # `recent_lines` 是这个角色生成前自己看到的几行，只进判分提示，
             # 不进事件、观察或记忆（见 audit.py 的 AuditRequest）。
             return router_mod.judge(
-                client,
+                judge_client,
                 request.character_id,
                 request.text,
                 # 自主路径上没有"第几轮"这个概念；它只出现在判分提示的措辞里。
@@ -689,9 +702,9 @@ class WorldControlPlane:
                 judge,
                 threshold=models.ooc_threshold,
                 evaluator_model=models.evaluator_model,
-                evaluator_provider=models.provider,
+                evaluator_provider=judge_line.provider,
                 generator_model=models.generator_model,
-                generator_provider=models.provider,
+                generator_provider=generation.provider,
             ),
             policy_factory=policy_factory,
             # 世界一生的动作上限。P9 的默认 128 是给研究会话定的，用在一个

@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -59,6 +60,11 @@ from pns.interfaces.security import (  # noqa: E402
     SessionStore,
     is_public,
 )
+from pns.runtime.provider_settings import (  # noqa: E402
+    ModelSettings,
+    Secret,
+    builtin_catalog,
+)
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 
 from accounts_support import (  # noqa: E402
@@ -74,6 +80,17 @@ CHARACTERS = ["mizuki", "ena"]
 ADMIN_TOKEN = "ADMIN-CANARY-0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 # 同样形状独一无二的模型凭据。
 KEY_CANARY = "MODEL-CANARY-9a8b7c6d5e4f30211203f4e5d6c7b8a9"
+
+
+def _models_with_key(key):
+    """env 派生的两条线路，token 换成一把给定的 key（不碰进程环境）。"""
+    base = ModelSettings.from_env({})
+    token = Secret(key)
+    return replace(
+        base,
+        generation=replace(base.generation, token=token),
+        judge=replace(base.judge, token=token),
+    )
 
 
 class _FakeModelClient:
@@ -123,7 +140,7 @@ class AuthTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name) / "worlds"
         self._env = patch.dict(
-            os.environ, {self.registry.models.key_name: KEY_CANARY}
+            os.environ, {self.registry.models.env_key_name: KEY_CANARY}
         )
         self._env.start()
         self.settings = DeploymentSettings(
@@ -496,7 +513,8 @@ class CredentialShapeTests(AuthTestCase):
 class ProductionFailsClosedTests(unittest.TestCase):
     def registry(self, key=KEY_CANARY):
         return SimpleNamespace(
-            models=SimpleNamespace(key_name="MIMO_API_KEY", api_key=key),
+            models=_models_with_key(key),
+            accounts=builtin_catalog(),
             revision=1,
         )
 

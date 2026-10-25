@@ -153,7 +153,7 @@ class ImmutableProductionTests(unittest.TestCase):
         self.dist = Path(self._tmp.name) / "dist"
         self.dist.mkdir()
         self._env = patch.dict(
-            os.environ, {self.registry.models.key_name: KEY_CANARY}
+            os.environ, {self.registry.models.env_key_name: KEY_CANARY}
         )
         self._env.start()
         self.before = {path: path.read_bytes() for path in self.SOURCES}

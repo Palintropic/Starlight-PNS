@@ -374,7 +374,7 @@ class WiringTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
-        env = patch.dict(os.environ, {self.registry.models.key_name: KEY})
+        env = patch.dict(os.environ, {self.registry.models.env_key_name: KEY})
         env.start()
         self.addCleanup(env.stop)
         self.client = FakeClient()

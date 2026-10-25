@@ -241,7 +241,7 @@ class MvpTestCase(unittest.TestCase):
     def setUp(self):
         self.registry = BOUNDARY.active()
         self.assertEqual(
-            self.registry.models.api_format,
+            self.registry.models.generation.api_format,
             "anthropic",
             "这些用例的 provider 替身按 anthropic 形态写；换了形态要一起改",
         )
@@ -252,7 +252,7 @@ class MvpTestCase(unittest.TestCase):
         self._env = patch.dict(
             os.environ,
             {
-                self.registry.models.key_name: CANARY,
+                self.registry.models.env_key_name: CANARY,
                 "PNS_AUTONOMY_REPLY_DELAY_MINUTES": self.reply_delay,
                 **(
                     {"PNS_AUTONOMY_REPLY_BURST_LINES": self.reply_burst}
@@ -852,7 +852,7 @@ class ProviderLeakTests(MvpTestCase):
 
     def test_missing_generation_config_fails_before_taking_ownership(self):
         """配置不全就在这里响亮失败，绝不退回一个永远不说话的世界。"""
-        with patch.dict(os.environ, {self.registry.models.key_name: ""}):
+        with patch.dict(os.environ, {self.registry.models.env_key_name: ""}):
             with self.assertRaises(AdaptersUnavailable):
                 self.plane.create(
                     world_id="nokey", scene_id=SCENE, character_ids=CHARACTERS

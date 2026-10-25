@@ -2470,7 +2470,7 @@ class ResearchWebSocketCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             }
 
         with patch(
-            "pns.runtime.session_runtime.router_mod._get_api_key",
+            "pns.runtime.provider_settings.read_env_key",
             return_value="test-key",
         ), patch(
             "pns.runtime.session_runtime.router_mod.create_client",

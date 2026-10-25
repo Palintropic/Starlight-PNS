@@ -28,15 +28,15 @@ def _get_api_key(key_name: str = None) -> str:
 
 
 def create_client(api_key: str = None, *, settings=None):
-    """按 provider 设定建客户端。
+    """按一条线路建客户端。
 
-    settings 是一份 ModelSettings 快照（来自 ContentRegistry）。客户端和它的
-    api_format 必须来自同一份快照，否则会出现"用 anthropic 客户端走 openai
-    分支"这种错配 —— 这正是重载前 importlib.reload(router) 造成的老问题。
+    settings 是一条 `Line`（来自 ContentRegistry 的 ModelSettings）。客户端和它的
+    api_format 必须来自同一条线路，否则会出现"用 anthropic 客户端走 openai
+    分支"这种错配。没有 settings 是遗留兜底：进程启动时的 .env。
     """
     api_format = settings.api_format if settings is not None else API_FORMAT
     base_url = settings.base_url if settings is not None else BASE_URL
-    key = api_key or _get_api_key(settings.key_name if settings is not None else None)
+    key = api_key or (settings.token.reveal() if settings is not None else _get_api_key())
     if api_format == "openai":
         from openai import OpenAI
         return OpenAI(api_key=key, base_url=base_url)
@@ -264,11 +264,12 @@ def judge(
     situation_facts: list | None = None,
     registry=None,
 ) -> dict:
-    settings = registry.models if registry is not None else None
+    # 判分走判分线路：协议、地址、模型都取它的，跟生成线路可以完全不同。
+    settings = registry.models.judge if registry is not None else None
     if settings is not None:
-        model = settings.evaluator_model
+        model = settings.model
         evaluator_provider = settings.provider
-        ooc_threshold = settings.ooc_threshold
+        ooc_threshold = registry.models.ooc_threshold
         char_name = registry.character_name(character)
     else:
         model = os.environ.get("EVALUATOR_MODEL") or os.environ.get("MODEL", "mimo-v2.6-pro")

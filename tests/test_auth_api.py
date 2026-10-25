@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -50,6 +51,11 @@ from pns.interfaces.security import (  # noqa: E402
     DeploymentConfigError,
     DeploymentSettings,
 )
+from pns.runtime.provider_settings import (  # noqa: E402
+    ModelSettings,
+    Secret,
+    builtin_catalog,
+)
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 
 from accounts_support import (  # noqa: E402
@@ -67,6 +73,17 @@ KEY_CANARY = "AUTH1-MODEL-CANARY-0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 # 都是一次泄露。
 OPERATOR_PASSWORD = "operator-password-01"
 OBSERVER_PASSWORD = "observer-password-01"
+
+
+def _models_with_key(key):
+    """env 派生的两条线路，token 换成一把给定的 key（不碰进程环境）。"""
+    base = ModelSettings.from_env({})
+    token = Secret(key)
+    return replace(
+        base,
+        generation=replace(base.generation, token=token),
+        judge=replace(base.judge, token=token),
+    )
 
 
 class _FakeModelClient:
@@ -98,7 +115,7 @@ class ApiTestCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
         self.root = self.tmp / "worlds"
-        self._env = patch.dict(os.environ, {self.registry.models.key_name: KEY_CANARY})
+        self._env = patch.dict(os.environ, {self.registry.models.env_key_name: KEY_CANARY})
         self._env.start()
         self.addCleanup(self._env.stop)
 
@@ -762,7 +779,8 @@ class AuditTests(ApiTestCase):
 class BootstrapAndProductionTests(unittest.TestCase):
     def setUp(self):
         self.registry = SimpleNamespace(
-            models=SimpleNamespace(key_name="MIMO_API_KEY", api_key=KEY_CANARY),
+            models=_models_with_key(KEY_CANARY),
+            accounts=builtin_catalog(),
             revision=1,
         )
         self._tmp = tempfile.TemporaryDirectory()

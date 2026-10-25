@@ -449,10 +449,26 @@ between them is the point of this layer.
 **Reloadable configuration** is authored data that can be re-read from disk
 without re-executing any Python: the `SCENES` / `DEFAULT_SCENE` literals in
 `pns/world/scenes.py`, the `WORLD_FACTS` literal in `pns/world/facts.py`,
-`config.yaml`, `.env`, and everything under `packs/<active_pack>/`.
+`config.yaml`, `.env`, the panel-written model settings in
+`data/settings/provider.json` and `data/settings/accounts.json`, and everything
+under `packs/<active_pack>/`.
 `pns/runtime/content_registry.py` is the single entry point that turns those
 files into a `ContentRegistry` — an immutable snapshot holding scenes, facts,
 character prompts, and provider settings.
+
+Provider settings are two resolved **lines** — generation and judge — each with
+its own billing account, protocol, base URL, model, and token
+(`pns/runtime/provider_settings.py`). When `provider.json` does not exist both
+lines are derived from `.env` exactly as before: one credential set, the
+generation model from `GENERATOR_MODEL or MODEL`, and the judge as an
+independent line on `EVALUATOR_MODEL or MODEL` (never "follow"). When it exists
+it wins, and a file that cannot be read or validated fails the whole build, so
+production refuses to start rather than guessing. Tokens are held in `Secret`,
+which refuses to print, pickle, or expose itself through `vars()`; only client
+construction calls `reveal()`, and everything that crosses a boundary goes
+through `public_dict()`. Persistent worlds and research sessions build one
+client per line, and a world gets one usage meter per line (so mixed protocols
+read their usage correctly); the cache warmer hangs off the generation line only.
 
 The `.py` data files are read by `pns/world/data_module.py`, a strict AST
 whitelist evaluator, not by `exec`. Only top-level `NAME = <literal>` assignments

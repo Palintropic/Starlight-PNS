@@ -8,7 +8,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-import pns.logic.router as router_mod
 from oobe import ENV_FILE, PROVIDERS, write_env
 from pns.runtime.reload import BOUNDARY, write_and_reload
 
@@ -22,11 +21,11 @@ def get_config():
     registry = BOUNDARY.active()
     models = registry.models
     return {
-        "has_key": bool(router_mod._get_api_key(models.key_name)),
-        "model": models.model,
+        "has_key": bool(models.generation.token and models.judge.token),
+        "model": models.generator_model,
         "generator_model": models.generator_model,
         "evaluator_model": models.evaluator_model,
-        "api_format": models.api_format,
+        "api_format": models.generation.api_format,
         "default_scene": registry.default_scene,
         "config_revision": registry.revision,
     }
