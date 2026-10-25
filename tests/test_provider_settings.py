@@ -233,8 +233,11 @@ class EnvDerivationTests(_SettingsDir):
             self.assertEqual(settings.judge.token.reveal(), GEN_KEY)
 
     def test_bad_api_format_is_refused(self):
-        with self.assertRaises(ProviderSettingsError):
-            self.load({"API_FORMAT": "grpc"})
+        # 没有面板文件时 env 照旧严格校验（面板存在时不校验，见 PanelFileTests）。
+        for env in ({"API_FORMAT": "grpc"}, {"BASE_URL": ""}, {"PNS_API_KEY_NAME": ""}):
+            with self.subTest(env=env):
+                with self.assertRaises(ProviderSettingsError):
+                    self.load(env)
 
 
 # ── 3. 面板文件 ─────────────────────────────────────────────────────────
@@ -352,6 +355,23 @@ class PanelFileTests(_SettingsDir):
                 self.assertFalse(settings.env_complete)
                 self.assertEqual(
                     (settings.generator_model, settings.evaluator_model), ("gen-model", "judge-model")
+                )
+
+    def test_the_env_key_name_is_recorded_as_is_beside_a_panel(self):
+        self.write(PROVIDER_FILE, _panel_file())
+        for env, name, complete in (
+            ({"MIMO_API_KEY": "sk-legacy"}, "MIMO_API_KEY", True),
+            ({"PNS_API_KEY_NAME": "OTHER_KEY", "OTHER_KEY": "sk-legacy"}, "OTHER_KEY", True),
+            ({"PNS_API_KEY_NAME": "OTHER_KEY"}, "OTHER_KEY", False),
+            # 空串不偷偷换成默认名：它记录的是"旧配置用不了"，回滚预检要看到原样。
+            ({"PNS_API_KEY_NAME": "", "MIMO_API_KEY": "sk-legacy"}, "", False),
+        ):
+            with self.subTest(env=env):
+                with patch.dict(os.environ, env):
+                    settings, _ = self.load(env)
+                self.assertEqual((settings.env_key_name, settings.env_complete), (name, complete))
+                self.assertEqual(
+                    (settings.generation.token.reveal(), settings.judge.token.reveal()), (GEN_KEY, JUDGE_KEY)
                 )
 
     def test_panel_tokens_do_not_need_the_env_key(self):
@@ -902,12 +922,17 @@ class RealSdkTwoLineTests(_SettingsDir):
         echo = json.dumps({"error": {"type": "invalid_request_error",
                                      "message": f"bad key {GEN_KEY} / {JUDGE_KEY}"}}).encode()
         not_json = f"<html>upstream {GEN_KEY} {JUDGE_KEY}</html>".encode()
+        # 合法 JSON、形状不对：两种协议都认不出正文在哪。
+        bad_shape = json.dumps({"id": "x", "type": "message", "content": f"{GEN_KEY} {JUDGE_KEY}",
+                                "choices": [], "note": f"{GEN_KEY} {JUDGE_KEY}"}).encode()
         cases = (
             ("生成 400 回显", {"gen_raw": echo, "status": 400}),
             ("生成 401 回显", {"gen_raw": echo, "status": 401}),
             ("生成非 JSON", {"gen_raw": not_json}),
+            ("生成结构错", {"gen_raw": bad_shape}),
             ("判分 400 回显", {"judge_raw": echo, "status": 400}),
             ("判分非 JSON", {"judge_raw": not_json}),
+            ("判分结构错", {"judge_raw": bad_shape}),
         )
         for gen_format, judge_format in (("anthropic", "openai"), ("openai", "anthropic")):
             for name, kwargs in cases:
@@ -917,7 +942,21 @@ class RealSdkTwoLineTests(_SettingsDir):
                     logging.getLogger().addHandler(handler)
                     self.addCleanup(logging.getLogger().removeHandler, handler)
                     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                        messages, _, _, out = self._run_session(gen_format, judge_format, **kwargs)
+                        messages, gen_seen, judge_seen, out = self._run_session(
+                            gen_format, judge_format, **kwargs
+                        )
+                    # 先确认真的走进了失败路径，不然"没漏"什么也说明不了。
+                    types = [m.get("type") for m in messages]
+                    if "gen_raw" in kwargs:
+                        self.assertTrue(gen_seen)
+                        self.assertIn("error", types)
+                        self.assertNotIn("turn", types)
+                    else:
+                        self.assertTrue(judge_seen)
+                        turns = [m for m in messages if m.get("type") == "turn"]
+                        self.assertEqual(len(turns), 1)
+                        self.assertIn(turns[0]["drift_type"], ("error", "解析失败"))
+                        self.assertFalse(turns[0]["dimensions_complete"])
                     text = json.dumps(messages, ensure_ascii=False, default=str) + "".join(
                         path.read_text(errors="ignore") for path in out.rglob("*") if path.is_file()
                     ) + stdout.getvalue() + stderr.getvalue() + logs.getvalue()
