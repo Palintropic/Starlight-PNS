@@ -26,6 +26,15 @@ from pns.runtime.event_commit import (
 )
 from pns.runtime.reload import BOUNDARY, SessionAdmissionClosed, SessionSupervisor
 from pns.runtime.scheduler import PersistentScheduler
+from pns.runtime.usage_ledger import (
+    FAILURE_AUTH,
+    FAILURE_BAD_REQUEST,
+    FAILURE_NETWORK,
+    FAILURE_PAYMENT,
+    FAILURE_RATE_LIMITED,
+    FAILURE_SERVER,
+    classify_failure,
+)
 from pns.world.characters import registry as character_registry
 from pns.world.context import render_clock, render_session_location
 from pns.world.scene_compat import SceneMappingError
@@ -45,6 +54,24 @@ class SessionSetupError(Exception):
 
 class SessionRefusedError(SessionSetupError):
     """配置正在重载，准入闸门关着，这次不开新会话。"""
+
+
+# 模型调用失败时对外只说"哪一步、哪一类"。异常来自 SDK，消息、类型名、响应体
+# 都可能带着 API Key，所以一个字都不往会话状态和 WS 消息里放；分类只经过
+# classify_failure（isinstance + int 状态码查表），认不出来的就是"未知原因"。
+_FAILURE_TEXT = {
+    FAILURE_AUTH: "鉴权失败，请检查 API Key",
+    FAILURE_PAYMENT: "余额不足",
+    FAILURE_RATE_LIMITED: "请求过于频繁或额度耗尽",
+    FAILURE_BAD_REQUEST: "请求被拒绝",
+    FAILURE_SERVER: "模型服务端出错",
+    FAILURE_NETWORK: "网络不通或超时",
+}
+
+
+def _call_failure_message(stage: str, exc: BaseException) -> str:
+    reason = _FAILURE_TEXT.get(classify_failure(exc), "未知原因，详情见服务器侧")
+    return f"{stage}调用失败：{reason}"
 
 
 class SessionRuntime:
@@ -196,7 +223,14 @@ class SessionRuntime:
         except SceneMappingError as e:
             raise SessionSetupError(str(e)) from e
 
-        client = router_mod.create_client(api_key, settings=registry.models)
+        try:
+            client = router_mod.create_client(api_key, settings=registry.models)
+        except Exception as e:
+            # 工厂收到过 API Key，从它出来的异常（消息、类型名）都可能带着 key。
+            # 对外只给固定文案，原异常留在 __cause__，同 composition.py 的边界。
+            raise SessionSetupError(
+                "模型客户端建不起来；请检查服务器侧的 provider 与凭据配置"
+            ) from e
         session_id = (
             f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{scene['id']}_{uuid4().hex[:12]}"
         )
@@ -306,7 +340,7 @@ class SessionRuntime:
                 }
                 break
             except Exception as e:
-                message = str(e)
+                message = _call_failure_message("生成", e)
                 self.state.record_error(message)
                 yield {"type": "error", "turn": turn, "message": message}
                 break
@@ -326,7 +360,7 @@ class SessionRuntime:
                     registry=self.registry,
                 )
             except Exception as e:
-                message = str(e)
+                message = _call_failure_message("判分", e)
                 self.state.record_error(message)
                 yield {"type": "error", "turn": turn, "message": message}
                 break

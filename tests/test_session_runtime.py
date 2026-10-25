@@ -12,6 +12,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import anthropic
+import httpx2
+
 from pns.models.event import EventScope, EventType
 from pns.models.exposure import ExposureReason
 from pns.models.world_state import Availability, WorldState
@@ -184,7 +187,7 @@ class SessionRuntimeRunTests(RuntimeTestBase):
 
         types = [m["type"] for m in messages]
         self.assertEqual(types, ["start", "generating", "error", "done"])
-        self.assertEqual(messages[-2]["message"], "boom")
+        self.assertEqual(messages[-2]["message"], "生成调用失败：未知原因，详情见服务器侧")
         self.assertEqual(messages[-1]["stats"]["total_turns"], 0)
         # 没有任何轮次落地，history 不应该被写出
         self.assertIsNone(messages[-1]["history_file"])
@@ -216,7 +219,7 @@ class SessionRuntimeRunTests(RuntimeTestBase):
             messages = await _run(runtime)
 
         self.assertEqual([m["type"] for m in messages], ["start", "generating", "judging", "error", "done"])
-        self.assertEqual(messages[-2]["message"], "judge boom")
+        self.assertEqual(messages[-2]["message"], "判分调用失败：未知原因，详情见服务器侧")
         self.assertEqual(messages[-1]["stats"]["total_turns"], 0)
 
     async def test_drift_failure_does_not_publish_turn(self):
@@ -364,6 +367,87 @@ class SessionRuntimeRunTests(RuntimeTestBase):
 
         await stream.aclose()
         self.assertEqual(runtime.state.status, "cancelled")
+
+
+KEY = "sk-secret-0123456789abcdef"
+
+
+def _status_error(code):
+    response = httpx2.Response(code, request=httpx2.Request("POST", "http://x"))
+    return anthropic.APIStatusError(KEY, response=response, body={"error": {"message": KEY}})
+
+
+def _key_named_error():
+    # 类型名本身就是 key：Python 不校验类名，type(e).__name__ 会把它带出去。
+    return type(KEY, (RuntimeError,), {})(KEY)
+
+
+class SessionSecretBoundaryTests(RuntimeTestBase):
+    """模型调用失败时，异常里的任何东西（消息、类型名、响应体）都不能进会话状态或 WS 消息。"""
+
+    def _assert_no_key(self, runtime, messages):
+        self.assertNotIn(KEY, json.dumps(messages, ensure_ascii=False, default=str))
+        self.assertNotIn(KEY, json.dumps(runtime.state.to_dict(), ensure_ascii=False, default=str))
+
+    async def test_generation_failure_never_carries_the_key(self):
+        for error in (ValueError(KEY), _key_named_error(), _status_error(401), _status_error(500)):
+            async def failing_call(*args, error=error, **kwargs):
+                raise error
+
+            runtime = self._create()
+            with self.subTest(error=type(error).__mro__[1].__name__), \
+                 patch("pns.runtime.session_runtime.call_character_async", failing_call):
+                messages = await _run(runtime)
+                self.assertEqual([m["type"] for m in messages][-2:], ["error", "done"])
+                self._assert_no_key(runtime, messages)
+
+    async def test_judge_failure_never_carries_the_key(self):
+        async def fake_call(*args, **kwargs):
+            return "reply"
+
+        for error in (RuntimeError(KEY), _key_named_error(), _status_error(402)):
+            async def failing_judge(*args, error=error, **kwargs):
+                raise error
+
+            runtime = self._create()
+            with self.subTest(error=type(error).__mro__[1].__name__), \
+                 patch("pns.runtime.session_runtime.call_character_async", fake_call), \
+                 patch("pns.runtime.session_runtime.judge_async", failing_judge):
+                messages = await _run(runtime)
+                self._assert_no_key(runtime, messages)
+
+    async def test_failures_are_reported_by_fixed_category(self):
+        cases = {
+            401: "生成调用失败：鉴权失败，请检查 API Key",
+            402: "生成调用失败：余额不足",
+            429: "生成调用失败：请求过于频繁或额度耗尽",
+            503: "生成调用失败：模型服务端出错",
+        }
+        for code, expected in cases.items():
+            async def failing_call(*args, code=code, **kwargs):
+                raise _status_error(code)
+
+            runtime = self._create()
+            with self.subTest(code=code), \
+                 patch("pns.runtime.session_runtime.call_character_async", failing_call):
+                messages = await _run(runtime)
+                error = next(m for m in messages if m["type"] == "error")
+                self.assertEqual(error["message"], expected)
+
+    def test_client_factory_failure_is_a_fixed_setup_error(self):
+        self._client_patch.stop()
+        try:
+            for error in (RuntimeError(KEY), _key_named_error()):
+                with self.subTest(error=type(error).__mro__[1].__name__), patch(
+                    "pns.runtime.session_runtime.router_mod.create_client", side_effect=error
+                ):
+                    with self.assertRaises(SessionSetupError) as ctx:
+                        self._create()
+                    self.assertNotIn(KEY, str(ctx.exception))
+                    self.assertNotIn(KEY, type(ctx.exception).__name__)
+                    self.assertIs(ctx.exception.__cause__, error)
+        finally:
+            self._client_patch.start()
 
 
 class SessionRuntimeEventTests(RuntimeTestBase):
