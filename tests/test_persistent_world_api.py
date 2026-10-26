@@ -936,11 +936,32 @@ class AdapterTests(WorldApiTestCase):
         self.assert_no_canary(response)
         self.assertEqual(
             self.detail(response)["message"],
-            "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置",
+            "生成模型客户端建不起来；请检查服务器侧的 provider 与凭据配置",
         )
         # 而且这一档在拿所有权之前就断掉了。
         self.assertFalse(self.root.exists())
         self.assertEqual(owned_world_paths(), ())
+
+    def test_the_message_says_which_client_failed(self):
+        """生成那个建得起来、判分那个建不起来：文案说的是判分，不是笼统一句。"""
+
+        def judge_explodes(api_key, *, settings):
+            if settings.name == "judge":
+                raise RuntimeError(f"provider rejected {api_key}")
+            return object()
+
+        with patch.dict(os.environ, {self.registry.models.env_key_name: CANARY}):
+            plane = WorldControlPlane(root=self.root, client_factory=judge_explodes)
+            response = TestClient(create_app(plane)).post(
+                "/api/persistent-worlds",
+                json={"world_id": "nightcord", "scene": SCENE, "characters": CHARACTERS},
+            )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assert_no_canary(response)
+        self.assertEqual(
+            self.detail(response)["message"],
+            "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置",
+        )
 
     def test_an_exception_type_name_is_untrusted_data_too(self):
         """连**类型名**都不能过边界。

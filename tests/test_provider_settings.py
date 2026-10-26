@@ -615,6 +615,67 @@ class DurableWriteTests(_SettingsDir):
         settings_files.durable_unlink(path)  # 不存在也算删过
 
 
+class JudgeThinkingTests(_SettingsDir):
+    """判分时 thinking 怎么发由线路说了算（不再只靠嗅探 MiMo 官方地址）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write(ACCOUNTS_FILE, _accounts_file())
+
+    def test_the_field_is_optional_checked_and_followed(self):
+        self.write(PROVIDER_FILE, _panel_file())
+        settings, _ = self.load()
+        self.assertEqual((settings.generation.judge_thinking, settings.judge.judge_thinking), ("auto", "auto"))
+        generation = {**_panel_file()["generation"], "judge_thinking": "off"}
+        self.write(PROVIDER_FILE, _panel_file(generation=generation, judge={"follow": LINE_GENERATION}))
+        settings, _ = self.load()
+        self.assertEqual(settings.judge.judge_thinking, "off")
+        self.assertEqual(settings.public_dict()["judge"]["judge_thinking"], "off")
+        self.write(PROVIDER_FILE, _panel_file(generation={**generation, "judge_thinking": GEN_KEY}))
+        with self.assertRaises(ProviderSettingsError) as caught:
+            self.load()
+        self.assertNotIn(GEN_KEY, str(caught.exception))
+        self.assertEqual(ModelSettings.from_env({}).judge.judge_thinking, "auto")
+
+    def test_the_judge_request_follows_the_line(self):
+        from pns.logic import router
+
+        sent = []
+        client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: sent.append(kw) or SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="{}")])))
+        relay, mimo = "https://relay.example/anthropic", "https://api.xiaomimimo.com/anthropic"
+        for policy, url, disabled in (
+            ("auto", mimo, True), ("auto", relay, False),
+            ("off", relay, True), ("off", mimo, True),
+            ("provider", mimo, False), ("provider", relay, False),
+        ):
+            with self.subTest(policy=policy, url=url):
+                sent.clear()
+                line = Line(name=LINE_JUDGE, account="ds", api_format="anthropic", base_url=url,
+                            model="m", token=Secret("k"), judge_thinking=policy)
+                router._call(client, "m", "sys", "msg", settings=line)
+                self.assertEqual("thinking" in sent[0], disabled)
+                if disabled:
+                    self.assertEqual(sent[0]["thinking"], {"type": "disabled"})
+
+    def test_a_put_carries_it(self):
+        from pns.runtime.provider_settings import build_candidate
+
+        request = {
+            "generation": {**_panel_file()["generation"], "judge_thinking": "off"},
+            "judge": {**_panel_file()["judge"]},
+        }
+        payload, settings = build_candidate(
+            request, None, load_accounts(self.dir), {}, updated_by="t", ooc_threshold=5.0
+        )
+        self.assertEqual(json.loads(payload)["generation"]["judge_thinking"], "off")
+        self.assertNotIn("judge_thinking", json.loads(payload)["judge"])
+        self.assertEqual((settings.generation.judge_thinking, settings.judge.judge_thinking), ("off", "auto"))
+        with self.assertRaises(ProviderSettingsError):
+            build_candidate({**request, "judge": {**request["judge"], "judge_thinking": "maybe"}},
+                            None, load_accounts(self.dir), {}, updated_by="t", ooc_threshold=5.0)
+
+
 # ── 6. 两条线路真的分开走 ───────────────────────────────────────────────
 class _Anthropic:
     def __init__(self, calls):

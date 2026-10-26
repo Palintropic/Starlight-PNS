@@ -41,6 +41,16 @@ LINES = (LINE_GENERATION, LINE_JUDGE)
 
 API_FORMATS = ("anthropic", "openai")
 
+# 这条线路被用来判分时 thinking 怎么发（只对 anthropic 协议有意义）。判分是受约束
+# 的分类调用，MiMo 会把整个输出预算花在思考块上，留不下 JSON。
+#   auto     —— 旧行为：Base URL 是 MiMo 官方地址才关。env 派生的线路永远是它。
+#   off      —— 总是发 thinking: disabled（经转发地址走 MiMo 时用这个）。
+#   provider —— 什么都不发，由 provider 自己的默认决定。
+JUDGE_THINKING_AUTO = "auto"
+JUDGE_THINKING_OFF = "off"
+JUDGE_THINKING_PROVIDER = "provider"
+JUDGE_THINKING = (JUDGE_THINKING_AUTO, JUDGE_THINKING_OFF, JUDGE_THINKING_PROVIDER)
+
 # `env` 是内建账户：代表 .env 那把 key 背后的计费账户。env 派生的两条线路都归它。
 ENV_ACCOUNT = "env"
 ACCOUNT_KINDS = (
@@ -399,6 +409,7 @@ class Line:
     token: Secret
     # 写进判分 / 生成审计的 provider 标签。env 派生沿用 PROVIDER；面板线路用账户 kind。
     provider: str = ""
+    judge_thinking: str = JUDGE_THINKING_AUTO
 
     @property
     def host(self) -> str:
@@ -413,6 +424,7 @@ class Line:
             "model": self.model,
             "has_token": bool(self.token),
             "token_hint": self.token.hint(),
+            "judge_thinking": self.judge_thinking,
         }
 
 
@@ -548,7 +560,17 @@ def _parse_line(name: str, raw: Any, catalog: AccountCatalog) -> Line:
         model=fields["model"],
         token=Secret(fields["token"]),
         provider=account.kind if account is not None else "",
+        judge_thinking=_judge_thinking(raw.get("judge_thinking"), label),
     )
+
+
+def _judge_thinking(raw: Any, label: str) -> str:
+    """可选字段，缺省是 auto（不带这个字段的文件行为不变）。"""
+    if raw is None:
+        return JUDGE_THINKING_AUTO
+    if raw not in JUDGE_THINKING:
+        raise ProviderSettingsError(f"{label} 的 judge_thinking 只能是 {'/'.join(JUDGE_THINKING)}")
+    return raw
 
 
 def validate_line(line: Line, catalog: AccountCatalog, *, require_token: bool = True) -> None:
@@ -614,7 +636,7 @@ def settings_from_raw(
         judge = Line(
             name=LINE_JUDGE, account=generation.account, api_format=generation.api_format,
             base_url=generation.base_url, model=generation.model, token=generation.token,
-            provider=generation.provider,
+            provider=generation.provider, judge_thinking=generation.judge_thinking,
         )
     else:
         judge = _parse_line(LINE_JUDGE, judge_raw, catalog)
@@ -680,6 +702,8 @@ def build_candidate(
         if not isinstance(token, str):
             raise ProviderSettingsError(f"{label} 的 token 必须是字符串")
         fields["token"] = token
+        if raw.get("judge_thinking") is not None:
+            fields["judge_thinking"] = _judge_thinking(raw["judge_thinking"], label)
         return fields
 
     generation = line_fields(LINE_GENERATION, request.get(LINE_GENERATION))

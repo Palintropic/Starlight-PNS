@@ -81,6 +81,7 @@ def extract_anthropic_text(response) -> str:
 def _call(client, model: str, system: str, user_msg: str, *, settings=None) -> str:
     api_format = settings.api_format if settings is not None else API_FORMAT
     base_url = settings.base_url if settings is not None else BASE_URL
+    judge_thinking = getattr(settings, "judge_thinking", "auto") if settings is not None else "auto"
     if api_format == "openai":
         resp = client.chat.completions.create(
             model=model,
@@ -103,8 +104,9 @@ def _call(client, model: str, system: str, user_msg: str, *, settings=None) -> s
         # MiMo 2.5 may spend the entire Router output budget on a ThinkingBlock,
         # leaving no JSON to parse. Router is a constrained classification call,
         # so disable extended thinking here while keeping it available to normal
-        # character-generation requests.
-        if "xiaomimimo.com" in base_url:
+        # character-generation requests. The line says how (CFG-1): "auto" keeps
+        # the old host sniff, "off" always disables, "provider" sends nothing.
+        if judge_thinking == "off" or (judge_thinking == "auto" and "xiaomimimo.com" in base_url):
             request["thinking"] = {"type": "disabled"}
         resp = client.messages.create(**request)
         return extract_anthropic_text(resp)

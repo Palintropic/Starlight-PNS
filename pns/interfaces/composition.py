@@ -537,33 +537,33 @@ class WorldControlPlane:
             raise AdaptersUnavailable(
                 "还没有配置生成模型，角色开不了口；请先在设置里完成配置"
             )
-        try:
-            raw_client = self._client_factory(
-                generation.token.reveal(), settings=generation
-            )
-            raw_judge_client = self._client_factory(
-                judge_line.token.reveal(), settings=judge_line
-            )
-        except Exception as e:
-            # 这个工厂**收到过 API Key**，所以从它这里出来的任何东西都是不可信
-            # 数据 —— 包括异常本身。
-            #
-            # 消息原文会带 key（"provider rejected sk-…" 是真实形状），这一点
-            # 显而易见。不显而易见的是**类型名也会**：
-            #
-            #     raise type(api_key, (RuntimeError,), {})("rejected")
-            #
-            # Python 不校验类名，于是 `type(e).__name__` 就是那把 key。所以
-            # "类型名装不下一把 key"是错的，而只要还有**任何**一处从异常派生
-            # 的数据能过边界，这条边界就还是漏的。
-            #
-            # 因此对外这句话是**完全固定**的：不含 str(e)、repr(e)、类型名、
-            # 也不含异常的任何属性。原始异常留在 __cause__ 里，谁在服务器侧
-            # 调试谁自己去看，不经过这条边界；这里同样刻意不打日志 —— 把原文
-            # 打出去只是换个地方泄漏。
-            raise AdaptersUnavailable(
-                "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置"
-            ) from e
+
+        # 这个工厂**收到过 API Key**，所以从它这里出来的任何东西都是不可信
+        # 数据 —— 包括异常本身。
+        #
+        # 消息原文会带 key（"provider rejected sk-…" 是真实形状），这一点
+        # 显而易见。不显而易见的是**类型名也会**：
+        #
+        #     raise type(api_key, (RuntimeError,), {})("rejected")
+        #
+        # Python 不校验类名，于是 `type(e).__name__` 就是那把 key。所以
+        # "类型名装不下一把 key"是错的，而只要还有**任何**一处从异常派生
+        # 的数据能过边界，这条边界就还是漏的。
+        #
+        # 因此对外这句话是**完全固定**的（只分"生成"还是"判分"）：不含 str(e)、
+        # repr(e)、类型名，也不含异常的任何属性。原始异常留在 __cause__ 里，
+        # 谁在服务器侧调试谁自己去看，不经过这条边界；这里同样刻意不打日志 ——
+        # 把原文打出去只是换个地方泄漏。
+        def build_client(line, what: str):
+            try:
+                return self._client_factory(line.token.reveal(), settings=line)
+            except Exception as e:
+                raise AdaptersUnavailable(
+                    f"{what}模型客户端建不起来；请检查服务器侧的 provider 与凭据配置"
+                ) from e
+
+        raw_client = build_client(generation, "生成")
+        raw_judge_client = build_client(judge_line, "判分")
 
         # 生成和判分各走各的线路、各有一个 client 和一个计量器（COST-1）：两条
         # 线路的协议可以不同，计量器的协议决定怎么读 usage，所以不能共用一个。
