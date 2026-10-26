@@ -34,7 +34,7 @@ from pns.runtime.provider_settings import (
 
 from . import accounts_api
 from . import auth as auth_routes
-from . import config, health, persistent_worlds, review, simulate, usage, world
+from . import config, health, persistent_worlds, provider_api, review, simulate, usage, world
 from .accounts import AccountError, AccountStore
 from .composition import AutonomySettings, WorldControlPlane
 from .paths import ACCOUNTS_DB_FILE, DASHBOARD_DIST
@@ -322,6 +322,7 @@ def create_app(
     app.include_router(accounts_api.router)
     app.include_router(review.router)
     app.include_router(config.router)
+    app.include_router(provider_api.router)
     app.include_router(world.router)
     app.include_router(persistent_worlds.router)
     app.include_router(usage.router)

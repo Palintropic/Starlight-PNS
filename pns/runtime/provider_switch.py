@@ -16,7 +16,9 @@
 # 只管本进程：部署是单写者拓扑（compose 里只有一个容器写 data/）。
 import threading
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Callable, Iterator, Optional
+
+from pns.runtime.reload import BOUNDARY, QUARANTINE_MESSAGE, SettingsQuarantined
 
 
 class ProviderSwitchBusy(RuntimeError):
@@ -24,7 +26,10 @@ class ProviderSwitchBusy(RuntimeError):
 
 
 class ProviderSwitchGate:
-    def __init__(self) -> None:
+    def __init__(self, quarantined: Optional[Callable[[], bool]] = None) -> None:
+        # 设置隔离时世界入口也拒绝（CFG-1 §5.4）：隔离意味着磁盘与内存可能不一致，
+        # 这时建出来的 adapters 用的是哪份线路说不清。
+        self._quarantined = quarantined if quarantined is not None else (lambda: False)
         self._lock = threading.Lock()
         self._world_entries = 0
         self._switching = False
@@ -40,6 +45,8 @@ class ProviderSwitchGate:
         with self._lock:
             if self._switching:
                 raise ProviderSwitchBusy("模型设置正在保存，暂时不能创建或恢复世界，请稍后重试")
+            if self._quarantined():
+                raise SettingsQuarantined(QUARANTINE_MESSAGE)
             self._world_entries += 1
         try:
             yield
@@ -64,4 +71,4 @@ class ProviderSwitchGate:
 
 
 # 进程内的单例。测试可以给 WorldControlPlane 传自己的实例。
-SWITCH_GATE = ProviderSwitchGate()
+SWITCH_GATE = ProviderSwitchGate(quarantined=lambda: BOUNDARY.quarantined)

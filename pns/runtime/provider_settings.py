@@ -502,6 +502,13 @@ def load_model_settings(
     raw = _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
     if raw is None:
         return ModelSettings.from_env(env, ooc_threshold=ooc_threshold), catalog
+    return settings_from_raw(raw, catalog, env, ooc_threshold=ooc_threshold), catalog
+
+
+def settings_from_raw(
+    raw: Mapping[str, Any], catalog: AccountCatalog, env: Mapping[str, str], *, ooc_threshold: float
+) -> ModelSettings:
+    """面板文件内容 → 校验过的模型设定。读文件和保存前校验候选共用。"""
     if raw.get("version") != PROVIDER_VERSION:
         raise ProviderSettingsError("线路配置的版本不认识")
     generation = _parse_line(LINE_GENERATION, raw.get("generation"), catalog)
@@ -525,7 +532,100 @@ def load_model_settings(
         env_key_name=env.get("PNS_API_KEY_NAME", "MIMO_API_KEY"),
     )
     validate_settings(settings, catalog)
-    return settings, catalog
+    return settings
+
+
+_LINE_FIELDS = ("account", "api_format", "base_url", "model")
+
+
+def _stored_token(raw: Optional[Mapping[str, Any]], name: str) -> str:
+    """当前面板文件里这条线路**自己**存的 token；没有、跟随、文件坏了都是空。"""
+    line = raw.get(name) if isinstance(raw, Mapping) else None
+    if not isinstance(line, Mapping) or set(line) == {"follow"}:
+        return ""
+    token = line.get("token")
+    return token if isinstance(token, str) else ""
+
+
+def _judge_followed(raw: Optional[Mapping[str, Any]]) -> bool:
+    line = raw.get(LINE_JUDGE) if isinstance(raw, Mapping) else None
+    return isinstance(line, Mapping) and set(line) == {"follow"}
+
+
+def build_candidate(
+    request: Mapping[str, Any],
+    current: Optional[Mapping[str, Any]],
+    catalog: AccountCatalog,
+    env: Mapping[str, str],
+    *,
+    updated_by: str,
+    ooc_threshold: float,
+) -> Tuple[bytes, ModelSettings]:
+    """一次 PUT 的请求体 → 要发布的文件内容和它解析出的设定（CFG-1 §4.2、§6）。
+
+    空 token 的解析：本线路已存的 → 判分之前跟随时用生成线路（本次保存后的）
+    的 → 否则拒绝。从 env 派生第一次切到面板时 token 必填。current 是当前面板
+    文件的内容（不存在或读不出来时为 None）。错误都是固定措辞，不带输入值。
+    """
+    if not isinstance(request, Mapping):
+        raise ProviderSettingsError("请求体必须是对象")
+
+    def line_fields(name: str, raw: Any) -> Dict[str, str]:
+        label = "生成线路" if name == LINE_GENERATION else "判分线路"
+        if not isinstance(raw, Mapping):
+            raise ProviderSettingsError(f"{label} 必须是对象")
+        fields = {}
+        for key in _LINE_FIELDS:
+            value = raw.get(key)
+            if not isinstance(value, str):
+                raise ProviderSettingsError(f"{label} 缺少字段 {key}")
+            fields[key] = value
+        token = raw.get("token", "")
+        if token is None:
+            token = ""
+        if not isinstance(token, str):
+            raise ProviderSettingsError(f"{label} 的 token 必须是字符串")
+        fields["token"] = token
+        return fields
+
+    generation = line_fields(LINE_GENERATION, request.get(LINE_GENERATION))
+    if not generation["token"]:
+        generation["token"] = _stored_token(current, LINE_GENERATION)
+    if not generation["token"]:
+        raise ProviderSettingsError("生成线路需要填写 token")
+
+    judge_raw = request.get(LINE_JUDGE)
+    if isinstance(judge_raw, Mapping) and set(judge_raw) == {"follow"}:
+        if judge_raw["follow"] != LINE_GENERATION:
+            raise ProviderSettingsError("判分线路只能跟随生成线路")
+        judge: Dict[str, Any] = {"follow": LINE_GENERATION}
+    else:
+        judge = line_fields(LINE_JUDGE, judge_raw)
+        if not judge["token"]:
+            judge["token"] = _stored_token(current, LINE_JUDGE)
+        if not judge["token"] and _judge_followed(current):
+            # 解除跟随且没填：显式拷贝生成线路的 token（§4.2）。
+            judge["token"] = generation["token"]
+        if not judge["token"]:
+            raise ProviderSettingsError("判分线路需要填写 token")
+
+    payload = {
+        "version": PROVIDER_VERSION,
+        LINE_GENERATION: generation,
+        LINE_JUDGE: judge,
+        "updated_at": _now(),
+        "updated_by": updated_by,
+    }
+    settings = settings_from_raw(payload, catalog, env, ooc_threshold=ooc_threshold)
+    return _dump(payload), settings
+
+
+def read_current(settings_dir: Path) -> Optional[Dict[str, Any]]:
+    """当前面板文件的内容；不存在或读不出来都是 None（只用来复用已存的 token）。"""
+    try:
+        return _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
+    except ProviderSettingsError:
+        return None
 
 
 # ── 文件 ─────────────────────────────────────────────────────────────────
