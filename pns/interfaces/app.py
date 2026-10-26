@@ -25,6 +25,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from pns.runtime import content_registry, provider_txn
 from pns.runtime.provider_settings import (
     SOURCE_ENV,
     ProviderSettingsError,
@@ -100,6 +101,10 @@ def _verify_production_config(
             f"生产模式要求已构建的 Dashboard，但 {dashboard_dist} 不存在；"
             f"生产镜像应当在构建阶段产出它"
         )
+    # 上一次模型设置保存没收尾（CFG-1 §4.4）：不靠 schema 判断那份配置算不算
+    # 做完了，拒绝起来，等服务器侧恢复。
+    if provider_txn.pending(content_registry.SETTINGS_DIR):
+        raise DeploymentConfigError(provider_txn.STARTUP_REFUSAL)
     if registry_provider is None:
         return
     try:
