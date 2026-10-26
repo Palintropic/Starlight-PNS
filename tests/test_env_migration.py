@@ -35,7 +35,7 @@ class _Crash(BaseException):
     pass
 
 
-class EnvMigrationTests(unittest.TestCase):
+class _MigrationCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -54,6 +54,8 @@ class EnvMigrationTests(unittest.TestCase):
     def env(self):
         return load_accounts(self.settings).get("env")
 
+
+class EnvMigrationTests(_MigrationCase):
     def test_first_run(self):
         payload = self.migrate()
         env = self.env()
@@ -123,6 +125,52 @@ class EnvMigrationTests(unittest.TestCase):
                 with self.assertRaises(AnchorsUnreadable):
                     self.migrate()
                 self.assertEqual((self.usage / ANCHORS_FILE).read_text(encoding="utf-8"), body)
+
+
+class ProductionStartTests(_MigrationCase):
+    """服务入口在 create_app() 之后调 prepare_production_data()：只在生产迁移。"""
+
+    def app(self, mode):
+        from types import SimpleNamespace
+
+        from pns.interfaces.composition import WorldControlPlane
+        from pns.interfaces.security import DeploymentSettings
+        from tests.test_provider_settings import ADMIN_TOKEN
+
+        plane = WorldControlPlane(root=self.usage.parent / "worlds")
+        self.assertEqual(plane.usage_ledger.root, self.usage)
+        return SimpleNamespace(state=SimpleNamespace(
+            deployment=DeploymentSettings(mode=mode, admin_token=ADMIN_TOKEN),
+            world_control_plane=plane,
+        ))
+
+    def prepare(self, mode):
+        from pns.interfaces.app import prepare_production_data
+        from pns.runtime import content_registry
+
+        with patch.object(content_registry, "SETTINGS_DIR", self.settings):
+            prepare_production_data(self.app(mode))
+
+    def test_production_migrates_and_development_does_not(self):
+        accounts = (self.settings / ACCOUNTS_FILE).read_bytes()
+        self.prepare("development")
+        self.assertEqual((self.settings / ACCOUNTS_FILE).read_bytes(), accounts)
+        self.assertFalse((self.usage / ANCHORS_FILE).exists())
+        self.prepare("production")
+        self.assertTrue(self.env().created_at)
+        self.assertEqual(json.loads(self.anchors_bytes())["anchors"]["env"]["balance"], 123.45)
+
+    def test_an_unreadable_anchors_file_stops_production(self):
+        from pns.interfaces.security import DeploymentConfigError
+
+        (self.usage / ANCHORS_FILE).write_text("not json", encoding="utf-8")
+        with self.assertRaises(DeploymentConfigError) as caught:
+            self.prepare("production")
+        self.assertIn("balance_anchors.json", str(caught.exception))
+
+    def test_the_server_entry_calls_it_after_create_app(self):
+        source = (REPO_ROOT / "scripts" / "server.py").read_text(encoding="utf-8")
+        self.assertLess(source.index("app = create_app()"), source.index("prepare_production_data(app)"))
 
 
 if __name__ == "__main__":
