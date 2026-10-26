@@ -21,10 +21,11 @@
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from pns.runtime.content_registry import (
     ConfigValidationError,
@@ -37,8 +38,25 @@ from pns.runtime.content_registry import (
 DEFAULT_STOP_TIMEOUT = 60.0
 
 
+# 模型设置保存没能收尾（CFG-1 §5.4）时，准入、普通重载、再次保存都用这句。
+# 固定措辞：不带任何从文件或异常派生的文字。
+QUARANTINE_MESSAGE = (
+    "模型设置的上一次保存没能收尾，服务处于隔离状态：需要在服务器上核对 "
+    "settings/provider.json 与 provider.json.prev 并解除隔离。"
+)
+RELOADING_MESSAGE = "配置正在重新加载，暂时不能开始新会话，请稍后重试。"
+
+
 class SessionAdmissionClosed(Exception):
-    """重载正在进行，准入闸门关着，这次不接新 session。"""
+    """重载正在进行（或服务处于隔离状态），准入闸门关着，这次不接新 session。"""
+
+
+class ReloadBusy(Exception):
+    """已经有一次重载或设置保存在进行。什么都没做。"""
+
+
+class SettingsQuarantined(Exception):
+    """服务处于隔离状态：设置事务没能收尾，只能先解除隔离。"""
 
 
 class SessionSupervisor:
@@ -51,6 +69,7 @@ class SessionSupervisor:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._accepting = True
+        self._closed_message = RELOADING_MESSAGE
         self._live: Dict[str, object] = {}
         # 没有活 session 时置位。重载在这上面等，所以它必须严格跟 _live 同步维护。
         self._idle = threading.Event()
@@ -73,9 +92,7 @@ class SessionSupervisor:
         """
         with self._lock:
             if not self._accepting:
-                raise SessionAdmissionClosed(
-                    "配置正在重新加载，暂时不能开始新会话，请稍后重试。"
-                )
+                raise SessionAdmissionClosed(self._closed_message)
             self._live[session_id] = session
             self._idle.clear()
 
@@ -93,13 +110,15 @@ class SessionSupervisor:
         """
         return self._idle.wait(timeout)
 
-    def close_gate(self) -> None:
+    def close_gate(self, message: str = RELOADING_MESSAGE) -> None:
         with self._lock:
             self._accepting = False
+            self._closed_message = message
 
     def open_gate(self) -> None:
         with self._lock:
             self._accepting = True
+            self._closed_message = RELOADING_MESSAGE
 
     def stop_all(self, reason: str) -> Tuple[str, ...]:
         """给所有活着的 session 发停止信号，返回被停掉的 session id。
@@ -123,7 +142,7 @@ class SessionSupervisor:
 class ReloadResult:
     """一次重载尝试的结果。直接就是 /api/config/reload 的响应体。"""
 
-    status: str  # "ok" | "failed" | "busy"
+    status: str  # "ok" | "failed" | "busy" | "quarantined"
     revision: int
     finished_at: str
     stopped_sessions: Tuple[str, ...] = ()
@@ -160,6 +179,8 @@ class ConfigBoundary:
         self._active: Optional[ContentRegistry] = None
         self._revision = 0
         self._last_result: Optional[ReloadResult] = None
+        # 设置事务没能收尾（CFG-1 §5.4）。只在持有 _reload_lock 时改。
+        self._quarantined = False
 
     # ── 读 ────────────────────────────────────────────────────────────
     @property
@@ -178,12 +199,17 @@ class ConfigBoundary:
         with self._swap_lock:
             return self._active
 
+    @property
+    def quarantined(self) -> bool:
+        return self._quarantined
+
     def status(self) -> Dict:
         with self._swap_lock:
             active = self._active
             last = self._last_result
         return {
             "reloading": self._reload_lock.locked(),
+            "quarantined": self._quarantined,
             "stop_timeout": self._stop_timeout,
             "accepting_sessions": self._supervisor.accepting,
             "live_sessions": self._supervisor.live_session_ids(),
@@ -224,11 +250,23 @@ class ConfigBoundary:
             error="已有一次配置重载正在进行，请等它结束。" + note,
         )
 
+    def _quarantined_result(self) -> ReloadResult:
+        with self._swap_lock:
+            revision = self._active.revision if self._active else 0
+        return ReloadResult(
+            status="quarantined",
+            revision=revision,
+            finished_at=_now(),
+            error=QUARANTINE_MESSAGE,
+        )
+
     def reload(self, reason: str = "配置重新加载") -> ReloadResult:
         if not self._reload_lock.acquire(blocking=False):
             # 已经有一次重载在跑。第二次不排队、不并发，直接告诉调用方在忙。
             return self._busy()
         try:
+            if self._quarantined:
+                return self._quarantined_result()
             return self._reload_locked(reason)
         finally:
             self._reload_lock.release()
@@ -253,6 +291,8 @@ class ConfigBoundary:
         if not self._reload_lock.acquire(blocking=False):
             return self._busy("（本次保存未写入任何内容）")
         try:
+            if self._quarantined:
+                return self._quarantined_result()
             paths = list(paths)
             originals: Dict[Path, Optional[bytes]] = {
                 path: (path.read_bytes() if path.exists() else None) for path in paths
@@ -276,55 +316,110 @@ class ConfigBoundary:
         finally:
             self._reload_lock.release()
 
+    @contextmanager
+    def provider_transaction(self, *, allow_quarantined: bool = False) -> Iterator["ProviderTransaction"]:
+        """模型设置保存用的持锁入口（CFG-1 §5.3）。
+
+        跟 reload() / write_and_reload() 用同一把锁，拿不到就 ReloadBusy，不排队。
+        进门就关准入，**出门才开**：中间的写盘、切换、失败后的文件恢复、事务
+        清理都在准入关着的时候做完。事务里判定了隔离（tx.quarantine()），出门
+        时准入保持关闭，换成隔离文案。
+
+        处于隔离状态时只有 allow_quarantined=True（解除隔离）能进门，成功后由
+        它调 tx.clear_quarantine()。
+        """
+        if not self._reload_lock.acquire(blocking=False):
+            raise ReloadBusy("已有一次配置重载或模型设置保存正在进行，请等它结束。")
+        try:
+            if self._quarantined and not allow_quarantined:
+                raise SettingsQuarantined(QUARANTINE_MESSAGE)
+            self._supervisor.close_gate(
+                QUARANTINE_MESSAGE if self._quarantined else RELOADING_MESSAGE
+            )
+            try:
+                yield ProviderTransaction(self)
+            finally:
+                if self._quarantined:
+                    self._supervisor.close_gate(QUARANTINE_MESSAGE)
+                else:
+                    self._supervisor.open_gate()
+        finally:
+            self._reload_lock.release()
+
     def _reload_locked(self, reason: str) -> ReloadResult:
-        """重载流程本体。调用方必须已经持有 _reload_lock。"""
+        """普通重载：关准入 → 切换 → 开准入。调用方必须已经持有 _reload_lock。"""
         try:
             self._supervisor.close_gate()
-            stopped = self._supervisor.stop_all(reason)
-
-            # 等旧 session 真的退出。等不到就整件事作废：不构建、不切换。
-            # 这是"新旧配置绝不并存"这条要求唯一的落实点。
-            if not self._supervisor.wait_until_idle(self._stop_timeout):
-                pending = tuple(self._supervisor.live_session_ids())
-                return self._fail(
-                    f"{len(pending)} 个会话在 {self._stop_timeout:g} 秒内没有停止"
-                    f"（{'、'.join(pending)}），配置未切换，仍在使用上一份可用配置。",
-                    stopped=stopped,
-                    pending=pending,
-                )
-
-            try:
-                with self._swap_lock:
-                    next_revision = self._revision + 1
-                # 构建在锁外进行：它是整个流程里最慢的一步，而且必须在完全
-                # 成功之后才允许影响任何人。构建期间读 active() 的人拿到的
-                # 依然是旧快照。
-                candidate = build_content_registry(revision=next_revision)
-            except Exception as e:
-                # 校验失败和非预期异常一视同仁：这次重载不算数，绝不半途替换。
-                detail = (
-                    str(e)
-                    if isinstance(e, ConfigValidationError)
-                    else f"{type(e).__name__}: {e}"
-                )
-                return self._fail(detail, stopped=stopped)
-
-            # 原子替换：只有这一行会改全局引用，且在锁内一次赋值完成。
-            with self._swap_lock:
-                self._revision = next_revision
-                self._active = candidate
-                result = ReloadResult(
-                    status="ok",
-                    revision=candidate.revision,
-                    finished_at=_now(),
-                    stopped_sessions=stopped,
-                    registry=candidate.to_dict(),
-                )
-                self._last_result = result
-            return result
+            return self._swap_locked(reason)
         finally:
             # 成功也好失败也好，服务都必须恢复到能开新 session 的状态。
             self._supervisor.open_gate()
+
+    def _swap_locked(self, reason: str) -> ReloadResult:
+        """停会话、等退出、构建、切换。持有 _reload_lock、准入已关；不碰准入。"""
+        stopped = self._supervisor.stop_all(reason)
+
+        # 等旧 session 真的退出。等不到就整件事作废：不构建、不切换。
+        # 这是"新旧配置绝不并存"这条要求唯一的落实点。
+        if not self._supervisor.wait_until_idle(self._stop_timeout):
+            pending = tuple(self._supervisor.live_session_ids())
+            return self._fail(
+                f"{len(pending)} 个会话在 {self._stop_timeout:g} 秒内没有停止"
+                f"（{'、'.join(pending)}），配置未切换，仍在使用上一份可用配置。",
+                stopped=stopped,
+                pending=pending,
+            )
+
+        try:
+            with self._swap_lock:
+                next_revision = self._revision + 1
+            # 构建在锁外进行：它是整个流程里最慢的一步，而且必须在完全
+            # 成功之后才允许影响任何人。构建期间读 active() 的人拿到的
+            # 依然是旧快照。
+            candidate = build_content_registry(revision=next_revision)
+        except Exception as e:
+            # 校验失败和非预期异常一视同仁：这次重载不算数，绝不半途替换。
+            detail = (
+                str(e)
+                if isinstance(e, ConfigValidationError)
+                else f"{type(e).__name__}: {e}"
+            )
+            return self._fail(detail, stopped=stopped)
+
+        # 原子替换：只有这一行会改全局引用，且在锁内一次赋值完成。
+        with self._swap_lock:
+            self._revision = next_revision
+            self._active = candidate
+            result = ReloadResult(
+                status="ok",
+                revision=candidate.revision,
+                finished_at=_now(),
+                stopped_sessions=stopped,
+                registry=candidate.to_dict(),
+            )
+            self._last_result = result
+        return result
+
+
+class ProviderTransaction:
+    """provider_transaction() 里拿到的句柄。只在那个 with 块里有效。"""
+
+    def __init__(self, boundary: ConfigBoundary) -> None:
+        self._boundary = boundary
+
+    def swap(self, reason: str) -> ReloadResult:
+        """从磁盘构建并切换（含停止旧会话、等待退出）。失败时旧快照不动。"""
+        return self._boundary._swap_locked(reason)
+
+    def quarantine(self) -> None:
+        """事务收不了尾：进入隔离。出门后准入保持关闭。"""
+        self._boundary._quarantined = True
+        self._boundary._supervisor.close_gate(QUARANTINE_MESSAGE)
+
+    def clear_quarantine(self) -> None:
+        """解除隔离成功、磁盘与内存一致之后调用。出门后准入重新打开。"""
+        self._boundary._quarantined = False
+        self._boundary._supervisor.close_gate(RELOADING_MESSAGE)
 
 
 def _now() -> str:

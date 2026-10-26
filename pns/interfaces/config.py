@@ -66,6 +66,8 @@ def post_config(payload: ConfigPayload):
         ),
         reason="provider 配置更新",
     )
+    if result.status == "quarantined":
+        raise HTTPException(503, result.error)
     if result.status == "busy":
         raise HTTPException(
             409,
@@ -102,6 +104,9 @@ def post_reload():
     对应 HTTP 409，不排队也不并发执行第二次。
     """
     result = BOUNDARY.reload()
+    if result.status == "quarantined":
+        # 模型设置的上一次保存没收尾：先在服务器上解除隔离（CFG-1 §5.4）。
+        raise HTTPException(503, result.error)
     if result.status == "busy":
         raise HTTPException(409, result.error or "已有一次配置重载正在进行")
     if result.status == "failed":

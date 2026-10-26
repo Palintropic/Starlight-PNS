@@ -25,10 +25,14 @@ from pns.runtime.content_registry import (
     build_content_registry,
 )
 from pns.runtime.reload import (
+    QUARANTINE_MESSAGE,
+    RELOADING_MESSAGE,
     ConfigBoundary,
+    ReloadBusy,
     ReloadResult,
     SessionAdmissionClosed,
     SessionSupervisor,
+    SettingsQuarantined,
 )
 from pns.runtime.reload import write_and_reload
 from pns.runtime.session_runtime import (
@@ -634,6 +638,140 @@ class ClassificationTests(unittest.TestCase):
             + len(cr.COLD_UPDATE_SOURCES)
             + len(cr.RUNTIME_AUTHORITATIVE_STATE),
         )
+
+
+class _StoppableSession:
+    """一个收到停止信号就当场退出的假会话。"""
+
+    def __init__(self, supervisor, session_id):
+        self._supervisor = supervisor
+        self._id = session_id
+
+    def request_stop(self, reason):
+        self._supervisor.release(self._id)
+
+
+class ProviderTransactionTests(BoundaryTestBase):
+    """模型设置保存的持锁入口（CFG-1 §5.3、§5.4、§13 第 1 条）。"""
+
+    def assert_admission_closed(self, message=RELOADING_MESSAGE):
+        self.assertFalse(self.supervisor.accepting)
+        with self.assertRaises(SessionAdmissionClosed) as caught:
+            self.supervisor.admit("late", object())
+        self.assertEqual(str(caught.exception), message)
+
+    def test_admission_stays_closed_until_the_transaction_ends(self):
+        self.boundary.active()
+        self.supervisor.admit("s1", _StoppableSession(self.supervisor, "s1"))
+        with self.boundary.provider_transaction() as tx:
+            self.assert_admission_closed()
+            result = tx.swap("模型设置保存")
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.stopped_sessions, ("s1",))
+            # 切换完了也不开：后面还有事务清理要在准入关着时做完。
+            self.assert_admission_closed()
+        self.assertTrue(self.supervisor.accepting)
+
+    def test_a_failed_swap_keeps_admission_closed_inside(self):
+        before = self.boundary.active()
+        with patch("pns.runtime.reload.build_content_registry", side_effect=ConfigValidationError("坏")):
+            with self.boundary.provider_transaction() as tx:
+                self.assertEqual(tx.swap("模型设置保存").status, "failed")
+                self.assert_admission_closed()
+        self.assertIs(self.boundary.active(), before)
+        self.assertTrue(self.supervisor.accepting)
+
+    def test_reload_and_a_transaction_exclude_each_other_both_ways(self):
+        self.boundary.active()
+        before = self.disk.env.read_bytes()
+        with self.boundary.provider_transaction():
+            self.assertEqual(self.boundary.reload().status, "busy")
+            wrote = []
+            result = self.boundary.write_and_reload(
+                [self.disk.env], lambda: wrote.append(self.disk.env.write_text("X=1\n")), reason="t"
+            )
+            self.assertEqual(result.status, "busy")
+            self.assertEqual(wrote, [])
+        self.assertEqual(self.disk.env.read_bytes(), before)
+
+        entered, release = threading.Event(), threading.Event()
+        real_build = build_content_registry
+
+        def slow_build(revision=0):
+            entered.set()
+            release.wait(timeout=5)
+            return real_build(revision=revision)
+
+        with patch("pns.runtime.reload.build_content_registry", slow_build):
+            first = threading.Thread(target=self.boundary.reload)
+            first.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                with self.assertRaises(ReloadBusy):
+                    with self.boundary.provider_transaction():
+                        self.fail("不该进门")
+            finally:
+                release.set()
+                first.join(timeout=5)
+        with self.boundary.provider_transaction():
+            pass
+
+    def test_quarantine_outlives_the_transaction(self):
+        self.boundary.active()
+        before = self.disk.env.read_bytes()
+        with self.assertRaises(KeyError):
+            with self.boundary.provider_transaction() as tx:
+                tx.quarantine()
+                raise KeyError("恢复也失败了")
+        self.assertTrue(self.boundary.quarantined)
+        self.assertTrue(self.boundary.status()["quarantined"])
+        self.assert_admission_closed(QUARANTINE_MESSAGE)
+        self.assertEqual(self.boundary.reload().status, "quarantined")
+        wrote = []
+        result = self.boundary.write_and_reload(
+            [self.disk.env], lambda: wrote.append(self.disk.env.write_text("X=1\n")), reason="t"
+        )
+        self.assertEqual((result.status, result.error), ("quarantined", QUARANTINE_MESSAGE))
+        self.assertEqual(wrote, [])
+        self.assertEqual(self.disk.env.read_bytes(), before)
+        with self.assertRaises(SettingsQuarantined):
+            with self.boundary.provider_transaction():
+                self.fail("隔离时普通保存不该进门")
+        # 锁没被隔离卡住：解除隔离的入口进得去。
+        with self.boundary.provider_transaction(allow_quarantined=True):
+            self.assert_admission_closed(QUARANTINE_MESSAGE)
+        self.assertTrue(self.boundary.quarantined)
+        self.assert_admission_closed(QUARANTINE_MESSAGE)
+
+    def test_clearing_the_quarantine_reopens_everything(self):
+        self.boundary.active()
+        with self.boundary.provider_transaction() as tx:
+            tx.quarantine()
+        with self.boundary.provider_transaction(allow_quarantined=True) as tx:
+            self.assertEqual(tx.swap("解除隔离").status, "ok")
+            tx.clear_quarantine()
+            self.assert_admission_closed()
+        self.assertFalse(self.boundary.quarantined)
+        self.assertTrue(self.supervisor.accepting)
+        self.assertEqual(self.boundary.reload().status, "ok")
+
+    def test_the_reload_endpoint_answers_503_while_quarantined(self):
+        import sys
+
+        from fastapi import HTTPException
+
+        scripts = str(Path(__file__).resolve().parent.parent / "scripts")
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)  # pns.interfaces.config 要 import oobe
+        from pns.interfaces import config as config_api
+
+        self.boundary.active()
+        with self.boundary.provider_transaction() as tx:
+            tx.quarantine()
+        with patch.object(config_api, "BOUNDARY", self.boundary):
+            with self.assertRaises(HTTPException) as caught:
+                config_api.post_reload()
+        self.assertEqual((caught.exception.status_code, caught.exception.detail), (503, QUARANTINE_MESSAGE))
 
 
 class StopConfirmationTests(BoundaryTestBase):
