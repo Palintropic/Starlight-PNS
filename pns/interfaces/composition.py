@@ -80,6 +80,7 @@ from pns.runtime.persistence import (
     WorldLifecycleService,
     validate_world_id,
 )
+from pns.runtime.provider_switch import SWITCH_GATE, ProviderSwitchGate
 from pns.runtime.reload import BOUNDARY
 from pns.runtime.rhythm import RhythmDirector
 from pns.runtime.usage_ledger import (
@@ -371,6 +372,7 @@ class WorldControlPlane:
         checkpoint_policy: Optional[CheckpointPolicy] = None,
         autonomy: Optional[AutonomySettings] = None,
         usage_ledger: Optional[UsageLedger] = None,
+        switch_gate: Optional[ProviderSwitchGate] = None,
     ) -> None:
         self._root = Path(root) if root is not None else default_world_root()
         # 用量账本是运维数据：放在存档根**旁边**，不在任何一个世界的目录里，
@@ -389,6 +391,9 @@ class WorldControlPlane:
         self._client_factory = (
             client_factory if client_factory is not None else router_mod.create_client
         )
+        # 世界入口与模型设置保存互斥（CFG-1 §5.2）：adapters 只在这三个入口按当时的
+        # registry 建一次。
+        self._switch_gate = switch_gate if switch_gate is not None else SWITCH_GATE
         self._autonomy = autonomy if autonomy is not None else AutonomySettings.from_env()
         if not isinstance(self._autonomy, AutonomySettings):
             raise CompositionError("autonomy 必须是 AutonomySettings")
@@ -428,6 +433,10 @@ class WorldControlPlane:
     @property
     def autonomy(self) -> AutonomySettings:
         return self._autonomy
+
+    @property
+    def switch_gate(self) -> ProviderSwitchGate:
+        return self._switch_gate
 
     def registry(self) -> ContentRegistry:
         return self._registry_provider()
@@ -725,7 +734,15 @@ class WorldControlPlane:
     #
     # 这些方法只做组装和转交。所有权、修订号、dirty、running 的判断一律在
     # `WorldLifecycleService` 那一侧，这里不复制、不缓存、不预判。
+    # 三个世界入口在闸门里从头跑到尾：读 registry、建 adapters、登记、起 worker 都
+    # 在里面，保存不会插进"拿了旧快照、还没登记"的窗口。
     def create(
+        self, *, world_id: str, scene_id: str, character_ids: Sequence[str]
+    ) -> Dict:
+        with self._switch_gate.world_entry():
+            return self._create(world_id=world_id, scene_id=scene_id, character_ids=character_ids)
+
+    def _create(
         self, *, world_id: str, scene_id: str, character_ids: Sequence[str]
     ) -> Dict:
         # 先过 ID：不合法的 ID 不该先把一份初始世界造出来再被拒。
@@ -767,6 +784,10 @@ class WorldControlPlane:
         return self._with_driver(world.status())
 
     def create_formal(self, world_id: str, *, operator: Optional[str] = None) -> Dict:
+        with self._switch_gate.world_entry():
+            return self._create_formal(world_id, operator=operator)
+
+    def _create_formal(self, world_id: str, *, operator: Optional[str] = None) -> Dict:
         """按正式世界的规则开局（WORLD-1「夜明け前」）。
 
         开局时刻、时区、resident 都来自代码里的正式世界定义；位置、活动、频道
@@ -840,6 +861,10 @@ class WorldControlPlane:
         return self._with_driver(world.checkpoint("content_decision"))
 
     def restore(self, world_id: str) -> Dict:
+        with self._switch_gate.world_entry():
+            return self._restore(world_id)
+
+    def _restore(self, world_id: str) -> Dict:
         name = validate_world_id(world_id)
         # 恢复不带播种器：存档里已经有这个世界自己的排期队列了。续额策略按世界
         # 名查代码里的正式世界定义，旧存档在下一次 Start 起续额（COG-1 §5）。
