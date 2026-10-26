@@ -52,7 +52,7 @@ for _path in (str(REPO_ROOT), str(REPO_ROOT / "scripts")):
 from fastapi.encoders import jsonable_encoder  # noqa: E402
 
 from pns.interfaces.app import _verify_production_config  # noqa: E402
-from pns.interfaces.composition import WorldControlPlane  # noqa: E402
+from pns.interfaces.composition import AdaptersUnavailable, WorldControlPlane  # noqa: E402
 from pns.interfaces.security import DeploymentSettings  # noqa: E402
 from pns.logic.router import DIMENSION_KEYS  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
@@ -1134,7 +1134,15 @@ class RealSdkTwoLineTests(_SettingsDir):
                         client.post("/api/persistent-worlds/nightcord/autonomy/start"),
                         client.get("/api/persistent-worlds/nightcord"),
                     ]
+                    # 原始异常留在 __cause__ 里给服务器侧调试（上面扫过的出口都没打印它）。
+                    with self.assertRaises(AdaptersUnavailable) as world_caught:
+                        plane.build_adapters(registry, world_id="w")
                     plane.service.release_all()
+                for raised in (caught.exception, world_caught.exception):
+                    self.assertIs(raised.__cause__, error)
+                    self.assertTrue(raised.__suppress_context__)
+                    self.assertNotIn(GEN_KEY, str(raised) + type(raised).__name__)
+                    self.assertNotIn(JUDGE_KEY, str(raised) + type(raised).__name__)
                 self.assertTrue(any(r.status_code >= 400 for r in responses), [r.status_code for r in responses])
                 text = (
                     str(caught.exception) + type(caught.exception).__name__
@@ -1158,7 +1166,7 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
         self.before = set(clock_threads())
 
     def _run_world(self, gen_format, judge_format, *, gen_raw=None, judge_raw=None, status=200,
-                   follow=False):
+                   follow=False, warm=False, before_stop=None):
         from fastapi.testclient import TestClient
 
         from pns.interfaces.app import create_app
@@ -1197,6 +1205,7 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                 clock=ClockConfig(rate=3000.0, interval_seconds=0.01, stop_timeout_seconds=2.0),
                 cadence=ActivationCadence(), shutdown_timeout_seconds=1.0,
                 reply_delay_minutes=None,
+                **({"warm_window_seconds": 600.0, "warm_interval_seconds": 30.0} if warm else {}),
             ),
         )
         client = TestClient(create_app(plane))
@@ -1219,6 +1228,8 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
             else:
                 wait_for(lambda: gen_seen, timeout=15.0, what="至少试过一次生成")
             client.post("/api/persistent-worlds/nightcord/autonomy/stop")
+            if before_stop is not None:
+                before_stop(plane, gen_seen, judge_seen)
             body = client.get("/api/persistent-worlds/nightcord").text
         finally:
             plane.service.release_all()
@@ -1229,6 +1240,46 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
             for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
         ]
         return body, rows, gen_seen, judge_seen, out
+
+    def test_cache_warming_only_ever_reaches_the_generation_provider(self):
+        # 续命的最小间隔是 30 秒现实时间：认知停下之后把续命的时钟拨到窗口内、
+        # 间隔之后，手动续一次。请求仍然经真 SDK 打到回环服务器上。
+        for gen_format, judge_format in (("anthropic", "openai"), ("openai", "anthropic")):
+            with self.subTest(generation=gen_format, judge=judge_format):
+                seen_before = {}
+
+                def warm(plane, gen_seen, judge_seen):
+                    from tests.autonomy_support import wait_for
+
+                    warmer = plane.service.opened("nightcord").clock_worker._warmer
+                    self.assertIsNotNone(warmer)
+
+                    def booked(path=None):
+                        records, _ = plane.usage_ledger.read()
+                        return [r for r in records if path is None or r.path == path]
+
+                    # Stop 不等进行中的调用：等每个已到服务器的请求都记了账（没有请求
+                    # 还在路上）再记基数。
+                    wait_for(lambda: len(booked()) == len(gen_seen) + len(judge_seen),
+                             timeout=10.0, what="进行中的调用都记完账")
+                    seen_before.update(gen=len(gen_seen), judge=len(judge_seen))
+                    real_now = warmer._now
+                    warmer._now = lambda: real_now() + 60.0
+                    # 时钟 worker 自己也会续：谁抢到都行，只续得了一次（发出前就记下发送时刻）。
+                    warmer.warm_once(timeout=5.0)
+                    wait_for(lambda: booked("warm"), timeout=10.0, what="续命记账")
+
+                _, rows, gen_seen, judge_seen, _ = self._run_world(
+                    gen_format, judge_format, warm=True, before_stop=warm
+                )
+                # 续命那一次只打到生成那台，用生成的 key 和模型；判分那台一个新请求都没有。
+                self.assertEqual(len(gen_seen), seen_before["gen"] + 1)
+                self.assertEqual(len(judge_seen), seen_before["judge"])
+                self.assertEqual(gen_seen[-1][1:], (GEN_KEY, "gen-model"))
+                warmed = [row for row in rows if row["path"] == "warm"]
+                self.assertEqual(len(warmed), 1, rows)
+                self.assertEqual((warmed[0]["protocol"], warmed[0]["model"], warmed[0]["failure"]),
+                                 (gen_format, "gen-model", None))
 
     def test_world_lines_reach_their_own_providers(self):
         for gen_format, judge_format in (("anthropic", "openai"), ("openai", "anthropic")):
