@@ -18,7 +18,9 @@
 #      stdout、stderr 和日志；建 client 失败时，研究会话抛的异常、世界的 HTTP
 #      响应、stdout、stderr、日志都只有固定文案；跟随时判分真的判完；
 #   9. 世界那一半同理：经 HTTP 建世界、开认知，生成走 A、判分走 B，账本两行协议
-#      各自对；上游回显 key 时状态接口、存档、账本、输出里都没有它。
+#      各自对；上游回显 key 时状态接口、存档、账本、输出里都没有它；两个世界
+#      共用一本账同时跑、生成与判分请求重叠时，每次响应的 usage（两台各不相同、
+#      每次也不同）恰好记成一行，记在发出那个请求的线路和角色名下。
 #
 # 运行: python -m unittest tests.test_provider_settings -v
 import asyncio
@@ -29,6 +31,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import stat
 import sys
 import tempfile
@@ -790,24 +793,75 @@ class ProductionStartupTests(unittest.TestCase):
 
 
 # ── 8. 真 SDK 走回环 ────────────────────────────────────────────────────
-def _fake_provider(reply, *, status=200, raw=None):
+class _InFlight:
+    """几台假服务器共用：记下每个请求进来时，别的服务器上有没有请求还没回。
+
+    给了 hold，那台服务器的第一个请求会停住，直到别的服务器也有请求在路上（最多
+    等 10 秒）：两个世界同时起步时步调一致，不这么做，生成和判分可能很久都碰不上头。
+    """
+
+    def __init__(self, delay, *, hold=None):
+        self.delay = delay
+        self._hold = hold
+        self._held = False
+        self._partner = threading.Event()
+        self._lock = threading.Lock()
+        self._current = {}
+        self.overlaps = set()  # (进来的服务器, 正在处理中的那台)
+
+    @contextlib.contextmanager
+    def request(self, name):
+        with self._lock:
+            busy = {other for other, n in self._current.items() if n}
+            self.overlaps.update((name, other) for other in busy)
+            self._current[name] = self._current.get(name, 0) + 1
+            if (name == self._hold and busy - {name}) or (name != self._hold and self._hold in busy):
+                self._partner.set()
+            first = name == self._hold and not self._held
+            self._held = self._held or first
+        try:
+            if first:
+                self._partner.wait(10.0)
+            threading.Event().wait(self.delay)
+            yield
+        finally:
+            with self._lock:
+                self._current[name] -= 1
+
+
+def _fake_provider(reply, *, status=200, raw=None, usage_base=None, inflight=None, name=None):
     """一台只认 POST 的假 provider：按路径回 anthropic 或 openai 格式，记下认证头和模型。
 
     给了 raw 就原样回这段字节（配 status），用来模拟上游报错和坏响应。reply 可以是
     函数（收请求体、回文本），一台服务器同时扮生成和判分时用。
+
+    给了 usage_base，每个请求回的 usage 都不一样（第 n 个是 usage_base + n），归一后
+    两种协议都是 Usage(usage_base + n, 0, 7, n + 1)；server.issued 按序记下
+    (这个 usage, 请求体文本)。
+    给了 inflight，请求在里面停 inflight.delay 秒，用来制造重叠。
     """
     seen = []
+    issued = []
+    lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_POST(self):
+            with inflight.request(name) if inflight is not None else contextlib.nullcontext():
+                self._answer()
+
+        def _answer(self):
             body = json.loads(self.rfile.read(int(self.headers["content-length"])))
             key = self.headers.get("x-api-key") or (
                 self.headers.get("authorization") or ""
             ).removeprefix("Bearer ")
-            seen.append((self.path, key, body.get("model")))
+            with lock:
+                seen.append((self.path, key, body.get("model")))
+                n = len(issued)
+                if usage_base is not None:
+                    issued.append((ul.Usage(usage_base + n, 0, 7, n + 1), json.dumps(body, ensure_ascii=False)))
             text = reply(body) if callable(reply) else reply
             if raw is not None:
                 self.send_response(status)
@@ -822,6 +876,11 @@ def _fake_provider(reply, *, status=200, raw=None):
                     "content": [{"type": "text", "text": text}], "stop_reason": "end_turn",
                     "stop_sequence": None, "usage": {"input_tokens": 3, "output_tokens": 2},
                 }
+                if usage_base is not None:
+                    out["usage"] = {
+                        "input_tokens": usage_base + n, "output_tokens": n + 1,
+                        "cache_read_input_tokens": 7, "cache_creation_input_tokens": None,
+                    }
             else:
                 out = {
                     "id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
@@ -831,6 +890,13 @@ def _fake_provider(reply, *, status=200, raw=None):
                     }],
                     "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
                 }
+                if usage_base is not None:
+                    # openai 的 prompt_tokens 含缓存命中，归一时减掉。
+                    out["usage"] = {
+                        "prompt_tokens": usage_base + n + 7, "completion_tokens": n + 1,
+                        "total_tokens": usage_base + 2 * n + 8,
+                        "prompt_tokens_details": {"cached_tokens": 7},
+                    }
             data = json.dumps(out, ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header("content-type", "application/json")
@@ -839,6 +905,7 @@ def _fake_provider(reply, *, status=200, raw=None):
             self.wfile.write(data)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.issued = issued
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, seen
 
@@ -1135,6 +1202,108 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                 ) + stdout.getvalue() + stderr.getvalue() + logs.getvalue()
                 self.assertNotIn(GEN_KEY, text)
                 self.assertNotIn(JUDGE_KEY, text)
+
+    def test_overlapping_worlds_book_each_response_on_its_own_row(self):
+        from fastapi.testclient import TestClient
+
+        from pns.interfaces.app import create_app
+        from pns.interfaces.composition import AutonomySettings
+        from pns.runtime.autonomy.clock_worker import ClockConfig
+        from pns.runtime.autonomy.seeding import ActivationCadence
+        from tests.autonomy_support import wait_for
+
+        worlds = {"nightcord": ["mizuki", "ena"], "nightcord-b": ["kanade", "mafuyu"]}
+        for gen_format, judge_format in (("anthropic", "openai"), ("openai", "anthropic")):
+            with self.subTest(generation=gen_format, judge=judge_format):
+                # 两台服务器回的 usage 互不相同、每次也不同：任何一行串到别的响应、
+                # 别的线路或按错协议读，数值都对不上。
+                inflight = _InFlight(delay=0.02, hold="judge")
+                gen_server, gen_seen = _fake_provider(
+                    "「……嗯，今天也画完了。」", usage_base=10_000, inflight=inflight, name="generation")
+                judge_server, judge_seen = _fake_provider(
+                    VERDICT, usage_base=20_000, inflight=inflight, name="judge")
+                for server in (gen_server, judge_server):
+                    self.addCleanup(server.server_close)
+                    self.addCleanup(server.shutdown)
+                panel = _panel_file()
+                self.write(PROVIDER_FILE, _panel_file(
+                    generation={**panel["generation"], "api_format": gen_format,
+                                "base_url": self._url(gen_server, gen_format)},
+                    judge={**panel["judge"], "api_format": judge_format,
+                           "base_url": self._url(judge_server, judge_format)},
+                ))
+                with patch.object(content_registry, "SETTINGS_DIR", self.dir):
+                    registry = build_content_registry()
+                out = self.dir.parent / f"overlap-{gen_format}-{judge_format}"
+                ledger = ul.UsageLedger(out / "usage")
+                plane = WorldControlPlane(
+                    root=out / "worlds", registry_provider=lambda: registry, usage_ledger=ledger,
+                    autonomy=AutonomySettings(
+                        clock=ClockConfig(rate=3000.0, interval_seconds=0.01, stop_timeout_seconds=2.0),
+                        cadence=ActivationCadence(), shutdown_timeout_seconds=1.0,
+                        reply_delay_minutes=None,
+                    ),
+                )
+                client = TestClient(create_app(plane))
+
+                def booked():
+                    records, _ = ledger.read()
+                    return {(r.world_id, r.path) for r in records}
+
+                try:
+                    for world_id, characters in worlds.items():
+                        created = client.post("/api/persistent-worlds", json={
+                            "world_id": world_id, "scene": "nightcord", "characters": characters,
+                        })
+                        self.assertEqual(created.status_code, 201, created.text)
+                    for world_id in worlds:
+                        client.post(f"/api/persistent-worlds/{world_id}/autonomy/start")
+                    # 两个世界的生成和判分都进了账，并且有过一个生成请求和一个判分请求
+                    # 同时在路上（同一个世界里两者是串行的，所以碰头的一定来自两个世界）。
+                    wait_for(
+                        lambda: inflight.overlaps & {("generation", "judge"), ("judge", "generation")}
+                        and booked() >= {(w, p) for w in worlds for p in ("generation", "judge")},
+                        timeout=20.0, what="两个世界都生成、判分过，且生成与判分请求重叠",
+                    )
+                    for world_id in worlds:
+                        client.post(f"/api/persistent-worlds/{world_id}/autonomy/stop")
+                finally:
+                    plane.service.release_all()
+                    wait_for(lambda: not (set(self.clock_threads()) - self.before), what="worker 退出")
+
+                records, corrupt = ledger.read()
+                self.assertEqual(corrupt, 0)
+                # 请求是替谁发的，从提示词里固定的那一处读：生成看配套的角色宪法文件名，
+                # 判分看评分参考的标题。
+                speaker = {
+                    "generation": re.compile(r"配套文件：`(\w+)_constitution\.md`"),
+                    "judge": re.compile(r"【角色专属评分参考：(\w+)】"),
+                }
+                lines = {
+                    "generation": (gen_format, "gen-model", gen_server.issued, gen_seen, GEN_KEY),
+                    "judge": (judge_format, "judge-model", judge_server.issued, judge_seen, JUDGE_KEY),
+                }
+                for path, (protocol, model, issued, seen, key) in lines.items():
+                    rows = [r for r in records if r.path == path]
+                    self.assertEqual({(k, m) for _, k, m in seen}, {(key, model)})
+                    sent = []
+                    for usage, body in issued:
+                        found = set(speaker[path].findall(body))
+                        self.assertEqual(len(found), 1, found)
+                        sent.append((usage, found.pop()))
+                    # 服务器回出去的每个 usage 恰好对应一行账，记在发这个请求的角色名下：
+                    # 不丢、不重、不串线、不串角色。
+                    self.assertEqual(
+                        sorted(((r.usage, r.character_id) for r in rows), key=repr),
+                        sorted(sent, key=repr),
+                    )
+                    for row in rows:
+                        self.assertEqual(
+                            (row.protocol, row.model, row.transport, row.failure),
+                            (protocol, model, ul.TRANSPORT_RESPONSE, None), row,
+                        )
+                        self.assertIn(row.character_id, worlds[row.world_id], row)
+                self.assertEqual(len(records), sum(len(line[2]) for line in lines.values()))
 
     def test_a_following_judge_in_the_world_goes_to_the_generation_provider(self):
         for gen_format in ("anthropic", "openai"):
