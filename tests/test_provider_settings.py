@@ -1134,6 +1134,13 @@ class RealSdkTwoLineTests(_SettingsDir):
                         client.post("/api/persistent-worlds/nightcord/autonomy/start"),
                         client.get("/api/persistent-worlds/nightcord"),
                     ]
+                    # 研究会话的 WS 出口：一条 error 消息，同样只有固定文案。
+                    with patch("pns.runtime.session_runtime.BOUNDARY.active", return_value=registry), \
+                            client.websocket_connect("/ws/run") as ws:
+                        ws.send_json({"max_turns": 1, "characters": ["mizuki", "ena"]})
+                        ws_reply = ws.receive_json()
+                    self.assertEqual(ws_reply["type"], "error")
+                    self.assertEqual(ws_reply["message"], str(caught.exception))
                     # 原始异常留在 __cause__ 里给服务器侧调试（上面扫过的出口都没打印它）。
                     with self.assertRaises(AdaptersUnavailable) as world_caught:
                         plane.build_adapters(registry, world_id="w")
@@ -1146,7 +1153,7 @@ class RealSdkTwoLineTests(_SettingsDir):
                 self.assertTrue(any(r.status_code >= 400 for r in responses), [r.status_code for r in responses])
                 text = (
                     str(caught.exception) + type(caught.exception).__name__
-                    + "".join(r.text for r in responses)
+                    + "".join(r.text for r in responses) + json.dumps(ws_reply, ensure_ascii=False)
                     + stdout.getvalue() + stderr.getvalue() + logs.getvalue()
                 )
                 self.assertNotIn(GEN_KEY, text)
@@ -1416,6 +1423,92 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                         )
                         self.assertIn(row.character_id, worlds[row.world_id], row)
                 self.assertEqual(len(records), sum(len(line[2]) for line in lines.values()))
+
+    def test_rotated_keys_reach_the_providers_after_a_save(self):
+        """换 key 走正式的保存事务；恢复的世界和新开的研究会话从此只用新 key。"""
+        from fastapi.testclient import TestClient
+
+        from pns.interfaces.app import create_app
+        from pns.interfaces.composition import AutonomySettings
+        from pns.runtime import provider_txn
+        from pns.runtime.autonomy.clock_worker import ClockConfig
+        from pns.runtime.autonomy.seeding import ActivationCadence
+        from tests.autonomy_support import wait_for
+
+        new_gen, new_judge = GEN_KEY + "-rotated", JUDGE_KEY + "-rotated"
+        gen_server, gen_seen = _fake_provider("「……嗯，今天也画完了。」")
+        judge_server, judge_seen = _fake_provider(VERDICT)
+        for server in (gen_server, judge_server):
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+        def panel(gen_key, judge_key):
+            base = _panel_file()
+            return _panel_file(
+                generation={**base["generation"], "base_url": self._url(gen_server, "anthropic"),
+                            "token": gen_key},
+                judge={**base["judge"], "base_url": self._url(judge_server, "openai"),
+                       "token": judge_key},
+            )
+
+        self.write(PROVIDER_FILE, panel(GEN_KEY, JUDGE_KEY))
+        settings_dir = patch.object(content_registry, "SETTINGS_DIR", self.dir)
+        settings_dir.start()
+        self.addCleanup(settings_dir.stop)
+        boundary = ConfigBoundary(SessionSupervisor(), stop_timeout=2.0)
+        boundary.active()
+        out = self.dir.parent / "rotation"
+        plane = WorldControlPlane(
+            root=out / "worlds", registry_provider=boundary.active,
+            usage_ledger=ul.UsageLedger(out / "usage"),
+            autonomy=AutonomySettings(
+                clock=ClockConfig(rate=3000.0, interval_seconds=0.01, stop_timeout_seconds=2.0),
+                cadence=ActivationCadence(), shutdown_timeout_seconds=1.0, reply_delay_minutes=None,
+            ),
+        )
+        client = TestClient(create_app(plane))
+        url = "/api/persistent-worlds/nightcord"
+        try:
+            created = client.post("/api/persistent-worlds", json={
+                "world_id": "nightcord", "scene": "nightcord", "characters": ["mizuki", "ena"],
+            })
+            self.assertEqual(created.status_code, 201, created.text)
+            client.post(f"{url}/autonomy/start")
+            wait_for(lambda: judge_seen, timeout=15.0, what="旧 key 判过一次分")
+            client.post(f"{url}/autonomy/stop")
+            self.assertEqual(client.post(f"{url}/close").status_code, 200)
+            wait_for(lambda: not (set(self.clock_threads()) - self.before), what="worker 退出")
+            before = (len(gen_seen), len(judge_seen))
+
+            outcome = provider_txn.save(
+                boundary, self.dir, json.dumps(panel(new_gen, new_judge)).encode(), reason="换 key"
+            )
+            self.assertEqual(outcome.status, provider_txn.OUTCOME_OK)
+
+            self.assertEqual(client.post(f"{url}/restore").status_code, 200)
+            client.post(f"{url}/autonomy/start")
+            wait_for(lambda: len(judge_seen) > before[1], timeout=15.0, what="新 key 判过一次分")
+            client.post(f"{url}/autonomy/stop")
+        finally:
+            plane.service.release_all()
+            wait_for(lambda: not (set(self.clock_threads()) - self.before), what="worker 退出")
+
+        runtime = SessionRuntime.create(
+            {"max_turns": 1, "api_delay": 0, "characters": ["mizuki", "ena"]},
+            registry=boundary.active(), supervisor=SessionSupervisor(),
+            history_dir=out / "history", drift_scores_file=out / "drift.jsonl",
+        )
+
+        async def consume():
+            return [message async for message in runtime.run()]
+
+        messages = asyncio.run(consume())
+        self.assertNotIn("error", [m.get("type") for m in messages])
+        # 换之前只有旧 key；换之后世界和研究会话都只有新 key。
+        self.assertEqual({key for _, key, _ in gen_seen[:before[0]]}, {GEN_KEY})
+        self.assertEqual({key for _, key, _ in judge_seen[:before[1]]}, {JUDGE_KEY})
+        self.assertEqual({key for _, key, _ in gen_seen[before[0]:]}, {new_gen})
+        self.assertEqual({key for _, key, _ in judge_seen[before[1]:]}, {new_judge})
 
     def test_a_following_judge_in_the_world_goes_to_the_generation_provider(self):
         for gen_format in ("anthropic", "openai"):
