@@ -308,9 +308,19 @@ class LedgerRecord:
     usage: Optional[Usage]
     prices: Optional[Prices]
     cost_yuan: Optional[float]
+    # CFG-1 §8.3：这次调用走的线路、计费账户、上游主机名。全部可选：旧行没有，
+    # 没有就不写；旧读取器只认它知道的键，读新行不会多出坏行。
+    line: Optional[str] = None
+    account: Optional[str] = None
+    host: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         usage = self.usage.to_dict() if self.usage is not None else {}
+        provenance = {
+            key: value
+            for key, value in (("line", self.line), ("account", self.account), ("host", self.host))
+            if value is not None
+        }
         return {
             "at": self.at.astimezone(timezone.utc).isoformat(),
             "world_id": self.world_id,
@@ -327,6 +337,7 @@ class LedgerRecord:
             "output": usage.get("output"),
             "prices": self.prices.to_dict() if self.prices is not None else None,
             "cost_yuan": self.cost_yuan,
+            **provenance,
         }
 
 
@@ -379,6 +390,9 @@ def _record_from_dict(raw: Any) -> LedgerRecord:
         raise ValueError("strings")
     if cost is not None and (usage is None or prices is None):
         raise ValueError("consistency")
+    provenance = {key: raw.get(key) for key in ("line", "account", "host")}
+    if not all(value is None or isinstance(value, str) for value in provenance.values()):
+        raise ValueError("provenance")
     return LedgerRecord(
         at=_parse_at(raw.get("at")),
         world_id=strings[0],
@@ -392,6 +406,7 @@ def _record_from_dict(raw: Any) -> LedgerRecord:
         usage=usage,
         prices=prices,
         cost_yuan=float(cost) if cost is not None else None,
+        **provenance,
     )
 
 
