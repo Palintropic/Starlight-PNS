@@ -33,7 +33,7 @@ from pns.interfaces.composition import AutonomySettings, WorldControlPlane  # no
 from pns.runtime import content_registry, provider_txn  # noqa: E402
 from pns.runtime.autonomy.clock_worker import ClockConfig  # noqa: E402
 from pns.runtime.autonomy.seeding import ActivationCadence  # noqa: E402
-from pns.runtime.provider_settings import ACCOUNTS_FILE, PROVIDER_FILE  # noqa: E402
+from pns.runtime.provider_settings import ACCOUNTS_FILE, PROVIDER_FILE, ensure_env_account  # noqa: E402
 from pns.runtime.provider_switch import ProviderSwitchGate  # noqa: E402
 from pns.runtime.reload import ConfigBoundary, SessionSupervisor  # noqa: E402
 from tests.autonomy_support import clock_threads, wait_for  # noqa: E402
@@ -289,6 +289,107 @@ class DeleteTests(ProviderApiTestBase):
         self.assertTrue((self.dir / ACCOUNTS_FILE).exists())
 
 
+ACCOUNTS = "/api/settings/accounts"
+NEW_ACCOUNT = {"id": "nov", "name": "Novita", "kind": "novita", "currency": "USD", "multiplier": "1.1"}
+
+
+class AccountApiTests(ProviderApiTestBase):
+    def on_disk(self):
+        return json.loads((self.dir / ACCOUNTS_FILE).read_text(encoding="utf-8"))["accounts"]
+
+    def test_create_then_reference_it(self):
+        response = self.client.post(ACCOUNTS, json=NEW_ACCOUNT)
+        self.assertEqual(response.status_code, 201, response.text)
+        created = self.on_disk()["nov"]
+        self.assertEqual((created["kind"], created["currency"], created["balance"]), ("novita", "USD", "manual"))
+        self.assertTrue(created["created_at"])
+        # 还没落过盘的内建 env 不会被顺手写进文件（③ 才落盘）。
+        self.assertNotIn("env", self.on_disk())
+        self.assertIn("nov", self.client.get(ACCOUNTS).json()["accounts"])
+        body = _request(judge=_line("j", JUDGE_KEY, account="nov"))
+        self.assertEqual(self.put(body).status_code, 200)
+        self.assertEqual(self.boundary.active().models.judge.provider, "novita")
+
+    def test_bad_creates_write_nothing(self):
+        self.assertEqual(self.client.post(ACCOUNTS, json=NEW_ACCOUNT).status_code, 201)
+        before = (self.dir / ACCOUNTS_FILE).read_bytes()
+        for name, body in (
+            ("重复 id", NEW_ACCOUNT),
+            ("保留 id", {**NEW_ACCOUNT, "id": "env"}),
+            ("kind 是 env", {**NEW_ACCOUNT, "id": "x1", "kind": "env"}),
+            ("币种不支持", {**NEW_ACCOUNT, "id": "x2", "currency": "JPY"}),
+            ("倍率不是正数", {**NEW_ACCOUNT, "id": "x3", "multiplier": "0"}),
+            ("id 非法", {**NEW_ACCOUNT, "id": "带空格 的"}),
+        ):
+            with self.subTest(name):
+                response = self.client.post(ACCOUNTS, json=body)
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual((self.dir / ACCOUNTS_FILE).read_bytes(), before)
+
+    def test_only_name_and_multiplier_change(self):
+        self.assertEqual(self.client.post(ACCOUNTS, json=NEW_ACCOUNT).status_code, 201)
+        created_at = self.on_disk()["nov"]["created_at"]
+        response = self.client.post(f"{ACCOUNTS}/nov", json={"name": "N2", "multiplier": "2"})
+        self.assertEqual(response.status_code, 200, response.text)
+        for field, value in (("currency", "CNY"), ("kind", "openrouter"), ("created_at", "x")):
+            with self.subTest(field):
+                response = self.client.post(f"{ACCOUNTS}/nov", json={field: value})
+                self.assertEqual(response.status_code, 400, response.text)
+        # 带着原值提交不算修改。
+        self.assertEqual(self.client.post(f"{ACCOUNTS}/nov", json={"currency": "USD"}).status_code, 200)
+        stored = self.on_disk()["nov"]
+        self.assertEqual((stored["name"], stored["multiplier"], stored["currency"], stored["created_at"]),
+                         ("N2", "2", "USD", created_at))
+        self.assertEqual(self.client.post(f"{ACCOUNTS}/nobody", json={"name": "x"}).status_code, 404)
+
+    def test_retiring(self):
+        self.assertEqual(self.put(_request()).status_code, 200)
+        for account in ("mimo-main", "ds"):
+            with self.subTest(in_use=account):
+                response = self.client.post(f"{ACCOUNTS}/{account}/retire")
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["detail"]["category"], "account_in_use")
+        # 判分换到新账户之后，ds 就能退役；退役的不能再被引用、不能改、id 不复用。
+        self.assertEqual(self.client.post(ACCOUNTS, json=NEW_ACCOUNT).status_code, 201)
+        self.assertEqual(self.put(_request(judge=_line("j", JUDGE_KEY, account="nov"))).status_code, 200)
+        self.assertEqual(self.client.post(f"{ACCOUNTS}/ds/retire").status_code, 200)
+        self.assertTrue(self.on_disk()["ds"]["retired_at"])
+        self.assertEqual(self.client.post(f"{ACCOUNTS}/ds/retire").status_code, 400)
+        self.assertEqual(self.put(_request()).status_code, 400)
+        self.assertEqual(self.client.post(f"{ACCOUNTS}/ds", json={"name": "x"}).status_code, 400)
+        self.assertEqual(self.client.post(ACCOUNTS, json={**NEW_ACCOUNT, "id": "ds"}).status_code, 400)
+
+    def test_retiring_sees_the_snapshot_too(self):
+        # 没有面板文件时线路来自 env：内建 env 不在文件里 → 404；落过盘之后，它被
+        # 生效快照的线路引用（磁盘上没有 provider.json 可看）→ 409。
+        self.assertEqual(self.client.post(f"{ACCOUNTS}/env/retire").status_code, 404)
+        ensure_env_account(self.dir)
+        response = self.client.post(f"{ACCOUNTS}/env/retire")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["category"], "account_in_use")
+
+    def test_accounts_survive_delete_and_put_again(self):
+        self.assertEqual(self.client.post(ACCOUNTS, json=NEW_ACCOUNT).status_code, 201)
+        before = self.on_disk()
+        self.assertEqual(self.put(_request()).status_code, 200)
+        self.assertEqual(self.client.delete(URL).status_code, 200)
+        self.assertEqual(self.put(_request()).status_code, 200)
+        self.assertEqual(self.on_disk(), before)
+
+    def test_a_failed_account_write_is_reported_as_such(self):
+        for fault, status, category in (("not_published", 500, "not_written"),
+                                        ("not_durable", 500, "not_durable")):
+            with self.subTest(fault):
+                with _Faults(0, fault).active():
+                    response = self.client.post(ACCOUNTS, json={**NEW_ACCOUNT, "id": f"x-{fault}"})
+                self.assertEqual((response.status_code, response.json()["detail"]["category"]),
+                                 (status, category))
+        # 没写成的那个不存在；耐久证实不了的那个已经在文件里，身份照样不复用。
+        self.assertNotIn("x-not_published", self.on_disk())
+        self.assertIn("x-not_durable", self.on_disk())
+        self.assertEqual(self.client.post(ACCOUNTS, json={**NEW_ACCOUNT, "id": "x-not_durable"}).status_code, 400)
+
+
 class QuarantineApiTests(ProviderApiTestBase):
     def quarantine(self):
         faults = _Faults()
@@ -306,6 +407,8 @@ class QuarantineApiTests(ProviderApiTestBase):
             ("PUT", lambda: self.put(_request())),
             ("DELETE", lambda: self.client.delete(URL)),
             ("建世界", lambda: self.client.post("/api/persistent-worlds", json=LEGACY)),
+            ("建账户", lambda: self.client.post(ACCOUNTS, json=NEW_ACCOUNT)),
+            ("退役账户", lambda: self.client.post(f"{ACCOUNTS}/ds/retire")),
         ):
             with self.subTest(name):
                 response = call()
@@ -348,10 +451,14 @@ class AdminOnlyTests(ApiTestCase):
             ("PUT", URL, _request()),
             ("DELETE", URL, None),
             ("POST", f"{URL}/resolve", {"keep": "current"}),
+            ("POST", ACCOUNTS, NEW_ACCOUNT),
+            ("POST", f"{ACCOUNTS}/ds", {"name": "x"}),
+            ("POST", f"{ACCOUNTS}/ds/retire", None),
         ):
             with self.subTest(f"{method} {path}"):
                 self.assertEqual(operator.request(method, path, json=body).status_code, 403)
         self.assertEqual(operator.get(URL).status_code, 200)
+        self.assertEqual(operator.get(ACCOUNTS).status_code, 200)
         self.assertEqual(self.client.put(URL, json=_request(), headers=self.bearer).status_code, 200)
 
 

@@ -20,13 +20,14 @@
 # 只走各对象的 `public_dict()`，token 只给"有没有"和够长时的末 4 位。
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 from urllib.parse import SplitResult, urlsplit
 
+from pns.runtime import settings_files
 from pns.runtime.settings_files import durable_write
 
 PROVIDER_FILE = "provider.json"
@@ -62,6 +63,10 @@ class ProviderSettingsError(ValueError):
 
     消息是固定措辞加字段名，**从不**带字段的值：值里可能就是 token。
     """
+
+
+class AccountInUse(ProviderSettingsError):
+    """账户正被线路引用，不能退役。"""
 
 
 # ── 密钥 ─────────────────────────────────────────────────────────────────
@@ -288,6 +293,95 @@ def ensure_env_account(settings_dir: Path) -> Account:
     accounts[ENV_ACCOUNT] = created
     durable_write(path, _dump(AccountCatalog(accounts=accounts).to_file()))
     return created
+
+
+def _persisted(catalog: AccountCatalog) -> Dict[str, Account]:
+    """要落盘的账户：内建但还没落过盘的 `env`（created_at 为空）不写进文件。"""
+    return {aid: acc for aid, acc in catalog.accounts.items() if acc.created_at}
+
+
+def _write_accounts(settings_dir: Path, accounts: Mapping[str, Account]) -> None:
+    settings_files.durable_write(
+        Path(settings_dir) / ACCOUNTS_FILE, _dump(AccountCatalog(accounts=accounts).to_file())
+    )
+
+
+def create_account(settings_dir: Path, account_id: Any, fields: Mapping[str, Any]) -> Account:
+    """新建一个账户（§4.3）。id 一经创建不复用：退役的也算占用；`env` 是保留名。
+
+    写盘按三档合同：NotPublished = 没建；PublishedNotDurable = 已经在文件里、
+    耐久证实不了（身份照样不复用）。线路引用它之前，保存事务写 provider.txn
+    时会刷同一个目录，账户目录项从那一刻起一定是耐久的。
+    """
+    account_id = validate_account_id(account_id)
+    if account_id == ENV_ACCOUNT:
+        raise ProviderSettingsError("env 是保留的账户 id")
+    catalog = load_accounts(settings_dir)
+    if catalog.get(account_id) is not None:
+        raise ProviderSettingsError("这个账户 id 已经用过了（含已退役的），换一个")
+    raw = {key: fields.get(key) for key in ("name", "kind", "currency", "multiplier")}
+    raw.update(balance=BALANCE_MANUAL, created_at=_now())
+    account = _parse_account(account_id, raw)
+    if account.kind == "env":
+        raise ProviderSettingsError("kind 不能是 env")
+    accounts = _persisted(catalog)
+    accounts[account_id] = account
+    _write_accounts(settings_dir, accounts)
+    return account
+
+
+def update_account(settings_dir: Path, account_id: str, fields: Mapping[str, Any]) -> Account:
+    """改显示名或倍率。币种和 kind 不可改（要换就新建账户）；退役的不能改。"""
+    catalog = load_accounts(settings_dir)
+    current = catalog.get(account_id)
+    if current is None or not current.created_at:
+        raise KeyError(account_id)
+    if current.retired:
+        raise ProviderSettingsError("已退役的账户不能修改")
+    for frozen in ("currency", "kind", "balance", "created_at", "retired_at"):
+        if frozen in fields and fields[frozen] != getattr(current, frozen):
+            raise ProviderSettingsError(f"账户的 {frozen} 不能修改；要换就新建一个账户")
+    unknown = set(fields) - {"name", "multiplier", "currency", "kind", "balance", "created_at", "retired_at"}
+    if unknown:
+        raise ProviderSettingsError("请求里有不认识的字段")
+    raw = current.to_dict()
+    for key in ("name", "multiplier"):
+        if key in fields:
+            raw[key] = fields[key]
+    updated = _parse_account(account_id, raw)
+    accounts = _persisted(catalog)
+    accounts[account_id] = updated
+    _write_accounts(settings_dir, accounts)
+    return updated
+
+
+def retire_account(settings_dir: Path, account_id: str, in_use: Iterable[str]) -> Account:
+    """标记退役（§4.3）。被有效线路引用的不许退役；历史账本行仍归它。"""
+    catalog = load_accounts(settings_dir)
+    current = catalog.get(account_id)
+    if current is None or not current.created_at:
+        raise KeyError(account_id)
+    if current.retired:
+        raise ProviderSettingsError("这个账户已经退役了")
+    if account_id in set(in_use):
+        raise AccountInUse("这个账户正被模型线路使用，先把线路换到别的账户再退役")
+    retired = replace(current, retired_at=_now())
+    accounts = _persisted(catalog)
+    accounts[account_id] = retired
+    _write_accounts(settings_dir, accounts)
+    return retired
+
+
+def accounts_in_use(settings_dir: Path, active: ModelSettings) -> Tuple[str, ...]:
+    """现在被线路引用的账户：生效的快照，加上磁盘上的 provider.json（两者平时一致）。"""
+    used = {active.generation.account, active.judge.account}
+    current = read_current(settings_dir)
+    if isinstance(current, Mapping):
+        for name in LINES:
+            line = current.get(name)
+            if isinstance(line, Mapping) and isinstance(line.get("account"), str):
+                used.add(line["account"])
+    return tuple(sorted(used))
 
 
 # ── 线路 ─────────────────────────────────────────────────────────────────

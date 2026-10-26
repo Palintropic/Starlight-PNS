@@ -5,6 +5,11 @@
 #     DELETE /api/settings/provider           恢复默认（删 provider.json，回到 .env 派生）
 #     POST   /api/settings/provider/resolve   解除隔离：选定保留哪一份
 #
+#     GET    /api/settings/accounts           计费账户目录
+#     POST   /api/settings/accounts           新建账户
+#     POST   /api/settings/accounts/{id}      改显示名 / 倍率（币种、kind 不可改）
+#     POST   /api/settings/accounts/{id}/retire  退役（被线路引用时拒绝）
+#
 # 写操作要 `accounts:manage`（只有管理员有）：换的是整台服务器的模型凭据。
 #
 # 一次保存的顺序是固定的（§5.3）：进 ProviderSwitchGate → 所有持久世界都已关闭
@@ -19,13 +24,19 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from pns.runtime import content_registry, provider_txn
 from pns.runtime.provider_settings import (
+    AccountInUse,
     ModelSettings,
     ProviderSettingsError,
+    accounts_in_use,
     build_candidate,
+    create_account,
     load_accounts,
     read_current,
+    retire_account,
+    update_account,
     validate_settings,
 )
+from pns.runtime.settings_files import NotPublished, PublishedNotDurable
 from pns.runtime.provider_switch import ProviderSwitchBusy
 from pns.runtime.reload import BOUNDARY, QUARANTINE_MESSAGE, ReloadBusy, SettingsQuarantined
 
@@ -35,6 +46,7 @@ from .composition import WorldControlPlane
 from .persistent_worlds import get_control_plane
 
 router = APIRouter(prefix="/api/settings/provider", tags=["settings"])
+accounts_router = APIRouter(prefix="/api/settings/accounts", tags=["settings"])
 _admin = [Depends(require_scope(SCOPE_ACCOUNTS))]
 
 
@@ -171,3 +183,73 @@ def resolve_provider_settings(
         reload = outcome.reload.to_dict() if outcome.reload is not None else None
         raise _error(503, "settings_quarantined", "所选设置没能完成恢复，仍处于隔离状态", reload=reload)
     return {**_view(), "reload": outcome.reload.to_dict() if outcome.reload is not None else None}
+
+
+# ── 计费账户 ────────────────────────────────────────────────────────────
+# 账户写操作也进闸门（独占）：退役要看"现在哪些账户被线路引用"，不能跟一次
+# 保存交错。隔离时一律拒绝——那时磁盘上的线路是哪一份还没定。
+
+
+def _catalog_view() -> Dict[str, Any]:
+    try:
+        catalog = load_accounts(content_registry.SETTINGS_DIR)
+    except ProviderSettingsError as e:
+        raise _error(500, "accounts_unreadable", str(e)) from None
+    return {"accounts": catalog.public_dict()}
+
+
+@accounts_router.get("")
+def get_accounts():
+    return _catalog_view()
+
+
+def _write_account(plane: WorldControlPlane, action) -> Dict[str, Any]:
+    try:
+        with plane.switch_gate.switch():
+            if BOUNDARY.quarantined:
+                raise _error(503, "settings_quarantined", QUARANTINE_MESSAGE)
+            try:
+                account = action()
+            except KeyError:
+                raise _error(404, "account_not_found", "没有这个账户") from None
+            except AccountInUse as e:
+                raise _error(409, "account_in_use", str(e)) from None
+            except ProviderSettingsError as e:
+                raise _error(400, "invalid_account", str(e)) from None
+            except NotPublished:
+                raise _error(500, "not_written", "账户目录没写成，什么都没变") from None
+            except PublishedNotDurable:
+                raise _error(500, "not_durable", "账户目录已经写入，但耐久性无法证实") from None
+    except ProviderSwitchBusy as e:
+        raise _error(409, "provider_switch_in_progress", str(e)) from None
+    return {"account": account.public_dict(), **_catalog_view()}
+
+
+@accounts_router.post("", status_code=201, dependencies=_admin)
+def post_account(
+    payload: Dict[str, Any] = Body(...), plane: WorldControlPlane = Depends(get_control_plane)
+):
+    return _write_account(
+        plane, lambda: create_account(content_registry.SETTINGS_DIR, payload.get("id"), payload)
+    )
+
+
+@accounts_router.post("/{account_id}", dependencies=_admin)
+def post_account_update(
+    account_id: str,
+    payload: Dict[str, Any] = Body(...),
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    return _write_account(
+        plane, lambda: update_account(content_registry.SETTINGS_DIR, account_id, payload)
+    )
+
+
+@accounts_router.post("/{account_id}/retire", dependencies=_admin)
+def post_account_retire(account_id: str, plane: WorldControlPlane = Depends(get_control_plane)):
+    def retire():
+        settings_dir = content_registry.SETTINGS_DIR
+        in_use = accounts_in_use(settings_dir, BOUNDARY.active().models)
+        return retire_account(settings_dir, account_id, in_use)
+
+    return _write_account(plane, retire)

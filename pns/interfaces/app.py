@@ -323,6 +323,7 @@ def create_app(
     app.include_router(review.router)
     app.include_router(config.router)
     app.include_router(provider_api.router)
+    app.include_router(provider_api.accounts_router)
     app.include_router(world.router)
     app.include_router(persistent_worlds.router)
     app.include_router(usage.router)
