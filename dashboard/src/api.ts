@@ -715,6 +715,25 @@ export interface UsageBalance {
   warn_yuan: number;
 }
 
+/** 一个计费账户的余额（CFG-1）：只扣归属它的账；非人民币账户不相减。 */
+export type AnchorProblem = 'retired' | 'account_recreated' | 'currency_mismatch' | 'malformed';
+
+export interface AccountBalance {
+  currency: 'CNY' | 'USD';
+  retired: boolean;
+  /** 数额是账户原币种。 */
+  anchor: { balance: number; currency: string; at: string } | null;
+  anchor_problem: AnchorProblem | null;
+  spent_since_anchor_yuan: number | null;
+  /** 只有人民币账户、锚点有效时才有。 */
+  estimated: number | null;
+  uncounted_calls: number;
+  billing_uncertain_calls: number;
+  anchor_before_ledger: boolean | null;
+  low: boolean;
+  warn_yuan: number | null;
+}
+
 export interface UsageSummary {
   now: string;
   timezone: string;
@@ -725,8 +744,14 @@ export interface UsageSummary {
   by_world: Record<string, UsageBucket>;
   by_path: Record<string, UsageBucket>;
   by_character: Record<string, UsageBucket>;
+  by_account?: Record<string, UsageBucket>;
   failure_streak: UsageFailureStreak;
+  /** `env` 账户那一份（旧形状）。 */
   balance: UsageBalance | null;
+  /** 每个计费账户一份；旧服务端没有这个字段。 */
+  balances?: Record<string, AccountBalance> | null;
+  /** 账户目录或锚点文件读不出来：一个余额都没估。 */
+  balances_unavailable?: boolean;
   ledger_write_failures: number;
   corrupt_lines: number;
 }
@@ -734,14 +759,15 @@ export interface UsageSummary {
 export const fetchUsageSummary = (days = 7): Promise<UsageSummary> =>
   fetch(`/api/usage/summary?days=${days}`).then((res) => json(res));
 
-/** 记下"控制台上看到的此刻余额"（余额本身，不是充值额）。 */
+/** 记下某个计费账户"控制台上看到的此刻余额"（余额本身，不是充值额；账户原币种）。 */
 export const setBalanceAnchor = (
-  balanceYuan: number,
-): Promise<{ balance_yuan: number; at: string }> =>
+  balance: number,
+  account = 'env',
+): Promise<{ account: string; balance: number; currency: string; at: string }> =>
   fetch('/api/usage/balance-anchor', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ balance_yuan: balanceYuan }),
+    body: JSON.stringify({ account, balance }),
   }).then((res) => json(res));
 
 // ── 模型线路与计费账户（CFG-1） ─────────────────────────────────────────
