@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pns.runtime import content_registry, provider_txn
 from pns.runtime.env_migration import AnchorsUnreadable, migrate_env_account
+from pns.runtime.version_switch import note_startup
 from pns.runtime.settings_files import SettingsWriteError
 from pns.runtime.provider_settings import (
     SOURCE_ENV,
@@ -207,7 +208,8 @@ def _verify_production_accounts(
 
 
 def prepare_production_data(app: FastAPI) -> None:
-    """生产启动时、开始服务之前的数据准备（CFG-1 §4.3）：`env` 账户落盘、旧单锚点迁移。
+    """生产启动时、开始服务之前的数据准备（CFG-1 §4.3）：`env` 账户落盘、旧单锚点迁移，
+    以及记下"旧版本 → 新版本"的切换时刻（§9，只用来提醒重填锚点）。
 
     不放在 create_app() 里：装配 app 不该写数据卷，很多测试会以生产模式装配。
     由服务入口（scripts/server.py）在 create_app() 之后调用一次；开发模式什么都
@@ -221,6 +223,11 @@ def prepare_production_data(app: FastAPI) -> None:
         migrate_env_account(content_registry.SETTINGS_DIR, plane.usage_ledger.root)
     except (AnchorsUnreadable, ProviderSettingsError, SettingsWriteError) as e:
         raise DeploymentConfigError(f"启动前的账户与锚点准备没有完成：{e}") from None
+    try:
+        note_startup(plane.usage_ledger, plane.usage_ledger.now())
+    except (SettingsWriteError, OSError):
+        # 只是一条提醒的依据：记不下来就少一次提醒，不为它拒绝启动。
+        pass
 
 
 def create_app(

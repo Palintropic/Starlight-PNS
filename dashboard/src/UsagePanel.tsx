@@ -103,6 +103,11 @@ function AccountBalanceBlock({ id, account }: { id: string; account: AccountBala
             {account.anchor_before_ledger ? '；这个时间早于账本起点，之前的花费没记下来' : ''}
             。计费有延迟，以控制台为准。
           </p>
+          {account.anchor_before_switch ? (
+            <p className="usage-note caution">
+              这个锚点早于最近一次版本切换（回滚过或刚升级），旧版本那段时间按另一套口径估余额，建议对照控制台重新填一次。
+            </p>
+          ) : null}
         </>
       )}
     </div>

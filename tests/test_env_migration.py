@@ -168,6 +168,21 @@ class ProductionStartTests(_MigrationCase):
             self.prepare("production")
         self.assertIn("balance_anchors.json", str(caught.exception))
 
+    def test_production_notes_the_version_switch_and_development_does_not(self):
+        from pns.runtime.version_switch import SWITCH_FILE, read_switch
+
+        self.prepare("development")
+        self.assertFalse((self.usage / SWITCH_FILE).exists())
+        self.prepare("production")
+        self.assertIsNotNone(read_switch(self.usage))
+
+    def test_failing_to_note_the_switch_does_not_stop_production(self):
+        from pns.runtime.settings_files import NotPublished
+
+        with patch("pns.interfaces.app.note_startup", side_effect=NotPublished("x")):
+            self.prepare("production")
+        self.assertEqual(json.loads(self.anchors_bytes())["anchors"]["env"]["balance"], 123.45)
+
     def test_the_server_entry_calls_it_after_create_app(self):
         source = (REPO_ROOT / "scripts" / "server.py").read_text(encoding="utf-8")
         self.assertLess(source.index("app = create_app()"), source.index("prepare_production_data(app)"))

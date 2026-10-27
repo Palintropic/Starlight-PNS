@@ -730,6 +730,8 @@ export interface AccountBalance {
   uncounted_calls: number;
   billing_uncertain_calls: number;
   anchor_before_ledger: boolean | null;
+  /** 锚点早于最近一次旧版本 → 新版本的切换（回滚过或刚升级），该对照控制台重填。 */
+  anchor_before_switch?: boolean | null;
   low: boolean;
   warn_yuan: number | null;
 }

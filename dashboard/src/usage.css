@@ -70,6 +70,7 @@
   color: var(--SystemBaseMedium);
 }
 .usage-note { max-width: 68ch; }
+.usage-note.caution { color: var(--caution); }
 
 .usage-balance {
   display: flex;

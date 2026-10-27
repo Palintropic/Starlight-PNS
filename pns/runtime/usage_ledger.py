@@ -532,6 +532,16 @@ class UsageLedger:
                 continue
         return sorted(days)
 
+    def latest(self) -> Optional[LedgerRecord]:
+        """时间上最后一行有效记录（从最近一天往前找，跳过坏行）。"""
+        for day in reversed(self._days()):
+            records, _ = self.read(
+                datetime.combine(day, datetime.min.time(), BEIJING), until_day=day
+            )
+            if records:
+                return records[-1]
+        return None
+
     def earliest(self) -> Optional[datetime]:
         """账本里最早一行的时刻。只读最早那个有内容的文件。"""
         for day in self._days():
@@ -719,10 +729,12 @@ def account_balance(
     *,
     earliest: Optional[datetime],
     warn_yuan: float,
+    switched_at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """一个账户的余额：只扣归属它的行（`records` 由调用方按 account_of 筛好）。
 
     币种不是人民币时不相减，只给锚点和"锚点之后本账户花了 ¥x"（§8.2）。
+    `switched_at` 是最近一次旧版本 → 新版本的切换（§9）：锚点早于它就提醒重填。
     """
     subtracts = view.currency == SPEND_CURRENCY
     out: Dict[str, Any] = {
@@ -735,6 +747,7 @@ def account_balance(
         "uncounted_calls": 0,
         "billing_uncertain_calls": 0,
         "anchor_before_ledger": None,
+        "anchor_before_switch": None,
         "low": False,
         "warn_yuan": warn_yuan if subtracts else None,
     }
@@ -756,6 +769,7 @@ def account_balance(
             1 for r in after if r.transport == TRANSPORT_ERROR and r.failure in BILLING_UNCERTAIN
         ),
         anchor_before_ledger=earliest is None or anchor.at < earliest,
+        anchor_before_switch=switched_at is not None and anchor.at < switched_at,
     )
     if subtracts:
         estimated = anchor.balance_yuan - spent
@@ -769,6 +783,7 @@ def summarize(
     days: int,
     anchor: Optional[BalanceAnchor] = None,
     accounts: Optional[Mapping[str, AccountView]] = None,
+    switched_at: Optional[datetime] = None,
     alert_threshold: int = DEFAULT_FAILURE_ALERT,
     warn_yuan: float = DEFAULT_BALANCE_WARN_YUAN,
     now: Optional[datetime] = None,
@@ -840,6 +855,7 @@ def summarize(
                 accounts[account_id],
                 earliest=earliest,
                 warn_yuan=warn_yuan,
+                switched_at=switched_at,
             )
             for account_id in sorted(accounts)
         }

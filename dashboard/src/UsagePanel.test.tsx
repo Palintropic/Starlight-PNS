@@ -275,6 +275,21 @@ describe('UsagePanel per account (CFG-1)', () => {
     expect(screen.getByText(/relay 此刻余额 12\.50 USD/)).toBeTruthy();
   });
 
+  it('asks for a new anchor when it is older than the last version switch', async () => {
+    vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue(
+      summary({
+        balances: {
+          env: anchored(100, 3, { anchor_before_switch: true }),
+          relay: anchored(20, 1, { anchor_before_switch: false }),
+        },
+      }),
+    );
+    await act(async () => {
+      renderAs(OPERATOR, <UsagePanel />);
+    });
+    expect(screen.getAllByText(/早于最近一次版本切换/)).toHaveLength(1);
+  });
+
   it('says so when balances could not be estimated', async () => {
     vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue(
       summary({ balances: {}, balances_unavailable: true }),

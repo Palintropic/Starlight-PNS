@@ -29,6 +29,7 @@ from typing import Union
 from pns.runtime import content_registry, settings_files
 from pns.runtime.account_anchors import AccountAnchorError, account_views, save_account_anchor
 from pns.runtime.env_migration import AnchorsUnreadable
+from pns.runtime.version_switch import read_switch
 from pns.runtime.provider_settings import ENV_ACCOUNT, ProviderSettingsError, load_accounts
 from pns.runtime.usage_ledger import (
     DEFAULT_BALANCE_WARN_YUAN,
@@ -121,6 +122,7 @@ def usage_summary(
         ledger,
         days=days,
         accounts=views,
+        switched_at=read_switch(ledger.root),
         alert_threshold=settings.failure_alert,
         warn_yuan=settings.balance_warn_yuan,
     )
