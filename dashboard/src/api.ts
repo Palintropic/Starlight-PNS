@@ -743,3 +743,76 @@ export const setBalanceAnchor = (
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ balance_yuan: balanceYuan }),
   }).then((res) => json(res));
+
+// ── 模型线路与计费账户（CFG-1） ─────────────────────────────────────────
+
+export type ApiFormat = 'anthropic' | 'openai';
+export type JudgeThinking = 'auto' | 'off' | 'provider';
+
+/** 一条线路的公开投影：没有 token，只有"有没有"和够长时的末 4 位。 */
+export interface ProviderLine {
+  account: string;
+  api_format: ApiFormat;
+  base_url: string;
+  model: string;
+  has_token: boolean;
+  token_hint: string | null;
+  judge_thinking: JudgeThinking;
+}
+
+export interface ProviderSettingsView {
+  settings: {
+    source: 'env' | 'panel';
+    generation: ProviderLine;
+    judge: ProviderLine & { follow: 'generation' | null };
+    ooc_threshold: number;
+    /** .env 那一套凭据是否完整：不完整时不能直接回滚到旧镜像。 */
+    env_complete: boolean;
+  };
+  config_revision: number;
+  quarantined: boolean;
+  transaction_pending: boolean;
+}
+
+/** 提交的一条线路。token 留空 = 沿用已存的（服务端解析）。 */
+export interface ProviderLineInput {
+  account: string;
+  api_format: ApiFormat;
+  base_url: string;
+  model: string;
+  token: string;
+  judge_thinking: JudgeThinking;
+}
+
+export interface ProviderSettingsInput {
+  generation: ProviderLineInput;
+  judge: ProviderLineInput | { follow: 'generation' };
+}
+
+export const fetchProviderSettings = (): Promise<ProviderSettingsView> =>
+  fetch('/api/settings/provider').then((res) => json(res));
+
+export const saveProviderSettings = (input: ProviderSettingsInput): Promise<ProviderSettingsView> =>
+  fetch('/api/settings/provider', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then((res) => json(res));
+
+/** 删掉面板存的线路，回到 .env 派生。 */
+export const resetProviderSettings = (): Promise<ProviderSettingsView> =>
+  fetch('/api/settings/provider', { method: 'DELETE' }).then((res) => json(res));
+
+export interface BillingAccount {
+  id: string;
+  name: string;
+  kind: string;
+  balance: 'manual';
+  currency: 'CNY' | 'USD';
+  multiplier: string;
+  created_at: string;
+  retired_at?: string;
+}
+
+export const fetchBillingAccounts = (): Promise<{ accounts: Record<string, BillingAccount> }> =>
+  fetch('/api/settings/accounts').then((res) => json(res));

@@ -156,3 +156,24 @@
     overflow-x: auto;
   }
 }
+
+/* 模型线路（ModelSettings）：每条线路一组，沿用上面设置组的样子。 */
+.model-line {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+}
+.model-line legend {
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
+  margin-bottom: var(--header-gap);
+}
+.accounts-create label.model-follow {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  max-width: none;
+}
