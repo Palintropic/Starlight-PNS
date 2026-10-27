@@ -1422,7 +1422,8 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                             (protocol, model, ul.TRANSPORT_RESPONSE, None), row,
                         )
                         self.assertEqual(
-                            (row.line, row.account, row.host), (path, account, "127.0.0.1"), row,
+                            (row.line, row.account, row.host, row.multiplier),
+                            (path, account, "127.0.0.1", "1"), row,
                         )
                         self.assertIn(row.character_id, worlds[row.world_id], row)
                 self.assertEqual(len(records), sum(len(line[2]) for line in lines.values()))

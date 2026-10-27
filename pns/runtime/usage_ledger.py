@@ -313,12 +313,18 @@ class LedgerRecord:
     line: Optional[str] = None
     account: Optional[str] = None
     host: Optional[str] = None
+    # 调用那一刻账户的价格倍率（字符串，原样抄账户目录）。有它时 cost_yuan 已经
+    # 乘过倍率：账户之后改倍率，历史行的花费不跟着变。
+    multiplier: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         usage = self.usage.to_dict() if self.usage is not None else {}
         provenance = {
             key: value
-            for key, value in (("line", self.line), ("account", self.account), ("host", self.host))
+            for key, value in (
+                ("line", self.line), ("account", self.account), ("host", self.host),
+                ("multiplier", self.multiplier),
+            )
             if value is not None
         }
         return {
@@ -390,7 +396,7 @@ def _record_from_dict(raw: Any) -> LedgerRecord:
         raise ValueError("strings")
     if cost is not None and (usage is None or prices is None):
         raise ValueError("consistency")
-    provenance = {key: raw.get(key) for key in ("line", "account", "host")}
+    provenance = {key: raw.get(key) for key in ("line", "account", "host", "multiplier")}
     if not all(value is None or isinstance(value, str) for value in provenance.values()):
         raise ValueError("provenance")
     return LedgerRecord(

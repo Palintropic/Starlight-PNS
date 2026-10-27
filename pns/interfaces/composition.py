@@ -581,6 +581,10 @@ class WorldControlPlane:
             if self._autonomy.warm_window_seconds > 0
             else None
         )
+        def multiplier_of(line) -> Optional[str]:
+            account = registry.accounts.get(line.account)
+            return account.multiplier if account is not None else None
+
         meter = UsageMeter(
             self._usage_ledger,
             world_id=world_id,
@@ -590,6 +594,7 @@ class WorldControlPlane:
             line=generation.name,
             account=generation.account,
             host=generation.host,
+            multiplier=multiplier_of(generation),
         )
         judge_meter = UsageMeter(
             self._usage_ledger,
@@ -599,6 +604,7 @@ class WorldControlPlane:
             line=judge_line.name,
             account=judge_line.account,
             host=judge_line.host,
+            multiplier=multiplier_of(judge_line),
         )
         client = MeteredClient(raw_client, meter)
         judge_client = MeteredClient(raw_judge_client, judge_meter)

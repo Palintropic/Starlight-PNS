@@ -25,6 +25,7 @@ import threading
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Callable, Iterator, List, Mapping, Optional
 
 from pns.runtime.usage_ledger import (
@@ -97,6 +98,7 @@ class UsageMeter:
         line: Optional[str] = None,
         account: Optional[str] = None,
         host: Optional[str] = None,
+        multiplier: Optional[str] = None,
     ) -> None:
         self._ledger = ledger
         self._world_id = world_id
@@ -104,11 +106,12 @@ class UsageMeter:
         self._prices = prices
         self._warmer = warmer
         # CFG-1 §8.3：这个计量器记的每一行都出自哪条线路、归哪个账户、发往哪个
-        # 主机。由建 client 的同一份配置快照在构造时给定，之后不再回头读配置：
-        # 保存新线路不会让旧 client 发出的请求记到新账户名下。
+        # 主机、按什么倍率计价。由建 client 的同一份配置快照在构造时给定，之后不再
+        # 回头读配置：保存新线路、改账户倍率，都不会改写旧 client 发出的请求的账。
         self._line = line
         self._account = account
         self._host = host or None
+        self._multiplier = multiplier
         # 只有挂了续命的世界才串行发送：续命请求与真实请求不交错。没有续命的
         # client（研究会话、bench）对并发保持完全透明，跟 COST-1 时一样。
         # 可重入：续命在持锁时再确认一次准入，然后经同一个 MeteredClient 发送。
@@ -191,12 +194,19 @@ class UsageMeter:
                     usage=call.usage,
                     prices=prices,
                     # 失败的请求不知道扣没扣钱：null，不是 0。
-                    cost_yuan=estimate_cost(call.usage, prices),
+                    cost_yuan=self._cost(call.usage, prices),
                     line=self._line,
                     account=self._account,
                     host=self._host,
+                    multiplier=self._multiplier,
                 )
             )
+
+    def _cost(self, usage: Optional[Usage], prices: Optional[Prices]) -> Optional[float]:
+        cost = estimate_cost(usage, prices)
+        if cost is None or self._multiplier is None:
+            return cost
+        return float(Decimal(repr(cost)) * Decimal(self._multiplier))
 
     def record_response(self, response: Any) -> None:
         op = _CURRENT.get()

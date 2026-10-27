@@ -326,7 +326,7 @@ class LedgerFileTest(unittest.TestCase):
 
 
 class ProvenanceFieldsTest(unittest.TestCase):
-    """CFG-1 §8.3 / §11.9：line / account / host 可选；旧行照读，新行旧读取器照读。"""
+    """CFG-1 §8.3 / §11.9：line / account / host / multiplier 可选；旧行照读，新行旧读取器照读。"""
 
     AT = datetime(2026, 10, 26, 15, tzinfo=timezone.utc)
 
@@ -334,14 +334,15 @@ class ProvenanceFieldsTest(unittest.TestCase):
         from dataclasses import replace
 
         old = _record(self.AT)
-        new = replace(old, line="judge", account="ds", host="judge.example")
+        new = replace(old, line="judge", account="ds", host="judge.example", multiplier="1.2")
         self.assertEqual(ul._record_from_dict(json.loads(json.dumps(new.to_dict()))), new)
         old_row = old.to_dict()
-        self.assertFalse({"line", "account", "host"} & set(old_row))
+        fields = {"line", "account", "host", "multiplier"}
+        self.assertFalse(fields & set(old_row))
         self.assertEqual(ul._record_from_dict(old_row), old)
         # 旧读取器只认它知道的键：去掉新键之后，其余每个键的值和类型都没变。
         new_row = new.to_dict()
-        self.assertEqual({k: v for k, v in new_row.items() if k not in ("line", "account", "host")}, old_row)
+        self.assertEqual({k: v for k, v in new_row.items() if k not in fields}, old_row)
         self.assertIsInstance(new_row["cost_yuan"], (float, type(None)))
 
     def test_a_row_with_a_bad_provenance_value_is_corrupt(self):
@@ -349,11 +350,11 @@ class ProvenanceFieldsTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         ledger = ul.UsageLedger(Path(tmp.name), clock=lambda: self.AT)
         self.assertTrue(ledger.append(_record(self.AT)))
-        row = {**_record(self.AT).to_dict(), "account": 7}
         with open(next(Path(tmp.name).rglob("*.jsonl")), "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
+            for bad in ({"account": 7}, {"multiplier": 1.2}):
+                fh.write(json.dumps({**_record(self.AT).to_dict(), **bad}) + "\n")
         records, corrupt = ledger.read()
-        self.assertEqual((len(records), corrupt), (1, 1))
+        self.assertEqual((len(records), corrupt), (1, 2))
 
 
 class AnchorTest(unittest.TestCase):
