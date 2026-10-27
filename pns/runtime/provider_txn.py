@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from pns.runtime import settings_files
-from pns.runtime.provider_settings import PROVIDER_FILE
+from pns.runtime.provider_settings import PROVIDER_FILE, ProviderSettingsError, validate_settings
 from pns.runtime.reload import ConfigBoundary, ProviderTransaction, ReloadResult
 from pns.runtime.settings_files import NotPublished, PublishedNotDurable, SettingsWriteError
 
@@ -226,7 +226,12 @@ def resolve(boundary: ConfigBoundary, settings_dir: Path, keep: str, *, reason: 
     与 .txn 记录的旧内容一致）；absent = 恢复为不存在（env 派生）。
 
     按锁顺序进门（调用方持闸门），在准入关着时写所选内容、构建切换（含排空旧
-    会话）、耐久清理，全部成功才解除隔离；任何一步失败都保持隔离。
+    会话）、**有效线路校验**、耐久清理，全部成功才解除隔离；任何一步失败都保持
+    隔离。
+
+    构建成功不等于线路能用：文件不存在时加载器允许缺 key（开发环境要能起来），
+    生产启动另有一道完整校验，而服务器侧的恢复脚本不经过那道启动检查。所以这里
+    自己校验，三种选择一视同仁（审查 F5）。摘要回读只证明字节一致，不证明线路有效。
     """
     if keep not in CHOICES:
         raise ValueError(f"keep 只能是 {'、'.join(CHOICES)}")
@@ -249,6 +254,12 @@ def resolve(boundary: ConfigBoundary, settings_dir: Path, keep: str, *, reason: 
         except Exception:
             return SaveOutcome(OUTCOME_QUARANTINED)
         if result.status != "ok":
+            return SaveOutcome(OUTCOME_QUARANTINED, result)
+        active = boundary.active()
+        try:
+            validate_settings(active.models, active.accounts)
+        except ProviderSettingsError:
+            # 选中的这一份线路不可用：事务记录留着、继续隔离，等操作员换个选择或补 .env。
             return SaveOutcome(OUTCOME_QUARANTINED, result)
         try:
             files.clear_record()

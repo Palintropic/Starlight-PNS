@@ -113,6 +113,13 @@ class TxnTestBase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
         self.case = 0
+        # env 那一套凭据由测试自己给，不读仓库里的 .env：resolve 选 absent 时会校验
+        # env 派生的线路（审查 F5），不能靠本机碰巧有 key 才通过。
+        no_env_file = patch.object(content_registry, "ENV_PATH", self.tmp / "no.env")
+        no_env_file.start()
+        self.addCleanup(no_env_file.stop)
+        os.environ["MIMO_API_KEY"] = "sk-txn-test-env-0123456789abcdef"
+        os.environ.pop("PNS_API_KEY_NAME", None)
 
     def _restore_env(self):
         os.environ.clear()
@@ -366,6 +373,23 @@ class ResolveTests(TxnTestBase):
         # 换一个能用的选择就能解开。
         self.assertEqual(self.resolve(provider_txn.KEEP_PREVIOUS).status, OUTCOME_OK)
         self.assertEqual(self.disk(), A)
+
+    def test_a_choice_whose_lines_are_unusable_stays_quarantined(self):
+        # 审查 F5：选"恢复为不存在"时 env 里没有 key。构建照样成功（开发环境允许缺
+        # key），但线路不可用，不能清掉事务、解除隔离。
+        self.quarantined_after_put(A)
+        key_name = self.boundary.active().models.env_key_name
+        os.environ.pop(key_name, None)
+        outcome = self.resolve(provider_txn.KEEP_ABSENT)
+        self.assertEqual(outcome.status, OUTCOME_QUARANTINED)
+        self.assertTrue(self.txn.exists())
+        self.assertTrue(self.boundary.quarantined)
+        self.assertFalse(self.supervisor.accepting)
+        # 补上 key 再选一次就能解开。
+        os.environ[key_name] = "sk-resolve-test-0123456789abcdef"
+        self.assertEqual(self.resolve(provider_txn.KEEP_ABSENT).status, OUTCOME_OK)
+        self.assertFalse(self.txn.exists())
+        self.assertFalse(self.boundary.quarantined)
 
     def test_a_cleanup_failure_while_resolving_stays_quarantined(self):
         self.quarantined_after_put(A)
