@@ -816,3 +816,36 @@ export interface BillingAccount {
 
 export const fetchBillingAccounts = (): Promise<{ accounts: Record<string, BillingAccount> }> =>
   fetch('/api/settings/accounts').then((res) => json(res));
+
+export interface BillingAccountInput {
+  id: string;
+  name: string;
+  kind: string;
+  currency: 'CNY' | 'USD';
+  multiplier: string;
+}
+
+type BillingAccountWrite = { account: BillingAccount; accounts: Record<string, BillingAccount> };
+
+export const createBillingAccount = (input: BillingAccountInput): Promise<BillingAccountWrite> =>
+  fetch('/api/settings/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then((res) => json(res));
+
+/** 只能改显示名和倍率；币种、kind 要换就新建账户。 */
+export const updateBillingAccount = (
+  id: string,
+  fields: { name?: string; multiplier?: string },
+): Promise<BillingAccountWrite> =>
+  fetch(`/api/settings/accounts/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  }).then((res) => json(res));
+
+export const retireBillingAccount = (id: string): Promise<BillingAccountWrite> =>
+  fetch(`/api/settings/accounts/${encodeURIComponent(id)}/retire`, { method: 'POST' }).then((res) =>
+    json(res),
+  );

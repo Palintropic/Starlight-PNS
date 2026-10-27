@@ -25,6 +25,7 @@ import {
   type ProviderLineInput,
   type ProviderSettingsView,
 } from './api';
+import BillingAccounts from './BillingAccounts';
 import './accounts.css';
 
 type LineName = 'generation' | 'judge';
@@ -272,6 +273,8 @@ export default function ModelSettings() {
           </div>
         </form>
       )}
+
+      <BillingAccounts accounts={accounts} onChange={setAccounts} />
     </div>
   );
 }
