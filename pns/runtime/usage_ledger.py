@@ -96,6 +96,12 @@ ANCHOR_FUTURE_SKEW = timedelta(minutes=5)
 
 ANCHOR_FILE = "balance_anchor.json"
 
+# 没有 account 字段的行（CFG-1 之前写的）都是 .env 那把 key 花的，归内建的 `env`
+# 账户（= provider_settings.ENV_ACCOUNT；这里不反向依赖配置模块）。
+LEGACY_ACCOUNT = "env"
+# 只有这个币种的手填锚点会被减成"估算余额"：花费一律是人民币（CFG-1 §8.2）。
+SPEND_CURRENCY = "CNY"
+
 
 # ── 失败分类 ─────────────────────────────────────────────────────────────
 
@@ -555,6 +561,24 @@ class BalanceAnchor:
         }
 
 
+@dataclass(frozen=True)
+class AccountView:
+    """汇总要知道的一个账户：币种、退没退役，以及校验过的锚点。
+
+    `anchor` 的数额是账户原币种（字段名沿用 balance_yuan）；锚点无效时 anchor
+    为 None、`anchor_problem` 说为什么。
+    """
+
+    currency: str
+    anchor: Optional[BalanceAnchor] = None
+    anchor_problem: Optional[str] = None
+    retired: bool = False
+
+
+def account_of(record: "LedgerRecord") -> str:
+    return record.account if record.account is not None else LEGACY_ACCOUNT
+
+
 def validate_anchor(balance_yuan: Any, at: Optional[datetime], now: datetime) -> BalanceAnchor:
     if type(balance_yuan) not in (int, float) or not math.isfinite(balance_yuan):
         raise AnchorError("余额必须是有限的数字")
@@ -689,16 +713,72 @@ def balance_estimate(
     }
 
 
+def account_balance(
+    records: Iterable[LedgerRecord],
+    view: AccountView,
+    *,
+    earliest: Optional[datetime],
+    warn_yuan: float,
+) -> Dict[str, Any]:
+    """一个账户的余额：只扣归属它的行（`records` 由调用方按 account_of 筛好）。
+
+    币种不是人民币时不相减，只给锚点和"锚点之后本账户花了 ¥x"（§8.2）。
+    """
+    subtracts = view.currency == SPEND_CURRENCY
+    out: Dict[str, Any] = {
+        "currency": view.currency,
+        "retired": view.retired,
+        "anchor": None,
+        "anchor_problem": view.anchor_problem,
+        "spent_since_anchor_yuan": None,
+        "estimated": None,
+        "uncounted_calls": 0,
+        "billing_uncertain_calls": 0,
+        "anchor_before_ledger": None,
+        "low": False,
+        "warn_yuan": warn_yuan if subtracts else None,
+    }
+    anchor = view.anchor
+    if anchor is None:
+        return out
+    # 锚点是"此刻的余额"：同一时刻已经结束的那次调用算在锚点之前。
+    after = [r for r in records if r.at > anchor.at]
+    spent = sum(r.cost_yuan for r in after if r.cost_yuan is not None)
+    out.update(
+        anchor={
+            "balance": anchor.balance_yuan,
+            "currency": view.currency,
+            "at": anchor.to_dict()["at"],
+        },
+        spent_since_anchor_yuan=round(spent, 8),
+        uncounted_calls=sum(1 for r in after if r.cost_yuan is None),
+        billing_uncertain_calls=sum(
+            1 for r in after if r.transport == TRANSPORT_ERROR and r.failure in BILLING_UNCERTAIN
+        ),
+        anchor_before_ledger=earliest is None or anchor.at < earliest,
+    )
+    if subtracts:
+        estimated = anchor.balance_yuan - spent
+        out.update(estimated=round(estimated, 8), low=estimated < warn_yuan)
+    return out
+
+
 def summarize(
     ledger: UsageLedger,
     *,
     days: int,
-    anchor: Optional[BalanceAnchor],
+    anchor: Optional[BalanceAnchor] = None,
+    accounts: Optional[Mapping[str, AccountView]] = None,
     alert_threshold: int = DEFAULT_FAILURE_ALERT,
     warn_yuan: float = DEFAULT_BALANCE_WARN_YUAN,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """`days` 个北京日（含今天）的汇总、连续失败段、余额估算。"""
+    """`days` 个北京日（含今天）的汇总、连续失败段、余额估算。
+
+    给了 `accounts`（CFG-1）：余额按账户算，每个账户只扣归属它的行；顶层的
+    `balance` 是 `env` 账户那一份、沿用旧形状，给还没改的界面用。`anchor` 被忽略。
+    没给 `accounts`：旧行为，一个锚点扣全部行。
+    """
     now = now or ledger.now()
     today = now.astimezone(BEIJING).date()
     first_day = today - timedelta(days=max(days, 1) - 1)
@@ -706,9 +786,13 @@ def summarize(
 
     # 只读需要的那几天：窗口起点和锚点里更早的那个。连续失败段如果一直延伸到
     # 读取范围的开头，说明更早的文件里可能还有，才往前补读整本账。
-    read_from = window_start
-    if anchor is not None and anchor.at < read_from:
-        read_from = anchor.at
+    if accounts is not None:
+        env_view = accounts.get(LEGACY_ACCOUNT)
+        anchor = env_view.anchor if env_view is not None else None
+    anchors = [anchor] if anchor is not None else []
+    if accounts is not None:
+        anchors += [view.anchor for view in accounts.values() if view.anchor is not None]
+    read_from = min([window_start] + [a.at for a in anchors])
     read_from = datetime.combine(read_from.astimezone(BEIJING).date(), datetime.min.time(), BEIJING)
     all_records, corrupt = ledger.read(since=read_from)
     if not any(
@@ -725,6 +809,7 @@ def summarize(
     by_world: Dict[str, Dict[str, Any]] = {}
     by_path: Dict[str, Dict[str, Any]] = {}
     by_character: Dict[str, Dict[str, Any]] = {}
+    by_account: Dict[str, Dict[str, Any]] = {}
     total = _blank_bucket()
     for record in window:
         day_key = record.at.astimezone(BEIJING).date().isoformat()
@@ -733,6 +818,7 @@ def summarize(
             (by_world, record.world_id),
             (by_path, record.path),
             (by_character, record.character_id),
+            (by_account, account_of(record)),
         ):
             _add(table.setdefault(key, _blank_bucket()), record)
         _add(total, record)
@@ -743,6 +829,20 @@ def summarize(
     streak = failure_streak(all_records)
     streak["alert"] = streak["consecutive"] >= alert_threshold
     streak["alert_threshold"] = alert_threshold
+    earliest = ledger.earliest() if anchors else None
+    balance_rows = all_records
+    balances = None
+    if accounts is not None:
+        balance_rows = [r for r in all_records if account_of(r) == LEGACY_ACCOUNT]
+        balances = {
+            account_id: account_balance(
+                [r for r in all_records if account_of(r) == account_id],
+                accounts[account_id],
+                earliest=earliest,
+                warn_yuan=warn_yuan,
+            )
+            for account_id in sorted(accounts)
+        }
     return {
         "now": now.astimezone(timezone.utc).isoformat(),
         "timezone": "Asia/Shanghai",
@@ -752,13 +852,15 @@ def summarize(
         "by_world": finish_all(by_world),
         "by_path": finish_all(by_path),
         "by_character": finish_all(by_character),
+        "by_account": finish_all(by_account),
         "failure_streak": streak,
         "balance": balance_estimate(
-            all_records,
+            balance_rows,
             anchor,
-            earliest=ledger.earliest() if anchor is not None else None,
+            earliest=earliest,
             warn_yuan=warn_yuan,
         ),
+        "balances": balances,
         "ledger_write_failures": ledger.write_failures,
         "corrupt_lines": corrupt,
     }
@@ -767,12 +869,16 @@ def summarize(
 __all__ = [
     "BEIJING",
     "BILLING_UNCERTAIN",
+    "LEGACY_ACCOUNT",
+    "AccountView",
     "AnchorError",
     "BalanceAnchor",
     "LedgerRecord",
     "Prices",
     "Usage",
     "UsageLedger",
+    "account_balance",
+    "account_of",
     "balance_estimate",
     "classify_failure",
     "estimate_cost",

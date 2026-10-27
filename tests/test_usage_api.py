@@ -8,13 +8,16 @@
 #
 # 运行: python -m unittest discover -s tests -p test_usage_api.py
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from tests.test_auth_api import ApiTestCase  # noqa: F401 - 只拿夹具，不重跑它的测试
 
 from pns.interfaces import usage as usage_api
+from pns.runtime import content_registry
 from pns.runtime import usage_ledger as ul
 
 
@@ -28,6 +31,15 @@ def _failed(at):
 
 
 class UsageApiTests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        # 计费账户目录不读仓库里的 data/settings：空目录 = 只有内建 env 账户。
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        settings = patch.object(content_registry, "SETTINGS_DIR", Path(tmp.name))
+        settings.start()
+        self.addCleanup(settings.stop)
+
     def test_summary_needs_a_principal(self):
         self.assertEqual(self.client.get("/api/usage/summary").status_code, 401)
 
