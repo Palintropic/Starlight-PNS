@@ -20,7 +20,7 @@
 #   9. 世界那一半同理：经 HTTP 建世界、开认知，生成走 A、判分走 B，账本两行协议
 #      各自对；上游回显 key 时状态接口、存档、账本、输出里都没有它；两个世界
 #      共用一本账同时跑、生成与判分请求重叠时，每次响应的 usage（两台各不相同、
-#      每次也不同）恰好记成一行，记在发出那个请求的线路和角色名下。
+#      每次也不同）恰好记成一行，记在发出那个请求的线路、账户和角色名下。
 #
 # 运行: python -m unittest tests.test_provider_settings -v
 import asyncio
@@ -1399,10 +1399,10 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                     "judge": re.compile(r"【角色专属评分参考：(\w+)】"),
                 }
                 lines = {
-                    "generation": (gen_format, "gen-model", gen_server.issued, gen_seen, GEN_KEY),
-                    "judge": (judge_format, "judge-model", judge_server.issued, judge_seen, JUDGE_KEY),
+                    "generation": (gen_format, "gen-model", gen_server.issued, gen_seen, GEN_KEY, "mimo-main"),
+                    "judge": (judge_format, "judge-model", judge_server.issued, judge_seen, JUDGE_KEY, "ds"),
                 }
-                for path, (protocol, model, issued, seen, key) in lines.items():
+                for path, (protocol, model, issued, seen, key, account) in lines.items():
                     rows = [r for r in records if r.path == path]
                     self.assertEqual({(k, m) for _, k, m in seen}, {(key, model)})
                     sent = []
@@ -1420,6 +1420,9 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                         self.assertEqual(
                             (row.protocol, row.model, row.transport, row.failure),
                             (protocol, model, ul.TRANSPORT_RESPONSE, None), row,
+                        )
+                        self.assertEqual(
+                            (row.line, row.account, row.host), (path, account, "127.0.0.1"), row,
                         )
                         self.assertIn(row.character_id, worlds[row.world_id], row)
                 self.assertEqual(len(records), sum(len(line[2]) for line in lines.values()))

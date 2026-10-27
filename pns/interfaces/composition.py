@@ -587,12 +587,18 @@ class WorldControlPlane:
             protocol=generation.api_format,
             prices=registry.price_table(),
             warmer=warmer,
+            line=generation.name,
+            account=generation.account,
+            host=generation.host,
         )
         judge_meter = UsageMeter(
             self._usage_ledger,
             world_id=world_id,
             protocol=judge_line.api_format,
             prices=registry.price_table(),
+            line=judge_line.name,
+            account=judge_line.account,
+            host=judge_line.host,
         )
         client = MeteredClient(raw_client, meter)
         judge_client = MeteredClient(raw_judge_client, judge_meter)

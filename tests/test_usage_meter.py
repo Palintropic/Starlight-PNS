@@ -8,9 +8,13 @@
 #      连续失败归零；截断记 truncated；
 #   4. 计量对调用结果透明：同一个响应原样返回，同一个异常原样抛出；
 #   5. 账本写不进去时世界照常拿到结果；
-#   6. 账本和汇总里没有异常或响应带来的任何字符串。
+#   6. 账本和汇总里没有异常或响应带来的任何字符串；
+#   7. 每行账记着发出请求的那条线路、它的计费账户和上游主机（CFG-1 §8.3），
+#      取自建 client 的同一份快照；判分跟随生成时，线路仍是判分、账户和主机
+#      是生成那边的。
 #
 # 运行: python -m unittest discover -s tests -p test_usage_meter.py
+import dataclasses
 import json
 import os
 import sys
@@ -33,6 +37,7 @@ from pns.interfaces.composition import WorldControlPlane  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
 from pns.runtime.autonomy.audit import AuditRequest  # noqa: E402
 from pns.runtime.autonomy.generation import GenerationError  # noqa: E402
+from pns.runtime.provider_settings import Line, Secret  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.runtime import usage_ledger as ul  # noqa: E402
 
@@ -116,7 +121,11 @@ class MeterWiringTest(unittest.TestCase):
             client_factory=lambda *a, **k: self.client,
             usage_ledger=self.ledger,
         )
-        adapters = self.plane.build_adapters(self.registry, world_id="yoake-mae")
+        self._wire(self.registry)
+
+    def _wire(self, registry):
+        self.registry = registry
+        adapters = self.plane.build_adapters(registry, world_id="yoake-mae")
         self.judge = adapters.auditor._judge
         self.call_model = self._call_model_of(self.plane, adapters)
 
@@ -156,6 +165,47 @@ class MeterWiringTest(unittest.TestCase):
         self.assertEqual(gen.usage, ul.Usage(120, 0, 3000, 40))
         self.assertEqual((gen.operation, judge.operation), ("ok", "ok"))
         self.assertIsNotNone(gen.cost_yuan)
+
+    def _panel_models(self, *, follows):
+        models = self.registry.models
+        generation = Line(
+            name="generation", account="gen-acct", api_format="anthropic",
+            base_url="https://gen.example/anthropic", model=models.generator_model,
+            token=Secret(KEY), provider="mimo",
+        )
+        judge = dataclasses.replace(generation, name="judge", model=models.evaluator_model)
+        if not follows:
+            judge = dataclasses.replace(
+                judge, account="judge-acct", base_url="https://judge.example/anthropic",
+                provider="deepseek",
+            )
+        return dataclasses.replace(
+            models, generation=generation, judge=judge, judge_follows=follows, source="panel",
+        )
+
+    def test_rows_name_their_line_account_and_host(self):
+        self.generate()
+        self.audit()
+        gen, judge = self.rows()
+        env_host = self.registry.models.generation.host
+        self.assertTrue(env_host)
+        self.assertEqual((gen.line, gen.account, gen.host), ("generation", "env", env_host))
+        self.assertEqual((judge.line, judge.account, judge.host), ("judge", "env", env_host))
+
+        # 两条线路账户、主机都不同：任何一个字段串到另一条线路上都对不上。
+        self._wire(dataclasses.replace(self.registry, models=self._panel_models(follows=False)))
+        self.generate()
+        self.audit()
+        gen, judge = self.rows()[2:]
+        self.assertEqual((gen.path, gen.line, gen.account, gen.host),
+                         ("generation", "generation", "gen-acct", "gen.example"))
+        self.assertEqual((judge.path, judge.line, judge.account, judge.host),
+                         ("judge", "judge", "judge-acct", "judge.example"))
+
+        self._wire(dataclasses.replace(self.registry, models=self._panel_models(follows=True)))
+        self.audit()
+        judge = self.rows()[-1]
+        self.assertEqual((judge.line, judge.account, judge.host), ("judge", "gen-acct", "gen.example"))
 
     def test_judge_payment_failure_is_seen_although_router_swallows_it(self):
         self.client.behaviour["judge"] = _status_error(402)
