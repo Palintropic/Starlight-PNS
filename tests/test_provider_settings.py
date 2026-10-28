@@ -63,6 +63,8 @@ from pns.runtime.autonomy.audit import AuditRequest  # noqa: E402
 from pns.runtime.content_registry import ConfigValidationError, build_content_registry  # noqa: E402
 from pns.runtime.provider_settings import (  # noqa: E402
     ACCOUNTS_FILE,
+    DEFAULT_ACTIVE,
+    EMPTY_DOCUMENT,
     ENV_ACCOUNT,
     LINE_GENERATION,
     LINE_JUDGE,
@@ -79,6 +81,10 @@ from pns.runtime.provider_settings import (  # noqa: E402
     env_account,
     load_accounts,
     load_model_settings,
+    candidate_payload,
+    put_card,
+    set_active,
+    settings_from_document,
 )
 from pns.runtime.reload import BOUNDARY, ConfigBoundary, SessionSupervisor  # noqa: E402
 from pns.runtime.session_runtime import SessionRuntime, SessionSetupError  # noqa: E402
@@ -96,19 +102,36 @@ VERDICT = json.dumps(
 )
 
 
+GEN_CARD = "c-gen"
+JUDGE_CARD = "c-judge"
+# 两张卡片默认的线路字段（不含显示名）。
+GEN_LINE = {
+    "account": "mimo-main", "api_format": "anthropic",
+    "base_url": "https://gen.example/anthropic", "model": "gen-model",
+    "token": GEN_KEY,
+}
+JUDGE_LINE = {
+    "account": "ds", "api_format": "openai",
+    "base_url": "https://judge.example/v1", "model": "judge-model",
+    "token": JUDGE_KEY,
+}
+
+
 def _panel_file(**overrides):
+    """v2 文件：生成一张卡片、判分一张卡片（judge={"follow": ...} 时判分跟随、
+    不建判分卡片）。generation / judge 照旧按线路给字段，方便沿用 v1 时代的用例。"""
+    generation = overrides.pop("generation", GEN_LINE)
+    judge = overrides.pop("judge", JUDGE_LINE)
+    cards = {GEN_CARD: {"name": "生成", **generation}}
+    if isinstance(judge, dict) and "follow" in judge:
+        active_judge = judge
+    else:
+        cards[JUDGE_CARD] = {"name": "判分", **judge}
+        active_judge = {"card": JUDGE_CARD}
     payload = {
-        "version": 1,
-        "generation": {
-            "account": "mimo-main", "api_format": "anthropic",
-            "base_url": "https://gen.example/anthropic", "model": "gen-model",
-            "token": GEN_KEY,
-        },
-        "judge": {
-            "account": "ds", "api_format": "openai",
-            "base_url": "https://judge.example/v1", "model": "judge-model",
-            "token": JUDGE_KEY,
-        },
+        "version": 2,
+        "cards": cards,
+        "active": {"generation": GEN_CARD, "judge": active_judge},
         "updated_at": "2026-10-25T00:00:00+00:00",
         "updated_by": "admin",
     }
@@ -202,8 +225,11 @@ class EnvDerivationTests(_SettingsDir):
     def test_separate_models_stay_separate_lines(self):
         settings, _ = self.load({"MODEL": "base", "GENERATOR_MODEL": "A", "EVALUATOR_MODEL": "B"})
         self.assertEqual(settings.source, SOURCE_ENV)
-        self.assertFalse(settings.judge_follows)
+        # 文件不存在 = 生效的是 env 卡片、判分跟随；env 卡片跟随时判分模型仍取
+        # EVALUATOR_MODEL（审查 F3 的特例），所以两条线路的模型照旧各管各的。
+        self.assertEqual(settings.active, DEFAULT_ACTIVE)
         self.assertEqual((settings.generator_model, settings.evaluator_model), ("A", "B"))
+        self.assertEqual((settings.generation.card, settings.judge.card), ("env", "env"))
         self.assertEqual(
             (settings.generation.account, settings.judge.account), (ENV_ACCOUNT, ENV_ACCOUNT)
         )
@@ -211,7 +237,6 @@ class EnvDerivationTests(_SettingsDir):
     def test_only_model_feeds_both(self):
         settings, _ = self.load({"MODEL": "only"})
         self.assertEqual((settings.generator_model, settings.evaluator_model), ("only", "only"))
-        self.assertFalse(settings.judge_follows)
 
     def test_defaults_match_the_previous_settings(self):
         settings, _ = self.load({})
@@ -267,12 +292,13 @@ class PanelFileTests(_SettingsDir):
         self.assertTrue(follows.judge_follows)
         self.assertEqual(follows.judge.token.reveal(), GEN_KEY)
         self.assertEqual(follows.judge.name, LINE_JUDGE)
-        equal = dict(_panel_file()["generation"])
+        self.assertEqual(follows.judge.card, GEN_CARD)
+        equal = dict(GEN_LINE)
         self.write(PROVIDER_FILE, _panel_file(judge=equal))
         independent, _ = self.load()
         self.assertFalse(independent.judge_follows)
-        self.assertEqual(follows.public_dict()["judge"]["follow"], "generation")
-        self.assertIsNone(independent.public_dict()["judge"]["follow"])
+        self.assertEqual(follows.public_dict()["active"]["judge"], {"follow": "generation"})
+        self.assertEqual(independent.public_dict()["active"]["judge"], {"card": JUDGE_CARD})
 
     def test_the_public_projection_carries_no_token(self):
         self.write(PROVIDER_FILE, _panel_file())
@@ -287,18 +313,29 @@ class PanelFileTests(_SettingsDir):
         cases = {
             "not json": GEN_KEY + "{",
             "not an object": json.dumps([GEN_KEY]),
-            "unknown version": _panel_file(version=2),
-            "missing line": _panel_file(generation=None),
-            "missing token": _panel_file(generation={**_panel_file()["generation"], "token": None}),
-            "empty token": _panel_file(generation={**_panel_file()["generation"], "token": ""}),
-            "empty model": _panel_file(judge={**_panel_file()["judge"], "model": " "}),
-            "bad format": _panel_file(judge={**_panel_file()["judge"], "api_format": GEN_KEY}),
-            "plain http": _panel_file(judge={**_panel_file()["judge"], "base_url": "http://judge.example/v1"}),
+            "v1 file": _panel_file(version=1),
+            "unknown version": _panel_file(version=3),
+            "missing cards": _panel_file(cards=None),
+            "card not an object": _panel_file(cards={GEN_CARD: GEN_KEY}),
+            "missing active": _panel_file(active=None),
+            "active names a missing card": _panel_file(active={"generation": "c-nope", "judge": {"follow": "generation"}}),
+            "judge names a missing card": _panel_file(active={"generation": GEN_CARD, "judge": {"card": "c-nope"}}),
+            "follow with a model": _panel_file(active={"generation": GEN_CARD, "judge": {"follow": "generation", "model": "x"}}),
+            "follow and card": _panel_file(active={"generation": GEN_CARD, "judge": {"follow": "generation", "card": GEN_CARD}}),
+            "empty override model": _panel_file(active={"generation": GEN_CARD, "judge": {"card": GEN_CARD, "model": " "}}),
+            "card named env": _panel_file(cards={"env": {"name": "x", **GEN_LINE}}),
+            "bad card id": _panel_file(cards={"a b": {"name": "x", **GEN_LINE}}),
+            "empty card name": _panel_file(cards={GEN_CARD: {**GEN_LINE, "name": " "}}),
+            "missing token": _panel_file(generation={**GEN_LINE, "token": None}),
+            "empty token": _panel_file(generation={**GEN_LINE, "token": ""}),
+            "empty model": _panel_file(judge={**JUDGE_LINE, "model": " "}),
+            "bad format": _panel_file(judge={**JUDGE_LINE, "api_format": GEN_KEY}),
+            "plain http": _panel_file(judge={**JUDGE_LINE, "base_url": "http://judge.example/v1"}),
             "credentials in url": _panel_file(
-                judge={**_panel_file()["judge"], "base_url": f"https://u:{GEN_KEY}@judge.example/v1"}
+                judge={**JUDGE_LINE, "base_url": f"https://u:{GEN_KEY}@judge.example/v1"}
             ),
-            "no host": _panel_file(judge={**_panel_file()["judge"], "base_url": "https://"}),
-            "unknown account": _panel_file(judge={**_panel_file()["judge"], "account": "nobody"}),
+            "no host": _panel_file(judge={**JUDGE_LINE, "base_url": "https://"}),
+            "unknown account": _panel_file(judge={**JUDGE_LINE, "account": "nobody"}),
             "follow something else": _panel_file(judge={"follow": "judge"}),
         }
         for label, payload in cases.items():
@@ -314,7 +351,7 @@ class PanelFileTests(_SettingsDir):
             with self.subTest(host):
                 self.write(
                     PROVIDER_FILE,
-                    _panel_file(judge={**_panel_file()["judge"], "base_url": f"http://{host}:8080/v1"}),
+                    _panel_file(judge={**JUDGE_LINE, "base_url": f"http://{host}:8080/v1"}),
                 )
                 settings, _ = self.load()
                 self.assertEqual(settings.judge.host, host)
@@ -338,7 +375,7 @@ class PanelFileTests(_SettingsDir):
         }
         for name, bad in bad_urls.items():
             with self.subTest(name):
-                self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+                self.write(PROVIDER_FILE, _panel_file(generation={**GEN_LINE, "base_url": bad}))
                 with self.assertRaises(ProviderSettingsError) as caught:
                     self.load()
                 self.assertIsNone(caught.exception.__cause__)
@@ -404,7 +441,7 @@ class RegistryBuildTests(_SettingsDir):
     def test_a_failed_reload_does_not_publish_the_url(self):
         bad = f"https://u:{GEN_KEY}@bad\u2100.example/v1"
         self.write(ACCOUNTS_FILE, _accounts_file())
-        self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+        self.write(PROVIDER_FILE, _panel_file(generation={**GEN_LINE, "base_url": bad}))
         boundary = ConfigBoundary(SessionSupervisor())
         with patch.object(content_registry, "SETTINGS_DIR", self.dir):
             result = boundary.reload()
@@ -423,7 +460,7 @@ class RegistryBuildTests(_SettingsDir):
         client = TestClient(create_app(WorldControlPlane(root=self.dir.parent / "worlds")))
         for bad in (f"https://u:{GEN_KEY}@bad\u2100.example/v1", f"https://host.example:{GEN_KEY}/v1"):
             with self.subTest(bad=bad.replace(GEN_KEY, "<key>")):
-                self.write(PROVIDER_FILE, _panel_file(generation={**_panel_file()["generation"], "base_url": bad}))
+                self.write(PROVIDER_FILE, _panel_file(generation={**GEN_LINE, "base_url": bad}))
                 before = BOUNDARY.active()
                 with patch.object(content_registry, "SETTINGS_DIR", self.dir):
                     posted = client.post("/api/config/reload")
@@ -626,7 +663,7 @@ class JudgeThinkingTests(_SettingsDir):
         self.write(PROVIDER_FILE, _panel_file())
         settings, _ = self.load()
         self.assertEqual((settings.generation.judge_thinking, settings.judge.judge_thinking), ("auto", "auto"))
-        generation = {**_panel_file()["generation"], "judge_thinking": "off"}
+        generation = {**GEN_LINE, "judge_thinking": "off"}
         self.write(PROVIDER_FILE, _panel_file(generation=generation, judge={"follow": LINE_GENERATION}))
         settings, _ = self.load()
         self.assertEqual(settings.judge.judge_thinking, "off")
@@ -658,22 +695,20 @@ class JudgeThinkingTests(_SettingsDir):
                 if disabled:
                     self.assertEqual(sent[0]["thinking"], {"type": "disabled"})
 
-    def test_a_put_carries_it(self):
-        from pns.runtime.provider_settings import build_candidate
-
-        request = {
-            "generation": {**_panel_file()["generation"], "judge_thinking": "off"},
-            "judge": {**_panel_file()["judge"]},
-        }
-        payload, settings = build_candidate(
-            request, None, load_accounts(self.dir), {}, updated_by="t", ooc_threshold=5.0
-        )
-        self.assertEqual(json.loads(payload)["generation"]["judge_thinking"], "off")
-        self.assertNotIn("judge_thinking", json.loads(payload)["judge"])
+    def test_a_card_write_carries_it(self):
+        catalog = load_accounts(self.dir)
+        document = put_card(EMPTY_DOCUMENT, "c-a", {"name": "A", **GEN_LINE, "judge_thinking": "off"},
+                            catalog, create=True)
+        document = put_card(document, "c-b", {"name": "B", **JUDGE_LINE}, catalog, create=True)
+        document = set_active(document, {"generation": "c-a", "judge": {"card": "c-b"}})
+        payload = json.loads(candidate_payload(document, updated_by="t"))
+        self.assertEqual(payload["cards"]["c-a"]["judge_thinking"], "off")
+        self.assertEqual(payload["cards"]["c-b"]["judge_thinking"], "auto")
+        settings = settings_from_document(document, catalog, {}, ooc_threshold=5.0)
         self.assertEqual((settings.generation.judge_thinking, settings.judge.judge_thinking), ("off", "auto"))
         with self.assertRaises(ProviderSettingsError):
-            build_candidate({**request, "judge": {**request["judge"], "judge_thinking": "maybe"}},
-                            None, load_accounts(self.dir), {}, updated_by="t", ooc_threshold=5.0)
+            put_card(document, "c-b", {"name": "B", **JUDGE_LINE, "judge_thinking": "maybe"},
+                     catalog, create=False)
 
 
 # ── 6. 两条线路真的分开走 ───────────────────────────────────────────────
@@ -995,10 +1030,10 @@ class RealSdkTwoLineTests(_SettingsDir):
             self.addCleanup(server.shutdown)
         panel = _panel_file()
         self.write(PROVIDER_FILE, _panel_file(
-            generation={**panel["generation"], "api_format": gen_format,
+            generation={**GEN_LINE, "api_format": gen_format,
                         "base_url": self._url(gen_server, gen_format)},
             judge={"follow": LINE_GENERATION} if follow else {
-                **panel["judge"], "api_format": judge_format,
+                **JUDGE_LINE, "api_format": judge_format,
                 "base_url": self._url(judge_server, judge_format)},
         ))
         out = self.dir.parent / f"out-{gen_format}-{judge_format}-{follow}"
@@ -1194,10 +1229,10 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
             self.addCleanup(server.shutdown)
         panel = _panel_file()
         self.write(PROVIDER_FILE, _panel_file(
-            generation={**panel["generation"], "api_format": gen_format,
+            generation={**GEN_LINE, "api_format": gen_format,
                         "base_url": self._url(gen_server, gen_format)},
             judge={"follow": LINE_GENERATION} if follow else {
-                **panel["judge"], "api_format": judge_format,
+                **JUDGE_LINE, "api_format": judge_format,
                 "base_url": self._url(judge_server, judge_format)},
         ))
         with patch.object(content_registry, "SETTINGS_DIR", self.dir):
@@ -1346,9 +1381,9 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
                     self.addCleanup(server.shutdown)
                 panel = _panel_file()
                 self.write(PROVIDER_FILE, _panel_file(
-                    generation={**panel["generation"], "api_format": gen_format,
+                    generation={**GEN_LINE, "api_format": gen_format,
                                 "base_url": self._url(gen_server, gen_format)},
-                    judge={**panel["judge"], "api_format": judge_format,
+                    judge={**JUDGE_LINE, "api_format": judge_format,
                            "base_url": self._url(judge_server, judge_format)},
                 ))
                 with patch.object(content_registry, "SETTINGS_DIR", self.dir):
@@ -1449,9 +1484,9 @@ class WorldRealSdkTwoLineTests(_SettingsDir):
         def panel(gen_key, judge_key):
             base = _panel_file()
             return _panel_file(
-                generation={**base["generation"], "base_url": self._url(gen_server, "anthropic"),
+                generation={**GEN_LINE, "base_url": self._url(gen_server, "anthropic"),
                             "token": gen_key},
-                judge={**base["judge"], "base_url": self._url(judge_server, "openai"),
+                judge={**JUDGE_LINE, "base_url": self._url(judge_server, "openai"),
                        "token": judge_key},
             )
 

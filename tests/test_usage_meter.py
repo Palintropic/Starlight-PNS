@@ -171,17 +171,15 @@ class MeterWiringTest(unittest.TestCase):
         generation = Line(
             name="generation", account="gen-acct", api_format="anthropic",
             base_url="https://gen.example/anthropic", model=models.generator_model,
-            token=Secret(KEY), provider="mimo",
+            token=Secret(KEY), provider="mimo", card="c-gen",
         )
         judge = dataclasses.replace(generation, name="judge", model=models.evaluator_model)
         if not follows:
             judge = dataclasses.replace(
                 judge, account="judge-acct", base_url="https://judge.example/anthropic",
-                provider="deepseek",
+                provider="deepseek", card="c-judge",
             )
-        models = dataclasses.replace(
-            models, generation=generation, judge=judge, judge_follows=follows, source="panel",
-        )
+        models = dataclasses.replace(models, generation=generation, judge=judge, source="panel")
         base = env_account(created_at="2026-10-25T00:00:00+00:00")
         accounts = AccountCatalog(accounts={
             "env": base,
@@ -203,6 +201,7 @@ class MeterWiringTest(unittest.TestCase):
         self.assertTrue(env_host)
         self.assertEqual((gen.line, gen.account, gen.host, gen.multiplier), ("generation", "env", env_host, "1"))
         self.assertEqual((judge.line, judge.account, judge.host, judge.multiplier), ("judge", "env", env_host, "1"))
+        self.assertEqual((gen.card, judge.card), ("env", "env"))
         self.assertCost(gen, 1)
 
         # 两条线路账户、主机、倍率都不同：任何一个字段串到另一条线路上都对不上。
@@ -215,6 +214,7 @@ class MeterWiringTest(unittest.TestCase):
                          ("generation", "generation", "gen-acct", "gen.example", "1.5"))
         self.assertEqual((judge.path, judge.line, judge.account, judge.host, judge.multiplier),
                          ("judge", "judge", "judge-acct", "judge.example", "0.8"))
+        self.assertEqual((gen.card, judge.card), ("c-gen", "c-judge"))
         self.assertCost(gen, 1.5)
 
         self.registry = env_registry
@@ -223,6 +223,11 @@ class MeterWiringTest(unittest.TestCase):
         judge = self.rows()[-1]
         self.assertEqual((judge.line, judge.account, judge.host, judge.multiplier),
                          ("judge", "gen-acct", "gen.example", "1.5"))
+        # 跟随时判分行的 line 是 judge，card 是实际用的那张生成卡片。
+        self.assertEqual(judge.card, "c-gen")
+        # 新字段读回来照样在。
+        reread = self.rows()[-1]
+        self.assertEqual(reread.card, "c-gen")
 
     def test_judge_payment_failure_is_seen_although_router_swallows_it(self):
         self.client.behaviour["judge"] = _status_error(402)

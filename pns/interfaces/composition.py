@@ -595,6 +595,7 @@ class WorldControlPlane:
             account=generation.account,
             host=generation.host,
             multiplier=multiplier_of(generation),
+            card=generation.card,
         )
         judge_meter = UsageMeter(
             self._usage_ledger,
@@ -605,6 +606,7 @@ class WorldControlPlane:
             account=judge_line.account,
             host=judge_line.host,
             multiplier=multiplier_of(judge_line),
+            card=judge_line.card,
         )
         client = MeteredClient(raw_client, meter)
         judge_client = MeteredClient(raw_judge_client, judge_meter)

@@ -61,8 +61,19 @@ def _bytes(payload):
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
-_GEN = _panel_file()["generation"]
-A = _bytes(_panel_file())
+_GEN = _panel_file()["cards"]["c-gen"]
+SPARE_KEY = "sk-spare-canary-0a1b2c3d4e5f60718293"
+
+
+def _with_spare(change=None, base=None):
+    """base（默认 _panel_file()）再加一张没生效的备用卡片，token 是 SPARE_KEY。"""
+    payload = base if base is not None else _panel_file()
+    payload["cards"]["c-spare"] = {"name": "备用", **_GEN, "token": SPARE_KEY, **(change or {})}
+    return _bytes(payload)
+
+
+# A 带着一张备用卡片：密钥出口检查覆盖没生效的卡片（卡片审查 F9）。
+A = _with_spare()
 B = _bytes(_panel_file(generation={**_GEN, "model": "gen-model-b"}))
 # 账户不存在：文件能写，构建过不了。
 BROKEN = _bytes(_panel_file(generation={**_GEN, "account": "nobody"}))
@@ -166,7 +177,7 @@ class TxnTestBase(unittest.TestCase):
             self.assertEqual(registry.models.source, SOURCE_ENV)
         else:
             self.assertEqual(registry.models.source, SOURCE_PANEL)
-            self.assertEqual(registry.models.generator_model, json.loads(payload)["generation"]["model"])
+            self.assertEqual(registry.models.generator_model, json.loads(payload)["cards"]["c-gen"]["model"])
 
     def assert_unchanged(self, before, initial):
         self.assertIs(self.boundary.active_or_none(), before)
@@ -446,6 +457,127 @@ class StartupAndScriptTests(TxnTestBase):
         self.assertIn(provider_txn.digest(A), text)
         self.assertNotIn(GEN_KEY, text)
         self.assertNotIn(JUDGE_KEY, text)
+        self.assertNotIn(SPARE_KEY, text)
+
+
+# ── 备用卡片：同一个解析器，处处同一个结论（卡片审查 §五 第 1 条）────────────
+
+RETIRED = {
+    "name": "旧账户", "kind": "other", "balance": "manual", "currency": "CNY",
+    "multiplier": "1", "created_at": "2026-10-01T00:00:00+00:00",
+    "retired_at": "2026-10-20T00:00:00+00:00",
+}
+# 只有生效时才查的项：备用卡片带着它们照样合法。
+SPARE_ALLOWED = {
+    "非本机 http": {"base_url": "http://spare.example/v1"},
+    "空 token": {"token": ""},
+    "退役账户": {"account": "old"},
+    "判分 thinking": {"judge_thinking": "off"},
+}
+# 形状不对：不管生效没生效，整份配置都不通过。
+SPARE_REFUSED = {
+    "URL 夹凭据": {"base_url": f"https://u:{SPARE_KEY}@spare.example/v1"},
+    "URL 解析不了": {"base_url": "https://[::1/v1"},
+    "不是 http(s)": {"base_url": "ftp://spare.example/v1"},
+    "账户不存在": {"account": "nobody"},
+    "协议": {"api_format": "grpc"},
+    "模型为空": {"model": " "},
+    "token 不是字符串": {"token": None},
+}
+
+
+class SpareCardConsistencyTests(TxnTestBase):
+    def place(self, initial):
+        """一份新的 data/settings（含一个已退役账户）和一个还没构建过的边界。"""
+        self.case += 1
+        self.dir = self.tmp / f"case-{self.case}" / "data" / "settings"
+        self.dir.mkdir(parents=True)
+        (self.dir / ACCOUNTS_FILE).write_bytes(_bytes(_accounts_file(old=RETIRED)))
+        if initial is not None:
+            (self.dir / PROVIDER_FILE).write_bytes(initial)
+        settings_dir = patch.object(content_registry, "SETTINGS_DIR", self.dir)
+        settings_dir.start()
+        self.addCleanup(settings_dir.stop)
+        self.renew()
+
+    def renew(self):
+        """模拟重启：新边界，下一次 active() 才从磁盘构建。"""
+        self.supervisor = SessionSupervisor()
+        self.boundary = ConfigBoundary(self.supervisor, stop_timeout=1.0)
+
+    def crash_while_saving(self, candidate):
+        """保存 candidate 时进程在发布之后退出：留下 .txn / .prev，重启。
+
+        发布总是第 3 次写盘调用（.prev、.txn 之后）；candidate 可能根本切换不过去，
+        所以不先空跑一遍拿 trace。
+        """
+        with self.assertRaises(_Crash), _Faults(2, "crash_after").active():
+            provider_txn.save(self.boundary, self.dir, candidate, reason="测试")
+        self.assertTrue(self.txn.exists())
+        self.renew()
+
+    def outcomes(self, spare):
+        """这份带备用卡片的文件在每条路径上的结论：True = 接受。"""
+        from pns.interfaces.app import _verify_production_config
+        from pns.interfaces.security import DeploymentConfigError, DeploymentSettings
+        from pns.runtime.provider_settings import ProviderSettingsError, load_accounts, read_document
+
+        seen = {}
+        # 回读（读改写用的那一份）。
+        self.place(spare)
+        try:
+            read_document(self.dir, load_accounts(self.dir))
+            seen["回读"] = True
+        except ProviderSettingsError as e:
+            self.assertNotIn(SPARE_KEY, str(e))
+            seen["回读"] = False
+        # 启动：构建 + 生产启动检查。
+        self.place(spare)
+        dist = self.tmp / "dist"
+        dist.mkdir(exist_ok=True)
+        try:
+            _verify_production_config(
+                DeploymentSettings(mode="production", admin_token=ADMIN_TOKEN), dist, self.boundary.active
+            )
+            seen["启动"] = True
+        except DeploymentConfigError as e:
+            self.assertNotIn(SPARE_KEY, str(e))
+            seen["启动"] = False
+        # reload：从 A 重新加载成这份。
+        self.place(A)
+        self.boundary.active()
+        self.target.write_bytes(spare)
+        result = self.boundary.reload()
+        self.assertNotIn(SPARE_KEY, json.dumps(result.to_dict(), ensure_ascii=False))
+        seen["reload"] = result.status == "ok"
+        # 保存：从 A 保存成这份。
+        self.place(A)
+        self.boundary.active()
+        outcome = self.save(spare)
+        seen["保存"] = outcome.status == OUTCOME_OK
+        # 恢复 current：磁盘上留着这份。
+        self.place(A)
+        self.crash_while_saving(spare)
+        seen["恢复 current"] = provider_txn.resolve(
+            self.boundary, self.dir, provider_txn.KEEP_CURRENT, reason="恢复").status == OUTCOME_OK
+        # 恢复 previous：.prev 是这份。
+        self.place(spare)
+        self.crash_while_saving(A)
+        seen["恢复 previous"] = provider_txn.resolve(
+            self.boundary, self.dir, provider_txn.KEEP_PREVIOUS, reason="恢复").status == OUTCOME_OK
+        # 恢复 absent：这份文件被丢掉，结论跟它无关。
+        self.place(A)
+        self.crash_while_saving(spare)
+        self.assertEqual(provider_txn.resolve(
+            self.boundary, self.dir, provider_txn.KEEP_ABSENT, reason="恢复").status, OUTCOME_OK)
+        return seen
+
+    def test_every_path_agrees(self):
+        for cases, want in ((SPARE_ALLOWED, True), (SPARE_REFUSED, False)):
+            for name, change in cases.items():
+                with self.subTest(name):
+                    seen = self.outcomes(_with_spare(change))
+                    self.assertEqual(seen, dict.fromkeys(seen, want), seen)
 
 
 if __name__ == "__main__":

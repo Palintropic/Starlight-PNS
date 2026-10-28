@@ -1,38 +1,52 @@
-# pns/interfaces/provider_api.py — 面板改模型线路（CFG-1 §5）
+# pns/interfaces/provider_api.py — 面板改模型卡片（CFG-1 §5、卡片补丁 §3 / §9）
 #
-#     GET    /api/settings/provider           当前线路的公开投影、隔离状态
-#     PUT    /api/settings/provider           保存两条线路
-#     DELETE /api/settings/provider           恢复默认（删 provider.json，回到 .env 派生）
-#     POST   /api/settings/provider/resolve   解除隔离：选定保留哪一份
+#     GET    /api/settings/provider              卡片（公开投影）、active、展开后的两条线路、隔离状态
+#     PUT    /api/settings/provider/active       切换：生成用哪张、判分跟随还是用哪张（可覆盖模型）
+#     POST   /api/settings/provider/cards        新建卡片（只保存不启用；可顺手建同 id 的账户）
+#     PUT    /api/settings/provider/cards/{id}   编辑卡片（token 留空 = 沿用已存的）
+#     DELETE /api/settings/provider/cards/{id}   删除卡片（生成或判分正引用着就拒绝）
+#     DELETE /api/settings/provider              删掉全部卡片，回到 .env
+#     POST   /api/settings/provider/resolve      解除隔离：选定保留哪一份
 #
 #     GET    /api/settings/accounts           计费账户目录
 #     POST   /api/settings/accounts           新建账户
 #     POST   /api/settings/accounts/{id}      改显示名 / 倍率（币种、kind 不可改）
-#     POST   /api/settings/accounts/{id}/retire  退役（被线路引用时拒绝）
+#     POST   /api/settings/accounts/{id}/retire  退役（被生效卡片引用时拒绝）
 #
 # 写操作要 `accounts:manage`（只有管理员有）：换的是整台服务器的模型凭据。
 #
-# 一次保存的顺序是固定的（§5.3）：进 ProviderSwitchGate → 所有持久世界都已关闭
-# （§5.1，判据是服务的已打开句柄集合）→ 构建候选并做有效线路校验 → P7 持锁入口
-# 里的文件事务（provider_txn）。锁顺序先闸门后 P7；世界入口只拿闸门。
+# 每个卡片写操作（新建、编辑、删除、切换，不分生效没生效）的顺序都是固定的：
+# 进 ProviderSwitchGate → 所有持久世界都已关闭（判据是服务的已打开句柄集合）→
+# 读当前 provider.json（坏了就停，不当成空的接着写）→ 在内存里改 → 校验 →
+# P7 持锁入口里的文件事务（provider_txn）。"这张卡片有没有生效"在拿到闸门之后
+# 才读。锁顺序先闸门后 P7；世界入口只拿闸门。
 #
-# 对外文字都是固定措辞或线路校验的固定文案，不带请求里的值，也不带 token。
+# 对外文字都是固定措辞或校验的固定文案，不带请求里的值，也不带 token。
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from pns.runtime import content_registry, provider_txn
 from pns.runtime.provider_settings import (
+    AccountCatalog,
     AccountInUse,
-    ModelSettings,
+    CardInUse,
+    ProviderDocument,
     ProviderSettingsError,
+    EMPTY_DOCUMENT,
     accounts_in_use,
-    build_candidate,
+    candidate_payload,
     create_account,
+    delete_card,
     load_accounts,
-    read_current,
+    new_account,
+    new_card_id,
+    put_card,
+    read_document,
     retire_account,
+    set_active,
+    settings_from_document,
     update_account,
     validate_settings,
 )
@@ -85,7 +99,47 @@ def _updated_by(request: Request) -> str:
     return principal.principal_id if principal is not None else "unknown"
 
 
-def _commit(plane: WorldControlPlane, candidate: Optional[bytes], reason: str) -> Dict[str, Any]:
+def _read_for_write(settings_dir) -> tuple:
+    """(账户目录, 当前卡片文件)。文件不存在当成空的；坏了就停。"""
+    try:
+        catalog = load_accounts(settings_dir)
+    except ProviderSettingsError as e:
+        raise _error(500, "accounts_unreadable", str(e)) from None
+    try:
+        document = read_document(settings_dir, catalog)
+    except ProviderSettingsError as e:
+        raise _error(
+            409, "provider_file_broken",
+            f"当前的模型设置文件读不出来（{e}），不能在它上面接着改；请在服务器上核对后恢复",
+        ) from None
+    return catalog, (EMPTY_DOCUMENT if document is None else document)
+
+
+def _check(before: ProviderDocument, after: ProviderDocument, catalog: AccountCatalog) -> None:
+    """候选的校验。
+
+    跟加载用同一套解析和展开；改变了生效线路的操作（切换、编辑生效中的卡片、
+    删光回到 .env）还要过完整的有效线路校验 —— 包括 env 卡片要有 key。
+    """
+    env = os.environ
+    threshold = BOUNDARY.active().models.ooc_threshold
+    try:
+        old = settings_from_document(
+            None if before.is_default else before, catalog, env, ooc_threshold=threshold
+        )
+    except ProviderSettingsError:
+        old = None
+    try:
+        new = settings_from_document(
+            None if after.is_default else after, catalog, env, ooc_threshold=threshold
+        )
+        if old is None or (new.generation, new.judge) != (old.generation, old.judge):
+            validate_settings(new, catalog)
+    except ProviderSettingsError as e:
+        raise _error(400, "invalid_settings", str(e)) from None
+
+
+def _commit(candidate: Optional[bytes], reason: str) -> Dict[str, Any]:
     """在 P7 持锁入口里发布并切换；把结局翻译成 HTTP。调用方已持闸门。"""
     try:
         outcome = provider_txn.save(BOUNDARY, content_registry.SETTINGS_DIR, candidate, reason=reason)
@@ -107,53 +161,156 @@ def _commit(plane: WorldControlPlane, candidate: Optional[bytes], reason: str) -
     raise _error(503, "settings_quarantined", QUARANTINE_MESSAGE)
 
 
-@router.put("", dependencies=_admin)
-def put_provider_settings(
+def _write(
+    plane: WorldControlPlane,
+    request: Request,
+    change: Callable[[ProviderDocument, AccountCatalog], ProviderDocument],
+    reason: str,
+) -> Dict[str, Any]:
+    """一次卡片写操作：闸门 → 世界全关 → 读 → 改 → 校验 → 事务。"""
+    try:
+        with plane.switch_gate.switch():
+            _require_all_closed(plane)
+            if BOUNDARY.quarantined:
+                raise _error(503, "settings_quarantined", QUARANTINE_MESSAGE)
+            catalog, before = _read_for_write(content_registry.SETTINGS_DIR)
+            try:
+                after = change(before, catalog)
+            except KeyError:
+                raise _error(404, "card_not_found", "没有这张卡片") from None
+            except CardInUse as e:
+                raise _error(409, "card_in_use", str(e)) from None
+            except ProviderSettingsError as e:
+                raise _error(400, "invalid_settings", str(e)) from None
+            _check(before, after, catalog)
+            return _commit(candidate_payload(after, updated_by=_updated_by(request)), reason)
+    except ProviderSwitchBusy as e:
+        raise _error(409, "provider_switch_in_progress", str(e)) from None
+
+
+@router.put("/active", dependencies=_admin)
+def put_active(
     request: Request,
     payload: Dict[str, Any] = Body(...),
     plane: WorldControlPlane = Depends(get_control_plane),
 ):
-    try:
-        with plane.switch_gate.switch():
-            _require_all_closed(plane)
-            if BOUNDARY.quarantined:
-                raise _error(503, "settings_quarantined", QUARANTINE_MESSAGE)
-            settings_dir = content_registry.SETTINGS_DIR
-            try:
-                candidate, _ = build_candidate(
-                    payload,
-                    read_current(settings_dir),
-                    load_accounts(settings_dir),
-                    os.environ,
-                    updated_by=_updated_by(request),
-                    ooc_threshold=BOUNDARY.active().models.ooc_threshold,
-                )
-            except ProviderSettingsError as e:
-                raise _error(400, "invalid_settings", str(e)) from None
-            return _commit(plane, candidate, "面板保存模型线路")
-    except ProviderSwitchBusy as e:
-        raise _error(409, "provider_switch_in_progress", str(e)) from None
+    return _write(plane, request, lambda doc, _: set_active(doc, payload), "面板切换模型卡片")
+
+
+@router.put("/cards/{card_id}", dependencies=_admin)
+def put_card_route(
+    card_id: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    return _write(
+        plane, request,
+        lambda doc, catalog: put_card(doc, card_id, payload, catalog, create=False),
+        "面板编辑模型卡片",
+    )
+
+
+@router.delete("/cards/{card_id}", dependencies=_admin)
+def delete_card_route(
+    card_id: str, request: Request, plane: WorldControlPlane = Depends(get_control_plane)
+):
+    return _write(plane, request, lambda doc, _: delete_card(doc, card_id), "面板删除模型卡片")
 
 
 @router.delete("", dependencies=_admin)
-def delete_provider_settings(plane: WorldControlPlane = Depends(get_control_plane)):
+def delete_provider_settings(request: Request, plane: WorldControlPlane = Depends(get_control_plane)):
+    """删掉全部卡片、回到 .env。只想换回 .env 而留着卡片，用 PUT /active。"""
+    return _write(plane, request, lambda doc, _: EMPTY_DOCUMENT, "面板删除全部模型卡片")
+
+
+@router.post("/cards", status_code=201, dependencies=_admin)
+def post_card(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    plane: WorldControlPlane = Depends(get_control_plane),
+):
+    """新建一张卡片：只保存、不启用。id 由服务端生成。
+
+    带 `create_account`（{kind?, currency?, multiplier?}）时，在同一次闸门持有里
+    先建一个同 id 的账户、再写卡片（审查 F6）：
+
+      * 账户没发布                → 什么都没变（not_written）；
+      * 账户已发布、耐久证实不了  → 停下，不写卡片（account_not_durable + 账户 id）；
+      * 账户成功、卡片没写成      → card_failed + 账户 id（账户保留，不自动退役）；
+      * 卡片写完进了隔离          → 照常回隔离，带上账户 id。
+
+    重试由调用方明确地挂到返回的账户上（不带 create_account），服务端不自动
+    复用同名账户。
+    """
+    if not isinstance(payload, dict):
+        raise _error(400, "invalid_settings", "请求体必须是对象")
+    body = {k: v for k, v in payload.items() if k != "create_account"}
+    account_request = payload.get("create_account")
+    if account_request is not None and not isinstance(account_request, dict):
+        raise _error(400, "invalid_settings", "create_account 必须是对象")
+    settings_dir = content_registry.SETTINGS_DIR
     try:
         with plane.switch_gate.switch():
             _require_all_closed(plane)
             if BOUNDARY.quarantined:
                 raise _error(503, "settings_quarantined", QUARANTINE_MESSAGE)
-            settings_dir = content_registry.SETTINGS_DIR
-            # 恢复默认之后生效的是 env 那一套：它本身无效就不删文件（§6）。
+            catalog, before = _read_for_write(settings_dir)
+            card_id = new_card_id([*before.cards, *catalog.accounts])
+            created = None
+            if account_request is not None:
+                body["account"] = card_id
+                try:
+                    account = new_account(catalog, card_id, {
+                        "name": body.get("name"),
+                        "kind": account_request.get("kind", "other"),
+                        "currency": account_request.get("currency", "CNY"),
+                        "multiplier": account_request.get("multiplier", "1"),
+                    })
+                    # 先在假设账户已建的目录上把卡片校验完：卡片本身不合法就一个都不建。
+                    trial = AccountCatalog(accounts={**catalog.accounts, card_id: account})
+                    _check(before, put_card(before, card_id, body, trial, create=True), trial)
+                except ProviderSettingsError as e:
+                    raise _error(400, "invalid_settings", str(e)) from None
+                try:
+                    created = create_account(settings_dir, card_id, account.to_dict()).account_id
+                except NotPublished:
+                    raise _error(500, "not_written", "账户没建成，什么都没变") from None
+                except PublishedNotDurable:
+                    raise _error(
+                        500, "account_not_durable",
+                        "账户已经写入但耐久无法证实，卡片没有写；核对后把卡片挂到这个账户上重试",
+                        account=card_id,
+                    ) from None
+                except ProviderSettingsError as e:
+                    raise _error(400, "invalid_settings", str(e)) from None
+                catalog = load_accounts(settings_dir)
             try:
-                fallback = ModelSettings.from_env(
-                    os.environ, ooc_threshold=BOUNDARY.active().models.ooc_threshold
-                )
-                validate_settings(fallback, load_accounts(settings_dir))
+                after = put_card(before, card_id, body, catalog, create=True)
             except ProviderSettingsError as e:
-                raise _error(400, "env_default_invalid", f"恢复默认后 .env 那一套线路不可用：{e}") from None
-            return _commit(plane, None, "面板恢复默认模型线路")
+                raise _card_failed(created, 400, "invalid_settings", str(e)) from None
+            try:
+                _check(before, after, catalog)
+                result = _commit(candidate_payload(after, updated_by=_updated_by(request)), "面板新建模型卡片")
+            except HTTPException as e:
+                if created is None:
+                    raise
+                raise _card_failed(created, e.status_code, e.detail["category"], e.detail["message"]) from None
+            return {**result, "card": card_id, "account": created}
     except ProviderSwitchBusy as e:
         raise _error(409, "provider_switch_in_progress", str(e)) from None
+
+
+def _card_failed(account: Optional[str], status: int, category: str, message: str) -> HTTPException:
+    """账户已经建好、卡片没写成：带上账户 id，让调用方明确地挂到它上面重试。"""
+    if account is None:
+        return _error(status, category, message)
+    if category == "settings_quarantined":
+        return _error(status, category, message, account=account)
+    return _error(
+        status, "card_failed", f"账户已经建好，卡片没有写成：{message}",
+        account=account, cause=category,
+    )
 
 
 @router.post("/resolve", dependencies=_admin)

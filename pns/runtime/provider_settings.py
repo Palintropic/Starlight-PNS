@@ -1,26 +1,31 @@
 # pns/runtime/provider_settings.py — 模型线路、计费账户与凭据的边界（CFG-1）
 #
 # 两条线路：**生成**（角色开口）和**判分**（Router 验收）。每条线路是一组
-# { 账户, 协议, Base URL, 模型名, token }；判分线路可以"跟随生成"。线路挂在一个
-# 计费账户下，余额属于账户、token 属于线路。
+# { 账户, 协议, Base URL, 模型名, token }。线路挂在一个计费账户下，余额属于账户、
+# token 属于线路。
 #
-# 线路有两个来源：
+# 面板存的是**卡片**（`settings/provider.json` v2）：每张卡片是一家配好的服务商，
+# 可以存好几张；`active` 说生成用哪张、判分跟随生成还是用哪张。下游只看展开
+# 出来的两条 `Line`。
 #
-#   * env 派生 —— 面板从没存过（`settings/provider.json` 不存在）。两条线路的协议 /
-#     地址 / key 都来自 .env 那一套，模型名分别是 `GENERATOR_MODEL or MODEL` 与
-#     `EVALUATOR_MODEL or MODEL`，**判分是独立线路，不是跟随**（与改动前逐字段
-#     一致）。key 照旧在用到时才从进程环境取，不进快照。
-#   * 面板 —— `settings/provider.json`。文件存在但读不出、过不了校验、版本不认识，
-#     这份配置整体不通过（生产启动因此失败，fail-closed）。
+#   * 文件不存在 —— 没有卡片、生效的是内建 `env` 卡片：两条线路的协议 / 地址 /
+#     key 都来自 .env 那一套，模型名分别是 `GENERATOR_MODEL or MODEL` 与
+#     `EVALUATOR_MODEL or MODEL`（与改动前逐字段一致）。key 照旧在用到时才从
+#     进程环境取，不进快照。
+#   * 文件存在但读不出、过不了校验、版本不认识（含 v1），这份配置整体不通过
+#     （生产启动因此失败，fail-closed）。CFG-1 上线前没有 v1 的生产文件，不迁移。
 #
-# 账户目录 `settings/accounts.json` 是账户的唯一真相源；provider.json 只引用 id。
+# 账户目录 `settings/accounts.json` 是账户的唯一真相源；卡片只引用 id。
 #
-# 密钥边界：token 一律包在 `Secret` 里，`repr` / `str` 输出 "<redacted>"、不能被
-# pickle；只有建 client 的地方 `.reveal()`。对外的一切（API、reload 状态、审计）
-# 只走各对象的 `public_dict()`，token 只给"有没有"和够长时的末 4 位。
+# 密钥边界：provider.json 是卡片凭据的唯一权威主文件（它的 .prev、写盘临时文件
+# 和备份同样装着 token）。token 一律包在 `Secret` 里，`repr` / `str` 输出
+# "<redacted>"、不能被 pickle；只有建 client 的地方 `.reveal()`、只有落盘时
+# `Card.to_file()` 写出明文。对外的一切（API、reload 状态、审计）只走各对象的
+# `public_dict()`，token 只给"有没有"和够长时的末 4 位。
 import json
 import os
-from dataclasses import dataclass, replace
+import secrets
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -32,7 +37,7 @@ from pns.runtime.settings_files import durable_write
 
 PROVIDER_FILE = "provider.json"
 ACCOUNTS_FILE = "accounts.json"
-PROVIDER_VERSION = 1
+PROVIDER_VERSION = 2
 ACCOUNTS_VERSION = 1
 
 LINE_GENERATION = "generation"
@@ -53,6 +58,9 @@ JUDGE_THINKING = (JUDGE_THINKING_AUTO, JUDGE_THINKING_OFF, JUDGE_THINKING_PROVID
 
 # `env` 是内建账户：代表 .env 那把 key 背后的计费账户。env 派生的两条线路都归它。
 ENV_ACCOUNT = "env"
+# `env` 也是内建卡片：由 .env 派生、只读，生效时账户固定是 env。
+ENV_CARD = "env"
+CARD_ID_PREFIX = "c-"
 ACCOUNT_KINDS = (
     "env", "mimo", "deepseek", "novita", "openrouter", "stepfun", "siliconflow", "other",
 )
@@ -323,10 +331,19 @@ def create_account(settings_dir: Path, account_id: Any, fields: Mapping[str, Any
     耐久证实不了（身份照样不复用）。线路引用它之前，保存事务写 provider.txn
     时会刷同一个目录，账户目录项从那一刻起一定是耐久的。
     """
+    catalog = load_accounts(settings_dir)
+    account = new_account(catalog, account_id, fields)
+    accounts = _persisted(catalog)
+    accounts[account_id] = account
+    _write_accounts(settings_dir, accounts)
+    return account
+
+
+def new_account(catalog: AccountCatalog, account_id: Any, fields: Mapping[str, Any]) -> Account:
+    """校验一个要新建的账户，不写盘。id 不复用、`env` 是保留名。"""
     account_id = validate_account_id(account_id)
     if account_id == ENV_ACCOUNT:
         raise ProviderSettingsError("env 是保留的账户 id")
-    catalog = load_accounts(settings_dir)
     if catalog.get(account_id) is not None:
         raise ProviderSettingsError("这个账户 id 已经用过了（含已退役的），换一个")
     raw = {key: fields.get(key) for key in ("name", "kind", "currency", "multiplier")}
@@ -334,9 +351,6 @@ def create_account(settings_dir: Path, account_id: Any, fields: Mapping[str, Any
     account = _parse_account(account_id, raw)
     if account.kind == "env":
         raise ProviderSettingsError("kind 不能是 env")
-    accounts = _persisted(catalog)
-    accounts[account_id] = account
-    _write_accounts(settings_dir, accounts)
     return account
 
 
@@ -382,18 +396,6 @@ def retire_account(settings_dir: Path, account_id: str, in_use: Iterable[str]) -
     return retired
 
 
-def accounts_in_use(settings_dir: Path, active: ModelSettings) -> Tuple[str, ...]:
-    """现在被线路引用的账户：生效的快照，加上磁盘上的 provider.json（两者平时一致）。"""
-    used = {active.generation.account, active.judge.account}
-    current = read_current(settings_dir)
-    if isinstance(current, Mapping):
-        for name in LINES:
-            line = current.get(name)
-            if isinstance(line, Mapping) and isinstance(line.get("account"), str):
-                used.add(line["account"])
-    return tuple(sorted(used))
-
-
 # ── 线路 ─────────────────────────────────────────────────────────────────
 
 
@@ -410,6 +412,8 @@ class Line:
     # 写进判分 / 生成审计的 provider 标签。env 派生沿用 PROVIDER；面板线路用账户 kind。
     provider: str = ""
     judge_thinking: str = JUDGE_THINKING_AUTO
+    # 这条线路出自哪张卡片（`env` = .env 派生）。跟随时判分线路记的是生成那张。
+    card: str = ""
 
     @property
     def host(self) -> str:
@@ -418,9 +422,10 @@ class Line:
 
     def public_dict(self) -> Dict[str, Any]:
         return {
+            "card": self.card,
             "account": self.account,
             "api_format": self.api_format,
-            "base_url": self.base_url,
+            "base_url": display_url(self.base_url),
             "model": self.model,
             "has_token": bool(self.token),
             "token_hint": self.token.hint(),
@@ -428,13 +433,412 @@ class Line:
         }
 
 
+# ── 卡片（provider.json v2）──────────────────────────────────────────────
+#
+# 一张卡片 = 一家配好的服务商：显示名、计费账户、协议、Base URL、模型、token、
+# 判分 thinking。`active` 说现在生成用哪张、判分跟随还是用哪张（可覆盖模型名）。
+# `env` 是内建卡片：由 .env 派生、只读、不在文件里。文件不存在 ⇔ 没有卡片、
+# 生效的是 env。
+#
+# 校验分两层：
+#   * 形状（每张卡片都过，生效没生效都一样）：id、字段类型、显示名和模型非空、
+#     协议、judge_thinking、账户在目录里、URL 能解析且有主机、只用 http(s)、
+#     不夹用户名密码；
+#   * 有效线路（只对生效的那一两张，§6）：https（本机例外）、token 非空、账户
+#     没退役。
+# 保存、回读、启动、reload、恢复都走 parse_document() + expand() 这一条路。
+
+
+@dataclass(frozen=True)
+class Card:
+    card_id: str
+    name: str
+    account: str
+    api_format: str
+    base_url: str
+    model: str
+    token: Secret
+    judge_thinking: str = JUDGE_THINKING_AUTO
+    created_at: str = ""
+
+    def to_file(self) -> Dict[str, Any]:
+        """落盘形状：唯一会写出 token 明文的地方。"""
+        payload = {
+            "name": self.name,
+            "account": self.account,
+            "api_format": self.api_format,
+            "base_url": self.base_url,
+            "model": self.model,
+            "token": self.token.reveal(),
+            "judge_thinking": self.judge_thinking,
+        }
+        if self.created_at:
+            payload["created_at"] = self.created_at
+        return payload
+
+    def public_dict(self) -> Dict[str, Any]:
+        """对外投影：逐个字段列出，token 只给有没有和末 4 位。"""
+        return {
+            "id": self.card_id,
+            "name": self.name,
+            "account": self.account,
+            "api_format": self.api_format,
+            "base_url": display_url(self.base_url),
+            "model": self.model,
+            "has_token": bool(self.token),
+            "token_hint": self.token.hint(),
+            "judge_thinking": self.judge_thinking,
+            "created_at": self.created_at,
+            "builtin": False,
+        }
+
+
+@dataclass(frozen=True)
+class JudgeChoice:
+    """判分用什么：跟随生成，或者指定一张卡片（可覆盖模型名）。两者互斥。"""
+
+    follow: bool
+    card: Optional[str] = None
+    model: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        if self.follow:
+            return {"follow": LINE_GENERATION}
+        payload: Dict[str, Any] = {"card": self.card}
+        if self.model is not None:
+            payload["model"] = self.model
+        return payload
+
+
+@dataclass(frozen=True)
+class Active:
+    generation: str
+    judge: JudgeChoice
+
+    def cards(self) -> Tuple[str, ...]:
+        """实际被引用的卡片 id（含 env）。跟随时判分引用的就是生成那张。"""
+        used = [self.generation]
+        if not self.judge.follow and self.judge.card not in used:
+            used.append(self.judge.card)
+        return tuple(used)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"generation": self.generation, "judge": self.judge.to_dict()}
+
+
+DEFAULT_ACTIVE = Active(generation=ENV_CARD, judge=JudgeChoice(follow=True))
+
+
+@dataclass(frozen=True)
+class ProviderDocument:
+    """provider.json 解析好的内容（只过了形状校验）。"""
+
+    cards: Mapping[str, Card]
+    active: Active
+
+    @property
+    def is_default(self) -> bool:
+        """没有卡片、生效的是 env 且判分跟随 —— 等于文件不存在。"""
+        return not self.cards and self.active == DEFAULT_ACTIVE
+
+    def to_file(self, *, updated_by: str) -> Dict[str, Any]:
+        return {
+            "version": PROVIDER_VERSION,
+            "cards": {cid: card.to_file() for cid, card in self.cards.items()},
+            "active": self.active.to_dict(),
+            "updated_at": _now(),
+            "updated_by": updated_by,
+        }
+
+
+EMPTY_DOCUMENT = ProviderDocument(cards={}, active=DEFAULT_ACTIVE)
+
+# 解析不了或夹着凭据的地址在公开投影里一律显示成这个，不回显原文。
+URL_PLACEHOLDER = "（地址无法显示）"
+
+
+def display_url(url: str) -> str:
+    parts = _split_url(url)
+    if parts is None or parts.username or parts.password:
+        return URL_PLACEHOLDER
+    return url
+
+
+def validate_card_id(card_id: Any) -> str:
+    """卡片 id 规则同账户 id；`env` 是保留名。"""
+    if (
+        not isinstance(card_id, str)
+        or not 1 <= len(card_id) <= 64
+        or not all(c.isascii() and (c.isalnum() or c in "-_") for c in card_id)
+    ):
+        raise ProviderSettingsError("卡片 id 只能用 1–64 个字母、数字、- 和 _")
+    if card_id == ENV_CARD:
+        raise ProviderSettingsError("env 是内建卡片，不能用作卡片 id")
+    return card_id
+
+
+def new_card_id(taken: Iterable[str]) -> str:
+    """服务端生成卡片 id：`c-` 加 8 位随机十六进制，避开已有的卡片和账户 id。"""
+    taken = set(taken)
+    while True:
+        card_id = CARD_ID_PREFIX + secrets.token_hex(4)
+        if card_id not in taken:
+            return card_id
+
+
+def _card_label(card_id: str) -> str:
+    return f"卡片 {card_id}"
+
+
+def _parse_card(card_id: str, raw: Any, catalog: AccountCatalog) -> Card:
+    """一张卡片的形状校验（不看它生效没生效）。"""
+    validate_card_id(card_id)
+    label = _card_label(card_id)
+    if not isinstance(raw, dict):
+        raise ProviderSettingsError(f"{label} 必须是对象")
+    fields = {}
+    for key in ("name", "account", "api_format", "base_url", "model", "token"):
+        value = raw.get(key)
+        if not isinstance(value, str):
+            raise ProviderSettingsError(f"{label} 缺少字段 {key}")
+        fields[key] = value
+    if not fields["name"].strip():
+        raise ProviderSettingsError(f"{label} 的显示名不能为空")
+    if not fields["model"].strip():
+        raise ProviderSettingsError(f"{label} 的模型名不能为空")
+    if fields["api_format"] not in API_FORMATS:
+        raise ProviderSettingsError(f"{label} 的协议必须是 {'/'.join(API_FORMATS)} 之一")
+    _check_url_shape(fields["base_url"], label)
+    if catalog.get(fields["account"]) is None:
+        raise ProviderSettingsError(f"{label} 引用的账户不存在")
+    created_at = raw.get("created_at", "")
+    if not isinstance(created_at, str):
+        raise ProviderSettingsError(f"{label} 的 created_at 不合法")
+    return Card(
+        card_id=card_id,
+        name=fields["name"],
+        account=fields["account"],
+        api_format=fields["api_format"],
+        base_url=fields["base_url"],
+        model=fields["model"],
+        token=Secret(fields["token"]),
+        judge_thinking=_judge_thinking(raw.get("judge_thinking"), label),
+        created_at=created_at,
+    )
+
+
+def _check_url_shape(url: str, label: str) -> None:
+    parts = _split_url(url)
+    if parts is None or not parts.hostname or parts.scheme not in ("http", "https"):
+        raise ProviderSettingsError(f"{label} 的 Base URL 不合法")
+    if parts.username or parts.password:
+        # URL 里夹凭据会原样出现在公开投影里。
+        raise ProviderSettingsError(f"{label} 的 Base URL 不能带用户名或密码")
+
+
+def _parse_active(raw: Any, cards: Mapping[str, Card]) -> Active:
+    if not isinstance(raw, dict) or set(raw) != {"generation", "judge"}:
+        raise ProviderSettingsError("active 必须是 { generation, judge }")
+    generation = raw["generation"]
+    if not isinstance(generation, str) or (generation != ENV_CARD and generation not in cards):
+        raise ProviderSettingsError("生成用的卡片不存在")
+    judge = raw["judge"]
+    if not isinstance(judge, dict):
+        raise ProviderSettingsError("判分设置必须是对象")
+    if "follow" in judge:
+        # 跟随时用生成卡片的全部字段，不许再带 card 或 model。
+        if set(judge) != {"follow"} or judge["follow"] != LINE_GENERATION:
+            raise ProviderSettingsError("判分跟随时只能写 { follow: generation }，不能再带卡片或模型")
+        return Active(generation=generation, judge=JudgeChoice(follow=True))
+    if not set(judge) <= {"card", "model"} or "card" not in judge:
+        raise ProviderSettingsError("判分要么跟随生成，要么指定一张卡片")
+    card = judge["card"]
+    if not isinstance(card, str) or (card != ENV_CARD and card not in cards):
+        raise ProviderSettingsError("判分用的卡片不存在")
+    model = judge.get("model")
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise ProviderSettingsError("判分的覆盖模型名不能为空")
+    return Active(generation=generation, judge=JudgeChoice(follow=False, card=card, model=model))
+
+
+def parse_document(raw: Mapping[str, Any], catalog: AccountCatalog) -> ProviderDocument:
+    """provider.json 的内容 → 卡片和 active（形状校验）。版本不认识一律拒绝。"""
+    if raw.get("version") != PROVIDER_VERSION:
+        raise ProviderSettingsError("线路配置的版本不认识")
+    entries = raw.get("cards")
+    if not isinstance(entries, dict):
+        raise ProviderSettingsError("线路配置缺少 cards")
+    cards = {card_id: _parse_card(card_id, entry, catalog) for card_id, entry in entries.items()}
+    return ProviderDocument(cards=cards, active=_parse_active(raw.get("active"), cards))
+
+
+def read_document(settings_dir: Path, catalog: AccountCatalog) -> Optional[ProviderDocument]:
+    """读改写用：不存在 → None；存在但读不出或过不了形状校验 → 抛错。
+
+    坏文件不能当成空目录接着写（会把里面的卡片连同 token 一起抹掉），要走
+    明确的恢复流程。
+    """
+    raw = _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
+    return None if raw is None else parse_document(raw, catalog)
+
+
+def env_settings(env: Mapping[str, str]) -> Tuple[str, str, str, str]:
+    """env 那一套：(协议, Base URL, key 变量名, provider 标签)。校验同改动前。"""
+    api_format = env.get("API_FORMAT", "anthropic")
+    if api_format not in API_FORMATS:
+        raise ProviderSettingsError(
+            f"API_FORMAT 必须是 {'/'.join(API_FORMATS)} 之一"
+        )
+    base_url = env.get("BASE_URL", "https://api.xiaomimimo.com/anthropic")
+    if not base_url:
+        raise ProviderSettingsError("BASE_URL 不能为空")
+    key_name = env.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
+    if not key_name:
+        raise ProviderSettingsError("PNS_API_KEY_NAME 不能为空")
+    return api_format, base_url, key_name, env.get("PROVIDER", "")
+
+
+def _env_models(env: Mapping[str, str]) -> Tuple[str, str]:
+    """env 卡片的 (生成模型, 判分模型)。"""
+    model = env.get("MODEL", "mimo-v2.6-pro")
+    return env.get("GENERATOR_MODEL") or model, env.get("EVALUATOR_MODEL") or model
+
+
+def _env_line(name: str, env: Mapping[str, str], model: str) -> Line:
+    api_format, base_url, key_name, provider = env_settings(env)
+    return Line(
+        name=name, account=ENV_ACCOUNT, api_format=api_format, base_url=base_url,
+        model=model, token=EnvSecret(key_name), provider=provider, card=ENV_CARD,
+    )
+
+
+def env_lines(env: Mapping[str, str]) -> Tuple[Line, Line]:
+    """文件不存在时的两条线路。判分模型取 EVALUATOR_MODEL（与改动前逐字段一致）。"""
+    generation_model, judge_model = _env_models(env)
+    return (
+        _env_line(LINE_GENERATION, env, generation_model),
+        _env_line(LINE_JUDGE, env, judge_model),
+    )
+
+
+def env_card_view(env: Mapping[str, str]) -> Dict[str, Any]:
+    """内建 env 卡片的公开投影。env 本身坏了也照样给出来，只是标成不可用。"""
+    view: Dict[str, Any] = {
+        "id": ENV_CARD, "name": ".env", "account": ENV_ACCOUNT, "builtin": True,
+    }
+    try:
+        api_format, base_url, key_name, _ = env_settings(env)
+    except ProviderSettingsError as e:
+        return {**view, "available": False, "problem": str(e)}
+    generation_model, judge_model = _env_models(env)
+    token = EnvSecret(key_name)
+    return {
+        **view,
+        "available": True,
+        "api_format": api_format,
+        "base_url": display_url(base_url),
+        "model": generation_model,
+        "judge_model": judge_model,
+        "has_token": bool(token),
+        "token_hint": token.hint(),
+        "judge_thinking": JUDGE_THINKING_AUTO,
+    }
+
+
+def env_is_complete(env: Mapping[str, str]) -> bool:
+    """旧镜像在生产上能不能只靠这套 env 起来（它只检查协议合法和 key 非空）。"""
+    try:
+        _, _, key_name, _ = env_settings(env)
+    except ProviderSettingsError:
+        return False
+    return bool(env.get(key_name))
+
+
+def _card_line(name: str, card: Card, catalog: AccountCatalog, model: str) -> Line:
+    account = catalog.get(card.account)
+    return Line(
+        name=name, account=card.account, api_format=card.api_format,
+        base_url=card.base_url, model=model, token=card.token,
+        provider=account.kind if account is not None else "",
+        judge_thinking=card.judge_thinking, card=card.card_id,
+    )
+
+
+def expand(document: ProviderDocument, catalog: AccountCatalog, env: Mapping[str, str]) -> Tuple[Line, Line]:
+    """生效的卡片 → 两条线路。判分模型的取法（审查 F3）：
+
+      * 判分跟随、生成用普通卡片 → 生成卡片的模型；
+      * 判分跟随、生成用 env      → EVALUATOR_MODEL or MODEL（特例：与文件不存在
+        时一致，env 卡片本来就分开配生成和判分模型）；
+      * 判分指定 env、不覆盖      → EVALUATOR_MODEL or MODEL；
+      * 判分指定卡片、不覆盖      → 那张卡片的模型；
+      * 指定了覆盖                → 覆盖的模型。
+
+    只在引用了 env 时才读 env：没选 env 时坏掉的 env 不否决合法的卡片。
+    """
+    active = document.active
+
+    def line_of(name: str, card_id: str, model: Optional[str]) -> Line:
+        if card_id == ENV_CARD:
+            generation_model, judge_model = _env_models(env)
+            default = generation_model if name == LINE_GENERATION else judge_model
+            return _env_line(name, env, model or default)
+        card = document.cards[card_id]
+        return _card_line(name, card, catalog, model or card.model)
+
+    generation = line_of(LINE_GENERATION, active.generation, None)
+    if active.judge.follow:
+        judge = line_of(LINE_JUDGE, active.generation, None)
+    else:
+        judge = line_of(LINE_JUDGE, active.judge.card, active.judge.model)
+    return generation, judge
+
+
+def _judge_thinking(raw: Any, label: str) -> str:
+    """可选字段，缺省是 auto。"""
+    if raw is None:
+        return JUDGE_THINKING_AUTO
+    if raw not in JUDGE_THINKING:
+        raise ProviderSettingsError(f"{label} 的 judge_thinking 只能是 {'/'.join(JUDGE_THINKING)}")
+    return raw
+
+
+def validate_line(line: Line, catalog: AccountCatalog, *, require_token: bool = True) -> None:
+    """§6 有效线路校验（只对生效的线路）。启动、保存、恢复共用。"""
+    label = "生成线路" if line.name == LINE_GENERATION else "判分线路"
+    if line.api_format not in API_FORMATS:
+        raise ProviderSettingsError(f"{label} 的协议必须是 {'/'.join(API_FORMATS)} 之一")
+    parts = _split_url(line.base_url)
+    if parts is None or not parts.hostname:
+        raise ProviderSettingsError(f"{label} 的 Base URL 不合法")
+    if parts.scheme != "https" and not (
+        parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS
+    ):
+        raise ProviderSettingsError(f"{label} 的 Base URL 必须是 https（本机地址例外）")
+    if parts.username or parts.password:
+        raise ProviderSettingsError(f"{label} 的 Base URL 不能带用户名或密码")
+    if not line.model.strip():
+        raise ProviderSettingsError(f"{label} 的模型名不能为空")
+    if require_token and not line.token:
+        raise ProviderSettingsError(f"{label} 没有可用的 token")
+    account = catalog.get(line.account)
+    if account is None:
+        raise ProviderSettingsError(f"{label} 引用的账户不存在")
+    if account.retired:
+        raise ProviderSettingsError(f"{label} 引用的账户已经退役")
+
+
+def validate_settings(settings: "ModelSettings", catalog: AccountCatalog) -> None:
+    validate_line(settings.generation, catalog)
+    validate_line(settings.judge, catalog)
+
+
 @dataclass(frozen=True)
 class ModelSettings:
-    """一份配置快照里的模型设定：两条解析好的线路 + 判分阈值。"""
+    """一份配置快照里的模型设定：两条解析好的线路 + 判分阈值，以及它们出自的卡片。"""
 
     generation: Line
     judge: Line
-    judge_follows: bool
     source: str
     ooc_threshold: float
     # env 那一套凭据（协议 / 地址 / key / 模型）在当前进程环境里是否完整。
@@ -443,16 +847,27 @@ class ModelSettings:
     # env 那把 key 的变量名（PNS_API_KEY_NAME）。env 派生线路从它取 key；面板
     # 线路不用它，但回滚预检要知道旧镜像会去找哪个变量。
     env_key_name: str = "MIMO_API_KEY"
+    document: ProviderDocument = EMPTY_DOCUMENT
+    # 内建 env 卡片的公开投影（构建时算好；里面没有 key，只有有没有和末 4 位）。
+    env_card: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str], *, ooc_threshold: float = 5.0) -> "ModelSettings":
         """只看 env 的派生结果（等于面板从没存过时的设定）。"""
         generation, judge = env_lines(env)
         return cls(
-            generation=generation, judge=judge, judge_follows=False, source=SOURCE_ENV,
+            generation=generation, judge=judge, source=SOURCE_ENV,
             ooc_threshold=ooc_threshold, env_complete=env_is_complete(env),
-            env_key_name=env_settings(env)[2],
+            env_key_name=env_settings(env)[2], env_card=env_card_view(env),
         )
+
+    @property
+    def active(self) -> Active:
+        return self.document.active
+
+    @property
+    def judge_follows(self) -> bool:
+        return self.active.judge.follow
 
     @property
     def generator_model(self) -> str:
@@ -472,11 +887,11 @@ class ModelSettings:
     def public_dict(self) -> Dict[str, Any]:
         return {
             "source": self.source,
+            "cards": [card.public_dict() for card in _ordered(self.document.cards)],
+            "env_card": dict(self.env_card),
+            "active": self.active.to_dict(),
             "generation": self.generation.public_dict(),
-            "judge": {
-                "follow": LINE_GENERATION if self.judge_follows else None,
-                **self.judge.public_dict(),
-            },
+            "judge": self.judge.public_dict(),
             "generator_model": self.generator_model,
             "evaluator_model": self.evaluator_model,
             "ooc_threshold": self.ooc_threshold,
@@ -484,6 +899,149 @@ class ModelSettings:
         }
 
     to_dict = public_dict
+
+
+def _ordered(cards: Mapping[str, Card]) -> Iterable[Card]:
+    return sorted(cards.values(), key=lambda card: (card.created_at, card.card_id))
+
+
+def settings_from_document(
+    document: Optional[ProviderDocument],
+    catalog: AccountCatalog,
+    env: Mapping[str, str],
+    *,
+    ooc_threshold: float,
+) -> ModelSettings:
+    """文件内容 → 校验过的模型设定。读文件和保存前校验候选共用。
+
+    文件不存在（None）只做改动前那几项 env 检查 —— key 缺不缺由生产启动检查和
+    建世界的地方分别把关，开发环境没有 key 也要能起来。文件存在时对生效的线路
+    做完整的有效线路校验。
+    """
+    if document is None:
+        return ModelSettings.from_env(env, ooc_threshold=ooc_threshold)
+    generation, judge = expand(document, catalog, env)
+    settings = ModelSettings(
+        generation=generation, judge=judge, source=SOURCE_PANEL, ooc_threshold=ooc_threshold,
+        # 旧 env 不完整只影响能不能回滚，不否决当前合法的卡片。
+        env_complete=env_is_complete(env),
+        env_key_name=env.get("PNS_API_KEY_NAME", "MIMO_API_KEY"),
+        document=document,
+        env_card=env_card_view(env),
+    )
+    for line in (generation, judge):
+        # 出自 env 卡片的线路跟文件不存在时一样，只做 env_settings 那几项检查；
+        # 卡片线路的 token 只可能来自这个文件，在这里就拦。
+        if line.card != ENV_CARD:
+            validate_line(line, catalog)
+    return settings
+
+
+def load_model_settings(
+    settings_dir: Path, env: Mapping[str, str], *, ooc_threshold: float
+) -> Tuple[ModelSettings, AccountCatalog]:
+    """读出这份配置的模型设定。面板文件存在就以它为准，否则 env 派生。"""
+    catalog = load_accounts(settings_dir)
+    document = read_document(settings_dir, catalog)
+    return settings_from_document(document, catalog, env, ooc_threshold=ooc_threshold), catalog
+
+
+def candidate_payload(document: ProviderDocument, *, updated_by: str) -> Optional[bytes]:
+    """要发布的文件内容；等于默认（没有卡片、生效 env）时是 None —— 删掉文件。"""
+    if document.is_default:
+        return None
+    return _dump(document.to_file(updated_by=updated_by))
+
+
+# ── 卡片操作（读当前文件 → 内存里改 → 整份写回，由接口层放进保存事务）────
+
+
+_CARD_FIELDS = ("name", "account", "api_format", "base_url", "model")
+
+
+def set_active(document: ProviderDocument, request: Any) -> ProviderDocument:
+    """切换：只改 active，卡片原样。"""
+    if not isinstance(request, Mapping):
+        raise ProviderSettingsError("请求体必须是对象")
+    active = _parse_active(dict(request), document.cards)
+    return replace(document, active=active)
+
+
+def put_card(
+    document: ProviderDocument,
+    card_id: str,
+    request: Any,
+    catalog: AccountCatalog,
+    *,
+    create: bool,
+) -> ProviderDocument:
+    """新建或编辑一张卡片。token 留空 = 沿用这张卡片已存的；新建时必填。
+
+    新建或改挂账户时，不许指向已退役的账户；账户没变的编辑照收（备用卡片可以
+    留着后来被退役的账户，启用时才拒绝）。
+    """
+    validate_card_id(card_id)
+    if not isinstance(request, Mapping):
+        raise ProviderSettingsError("请求体必须是对象")
+    unknown = set(request) - set(_CARD_FIELDS) - {"token", "judge_thinking"}
+    if unknown:
+        raise ProviderSettingsError("请求里有不认识的字段")
+    current = document.cards.get(card_id)
+    if create and current is not None:
+        raise ProviderSettingsError("这张卡片已经存在")
+    if not create and current is None:
+        raise KeyError(card_id)
+    raw: Dict[str, Any] = {key: request.get(key) for key in _CARD_FIELDS}
+    token = request.get("token")
+    if token is None:
+        token = ""
+    if not isinstance(token, str):
+        raise ProviderSettingsError("token 必须是字符串")
+    if not token and current is not None:
+        token = current.token.reveal()
+    if not token:
+        raise ProviderSettingsError("新建卡片需要填写 token")
+    raw["token"] = token
+    raw["judge_thinking"] = request.get("judge_thinking")
+    raw["created_at"] = current.created_at if current is not None else _now()
+    card = _parse_card(card_id, raw, catalog)
+    if current is None or current.account != card.account:
+        if catalog.get(card.account).retired:
+            raise ProviderSettingsError("不能挂到已退役的账户上")
+    cards = dict(document.cards)
+    cards[card_id] = card
+    return replace(document, cards=cards)
+
+
+class CardInUse(ProviderSettingsError):
+    """卡片正被生成或判分引用，不能删除。"""
+
+
+def delete_card(document: ProviderDocument, card_id: str) -> ProviderDocument:
+    if card_id == ENV_CARD:
+        raise ProviderSettingsError("env 是内建卡片，不能删除")
+    if card_id not in document.cards:
+        raise KeyError(card_id)
+    if card_id in document.active.cards():
+        raise CardInUse("这张卡片正在被生成或判分使用，先切到别的卡片再删除")
+    cards = dict(document.cards)
+    del cards[card_id]
+    return replace(document, cards=cards)
+
+
+def accounts_in_use(settings_dir: Path, active: ModelSettings) -> Tuple[str, ...]:
+    """现在被线路**实际引用**的账户：生效快照的两条线路，加上磁盘上 provider.json
+    生效的卡片（两者平时一致）。备用卡片挂着的账户不算占用。
+
+    磁盘文件坏了就抛错：这时说不清哪些账户被引用，不能放行退役。
+    """
+    used = {active.generation.account, active.judge.account}
+    catalog = load_accounts(settings_dir)
+    document = read_document(settings_dir, catalog)
+    if document is not None:
+        for card_id in document.active.cards():
+            used.add(ENV_ACCOUNT if card_id == ENV_CARD else document.cards[card_id].account)
+    return tuple(sorted(used))
 
 
 def _split_url(url: str) -> Optional[SplitResult]:
@@ -496,254 +1054,6 @@ def _split_url(url: str) -> Optional[SplitResult]:
     except ValueError:
         return None
     return parts
-
-
-def env_settings(env: Mapping[str, str]) -> Tuple[str, str, str, str]:
-    """env 那一套：(协议, Base URL, key 变量名, provider 标签)。校验同改动前。"""
-    api_format = env.get("API_FORMAT", "anthropic")
-    if api_format not in API_FORMATS:
-        raise ProviderSettingsError(
-            f"API_FORMAT 必须是 {'/'.join(API_FORMATS)} 之一"
-        )
-    base_url = env.get("BASE_URL", "https://api.xiaomimimo.com/anthropic")
-    if not base_url:
-        raise ProviderSettingsError("BASE_URL 不能为空")
-    key_name = env.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
-    if not key_name:
-        raise ProviderSettingsError("PNS_API_KEY_NAME 不能为空")
-    return api_format, base_url, key_name, env.get("PROVIDER", "")
-
-
-def env_lines(env: Mapping[str, str]) -> Tuple[Line, Line]:
-    """文件不存在时的两条线路。判分是**独立**线路，模型取 EVALUATOR_MODEL。"""
-    api_format, base_url, key_name, provider = env_settings(env)
-    model = env.get("MODEL", "mimo-v2.6-pro")
-    token = EnvSecret(key_name)
-
-    def line(name: str, line_model: str) -> Line:
-        return Line(
-            name=name, account=ENV_ACCOUNT, api_format=api_format,
-            base_url=base_url, model=line_model, token=token, provider=provider,
-        )
-
-    return (
-        line(LINE_GENERATION, env.get("GENERATOR_MODEL") or model),
-        line(LINE_JUDGE, env.get("EVALUATOR_MODEL") or model),
-    )
-
-
-def env_is_complete(env: Mapping[str, str]) -> bool:
-    """旧镜像在生产上能不能只靠这套 env 起来（它只检查协议合法和 key 非空）。"""
-    try:
-        _, _, key_name, _ = env_settings(env)
-    except ProviderSettingsError:
-        return False
-    return bool(env.get(key_name))
-
-
-def _parse_line(name: str, raw: Any, catalog: AccountCatalog) -> Line:
-    label = "生成线路" if name == LINE_GENERATION else "判分线路"
-    if not isinstance(raw, dict):
-        raise ProviderSettingsError(f"{label} 必须是对象")
-    fields = {}
-    for key in ("account", "api_format", "base_url", "model", "token"):
-        value = raw.get(key)
-        if not isinstance(value, str):
-            raise ProviderSettingsError(f"{label} 缺少字段 {key}")
-        fields[key] = value
-    account = catalog.get(fields["account"])
-    return Line(
-        name=name,
-        account=fields["account"],
-        api_format=fields["api_format"],
-        base_url=fields["base_url"],
-        model=fields["model"],
-        token=Secret(fields["token"]),
-        provider=account.kind if account is not None else "",
-        judge_thinking=_judge_thinking(raw.get("judge_thinking"), label),
-    )
-
-
-def _judge_thinking(raw: Any, label: str) -> str:
-    """可选字段，缺省是 auto（不带这个字段的文件行为不变）。"""
-    if raw is None:
-        return JUDGE_THINKING_AUTO
-    if raw not in JUDGE_THINKING:
-        raise ProviderSettingsError(f"{label} 的 judge_thinking 只能是 {'/'.join(JUDGE_THINKING)}")
-    return raw
-
-
-def validate_line(line: Line, catalog: AccountCatalog, *, require_token: bool = True) -> None:
-    """§6 有效线路校验。启动、PUT、DELETE 共用。"""
-    label = "生成线路" if line.name == LINE_GENERATION else "判分线路"
-    if line.api_format not in API_FORMATS:
-        raise ProviderSettingsError(f"{label} 的协议必须是 {'/'.join(API_FORMATS)} 之一")
-    parts = _split_url(line.base_url)
-    if parts is None or not parts.hostname:
-        raise ProviderSettingsError(f"{label} 的 Base URL 不合法")
-    if parts.scheme != "https" and not (
-        parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS
-    ):
-        raise ProviderSettingsError(f"{label} 的 Base URL 必须是 https（本机地址例外）")
-    if parts.username or parts.password:
-        # URL 里夹凭据会原样出现在公开投影里。
-        raise ProviderSettingsError(f"{label} 的 Base URL 不能带用户名或密码")
-    if not line.model.strip():
-        raise ProviderSettingsError(f"{label} 的模型名不能为空")
-    if require_token and not line.token:
-        raise ProviderSettingsError(f"{label} 没有可用的 token")
-    account = catalog.get(line.account)
-    if account is None:
-        raise ProviderSettingsError(f"{label} 引用的账户不存在")
-    if account.retired:
-        raise ProviderSettingsError(f"{label} 引用的账户已经退役")
-
-
-def validate_settings(settings: ModelSettings, catalog: AccountCatalog) -> None:
-    validate_line(settings.generation, catalog)
-    validate_line(settings.judge, catalog)
-
-
-def load_model_settings(
-    settings_dir: Path, env: Mapping[str, str], *, ooc_threshold: float
-) -> Tuple[ModelSettings, AccountCatalog]:
-    """读出这份配置的模型设定。面板文件存在就以它为准，否则 env 派生。
-
-    面板文件做完整的结构校验（坏文件 = 配置不通过）；token 是否为空也在这里
-    拦，因为面板线路的 token 只可能来自这个文件。env 派生只做改动前那几项
-    检查 —— key 缺不缺由生产启动检查和建世界的地方分别把关，开发环境没有 key
-    也要能起来。面板文件存在时不校验 env（它只决定 env_complete）。
-    """
-    catalog = load_accounts(settings_dir)
-    raw = _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
-    if raw is None:
-        return ModelSettings.from_env(env, ooc_threshold=ooc_threshold), catalog
-    return settings_from_raw(raw, catalog, env, ooc_threshold=ooc_threshold), catalog
-
-
-def settings_from_raw(
-    raw: Mapping[str, Any], catalog: AccountCatalog, env: Mapping[str, str], *, ooc_threshold: float
-) -> ModelSettings:
-    """面板文件内容 → 校验过的模型设定。读文件和保存前校验候选共用。"""
-    if raw.get("version") != PROVIDER_VERSION:
-        raise ProviderSettingsError("线路配置的版本不认识")
-    generation = _parse_line(LINE_GENERATION, raw.get("generation"), catalog)
-    judge_raw = raw.get("judge")
-    follows = isinstance(judge_raw, dict) and set(judge_raw) == {"follow"}
-    if follows:
-        if judge_raw["follow"] != LINE_GENERATION:
-            raise ProviderSettingsError("判分线路只能跟随生成线路")
-        judge = Line(
-            name=LINE_JUDGE, account=generation.account, api_format=generation.api_format,
-            base_url=generation.base_url, model=generation.model, token=generation.token,
-            provider=generation.provider, judge_thinking=generation.judge_thinking,
-        )
-    else:
-        judge = _parse_line(LINE_JUDGE, judge_raw, catalog)
-    settings = ModelSettings(
-        generation=generation, judge=judge, judge_follows=follows,
-        source=SOURCE_PANEL, ooc_threshold=ooc_threshold,
-        # 旧 env 不完整只影响能不能回滚，不否决当前合法的面板线路。
-        env_complete=env_is_complete(env),
-        env_key_name=env.get("PNS_API_KEY_NAME", "MIMO_API_KEY"),
-    )
-    validate_settings(settings, catalog)
-    return settings
-
-
-_LINE_FIELDS = ("account", "api_format", "base_url", "model")
-
-
-def _stored_token(raw: Optional[Mapping[str, Any]], name: str) -> str:
-    """当前面板文件里这条线路**自己**存的 token；没有、跟随、文件坏了都是空。"""
-    line = raw.get(name) if isinstance(raw, Mapping) else None
-    if not isinstance(line, Mapping) or set(line) == {"follow"}:
-        return ""
-    token = line.get("token")
-    return token if isinstance(token, str) else ""
-
-
-def _judge_followed(raw: Optional[Mapping[str, Any]]) -> bool:
-    line = raw.get(LINE_JUDGE) if isinstance(raw, Mapping) else None
-    return isinstance(line, Mapping) and set(line) == {"follow"}
-
-
-def build_candidate(
-    request: Mapping[str, Any],
-    current: Optional[Mapping[str, Any]],
-    catalog: AccountCatalog,
-    env: Mapping[str, str],
-    *,
-    updated_by: str,
-    ooc_threshold: float,
-) -> Tuple[bytes, ModelSettings]:
-    """一次 PUT 的请求体 → 要发布的文件内容和它解析出的设定（CFG-1 §4.2、§6）。
-
-    空 token 的解析：本线路已存的 → 判分之前跟随时用生成线路（本次保存后的）
-    的 → 否则拒绝。从 env 派生第一次切到面板时 token 必填。current 是当前面板
-    文件的内容（不存在或读不出来时为 None）。错误都是固定措辞，不带输入值。
-    """
-    if not isinstance(request, Mapping):
-        raise ProviderSettingsError("请求体必须是对象")
-
-    def line_fields(name: str, raw: Any) -> Dict[str, str]:
-        label = "生成线路" if name == LINE_GENERATION else "判分线路"
-        if not isinstance(raw, Mapping):
-            raise ProviderSettingsError(f"{label} 必须是对象")
-        fields = {}
-        for key in _LINE_FIELDS:
-            value = raw.get(key)
-            if not isinstance(value, str):
-                raise ProviderSettingsError(f"{label} 缺少字段 {key}")
-            fields[key] = value
-        token = raw.get("token", "")
-        if token is None:
-            token = ""
-        if not isinstance(token, str):
-            raise ProviderSettingsError(f"{label} 的 token 必须是字符串")
-        fields["token"] = token
-        if raw.get("judge_thinking") is not None:
-            fields["judge_thinking"] = _judge_thinking(raw["judge_thinking"], label)
-        return fields
-
-    generation = line_fields(LINE_GENERATION, request.get(LINE_GENERATION))
-    if not generation["token"]:
-        generation["token"] = _stored_token(current, LINE_GENERATION)
-    if not generation["token"]:
-        raise ProviderSettingsError("生成线路需要填写 token")
-
-    judge_raw = request.get(LINE_JUDGE)
-    if isinstance(judge_raw, Mapping) and set(judge_raw) == {"follow"}:
-        if judge_raw["follow"] != LINE_GENERATION:
-            raise ProviderSettingsError("判分线路只能跟随生成线路")
-        judge: Dict[str, Any] = {"follow": LINE_GENERATION}
-    else:
-        judge = line_fields(LINE_JUDGE, judge_raw)
-        if not judge["token"]:
-            judge["token"] = _stored_token(current, LINE_JUDGE)
-        if not judge["token"] and _judge_followed(current):
-            # 解除跟随且没填：显式拷贝生成线路的 token（§4.2）。
-            judge["token"] = generation["token"]
-        if not judge["token"]:
-            raise ProviderSettingsError("判分线路需要填写 token")
-
-    payload = {
-        "version": PROVIDER_VERSION,
-        LINE_GENERATION: generation,
-        LINE_JUDGE: judge,
-        "updated_at": _now(),
-        "updated_by": updated_by,
-    }
-    settings = settings_from_raw(payload, catalog, env, ooc_threshold=ooc_threshold)
-    return _dump(payload), settings
-
-
-def read_current(settings_dir: Path) -> Optional[Dict[str, Any]]:
-    """当前面板文件的内容；不存在或读不出来都是 None（只用来复用已存的 token）。"""
-    try:
-        return _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
-    except ProviderSettingsError:
-        return None
 
 
 # ── 文件 ─────────────────────────────────────────────────────────────────

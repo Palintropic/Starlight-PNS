@@ -99,19 +99,21 @@ class UsageMeter:
         account: Optional[str] = None,
         host: Optional[str] = None,
         multiplier: Optional[str] = None,
+        card: Optional[str] = None,
     ) -> None:
         self._ledger = ledger
         self._world_id = world_id
         self._protocol = protocol
         self._prices = prices
         self._warmer = warmer
-        # CFG-1 §8.3：这个计量器记的每一行都出自哪条线路、归哪个账户、发往哪个
+        # CFG-1 §8.3：这个计量器记的每一行都出自哪条线路（哪张卡片）、归哪个账户、发往哪个
         # 主机、按什么倍率计价。由建 client 的同一份配置快照在构造时给定，之后不再
         # 回头读配置：保存新线路、改账户倍率，都不会改写旧 client 发出的请求的账。
         self._line = line
         self._account = account
         self._host = host or None
         self._multiplier = multiplier
+        self._card = card or None
         # 只有挂了续命的世界才串行发送：续命请求与真实请求不交错。没有续命的
         # client（研究会话、bench）对并发保持完全透明，跟 COST-1 时一样。
         # 可重入：续命在持锁时再确认一次准入，然后经同一个 MeteredClient 发送。
@@ -199,6 +201,7 @@ class UsageMeter:
                     account=self._account,
                     host=self._host,
                     multiplier=self._multiplier,
+                    card=self._card,
                 )
             )
 
