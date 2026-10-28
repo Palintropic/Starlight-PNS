@@ -1591,6 +1591,11 @@ class PromptProjectionTests(unittest.TestCase):
         self.assertTrue(quoted.startswith("……灯，……先调暗。"), line)
         self.assertTrue(quoted.endswith("」"), line)
         self.assertNotIn("…」", line)
+        # 截断点恰好落在说话人自己的省略号后面：只去掉标记，原生的两个"…"留着（绘名审查 P3）。
+        state, encoder = _rig()
+        encoder.commit_and_encode(_message(state, "甲乙丙丁……戊己庚辛壬癸", event_id="e2"))
+        (line,) = [l for l in recalled_lines(MemoryRecall(state).recall_for("mizuki")) if "说了" in l]
+        self.assertTrue(line.endswith("说了一句话，开头是「甲乙丙丁……」"), line)
         for summary in ("去了 gate", "说了一段话", "说了句什么", "说了一句话：「没有截断标记」"):
             self.assertEqual(_said_display(summary), summary)
 
