@@ -142,6 +142,8 @@ def build_image_tree(destination: Path) -> Path:
     dist = REPO_ROOT / "dashboard" / "dist"
     if dist.exists():
         shutil.copytree(dist, destination / "dashboard" / "dist")
+    # 镜像里 /app/data 是建好的（Dockerfile 的 mkdir），生产启动的账户准备往里写。
+    (destination / "data").mkdir(exist_ok=True)
     return destination
 
 
