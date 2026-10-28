@@ -28,7 +28,7 @@ from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Tuple
 
 import yaml
-from dotenv import dotenv_values, load_dotenv
+from dotenv import dotenv_values
 
 from pns.models.channel import ChannelRegistry
 from pns.models.arrangement import ArrangementDefinition, ArrangementError, parse_arrangements
@@ -556,7 +556,7 @@ def build_content_registry(revision: int = 0, *, publish_check: bool = False) ->
     env_file = {
         k: v for k, v in dotenv_values(ENV_PATH).items() if v is not None
     } if ENV_PATH.exists() else {}
-    # 与 load_dotenv(override=True) 同样的优先级：.env 覆盖进程环境。
+    # .env 覆盖进程环境（同 load_dotenv(override=True)）；值为 None 的行不算。
     models, accounts = load_models({**os.environ, **env_file}, publish_check=publish_check)
     settings = _load_settings(CONFIG_PATH)
     # 价目表写错了要让这份配置不通过，而不是让用量账本按错价记一个月。
@@ -597,9 +597,10 @@ def build_content_registry(revision: int = 0, *, publish_check: bool = False) ->
             raise ConfigValidationError(content.prompt_error or f"角色 {character_id} 无提示词")
         characters[character_id] = content
 
-    # 全部校验通过，这一份配置确定可用了，才把 .env 落到进程环境里。
-    if env_file:
-        load_dotenv(ENV_PATH, override=True)
+    # 全部校验通过，这一份配置确定可用了，才把 .env 落到进程环境里。落的是开头
+    # 读出来、参与过校验的那一份，不按路径再读一次：构建期间有人改了 .env，
+    # 再读就会把一份没校验过的 key 换上去（CFG-1 实现复核 P2-1）。
+    os.environ.update(env_file)
 
     return ContentRegistry(
         revision=revision,

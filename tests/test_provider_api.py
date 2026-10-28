@@ -408,6 +408,26 @@ class DiskEnvTests(ProviderApiTestBase):
         # env 没被引用时，磁盘 env 坏了不挡卡片保存。
         self.add(_card(name="备用", token=SPARE_KEY))
 
+    def test_the_env_that_was_checked_is_the_env_that_goes_live(self):
+        """复核 P2-1：构建中途有人把 .env 的 key 改空，生效的仍是校验过的那份。"""
+        self.two_cards()
+        key = self.key_name()
+        path = self.tmp / "disk.env"
+        self.use_env_file(f"{key}={ENV_KEY}\n")
+        real_load = content_registry.load_pack_data
+
+        def edit_env_mid_build(*args, **kwargs):
+            path.write_text(f"{key}=\n", encoding="utf-8")
+            return real_load(*args, **kwargs)
+
+        with patch.object(content_registry, "load_pack_data", edit_env_mid_build):
+            response = self.client.put(ACTIVE, json={"generation": "env", "judge": FOLLOW})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(os.environ[key], ENV_KEY)
+        models = self.boundary.active().models
+        self.assertEqual(models.generation.card, "env")
+        self.assertEqual(models.generation.token.reveal(), ENV_KEY)
+
     def test_a_spare_save_cannot_break_a_working_env(self):
         self.add(_card())
         self.assertEqual(self.boundary.active().models.generation.card, "env")
