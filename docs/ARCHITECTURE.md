@@ -456,19 +456,25 @@ under `packs/<active_pack>/`.
 files into a `ContentRegistry` — an immutable snapshot holding scenes, facts,
 character prompts, and provider settings.
 
-Provider settings are two resolved **lines** — generation and judge — each with
-its own billing account, protocol, base URL, model, and token
-(`pns/runtime/provider_settings.py`). When `provider.json` does not exist both
-lines are derived from `.env` exactly as before: one credential set, the
-generation model from `GENERATOR_MODEL or MODEL`, and the judge as an
-independent line on `EVALUATOR_MODEL or MODEL` (never "follow"). When it exists
-it wins, and a file that cannot be read or validated fails the whole build, so
-production refuses to start rather than guessing. Tokens are held in `Secret`,
-which refuses to print, pickle, or expose itself through `vars()`; only client
-construction calls `reveal()`, and everything that crosses a boundary goes
-through `public_dict()`. Persistent worlds and research sessions build one
-client per line, and a world gets one usage meter per line (so mixed protocols
-read their usage correctly); the cache warmer hangs off the generation line only.
+Provider settings are stored as **cards** — each a configured provider with its
+own billing account, protocol, base URL, model, token and judge-thinking policy —
+plus an `active` choice: which card generation uses, and whether the judge
+follows it or uses a named card with an optional model override
+(`pns/runtime/provider_settings.py`). `.env` is a builtin read-only card, and
+when `provider.json` does not exist the `.env` card is active with the judge
+following — which still gives the judge `EVALUATOR_MODEL or MODEL`, exactly as
+before. Downstream code never sees cards: the active choice is expanded into two
+resolved **lines** (generation and judge), each carrying the card it came from.
+Every card passes a shape check whether or not it is active; only the active
+ones also need https, a token and a live account. A file that cannot be read or
+validated fails the whole build, so production refuses to start rather than
+guessing, and the write endpoints refuse to edit over it. Tokens are held in
+`Secret`, which refuses to print, pickle, or expose itself through `vars()`;
+only client construction calls `reveal()`, and everything that crosses a
+boundary goes through `public_dict()`. Persistent worlds and research sessions
+build one client per line, and a world gets one usage meter per line (so mixed
+protocols read their usage correctly, and each ledger row records its line,
+card, account and host); the cache warmer hangs off the generation line only.
 
 The `.py` data files are read by `pns/world/data_module.py`, a strict AST
 whitelist evaluator, not by `exec`. Only top-level `NAME = <literal>` assignments
