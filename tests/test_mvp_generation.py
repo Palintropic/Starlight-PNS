@@ -723,6 +723,9 @@ class PromptScopeTests(MvpTestCase):
         self.assertIn("刚才跟你在线上频道里聊天的人也不在这里", situation)
         self.assertIn("你在这里说的话不会发到线上频道", situation)
         self.assertIn("不要把你自己刚说过的意思换个说法再说一遍", situation)
+        # 别跟着最近的台词和过去的自己越说越碎（10-28 奏和真冬的省略号回声圈）。
+        self.assertIn("不是谁的口头禅", situation)
+        self.assertIn("别跟着别人、也别跟着过去的自己越说越碎", situation)
 
     def test_a_solo_speaker_is_not_told_they_are_alone_when_someone_is_there(self):
         context = replace(

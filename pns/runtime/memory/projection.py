@@ -14,6 +14,7 @@
 #
 # 别人的记忆更不可能出现在这里：召回本身就只接受单个角色的记忆，这一层拿到的
 # 就已经是收窄过的结果。
+import re
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from pns.models.memory import FACT_STANCE_AWAY, MemoryClass, MemoryRecord
@@ -113,6 +114,22 @@ def _place_summary(summary: str, content: Mapping, names: _Names) -> str:
     return summary
 
 
+# 台词摘要的固定句式（pns/models/memory.py 的 _said_phrase）：片段截断后在引号
+# 里补一个 "…"。原样渲染进提示词，模型读到的就是"我过去说的每句话都拖着
+# 省略号"，会照着学，再存回记忆里——奏和真冬的台词就是这样一周周变碎的。
+# 存储里的摘要不能改（恢复时要从观察重新推导核对），所以只在渲染时把截断
+# 标记挪到引号外，写成"开头是"。片段里说话人自己的省略号原样保留。
+_SAID_FRAGMENT = re.compile(r"^说了(一句话|一段话|很长一段)：「(.+)…」$", re.DOTALL)
+
+
+def _said_display(summary: str) -> str:
+    match = _SAID_FRAGMENT.match(summary)
+    if match is None:
+        return summary
+    scale, fragment = match.groups()
+    return f"说了{scale}，开头是「{fragment}」"
+
+
 def _body(record: MemoryRecord, names: _Names) -> str:
     """一条记忆在提示词里的正文。只读内容里被显式点名的那几个键。
 
@@ -125,7 +142,7 @@ def _body(record: MemoryRecord, names: _Names) -> str:
     summary = content.get("summary") or ""
     if not summary:
         return ""
-    summary = _place_summary(summary, content, names)
+    summary = _said_display(_place_summary(summary, content, names))
     actor = content.get("about") or content.get("by")
     mine = (
         bool(content.get("self"))
