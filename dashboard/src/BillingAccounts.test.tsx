@@ -122,27 +122,33 @@ describe('计费账户', () => {
     expect(screen.getByText('这个账户正被模型线路使用，先把线路换到别的账户再退役')).toBeTruthy();
   });
 
-  it('新建的账户马上出现在模型页的账户下拉里', async () => {
-    const line = {
-      account: 'env', api_format: 'anthropic' as const, base_url: 'https://x.example/anthropic',
-      model: 'm', has_token: true, token_hint: null, judge_thinking: 'auto' as const,
-    };
+  it('新建的账户马上出现在添加卡片的账户下拉里', async () => {
     vi.spyOn(api, 'fetchProviderSettings').mockResolvedValue({
-      settings: { source: 'env', generation: line, judge: { ...line, follow: null }, ooc_threshold: 5, env_complete: true },
+      settings: {
+        source: 'env', cards: [],
+        env_card: { id: 'env', name: '.env', account: 'env', builtin: true, available: true, model: 'm' },
+        active: { generation: 'env', judge: { follow: 'generation' } },
+        generation: { card: 'env', account: 'env', api_format: 'anthropic', base_url: 'https://x.example/anthropic', model: 'm', has_token: true, token_hint: null, judge_thinking: 'auto' },
+        judge: { card: 'env', account: 'env', api_format: 'anthropic', base_url: 'https://x.example/anthropic', model: 'm', has_token: true, token_hint: null, judge_thinking: 'auto' },
+        generator_model: 'm', evaluator_model: 'm', ooc_threshold: 5, env_complete: true,
+      },
       config_revision: 1, quarantined: false, transaction_pending: false,
     });
     vi.spyOn(api, 'fetchBillingAccounts').mockResolvedValue({ accounts: catalog(acct('env')) });
+    vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue({ balances: {} } as unknown as api.UsageSummary);
     const relay = acct('relay', { name: '朋友的转发' });
     vi.spyOn(api, 'createBillingAccount').mockResolvedValue({ account: relay, accounts: catalog(acct('env'), relay) });
     render(<ModelSettings />);
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: '▸ 高级：计费账户、删掉全部卡片' }));
     const form = createForm();
     fireEvent.change(field(form, 'id'), { target: { value: 'relay' } });
     fireEvent.change(field(form, '显示名'), { target: { value: '朋友的转发' } });
     fireEvent.click(within(form).getByRole('button', { name: '新建' }));
     await flush();
-    const generation = screen.getByText('生成线路').closest('fieldset') as HTMLElement;
-    const options = Array.from(field(generation, '计费账户').querySelectorAll('option')).map((o) => o.value);
-    expect(options).toEqual(['env', 'relay']);
+    fireEvent.click(screen.getByRole('button', { name: /添加服务商/ }));
+    fireEvent.click(screen.getByRole('button', { name: '▸ 高级' }));
+    const options = Array.from((screen.getByLabelText('计费账户') as HTMLSelectElement).querySelectorAll('option')).map((o) => o.value);
+    expect(options).toEqual(['', 'env', 'relay']);
   });
 });

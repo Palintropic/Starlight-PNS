@@ -1,0 +1,167 @@
+/* 卡片式「模型」页（CFG-1 卡片补丁）。令牌来自 index.css；卡片尺寸、内距以外的数值标了 by eye。 */
+
+.mcards {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--gutter) var(--page-margin) var(--group-gap);
+  display: flex;
+  flex-direction: column;
+  gap: var(--group-gap);
+}
+.mcards section,
+.mcards-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--header-gap);
+}
+.mcards-h {
+  font: var(--type-base);
+  color: var(--SystemBaseHigh);
+}
+.mcards-note {
+  font: var(--type-body);
+  color: var(--SystemBaseMediumHigh);
+}
+
+/* 卡片 = 磁贴：扁平色块，无圆角无阴影；选中整块填强调色（规则 4：选中靠颜色）。 */
+.mcards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); /* 168: by eye */
+  gap: 8px; /* by eye: tighter than --gutter so the cards read as one group */
+}
+.mcards-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 148px; /* by eye */
+  padding: var(--gutter);
+  border: var(--control-border) solid transparent;
+  border-radius: 0;
+  background: var(--SystemChromeLow);
+  color: var(--SystemBaseHigh);
+  font: var(--type-body);
+  text-align: left;
+  cursor: pointer;
+}
+.mcards-card:hover {
+  border-color: var(--SystemBaseMediumLow); /* 同 .btn 的悬停 */
+}
+.mcards-card:focus-visible {
+  outline: var(--control-border) solid var(--SystemBaseHigh);
+  outline-offset: -2px;
+}
+.mcards-card[aria-disabled='true'] {
+  cursor: default;
+}
+.mcards-add:disabled {
+  cursor: default;
+  opacity: 0.5; /* by eye */
+}
+.mcards-card.on {
+  background: var(--SystemAccent);
+  color: var(--SystemChromeWhite);
+  cursor: default;
+}
+.mcards-card.on:hover {
+  border-color: transparent;
+}
+.mcards-name {
+  font: var(--type-base);
+}
+.mcards-meta {
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+  overflow-wrap: anywhere;
+}
+.mcards-card.on .mcards-meta,
+.mcards-card.on .mcards-state {
+  color: rgb(255 255 255 / 0.8); /* 强调色上的次要文字：白 80%，by eye */
+}
+.mcards-balance {
+  margin-top: auto;
+  padding-top: var(--header-gap);
+  font: var(--type-subtitle);
+  font-variant-numeric: tabular-nums;
+}
+.mcards-balance-low {
+  color: var(--warn);
+}
+.mcards-card.on .mcards-balance-low {
+  color: inherit; /* 强调色底上不再叠警示色，靠用量面板的低余额提示 */
+}
+.mcards-balance-none {
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.mcards-foot {
+  height: 24px; /* by eye: 底栏定高，有没有"编辑"都一样 */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+.mcards-state {
+  font: var(--type-caption);
+  color: var(--SystemBaseMedium);
+}
+.mcards-edit {
+  font: var(--type-caption);
+  min-height: 0;
+  height: 24px;
+  padding: 0 6px;
+  color: inherit;
+}
+
+.mcards-add {
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: var(--control-border) dashed var(--SystemBaseLow); /* by eye: 空位用虚线，不是控件边框 */
+}
+.mcards-add:hover {
+  border-color: var(--SystemBaseMediumLow);
+  border-style: dashed;
+}
+.mcards-plus {
+  font: var(--type-subheader);
+  color: var(--SystemBaseMedium);
+}
+
+.mcards-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.mcards-editor {
+  padding: var(--gutter);
+  background: var(--SystemChromeLow);
+  gap: var(--gutter);
+}
+.mcards-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gutter);
+}
+.mcards-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--header-gap);
+  min-width: 200px; /* by eye */
+  flex: 1 1 200px;
+  max-width: 360px;
+  font: var(--type-control);
+  color: var(--SystemBaseHigh);
+}
+.mcards-disclose {
+  align-self: flex-start;
+}
+.mcards-danger {
+  color: var(--warn);
+  margin-left: auto;
+}
+.mcards-advanced {
+  max-width: 68ch;
+}
