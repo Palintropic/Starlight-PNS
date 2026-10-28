@@ -70,11 +70,23 @@
   color: var(--SystemBaseMedium);
 }
 .usage-note { max-width: 68ch; }
+.usage-note.caution { color: var(--caution); }
 
 .usage-balance {
   display: flex;
   flex-direction: column;
   gap: var(--header-gap);
+}
+/* 每个计费账户一组（CFG-1）：小标题是账户 id，下面跟估算值和说明。 */
+.usage-account {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: var(--header-gap);
+}
+.usage-account h5 {
+  font: var(--type-control);
+  color: var(--SystemBaseHigh);
 }
 .usage-balance-value {
   font: var(--type-subtitle);

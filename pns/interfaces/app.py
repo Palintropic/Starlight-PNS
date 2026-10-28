@@ -25,9 +25,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from pns.runtime import content_registry, provider_txn
+from pns.runtime.env_migration import AnchorsUnreadable, migrate_env_account
+from pns.runtime.version_switch import note_startup
+from pns.runtime.settings_files import SettingsWriteError
+from pns.runtime.provider_settings import (
+    SOURCE_ENV,
+    ProviderSettingsError,
+    validate_settings,
+)
+
 from . import accounts_api
 from . import auth as auth_routes
-from . import config, health, persistent_worlds, review, simulate, usage, world
+from . import config, health, persistent_worlds, provider_api, review, simulate, usage, world
 from .accounts import AccountError, AccountStore
 from .composition import AutonomySettings, WorldControlPlane
 from .paths import ACCOUNTS_DB_FILE, DASHBOARD_DIST
@@ -94,19 +104,31 @@ def _verify_production_config(
             f"生产模式要求已构建的 Dashboard，但 {dashboard_dist} 不存在；"
             f"生产镜像应当在构建阶段产出它"
         )
+    # 上一次模型设置保存没收尾（CFG-1 §4.4）：不靠 schema 判断那份配置算不算
+    # 做完了，拒绝起来，等服务器侧恢复。
+    if provider_txn.pending(content_registry.SETTINGS_DIR):
+        raise DeploymentConfigError(provider_txn.STARTUP_REFUSAL)
     if registry_provider is None:
         return
     try:
         registry = registry_provider()
     except Exception as e:  # 配置根本构建不出来，也是一次启动失败
         raise DeploymentConfigError(f"生产模式下配置构建失败：{e}") from e
-    models = getattr(registry, "models", None)
-    key_name = getattr(models, "key_name", None) or "API Key"
-    if not getattr(models, "api_key", ""):
-        raise DeploymentConfigError(
-            f"生产模式必须注入模型凭据 {key_name}；生产不接受从浏览器写 .env，"
-            f"缺了它这台服务器建得出世界却一动就失败"
+    models = registry.models
+    try:
+        # 两条线路都要有效（§6）：env 派生时就是那一套 env 凭据，面板存过时是
+        # 面板里的 —— 面板两条线路的 token 齐全时不再要求 env 的旧 key。
+        validate_settings(models, registry.accounts)
+    except ProviderSettingsError as e:
+        where = (
+            f"（线路来自 .env，key 变量 {models.env_key_name}）"
+            if models.source == SOURCE_ENV
+            else "（线路来自面板设置）"
         )
+        raise DeploymentConfigError(
+            f"生产模式要求生成与判分两条模型线路都有效：{e}{where}；生产不接受"
+            f"从浏览器写 .env，缺了它这台服务器建得出世界却一动就失败"
+        ) from None
 
 
 def _account_db_path(settings: DeploymentSettings) -> Path:
@@ -183,6 +205,29 @@ def _verify_production_accounts(
         f"(2) 对着数据卷跑 `python scripts/accounts.py create-admin`。"
         f"详见 docs/DEPLOY_UBUNTU_DOCKER.md"
     )
+
+
+def prepare_production_data(app: FastAPI) -> None:
+    """生产启动时、开始服务之前的数据准备（CFG-1 §4.3）：`env` 账户落盘、旧单锚点迁移，
+    以及记下"旧版本 → 新版本"的切换时刻（§9，只用来提醒重填锚点）。
+
+    不放在 create_app() 里：装配 app 不该写数据卷，很多测试会以生产模式装配。
+    由服务入口（scripts/server.py）在 create_app() 之后调用一次；开发模式什么都
+    不做——开发环境启动不往仓库的 data/ 里写东西。失败就起不来，文案固定。
+    """
+    deployment = app.state.deployment
+    if not deployment.production:
+        return
+    plane = app.state.world_control_plane
+    try:
+        migrate_env_account(content_registry.SETTINGS_DIR, plane.usage_ledger.root)
+    except (AnchorsUnreadable, ProviderSettingsError, SettingsWriteError) as e:
+        raise DeploymentConfigError(f"启动前的账户与锚点准备没有完成：{e}") from None
+    try:
+        note_startup(plane.usage_ledger, plane.usage_ledger.now())
+    except (SettingsWriteError, OSError):
+        # 只是一条提醒的依据：记不下来就少一次提醒，不为它拒绝启动。
+        pass
 
 
 def create_app(
@@ -303,6 +348,8 @@ def create_app(
     app.include_router(accounts_api.router)
     app.include_router(review.router)
     app.include_router(config.router)
+    app.include_router(provider_api.router)
+    app.include_router(provider_api.accounts_router)
     app.include_router(world.router)
     app.include_router(persistent_worlds.router)
     app.include_router(usage.router)

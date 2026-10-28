@@ -142,6 +142,8 @@ def build_image_tree(destination: Path) -> Path:
     dist = REPO_ROOT / "dashboard" / "dist"
     if dist.exists():
         shutil.copytree(dist, destination / "dashboard" / "dist")
+    # 镜像里 /app/data 是建好的（Dockerfile 的 mkdir），生产启动的账户准备往里写。
+    (destination / "data").mkdir(exist_ok=True)
     return destination
 
 
@@ -227,6 +229,9 @@ class ProcessTestCase(unittest.TestCase):
         cls._tree_dir = tempfile.TemporaryDirectory()
         cls.tree = build_image_tree(Path(cls._tree_dir.name) / "app")
         if not (cls.tree / "dashboard" / "dist").exists():
+            if os.environ.get("PNS_REQUIRE_DIST"):
+                # CI 构建了 Dashboard：这时缺产物是配置错了，不能悄悄跳过。
+                raise AssertionError("PNS_REQUIRE_DIST 已设置，但 dashboard/dist 不存在")
             raise unittest.SkipTest("Dashboard 未构建，生产模式起不来")
 
     @classmethod

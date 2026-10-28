@@ -6,6 +6,10 @@
 # 汇总是只读的（read 权限）；设余额锚点是写操作，按 authz 的默认规则要
 # operate 权限，和开始 / 停止认知同一道门。
 #
+# CFG-1：余额按计费账户算（锚点在 usage/balance_anchors.json，账户目录是
+# settings/accounts.json），每个账户只扣归属它的行。设锚点带 `account`，不带就是
+# `env`（旧面板只会发这个）。汇总的顶层 `balance` 是 `env` 那一份、旧形状。
+#
 # 账本是运维数据：这里交出去的只有计数、token 数、估算花费、封闭枚举值和
 # 我们自己的时间戳。provider 的报错原文从来没进过账本，所以这里也不可能有。
 #
@@ -22,14 +26,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictFloat, StrictInt
 from typing import Union
 
+from pns.runtime import content_registry, settings_files
+from pns.runtime.account_anchors import AccountAnchorError, account_views, save_account_anchor
+from pns.runtime.env_migration import AnchorsUnreadable
+from pns.runtime.version_switch import read_switch
+from pns.runtime.provider_settings import ENV_ACCOUNT, ProviderSettingsError, load_accounts
 from pns.runtime.usage_ledger import (
     DEFAULT_BALANCE_WARN_YUAN,
     DEFAULT_FAILURE_ALERT,
-    AnchorError,
-    load_anchor,
-    save_anchor,
     summarize,
-    validate_anchor,
 )
 
 from .composition import WorldControlPlane
@@ -90,8 +95,11 @@ def get_usage_settings(request: Request) -> UsageSettings:
 
 
 class BalanceAnchorRequest(BaseModel):
-    # Strict：`"100"`、`true` 都不是余额。
-    balance_yuan: Union[StrictInt, StrictFloat]
+    # Strict：`"100"`、`true` 都不是余额。数额是账户原币种；`balance_yuan` 是旧
+    # 面板的字段名，和 `balance` 只能给一个。
+    account: str = ENV_ACCOUNT
+    balance: Optional[Union[StrictInt, StrictFloat]] = None
+    balance_yuan: Optional[Union[StrictInt, StrictFloat]] = None
     at: Optional[datetime] = None
 
 
@@ -103,13 +111,23 @@ def usage_summary(
 ) -> Dict[str, Any]:
     """最近 `days` 个北京日的用量、连续失败段与余额估算。"""
     ledger = plane.usage_ledger
-    return summarize(
+    try:
+        views = account_views(ledger.root, load_accounts(content_registry.SETTINGS_DIR))
+        unavailable = False
+    except (AnchorsUnreadable, ProviderSettingsError):
+        # 账户目录或锚点文件读不出来：用量照给，余额一个都不估（不退回"一个锚点
+        # 扣全部行"），并且说出来。
+        views, unavailable = {}, True
+    summary = summarize(
         ledger,
         days=days,
-        anchor=load_anchor(ledger.root),
+        accounts=views,
+        switched_at=read_switch(ledger.root),
         alert_threshold=settings.failure_alert,
         warn_yuan=settings.balance_warn_yuan,
     )
+    summary["balances_unavailable"] = unavailable
+    return summary
 
 
 @router.post("/balance-anchor")
@@ -117,19 +135,39 @@ def set_balance_anchor(
     payload: BalanceAnchorRequest,
     plane: WorldControlPlane = Depends(get_control_plane),
 ) -> Dict[str, Any]:
-    """记下"控制台上看到的此刻余额"。之后的估算从这里往下扣。
+    """记下某个账户"控制台上看到的此刻余额"。之后的估算从这里往下扣。
 
     填的是余额本身，不是充了多少：欠着 0.58 再充 100，控制台显示 99.42。
     """
     ledger = plane.usage_ledger
-    try:
-        anchor = validate_anchor(payload.balance_yuan, payload.at, ledger.now())
-    except AnchorError as e:
-        raise HTTPException(422, {"category": "invalid_anchor", "message": str(e)}) from e
-    try:
-        save_anchor(ledger.root, anchor)
-    except OSError as e:
+    if (payload.balance is None) == (payload.balance_yuan is None):
         raise HTTPException(
-            500, {"category": "storage_error", "message": "余额锚点写不进用量目录"}
+            422, {"category": "invalid_anchor", "message": "balance 和 balance_yuan 要且只要给一个"}
+        )
+    amount = payload.balance if payload.balance is not None else payload.balance_yuan
+    try:
+        catalog = load_accounts(content_registry.SETTINGS_DIR)
+    except ProviderSettingsError as e:
+        raise HTTPException(
+            500, {"category": "storage_error", "message": "计费账户目录读不出来"}
         ) from e
-    return anchor.to_dict()
+    try:
+        entry = save_account_anchor(
+            ledger.root, catalog.get(payload.account), amount, payload.at, ledger.now()
+        )
+    except AccountAnchorError as e:
+        raise HTTPException(422, {"category": "invalid_anchor", "message": str(e)}) from e
+    except AnchorsUnreadable as e:
+        raise HTTPException(
+            500, {"category": "storage_error", "message": "余额锚点文件读不出来，没有改动"}
+        ) from e
+    except settings_files.PublishedNotDurable as e:
+        raise HTTPException(
+            500, {"category": "not_durable", "message": "余额锚点已经生效，但没能确认落盘；掉电可能丢，可以再填一次"}
+        ) from e
+    except settings_files.SettingsWriteError as e:
+        raise HTTPException(
+            500, {"category": "storage_error", "message": "余额锚点写不进用量目录，没有改动"}
+        ) from e
+    # balance_yuan 给旧面板（它只认这个名字）。
+    return {**entry, "balance_yuan": entry["balance"]}

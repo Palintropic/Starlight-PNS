@@ -122,7 +122,7 @@ class LiveCompositionGivesFullNameTablesTests(unittest.TestCase):
         registry = BOUNDARY.active()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        env = patch.dict(os.environ, {registry.models.key_name: "sk-names-0123456789"})
+        env = patch.dict(os.environ, {registry.models.env_key_name: "sk-names-0123456789"})
         env.start()
         self.addCleanup(env.stop)
         plane = WorldControlPlane(

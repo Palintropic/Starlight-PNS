@@ -67,7 +67,11 @@ def call_character(
     if correction:
         system += f"\n\n【注意】{correction}"
 
-    api_format = registry.models.api_format if registry is not None else router_mod.API_FORMAT
+    api_format = (
+        registry.models.generation.api_format
+        if registry is not None
+        else router_mod.API_FORMAT
+    )
 
     if api_format == "openai":
         oai_history = [{"role": "system", "content": system}] + history

@@ -173,7 +173,12 @@ Docker 具名卷（不在上面这棵树里）
 │   ├── worlds/<world_id>/history/      已封存的事件分卷，封存后不再改动
 │   ├── worlds/<world_id>/OWNER.lock    所有权锁
 │   ├── usage/YYYY-MM-DD.jsonl          模型用量账本，按北京日期分文件（见 9.1）
-│   ├── usage/balance_anchor.json       操作者记下的控制台余额
+│   ├── usage/balance_anchor.json       旧版本的单一余额锚点（新版本只在首次启动时迁移它，之后不再读写）
+│   ├── usage/balance_anchors.json      按计费账户的余额锚点（见 9.3）
+│   ├── usage/version_switch.json       最近一次旧版本 → 新版本切换的时刻（只用于提醒重填锚点）
+│   ├── settings/provider.json          面板存的模型卡片和当前启用哪张，**含 token**（0600，见 9.3）
+│   ├── settings/accounts.json          计费账户目录（不含 token）
+│   ├── settings/provider.json.prev / provider.txn   保存事务的中间文件，正常情况下不存在
 │   ├── accounts.sqlite3                账户与安全审计（0600，见第 8 节）
 │   ├── drift_scores.jsonl              判分记录
 │   └── review_decisions.jsonl          人工审核决策
@@ -523,10 +528,11 @@ docker compose down                # 停机并删掉容器；**卷保留**
 - **断供提示**：连续 `PNS_PROVIDER_FAILURE_ALERT`（默认 6）次调用没有产出能用的结果，后台「世界」页
   顶上标红，写明从几点起、失败几次、原因。MiMo 余额不足返回 HTTP 402，显示为「欠费」。拿到 HTTP 200
   但没有文本、判分解析失败也算失败，不会让计数归零。
-- **余额估算**：MiMo 没有余额接口。在「持久世界」页填一次**控制台上看到的余额本身**（不是充值额），
-  之后服务器从这个数往下扣。低于 `PNS_BALANCE_WARN_YUAN`（默认 10 元）时标黄。它永远是估算：计费
-  有延迟；超时、5xx 的请求可能扣了钱但没有用量（单独计数）；SDK 内部的自动重试看不见。充值后
-  重新填一次。
+- **余额估算**：按计费账户分开算（见 9.3）。在「持久世界」页选账户，填一次**控制台上看到的余额本身**
+  （不是充值额，账户原币种），之后服务器只从这个账户自己的调用里往下扣；`.env` 那把 key 的账户叫
+  `env`，升级前的账本行都算它的。人民币账户低于 `PNS_BALANCE_WARN_YUAN`（默认 10 元）时标黄；美元
+  账户只显示锚点和"之后花了 ¥x"，不相减。它永远是估算：计费有延迟；超时、5xx 的请求可能扣了钱但
+  没有用量（单独计数）；SDK 内部的自动重试看不见。充值后重新填一次。
 - **价目表**：`config.yaml` 的 `pricing:`，单位元 / 百万 token。表里没有的模型照常调用，花费记为
   「未定价」，不当成 0。换模型（例如 v2.6）之前先确认表里有它。
 - **写不进账本**（磁盘满、权限错）：调用照常进行，日志里打一行
@@ -546,6 +552,43 @@ MiMo 的提示词缓存只活几分钟（`mimo-v2.5-pro` 约 5 分钟），命�
   它的成败不算进断供提示的连续失败。
 - 窗口填 `0` 关掉续命。迁到 `mimo-v2.6` 后缓存活得更久，间隔可以放宽到 240–300。
 - 看效果：账本里生成 / 判分两路的 `cache_read` 占比应该上升；`warm` 那一行的花费应明显小于省下的部分。
+
+### 9.3 模型卡片与计费账户（CFG-1）
+
+管理员在后台「模型」页管理一排**卡片**：每张卡片是一家配好的服务商（显示名、协议、Base URL、模型名、
+access token、判分时 thinking），挂在一个**计费账户**下：余额属于账户，token 属于卡片。点一下卡片，
+**生成**（住民开口）就切到它；**判分**（Router 验收）平时跟着生成走，也可以指定任意一张卡片并覆盖
+模型名。`.env` 是一张内建的只读卡片。不用改 `.env`、不用重建容器。
+
+- **切换、添加、编辑、删除卡片都要先关闭所有世界**，否则返回 409 `world_open`、什么都不写；改完照
+  第 7 节恢复世界再 Start。完成的判据和 10.3 一样：至少一条台词生成并判分成功，审计记录里是新模型名。
+- **没有任何卡片时**（`settings/provider.json` 不存在），生效的是 `.env` 卡片：协议、地址、key 来自
+  `API_FORMAT`、`BASE_URL`、`PNS_API_KEY_NAME` 指向的 key，生成模型是 `GENERATOR_MODEL or MODEL`，
+  判分模型是 `EVALUATOR_MODEL or MODEL`（判分"跟着生成"且生成用 `.env` 时也是这样），账户是 `env`。
+- **添加服务商只保存、不启用**；新建时 token 必填，之后编辑留空表示沿用这张卡片已存的。面板从不回显
+  token，只给末四位。默认同时新建一个同 id 的计费账户（可在"高级"里改挂到已有账户、设币种和倍率）。
+  账户建好了而卡片没写成时，响应会带上账户 id，面板会改成挂到这个账户上重试。
+- **计费账户**在「模型」页"高级"里：id 建了不能改、退役了也不能再用；币种和服务商不能改（要换就新建）；
+  倍率是服务商在价目表之上的加价或折扣，只影响之后的调用，并且对挂在这个账户下的所有卡片生效。只有
+  正在被生成或判分使用的卡片的账户不能退役；没启用的卡片可以留着已退役的账户，但启用它会被拒绝。
+- **判分时 thinking**：经转发地址使用 MiMo 时，把卡片的这一项设成"关"。"自动"只认 MiMo 官方地址，
+  转发地址下会让判分把输出预算花在思考上、解析失败。
+- **换回 .env**：点 `.env` 卡片，其它卡片都保留。`.env` 那一套本身无效时会被拒绝。
+- **删掉全部卡片**（"高级"里，DELETE）：删掉 `settings/provider.json`，回到 `.env`。账户目录和余额
+  锚点不受影响。
+- `settings/provider.json` 是 v2 格式。CFG-1 之前的开发版本存过的 v1 文件不再识别（生产上没有这种
+  文件）；遇到时启动会失败，开发机上先用旧代码 `scripts/provider_resolve.py` 收尾残留的
+  `provider.txn`，再删掉 `provider.json`、`.prev`、`.txn` 三个文件。
+- **隔离**：保存中途出错且没法确认结果时，设置进入隔离状态，面板不能再保存，生产重启也会拒绝起来
+  （`provider.txn` 还在）。在容器里看、选定保留哪一份：
+
+  ```bash
+  docker compose exec app python scripts/provider_resolve.py show
+  docker compose exec app python scripts/provider_resolve.py resolve --keep previous   # 或 current
+  ```
+
+  不要直接删 `provider.txn`。
+- **`.env` 凭据不完整时**，「模型」页常驻"当前不可直接回滚"：旧镜像只认 `.env`，见第 11 节。
 
 ## 10. 升级
 
@@ -649,6 +692,9 @@ docker compose exec -T app python scripts/admit_residents.py execute admission \
 
 ### 10.3 只换模型
 
+**启用了面板卡片（9.3）之后，换模型在「模型」页做，本节的 `.env` 只影响 `.env` 卡片**（生效的是
+`.env` 卡片、或删掉全部卡片之后才用它）。下面是生效的是 `.env` 卡片时的做法。
+
 模型名只来自 `.env` 的 `MODEL`、`GENERATOR_MODEL`、`EVALUATOR_MODEL`，后两个优先于 `MODEL`。换模型
 不需要新镜像：
 
@@ -697,23 +743,41 @@ docker compose up -d --build
   去读新存档；
 - 只跑过读操作、没写过存档的升级可以直接回滚。
 
+**从带模型卡片（CFG-1）的版本回滚到之前的版本**，还有三件事：
+
+1. **旧镜像不读 `settings/`，只认 `.env`**，生产启动时照旧强制检查 `.env` 里那一套凭据。只在面板里
+   配过卡片、`.env` 不完整时，旧镜像会按预期拒绝起来。所以回滚前先在宿主 `.env` 补齐旧镜像支持的
+   `API_FORMAT`、`BASE_URL`、模型名和 key，并在**新镜像下**点 `.env` 卡片确认这一套能用（无效
+   会被拒绝），再回滚代码。「模型」页没有"当前不可直接回滚"的红字时，`.env` 才是完整的。
+2. **余额估算在旧镜像里失效**：旧代码用一个锚点扣全部账本行（不分账户）。回滚期间要看余额，就在旧
+   面板上重新填一次。
+3. **再升级回来时**，新版本在启动时发现回滚期间旧代码写过账，会把早于这次切换的按账户锚点标上
+   "早于最近一次版本切换"，对照控制台重新填。回滚期间一次模型调用都没发过的话不会提醒，那段时间
+   也没有花费。
+
 ## 12. 备份与恢复
 
 具名卷的备份用一个临时容器打包，宿主上不需要 root 去翻 `/var/lib/docker`：
+
+`pns-data` 里有面板存的 token（`settings/provider.json`），所以备份包和它一样按秘密对待：目录
+0700，包在创建时就是 0600，属主是你自己。
 
 ```bash
 cd /opt/starlight-pns
 docker compose stop                     # 停机备份，拿到的是一致快照
 
+mkdir -p backups && chmod 700 backups
 STAMP=$(date +%Y%m%d_%H%M%S)
 docker run --rm \
   -v starlight-pns_pns-data:/data:ro \
   -v "$PWD/backups:/backup" \
-  alpine tar czf "/backup/pns-data-$STAMP.tar.gz" -C /data .
+  alpine sh -c "umask 077 && tar czf /backup/pns-data-$STAMP.tar.gz -C /data ."
 docker run --rm \
   -v starlight-pns_pns-history:/history:ro \
   -v "$PWD/backups:/backup" \
-  alpine tar czf "/backup/pns-history-$STAMP.tar.gz" -C /history .
+  alpine sh -c "umask 077 && tar czf /backup/pns-history-$STAMP.tar.gz -C /history ."
+sudo chown "$(id -u):$(id -g)" backups/pns-*-"$STAMP".tar.gz
+chmod 600 backups/pns-*-"$STAMP".tar.gz
 
 docker compose start
 ```
@@ -732,7 +796,14 @@ docker run --rm \
 docker compose up -d
 ```
 
-恢复完之后进后台恢复世界，确认 revision 和世界时钟是你期望的那一份，再决定要不要 Start。
+恢复完之后先核一下面板存的线路文件的属主和权限（应该是 `10001` 和 `600`；文件不存在说明面板没存过，
+也正常）：
+
+```bash
+docker compose exec app stat -c '%u %a' /app/data/settings/provider.json
+```
+
+再进后台恢复世界，确认 revision 和世界时钟是你期望的那一份，再决定要不要 Start。
 
 账户库（`accounts.sqlite3`）在 `pns-data` 里，所以上面这套备份已经把用户和安全审计一起
 带走了。它是 SQLite 且刻意不开 WAL，所以"拷走这一个文件"就等于"拷走这个库"——前提仍然是

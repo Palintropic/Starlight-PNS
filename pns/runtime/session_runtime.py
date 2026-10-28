@@ -90,6 +90,7 @@ class SessionRuntime:
         client,
         model: str,
         generator_provider: str,
+        judge_client=None,
         max_tokens: int,
         temperature: float,
         api_delay: float,
@@ -106,6 +107,8 @@ class SessionRuntime:
         self._stop_reason: Optional[str] = None
         self.scene = scene
         self.client = client
+        # 判分线路可以是另一家、另一种协议，所以有自己的 client；没给就跟生成共用。
+        self.judge_client = judge_client if judge_client is not None else client
         self.model = model
         self.generator_provider = generator_provider
         self.max_tokens = max_tokens
@@ -197,7 +200,7 @@ class SessionRuntime:
             raise SessionSetupError("max_turns 和 max_tokens 必须大于 0，api_delay 不能小于 0")
 
         model = params.get("model") or registry.models.generator_model
-        generator_provider = registry.models.provider
+        generator_provider = registry.models.generation.provider
         character_ids = params.get("characters") or ["mizuki", "ena"]
 
         if not isinstance(character_ids, list) or not all(
@@ -216,8 +219,8 @@ class SessionRuntime:
                 )
 
         scene = registry.scene(scene_id)
-        api_key = router_mod._get_api_key(registry.models.key_name)
-        if not api_key:
+        lines = (registry.models.generation, registry.models.judge)
+        if not all(line.token for line in lines):
             raise SessionSetupError("找不到 API Key，请刷新页面完成配置向导，或运行 python oobe.py")
 
         # 遗留 scene 只在这里投影成初始世界状态一次，之后 scene 不再是世界真相。
@@ -229,7 +232,12 @@ class SessionRuntime:
             raise SessionSetupError(str(e)) from e
 
         try:
-            client = router_mod.create_client(api_key, settings=registry.models)
+            client = router_mod.create_client(
+                lines[0].token.reveal(), settings=lines[0]
+            )
+            judge_client = router_mod.create_client(
+                lines[1].token.reveal(), settings=lines[1]
+            )
         except Exception as e:
             # 工厂收到过 API Key，从它出来的异常（消息、类型名）都可能带着 key。
             # 对外只给固定文案，原异常留在 __cause__，同 composition.py 的边界。
@@ -246,6 +254,7 @@ class SessionRuntime:
             character_ids=character_ids,
             world_state=world_state,
             client=client,
+            judge_client=judge_client,
             model=model,
             generator_provider=generator_provider,
             max_tokens=max_tokens,
@@ -354,7 +363,7 @@ class SessionRuntime:
 
             try:
                 result = await judge_async(
-                    self.client,
+                    self.judge_client,
                     current,
                     reply,
                     turn,

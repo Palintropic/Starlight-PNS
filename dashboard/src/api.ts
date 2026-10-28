@@ -5,12 +5,20 @@ import type { FactsResponse, ScenesMap } from './world/types';
 export class ApiError extends Error {
   readonly status: number;
   readonly category: string | null;
+  /** `{category, message, ...}` 形状的 detail 原样留着，调用点要取其它字段（比如账户 id）。 */
+  readonly detail: Record<string, unknown> | null;
 
-  constructor(message: string, status: number, category: string | null) {
+  constructor(
+    message: string,
+    status: number,
+    category: string | null,
+    detail: Record<string, unknown> | null = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.category = category;
+    this.detail = detail;
   }
 }
 
@@ -55,7 +63,8 @@ async function json<T>(res: Response, options: { authRoute?: boolean } = {}): Pr
     // 服务器出错时正文不一定是 JSON（代理的 502、断掉的连接、静态兜底页）。
     // 解析失败就用状态行，别让一次 SyntaxError 盖住真正的错误。
     const body = await res.json().catch(() => null);
-    const { message, category } = describe(body && (body as { detail?: unknown }).detail);
+    const detail = body && (body as { detail?: unknown }).detail;
+    const { message, category } = describe(detail);
     // 登录接口自己的 401 是"这次密码不对"，不是"会话没了"——广播它会把用户
     // 从登录框上弹走，然后什么也没发生。
     //
@@ -64,7 +73,11 @@ async function json<T>(res: Response, options: { authRoute?: boolean } = {}): Pr
     if (res.status === 401 && !options.authRoute) {
       window.dispatchEvent(new CustomEvent(UNAUTHENTICATED_EVENT));
     }
-    throw new ApiError(message || `${res.status} ${res.statusText}`, res.status, category);
+    const record =
+      detail && typeof detail === 'object' && !Array.isArray(detail)
+        ? (detail as Record<string, unknown>)
+        : null;
+    throw new ApiError(message || `${res.status} ${res.statusText}`, res.status, category, record);
   }
   return res.json() as Promise<T>;
 }
@@ -715,6 +728,27 @@ export interface UsageBalance {
   warn_yuan: number;
 }
 
+/** 一个计费账户的余额（CFG-1）：只扣归属它的账；非人民币账户不相减。 */
+export type AnchorProblem = 'retired' | 'account_recreated' | 'currency_mismatch' | 'malformed';
+
+export interface AccountBalance {
+  currency: 'CNY' | 'USD';
+  retired: boolean;
+  /** 数额是账户原币种。 */
+  anchor: { balance: number; currency: string; at: string } | null;
+  anchor_problem: AnchorProblem | null;
+  spent_since_anchor_yuan: number | null;
+  /** 只有人民币账户、锚点有效时才有。 */
+  estimated: number | null;
+  uncounted_calls: number;
+  billing_uncertain_calls: number;
+  anchor_before_ledger: boolean | null;
+  /** 锚点早于最近一次旧版本 → 新版本的切换（回滚过或刚升级），该对照控制台重填。 */
+  anchor_before_switch?: boolean | null;
+  low: boolean;
+  warn_yuan: number | null;
+}
+
 export interface UsageSummary {
   now: string;
   timezone: string;
@@ -725,8 +759,14 @@ export interface UsageSummary {
   by_world: Record<string, UsageBucket>;
   by_path: Record<string, UsageBucket>;
   by_character: Record<string, UsageBucket>;
+  by_account?: Record<string, UsageBucket>;
   failure_streak: UsageFailureStreak;
+  /** `env` 账户那一份（旧形状）。 */
   balance: UsageBalance | null;
+  /** 每个计费账户一份；旧服务端没有这个字段。 */
+  balances?: Record<string, AccountBalance> | null;
+  /** 账户目录或锚点文件读不出来：一个余额都没估。 */
+  balances_unavailable?: boolean;
   ledger_write_failures: number;
   corrupt_lines: number;
 }
@@ -734,12 +774,188 @@ export interface UsageSummary {
 export const fetchUsageSummary = (days = 7): Promise<UsageSummary> =>
   fetch(`/api/usage/summary?days=${days}`).then((res) => json(res));
 
-/** 记下"控制台上看到的此刻余额"（余额本身，不是充值额）。 */
+/** 记下某个计费账户"控制台上看到的此刻余额"（余额本身，不是充值额；账户原币种）。 */
 export const setBalanceAnchor = (
-  balanceYuan: number,
-): Promise<{ balance_yuan: number; at: string }> =>
+  balance: number,
+  account = 'env',
+): Promise<{ account: string; balance: number; currency: string; at: string }> =>
   fetch('/api/usage/balance-anchor', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ balance_yuan: balanceYuan }),
+    body: JSON.stringify({ account, balance }),
   }).then((res) => json(res));
+
+// ── 模型卡片与计费账户（CFG-1） ─────────────────────────────────────────
+
+export type ApiFormat = 'anthropic' | 'openai';
+export type JudgeThinking = 'auto' | 'off' | 'provider';
+
+/** 展开后的一条生效线路：没有 token，只有"有没有"和够长时的末 4 位。 */
+export interface ProviderLine {
+  /** 出自哪张卡片；`env` = .env 派生。 */
+  card: string;
+  account: string;
+  api_format: ApiFormat;
+  base_url: string;
+  model: string;
+  has_token: boolean;
+  token_hint: string | null;
+  judge_thinking: JudgeThinking;
+}
+
+/** 一张卡片的公开投影（服务端逐个字段给出，没有 token）。 */
+export interface ModelCard {
+  id: string;
+  name: string;
+  account: string;
+  api_format: ApiFormat;
+  base_url: string;
+  model: string;
+  has_token: boolean;
+  token_hint: string | null;
+  judge_thinking: JudgeThinking;
+  created_at: string;
+  builtin: false;
+}
+
+/** 内建的 .env 卡片：只读。.env 本身坏了时 available 为 false，只带 problem。 */
+export interface EnvCard {
+  id: 'env';
+  name: string;
+  account: 'env';
+  builtin: true;
+  available: boolean;
+  problem?: string;
+  api_format?: ApiFormat;
+  base_url?: string;
+  model?: string;
+  judge_model?: string;
+  has_token?: boolean;
+  token_hint?: string | null;
+}
+
+export type JudgeChoice = { follow: 'generation' } | { card: string; model?: string };
+
+export interface ActiveCards {
+  /** 卡片 id 或 `env`。 */
+  generation: string;
+  judge: JudgeChoice;
+}
+
+export interface ProviderSettingsView {
+  settings: {
+    source: 'env' | 'panel';
+    cards: ModelCard[];
+    env_card: EnvCard;
+    active: ActiveCards;
+    generation: ProviderLine;
+    judge: ProviderLine;
+    generator_model: string;
+    evaluator_model: string;
+    ooc_threshold: number;
+    /** .env 那一套凭据是否完整：不完整时不能直接回滚到旧镜像。 */
+    env_complete: boolean;
+  };
+  config_revision: number;
+  quarantined: boolean;
+  transaction_pending: boolean;
+}
+
+/** 提交的一张卡片。编辑时 token 留空 = 沿用这张卡片已存的。 */
+export interface CardInput {
+  name: string;
+  account: string;
+  api_format: ApiFormat;
+  base_url: string;
+  model: string;
+  token: string;
+  judge_thinking: JudgeThinking;
+}
+
+/** 新建卡片时顺手建一个同 id 的账户（服务端一次编排）。 */
+export interface NewAccountInput {
+  kind: string;
+  currency: 'CNY' | 'USD';
+  multiplier: string;
+}
+
+export const fetchProviderSettings = (): Promise<ProviderSettingsView> =>
+  fetch('/api/settings/provider').then((res) => json(res));
+
+const sendJson = (url: string, method: string, body?: unknown) =>
+  fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+/** 切换：生成用哪张、判分跟随还是用哪张。卡片原样。 */
+export const switchActiveCards = (active: ActiveCards): Promise<ProviderSettingsView> =>
+  sendJson('/api/settings/provider/active', 'PUT', active).then((res) => json(res));
+
+/** 新建卡片：只保存、不启用。`account` 省略、带 createAccount 时服务端建同 id 的账户。 */
+export const createModelCard = (
+  input: Omit<CardInput, 'account'> & { account?: string },
+  createAccount?: NewAccountInput,
+): Promise<ProviderSettingsView & { card: string; account: string | null }> =>
+  sendJson('/api/settings/provider/cards', 'POST', {
+    ...input,
+    ...(createAccount ? { create_account: createAccount } : {}),
+  }).then((res) => json(res));
+
+export const updateModelCard = (id: string, input: CardInput): Promise<ProviderSettingsView> =>
+  sendJson(`/api/settings/provider/cards/${encodeURIComponent(id)}`, 'PUT', input).then((res) => json(res));
+
+export const deleteModelCard = (id: string): Promise<ProviderSettingsView> =>
+  sendJson(`/api/settings/provider/cards/${encodeURIComponent(id)}`, 'DELETE').then((res) => json(res));
+
+/** 删掉全部卡片，回到 .env。只想换回 .env、留着卡片，点 .env 卡片就行。 */
+export const clearModelCards = (): Promise<ProviderSettingsView> =>
+  sendJson('/api/settings/provider', 'DELETE').then((res) => json(res));
+
+export interface BillingAccount {
+  id: string;
+  name: string;
+  kind: string;
+  balance: 'manual';
+  currency: 'CNY' | 'USD';
+  multiplier: string;
+  created_at: string;
+  retired_at?: string;
+}
+
+export const fetchBillingAccounts = (): Promise<{ accounts: Record<string, BillingAccount> }> =>
+  fetch('/api/settings/accounts').then((res) => json(res));
+
+export interface BillingAccountInput {
+  id: string;
+  name: string;
+  kind: string;
+  currency: 'CNY' | 'USD';
+  multiplier: string;
+}
+
+type BillingAccountWrite = { account: BillingAccount; accounts: Record<string, BillingAccount> };
+
+export const createBillingAccount = (input: BillingAccountInput): Promise<BillingAccountWrite> =>
+  fetch('/api/settings/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then((res) => json(res));
+
+/** 只能改显示名和倍率；币种、kind 要换就新建账户。 */
+export const updateBillingAccount = (
+  id: string,
+  fields: { name?: string; multiplier?: string },
+): Promise<BillingAccountWrite> =>
+  fetch(`/api/settings/accounts/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  }).then((res) => json(res));
+
+export const retireBillingAccount = (id: string): Promise<BillingAccountWrite> =>
+  fetch(`/api/settings/accounts/${encodeURIComponent(id)}/retire`, { method: 'POST' }).then((res) =>
+    json(res),
+  );

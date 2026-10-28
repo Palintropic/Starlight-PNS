@@ -107,20 +107,24 @@ def load_registry(*, generator_model=None, evaluator_model=None):
     registry = build_content_registry()
     models = registry.models
     if generator_model:
-        models = replace(models, generator_model=generator_model)
+        models = replace(models, generation=replace(models.generation, model=generator_model))
     if evaluator_model:
-        models = replace(models, evaluator_model=evaluator_model)
-    if models.api_format == "openai":
+        models = replace(models, judge=replace(models.judge, model=evaluator_model))
+    if models.generation.api_format == "openai":
         raise SystemExit("this script only meters the anthropic-format path used in production")
+    gen, judge = models.generation, models.judge
+    if (judge.api_format, judge.base_url, judge.token) != (gen.api_format, gen.base_url, gen.token):
+        raise SystemExit("this script uses one client for both lines; judge must share the generation endpoint")
     return replace(registry, models=models)
 
 
 def make_meter(registry, budget_yuan):
     from pns.logic import router as router_mod
 
-    if not registry.models.api_key:
+    line = registry.models.generation
+    if not line.token:
         raise SystemExit("missing API key")
-    client = router_mod.create_client(registry.models.api_key, settings=registry.models)
+    client = router_mod.create_client(line.token.reveal(), settings=line)
     return Meter(client, budget_yuan)
 
 

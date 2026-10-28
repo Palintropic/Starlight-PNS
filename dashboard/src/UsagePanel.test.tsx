@@ -5,11 +5,13 @@
 //   1. 连续失败到阈值才标红，并且说出从几点起、失败了几次、为什么；
 //   2. 余额永远写"估算"，没算进去的次数要一起说出来；
 //   3. 锚点只发余额本身，只读账户看不到输入框；
-//   4. 一切正常时横幅什么都不显示。
+//   4. 一切正常时横幅什么都不显示；
+//   5. CFG-1：余额按账户各显示各的，非人民币不相减，锚点失效说原因；锚点带上
+//      选中的账户；低余额横幅按账户报。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import * as api from './api';
-import type { UsageBucket, UsageSummary } from './api';
+import type { AccountBalance, UsageBucket, UsageSummary } from './api';
 import { UsageAlert, UsagePanel } from './UsagePanel';
 import { alertLines, beijingMinute } from './usageAlerts';
 import { OPERATOR, renderAs } from './testPrincipal';
@@ -50,6 +52,30 @@ const summary = (overrides: Partial<UsageSummary> = {}): UsageSummary => ({
   corrupt_lines: 0,
   ...overrides,
 });
+
+const account = (overrides: Partial<AccountBalance> = {}): AccountBalance => ({
+  currency: 'CNY',
+  retired: false,
+  anchor: null,
+  anchor_problem: null,
+  spent_since_anchor_yuan: null,
+  estimated: null,
+  uncounted_calls: 0,
+  billing_uncertain_calls: 0,
+  anchor_before_ledger: null,
+  low: false,
+  warn_yuan: 10,
+  ...overrides,
+});
+
+const anchored = (balance: number, spent: number, overrides: Partial<AccountBalance> = {}) =>
+  account({
+    anchor: { balance, currency: overrides.currency ?? 'CNY', at: '2026-10-08T14:00:00+00:00' },
+    spent_since_anchor_yuan: spent,
+    estimated: (overrides.currency ?? 'CNY') === 'CNY' ? balance - spent : null,
+    anchor_before_ledger: false,
+    ...overrides,
+  });
 
 const failing = summary({
   failure_streak: {
@@ -169,9 +195,9 @@ describe('UsagePanel', () => {
 
   it('sends the balance itself as a number', async () => {
     vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue(summary());
-    const save = vi
-      .spyOn(api, 'setBalanceAnchor')
-      .mockResolvedValue({ balance_yuan: 99.42, at: '2026-10-08T14:40:00+00:00' });
+    const save = vi.spyOn(api, 'setBalanceAnchor').mockResolvedValue({
+      account: 'env', balance: 99.42, currency: 'CNY', at: '2026-10-08T14:40:00+00:00',
+    });
     await act(async () => {
       renderAs(OPERATOR, <UsagePanel />);
     });
@@ -179,7 +205,7 @@ describe('UsagePanel', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('记下余额'));
     });
-    expect(save).toHaveBeenCalledWith(99.42);
+    expect(save).toHaveBeenCalledWith(99.42, 'env');
     expect(screen.getByText(/记下了/)).toBeTruthy();
   });
 
@@ -199,5 +225,87 @@ describe('UsagePanel', () => {
     });
     const people = screen.getAllByText(/^(kanade|mafuyu)$/).map((el) => el.textContent);
     expect(people).toEqual(['mafuyu', 'kanade']);
+  });
+});
+
+describe('UsagePanel per account (CFG-1)', () => {
+  it('shows each account on its own, never subtracting a non-CNY one', async () => {
+    vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue(
+      summary({
+        balances: {
+          env: anchored(100, 3),
+          relay: anchored(20, 1.5, { currency: 'USD' }),
+          ds: account({ anchor_problem: 'account_recreated' }),
+          gone: account({ retired: true }),
+        },
+        by_account: { env: bucket(), relay: bucket() },
+      }),
+    );
+    await act(async () => {
+      renderAs(OPERATOR, <UsagePanel />);
+    });
+    expect(screen.getByText('¥97.00')).toBeTruthy();
+    const usd = screen.getByText(/20\.00 USD/).textContent ?? '';
+    expect(usd).toContain('之后本账户花了');
+    expect(usd).toContain('不相减');
+    expect(screen.getByText(/账户被重建过/)).toBeTruthy();
+    // 退役、没锚点、没花钱：不占地方，也不出现在锚点的账户下拉里。
+    expect(screen.queryByText('gone')).toBeNull();
+    const options = Array.from(screen.getByRole('combobox').querySelectorAll('option')).map((o) => o.value);
+    expect(options).toEqual(['env', 'relay', 'ds']);
+  });
+
+  it('sends the anchor for the chosen account, in its currency', async () => {
+    vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue(
+      summary({ balances: { env: account(), relay: account({ currency: 'USD' }) } }),
+    );
+    const save = vi.spyOn(api, 'setBalanceAnchor').mockResolvedValue({
+      account: 'relay', balance: 12.5, currency: 'USD', at: '2026-10-08T14:40:00+00:00',
+    });
+    await act(async () => {
+      renderAs(OPERATOR, <UsagePanel />);
+    });
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'relay' } });
+    expect(screen.getByText(/控制台上此刻的余额（USD）/)).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText('比如 99.42'), { target: { value: '12.5' } });
+    await act(async () => {
+      fireEvent.click(screen.getByText('记下余额'));
+    });
+    expect(save).toHaveBeenCalledWith(12.5, 'relay');
+    expect(screen.getByText(/relay 此刻余额 12\.50 USD/)).toBeTruthy();
+  });
+
+  it('asks for a new anchor when it is older than the last version switch', async () => {
+    vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue(
+      summary({
+        balances: {
+          env: anchored(100, 3, { anchor_before_switch: true }),
+          relay: anchored(20, 1, { anchor_before_switch: false }),
+        },
+      }),
+    );
+    await act(async () => {
+      renderAs(OPERATOR, <UsagePanel />);
+    });
+    expect(screen.getAllByText(/早于最近一次版本切换/)).toHaveLength(1);
+  });
+
+  it('says so when balances could not be estimated', async () => {
+    vi.spyOn(api, 'fetchUsageSummary').mockResolvedValue(
+      summary({ balances: {}, balances_unavailable: true }),
+    );
+    await act(async () => {
+      renderAs(OPERATOR, <UsagePanel />);
+    });
+    expect(screen.getByText(/一个余额都没估/)).toBeTruthy();
+  });
+
+  it('warns per account when an account runs low', () => {
+    const lines = alertLines(
+      summary({ balances: { env: anchored(100, 1), relay: anchored(12, 5, { low: true }) } }),
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0].text).toContain('账户 relay');
+    expect(lines[0].text).toContain('¥7');
   });
 });

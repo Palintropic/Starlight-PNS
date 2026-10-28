@@ -19,8 +19,10 @@ from process_setup import prepare, secret_env_names  # noqa: E402,F401
 prepare()
 
 from pns.interfaces import create_app
+from pns.interfaces.app import prepare_production_data
 
 app = create_app()
+prepare_production_data(app)
 
 if __name__ == "__main__":
     import uvicorn

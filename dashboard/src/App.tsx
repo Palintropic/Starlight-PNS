@@ -5,6 +5,7 @@ import SetupWizard from './SetupWizard';
 import Login from './Login';
 import ChangePassword from './ChangePassword';
 import Accounts from './Accounts';
+import ModelSettings from './ModelSettings';
 import ConfigReload from './ConfigReload';
 import PersistentWorlds from './PersistentWorlds';
 import Simulate from './Simulate';
@@ -22,7 +23,7 @@ import { PrincipalProvider } from './PrincipalProvider';
 import WorldOverview from './WorldOverview';
 import './App.css';
 
-type Tab = 'overview' | 'simulate' | 'review' | 'world' | 'worlds' | 'accounts';
+type Tab = 'overview' | 'simulate' | 'review' | 'world' | 'worlds' | 'models' | 'accounts';
 
 // Pivot 表头的文字就是页面标题：W10 的 Pivot 不在内容区再重复一遍。
 const TAB_LABEL: Record<Tab, string> = {
@@ -31,6 +32,7 @@ const TAB_LABEL: Record<Tab, string> = {
   review: '审核',
   world: '世界编辑',
   worlds: '持久世界',
+  models: '模型',
   accounts: '用户管理',
 };
 
@@ -73,12 +75,12 @@ function App() {
   const canOperate = scopes.includes(SCOPE_OPERATE);
   const canManageAccounts = scopes.includes(SCOPE_ACCOUNTS);
 
-  // 只读账户没有"模拟"和"用户管理"这两个页签。当前停在一个自己已经没权限的
+  // 只读账户没有"模拟"、"模型"和"用户管理"这几个页签。当前停在一个自己已经没权限的
   // 页签上时把它拨回来——否则换账户之后会停在一个空白页上。
   useEffect(() => {
     if (!authenticated) return;
     if (tab === 'simulate' && !canOperate) setTab('worlds');
-    if (tab === 'accounts' && !canManageAccounts) setTab('worlds');
+    if ((tab === 'accounts' || tab === 'models') && !canManageAccounts) setTab('worlds');
   }, [authenticated, tab, canOperate, canManageAccounts]);
 
   const loadConfig = useCallback(() => {
@@ -153,7 +155,7 @@ function App() {
     'review',
     'world',
     'worlds',
-    ...(canManageAccounts ? (['accounts'] as const) : []),
+    ...(canManageAccounts ? (['models', 'accounts'] as const) : []),
   ];
 
   // Pivot 表头支持左右方向键切换，和 UWP 的 Pivot 一致。
@@ -187,7 +189,7 @@ function App() {
           </nav>
         </header>
         <main className="pivot-item" role="tabpanel" aria-labelledby={`pivot-${tab}`} key={tab}>
-          {tab === 'overview' ? <WorldOverview /> : tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : <PersistentWorlds />}
+          {tab === 'overview' ? <WorldOverview /> : tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : tab === 'models' && canManageAccounts ? <ModelSettings /> : <PersistentWorlds />}
         </main>
         <footer className="command-bar">
           <span className="command-bar-account" title={principal ? `principal ${principal.principal_id}` : undefined}>{principal ? `${principal.username} · ${principal.role}` : null}</span>

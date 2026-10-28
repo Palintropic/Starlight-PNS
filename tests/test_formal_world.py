@@ -316,7 +316,7 @@ class PlaneTestCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name) / "worlds"
-        env = patch.dict(os.environ, {self.registry.models.key_name: CANARY})
+        env = patch.dict(os.environ, {self.registry.models.env_key_name: CANARY})
         env.start()
         self.addCleanup(env.stop)
         self.provider = FakeProvider()

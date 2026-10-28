@@ -12,7 +12,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -27,7 +27,28 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
+      # 生产进程测试要一份构建好的 Dashboard（跟镜像一样）；没有就跳过的话，
+      # CI 永远不会真的起一次生产服务器。Node 版本跟 Dockerfile 的 dashboard 阶段一致。
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build and test the dashboard
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm test
+          npm run lint
+          npm run build
+          test -f dist/index.html
+
       - name: Run tests
+        env:
+          # 缺 Dashboard 构建产物时生产进程测试失败，而不是跳过。
+          PNS_REQUIRE_DIST: "1"
         run: python -m unittest discover -s tests
 
       - name: Compile Python sources

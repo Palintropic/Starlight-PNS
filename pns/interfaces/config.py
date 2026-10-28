@@ -8,7 +8,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-import pns.logic.router as router_mod
 from oobe import ENV_FILE, PROVIDERS, write_env
 from pns.runtime.reload import BOUNDARY, write_and_reload
 
@@ -22,11 +21,11 @@ def get_config():
     registry = BOUNDARY.active()
     models = registry.models
     return {
-        "has_key": bool(router_mod._get_api_key(models.key_name)),
-        "model": models.model,
+        "has_key": bool(models.generation.token and models.judge.token),
+        "model": models.generator_model,
         "generator_model": models.generator_model,
         "evaluator_model": models.evaluator_model,
-        "api_format": models.api_format,
+        "api_format": models.generation.api_format,
         "default_scene": registry.default_scene,
         "config_revision": registry.revision,
     }
@@ -67,6 +66,8 @@ def post_config(payload: ConfigPayload):
         ),
         reason="provider 配置更新",
     )
+    if result.status == "quarantined":
+        raise HTTPException(503, result.error)
     if result.status == "busy":
         raise HTTPException(
             409,
@@ -103,6 +104,9 @@ def post_reload():
     对应 HTTP 409，不排队也不并发执行第二次。
     """
     result = BOUNDARY.reload()
+    if result.status == "quarantined":
+        # 模型设置的上一次保存没收尾：先在服务器上解除隔离（CFG-1 §5.4）。
+        raise HTTPException(503, result.error)
     if result.status == "busy":
         raise HTTPException(409, result.error or "已有一次配置重载正在进行")
     if result.status == "failed":

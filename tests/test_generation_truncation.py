@@ -14,7 +14,7 @@ def _registry(api_format):
     return SimpleNamespace(
         character_system=lambda *a, **k: "system",
         character_name=lambda c: "奏",
-        models=SimpleNamespace(api_format=api_format),
+        models=SimpleNamespace(generation=SimpleNamespace(api_format=api_format)),
     )
 
 

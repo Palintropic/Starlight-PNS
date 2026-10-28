@@ -57,6 +57,8 @@ from pns.runtime.persistence import (
     WorldAlreadyOwned,
     WorldIdError,
 )
+from pns.runtime.provider_switch import ProviderSwitchBusy
+from pns.runtime.reload import SettingsQuarantined
 
 from .authz import (
     BREAK_GLASS_PRINCIPAL_ID,
@@ -432,6 +434,10 @@ def _translate(
     """
     if isinstance(e, WorldIdError):
         return _error(400, "invalid_world_id", e)
+    if isinstance(e, ProviderSwitchBusy):
+        return _error(409, "provider_switch_in_progress", e)
+    if isinstance(e, SettingsQuarantined):
+        return _error(503, "settings_quarantined", e)
     if isinstance(e, ContentUnavailable):
         return _error(400, "invalid_content", e)
     if isinstance(e, ContentNotAdopted):

@@ -21,19 +21,27 @@
 # ContentRegistry 是一份不可变快照。会话在 create() 时抓住一份，整个生命周期里
 # 都用同一份 —— 所以重载切换全局引用时，正在跑的会话不会读到撕裂的半新半旧配置。
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Tuple
 
 import yaml
-from dotenv import dotenv_values, load_dotenv
+from dotenv import dotenv_values
 
 from pns.models.channel import ChannelRegistry
 from pns.models.arrangement import ArrangementDefinition, ArrangementError, parse_arrangements
 from pns.models.frozen import freeze_json_value, thaw_json_value
 from pns.models.location import LocationGraph
+from pns.runtime.provider_settings import (
+    AccountCatalog,
+    ModelSettings,
+    ProviderSettingsError,
+    builtin_catalog,
+    load_model_settings,
+    validate_for_publish,
+)
 from pns.runtime.usage_ledger import Prices, parse_price_table
 from pns.world.channels import build_default_channel_registry
 from pns.world.data_module import DataModuleError, evaluate_data_source, require
@@ -61,8 +69,8 @@ SCENES_PATH = REPO_ROOT / "pns" / "world" / "scenes.py"
 FACTS_PATH = REPO_ROOT / "pns" / "world" / "facts.py"
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 ENV_PATH = REPO_ROOT / ".env"
-
-VALID_API_FORMATS = ("anthropic", "openai")
+# 面板存的线路与账户目录（CFG-1）。生产上是 pns-data 卷里的 /app/data/settings。
+SETTINGS_DIR = REPO_ROOT / "data" / "settings"
 
 # 供文档与测试引用的分类清单。改动这三张表就是在改重载边界本身，
 # 必须同时改 docs/ARCHITECTURE.md 和 tests/test_config_reload.py。
@@ -71,6 +79,7 @@ RELOADABLE_SOURCES: Tuple[str, ...] = (
     "pns/world/facts.py (WORLD_FACTS 字面量)",
     "config.yaml",
     ".env",
+    "data/settings/provider.json、accounts.json (面板存的模型线路与计费账户)",
     "packs/<active_pack>/**",
 )
 COLD_UPDATE_SOURCES: Tuple[str, ...] = (
@@ -144,77 +153,43 @@ def _load_settings(path: Path) -> Dict:
 
 
 # ── 模型 / provider 配置 ──────────────────────────────────────────────────
+#
+# 线路、账户、密钥边界都在 pns/runtime/provider_settings.py；这里只负责在构建
+# 快照时把它们读进来，并把那边的错误统一成 ConfigValidationError。
 
 
-@dataclass(frozen=True)
-class ModelSettings:
-    """.env 里那套 provider/模型设定的一份快照。
-
-    API Key 本身不进快照（不想让密钥在内存里到处复制），只记住它的变量名，
-    需要时现从 os.environ 取。
-    """
-
-    provider: str
-    api_format: str
-    base_url: str
-    key_name: str
-    model: str
-    generator_model: str
-    evaluator_model: str
-    ooc_threshold: float
-
-    @classmethod
-    def from_env(cls, env: Mapping = None) -> "ModelSettings":
-        env = os.environ if env is None else env
-        api_format = env.get("API_FORMAT", "anthropic")
-        if api_format not in VALID_API_FORMATS:
-            raise ConfigValidationError(
-                f"API_FORMAT 必须是 {'/'.join(VALID_API_FORMATS)} 之一，实际是 {api_format!r}"
-            )
-        base_url = env.get("BASE_URL", "https://api.xiaomimimo.com/anthropic")
-        if not base_url:
-            raise ConfigValidationError("BASE_URL 不能为空")
-        key_name = env.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
-        if not key_name:
-            raise ConfigValidationError("PNS_API_KEY_NAME 不能为空")
-        raw_threshold = env.get("OOC_THRESHOLD", "5")
-        try:
-            ooc_threshold = float(raw_threshold)
-        except (TypeError, ValueError) as e:
-            raise ConfigValidationError(
-                f"OOC_THRESHOLD 必须是数字，实际是 {raw_threshold!r}"
-            ) from e
-        if not 0 <= ooc_threshold <= 10:
-            raise ConfigValidationError(
-                f"OOC_THRESHOLD 必须落在 0-10，实际是 {ooc_threshold}"
-            )
-        model = env.get("MODEL", "mimo-v2.6-pro")
-        return cls(
-            provider=env.get("PROVIDER", ""),
-            api_format=api_format,
-            base_url=base_url,
-            key_name=key_name,
-            model=model,
-            generator_model=env.get("GENERATOR_MODEL") or model,
-            evaluator_model=env.get("EVALUATOR_MODEL") or model,
-            ooc_threshold=ooc_threshold,
+def _ooc_threshold(env: Mapping) -> float:
+    raw_threshold = env.get("OOC_THRESHOLD", "5")
+    try:
+        ooc_threshold = float(raw_threshold)
+    except (TypeError, ValueError) as e:
+        raise ConfigValidationError(
+            f"OOC_THRESHOLD 必须是数字，实际是 {raw_threshold!r}"
+        ) from e
+    if not 0 <= ooc_threshold <= 10:
+        raise ConfigValidationError(
+            f"OOC_THRESHOLD 必须落在 0-10，实际是 {ooc_threshold}"
         )
+    return ooc_threshold
 
-    @property
-    def api_key(self) -> str:
-        return os.environ.get(self.key_name, "")
 
-    def to_dict(self) -> Dict:
-        return {
-            "provider": self.provider,
-            "api_format": self.api_format,
-            "base_url": self.base_url,
-            "key_name": self.key_name,
-            "model": self.model,
-            "generator_model": self.generator_model,
-            "evaluator_model": self.evaluator_model,
-            "ooc_threshold": self.ooc_threshold,
-        }
+def load_models(env: Mapping, settings_dir: Path = None, *, publish_check: bool = False):
+    """(ModelSettings, AccountCatalog)。面板文件存在以它为准，否则 env 派生。
+
+    publish_check：模型设置保存时打开 —— 生效的两条线路必须按**这份** env 完整
+    有效（含 env 卡片的 key），否则这份配置不通过、保存回退。普通加载不要求，
+    开发环境没有 key 也要能起来。
+    """
+    settings_dir = SETTINGS_DIR if settings_dir is None else settings_dir
+    try:
+        models, accounts = load_model_settings(
+            settings_dir, env, ooc_threshold=_ooc_threshold(env)
+        )
+        if publish_check:
+            validate_for_publish(models, accounts, env)
+    except ProviderSettingsError as e:
+        raise ConfigValidationError(str(e)) from e
+    return models, accounts
 
 
 # ── 角色内容 ──────────────────────────────────────────────────────────────
@@ -364,6 +339,7 @@ class ContentRegistry:
     characters: Mapping[str, CharacterContent]
     settings: Mapping
     models: ModelSettings
+    accounts: AccountCatalog = field(default_factory=builtin_catalog)
 
     # ── 场景 ──────────────────────────────────────────────────────────
     #
@@ -495,7 +471,7 @@ class ContentRegistry:
             "ready_characters": sorted(
                 cid for cid, c in self.characters.items() if c.status == "ready"
             ),
-            "models": self.models.to_dict(),
+            "models": self.models.public_dict(),
         }
 
 
@@ -566,7 +542,7 @@ def _validate_scenes(scenes: Dict, default_scene: str, locations, channels) -> N
         )
 
 
-def build_content_registry(revision: int = 0) -> ContentRegistry:
+def build_content_registry(revision: int = 0, *, publish_check: bool = False) -> ContentRegistry:
     """从磁盘完整构建一份新的内容注册表。
 
     这是**唯一**的配置构建入口。任何一步失败都抛 ConfigValidationError，
@@ -580,8 +556,8 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
     env_file = {
         k: v for k, v in dotenv_values(ENV_PATH).items() if v is not None
     } if ENV_PATH.exists() else {}
-    # 与 load_dotenv(override=True) 同样的优先级：.env 覆盖进程环境。
-    models = ModelSettings.from_env({**os.environ, **env_file})
+    # .env 覆盖进程环境（同 load_dotenv(override=True)）；值为 None 的行不算。
+    models, accounts = load_models({**os.environ, **env_file}, publish_check=publish_check)
     settings = _load_settings(CONFIG_PATH)
     # 价目表写错了要让这份配置不通过，而不是让用量账本按错价记一个月。
     try:
@@ -621,9 +597,10 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
             raise ConfigValidationError(content.prompt_error or f"角色 {character_id} 无提示词")
         characters[character_id] = content
 
-    # 全部校验通过，这一份配置确定可用了，才把 .env 落到进程环境里。
-    if env_file:
-        load_dotenv(ENV_PATH, override=True)
+    # 全部校验通过，这一份配置确定可用了，才把 .env 落到进程环境里。落的是开头
+    # 读出来、参与过校验的那一份，不按路径再读一次：构建期间有人改了 .env，
+    # 再读就会把一份没校验过的 key 换上去（CFG-1 实现复核 P2-1）。
+    os.environ.update(env_file)
 
     return ContentRegistry(
         revision=revision,
@@ -635,4 +612,5 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
         characters=MappingProxyType(characters),
         settings=_freeze(settings, "config.yaml"),
         models=models,
+        accounts=accounts,
     )

@@ -1056,7 +1056,7 @@ class RuntimeSessionTestBase:
         self.drift_file.touch()
         self._env_backup = dict(os.environ)
         self._patches = [
-            patch("pns.runtime.session_runtime.router_mod._get_api_key", return_value="test-key"),
+            patch("pns.runtime.provider_settings.read_env_key", return_value="test-key"),
             patch("pns.runtime.session_runtime.router_mod.create_client", return_value=object()),
         ]
         for p in self._patches:

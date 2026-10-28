@@ -8,11 +8,20 @@
 //   * `UsagePanel`：完整的用量面板，放在持久世界页：今天花了多少、各类 token、
 //     缓存命中率、按住民拆开、余额估算和锚点输入。
 //
+// CFG-1 起余额按计费账户：每个账户一块，只扣归属它的账；锚点也按账户填，数额
+// 是账户原币种。非人民币账户只给锚点和"之后花了 ¥x"，不相减。
+//
 // 这里的每个钱数都是**服务器按本地价目表的估算**：MiMo 没有余额接口，计费
 // 有延迟，超时的请求可能扣了钱却没有用量。所以界面上永远写"估算"，并把
 // 没算进去的次数一起列出来，而不是给一个看起来很确定的数。
 import { useState } from 'react';
-import { SCOPE_OPERATE, setBalanceAnchor, type UsageBucket } from './api';
+import {
+  SCOPE_OPERATE,
+  setBalanceAnchor,
+  type AccountBalance,
+  type AnchorProblem,
+  type UsageBucket,
+} from './api';
 import { useCan } from './principal';
 import { alertLines, beijingMinute, percent, tokens, useUsageSummary, yuan } from './usageAlerts';
 import './usage.css';
@@ -51,10 +60,65 @@ const unknownNote = (bucket: UsageBucket): string | undefined => {
   return parts.length ? `另有${parts.join('、')}，没算进去` : undefined;
 };
 
+const PROBLEM_TEXT: Record<AnchorProblem, string> = {
+  retired: '账户已退役，锚点不再算数',
+  account_recreated: '账户被重建过，旧锚点作废，请重新填',
+  currency_mismatch: '锚点币种和账户对不上，请重新填',
+  malformed: '锚点记录读不出来，请重新填',
+};
+
+const money = (value: number, currency: string) =>
+  currency === 'CNY' ? yuan(value) : `${value.toFixed(2)} ${currency}`;
+
+function AccountBalanceBlock({ id, account }: { id: string; account: AccountBalance }) {
+  const anchor = account.anchor;
+  return (
+    <div className="usage-account">
+      <h5>
+        {id}
+        <span className="usage-dim">
+          {' '}
+          {account.currency}
+          {account.retired ? '，已退役' : ''}
+        </span>
+      </h5>
+      {anchor === null ? (
+        <p className="usage-note">
+          {account.anchor_problem ? PROBLEM_TEXT[account.anchor_problem] ?? '锚点不算数' : '还没记过余额'}。
+        </p>
+      ) : (
+        <>
+          {account.estimated !== null ? (
+            <p className="usage-balance-value">{yuan(account.estimated)}</p>
+          ) : null}
+          <p className="usage-note">
+            从 {beijingMinute(anchor.at)} 记下的 {money(anchor.balance, anchor.currency)}
+            {account.estimated !== null ? ' 往下扣了 ' : ' 之后本账户花了 '}
+            {yuan(account.spent_since_anchor_yuan ?? 0)}
+            {account.estimated === null ? '（币种不同，不相减）' : ''}
+            {account.uncounted_calls ? `；${account.uncounted_calls} 次调用没有花费数据，没算进去` : ''}
+            {account.billing_uncertain_calls
+              ? `（其中 ${account.billing_uncertain_calls} 次可能已经扣了钱）`
+              : ''}
+            {account.anchor_before_ledger ? '；这个时间早于账本起点，之前的花费没记下来' : ''}
+            。计费有延迟，以控制台为准。
+          </p>
+          {account.anchor_before_switch ? (
+            <p className="usage-note caution">
+              这个锚点早于最近一次版本切换（回滚过或刚升级），旧版本那段时间按另一套口径估余额，建议对照控制台重新填一次。
+            </p>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function UsagePanel() {
   const { summary, error, reload } = useUsageSummary(7);
   const canOperate = useCan(SCOPE_OPERATE);
   const [draft, setDraft] = useState('');
+  const [anchorAccount, setAnchorAccount] = useState('env');
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'error'; message: string } | null>(null);
 
@@ -64,9 +128,12 @@ export function UsagePanel() {
   const saveAnchor = () => {
     if (!draftValid || draftValue === null) return;
     setSaving(true);
-    setBalanceAnchor(draftValue)
-      .then(() => {
-        setFeedback({ kind: 'ok', message: `记下了：此刻余额 ${yuan(draftValue)}` });
+    setBalanceAnchor(draftValue, anchorAccount)
+      .then((saved) => {
+        setFeedback({
+          kind: 'ok',
+          message: `记下了：${saved.account} 此刻余额 ${money(saved.balance, saved.currency)}`,
+        });
         setDraft('');
         reload();
       })
@@ -86,6 +153,12 @@ export function UsagePanel() {
   );
   const balance = summary.balance;
   const lines = alertLines(summary);
+  // 退役了、没锚点、这几天也没花钱的账户不占地方。
+  const accounts = Object.entries(summary.balances ?? {}).filter(
+    ([id, account]) => !account.retired || account.anchor !== null || summary.by_account?.[id],
+  );
+  const anchorable = Object.entries(summary.balances ?? {}).filter(([, account]) => !account.retired);
+  const anchorCurrency = summary.balances?.[anchorAccount]?.currency ?? 'CNY';
 
   return (
     <section className="usage">
@@ -112,7 +185,11 @@ export function UsagePanel() {
 
       <div className="usage-balance">
         <h4>余额（本地估算）</h4>
-        {balance ? (
+        {summary.balances_unavailable ? (
+          <p className="usage-note">计费账户目录或余额锚点读不出来，这次一个余额都没估。</p>
+        ) : summary.balances ? (
+          accounts.map(([id, account]) => <AccountBalanceBlock key={id} id={id} account={account} />)
+        ) : balance ? (
           <>
             <p className="usage-balance-value">{yuan(balance.estimated_yuan)}</p>
             <p className="usage-note">
@@ -131,8 +208,20 @@ export function UsagePanel() {
         )}
         {canOperate ? (
           <div className="usage-anchor">
+            {anchorable.length > 1 ? (
+              <label>
+                账户
+                <select value={anchorAccount} onChange={(e) => setAnchorAccount(e.target.value)}>
+                  {anchorable.map(([id, account]) => (
+                    <option key={id} value={id}>
+                      {id}（{account.currency}）
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <label>
-              控制台上此刻的余额（元）
+              控制台上此刻的余额（{anchorCurrency === 'CNY' ? '元' : anchorCurrency}）
               <input
                 type="number"
                 step="0.01"

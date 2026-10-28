@@ -92,8 +92,17 @@ export function alertLines(summary: UsageSummary): { tone: 'bad' | 'caution'; te
         '世界里的人现在说不了话。',
     });
   }
-  const balance = summary.balance;
-  if (balance && balance.low) {
+  if (summary.balances) {
+    // 每个账户各报各的：切到别家以后，低的可能不是 env 那份。
+    for (const [id, account] of Object.entries(summary.balances)) {
+      if (!account.low || account.estimated === null || account.warn_yuan === null) continue;
+      lines.push({
+        tone: 'caution',
+        text: `账户 ${id} 估算余额只剩 ${yuan(account.estimated)}（本地估算，低于 ${yuan(account.warn_yuan)}）。`,
+      });
+    }
+  } else if (summary.balance && summary.balance.low) {
+    const balance = summary.balance;
     lines.push({
       tone: 'caution',
       text: `估算余额只剩 ${yuan(balance.estimated_yuan)}（本地估算，低于 ${yuan(balance.warn_yuan)}）。`,

@@ -8,9 +8,13 @@
 #      连续失败归零；截断记 truncated；
 #   4. 计量对调用结果透明：同一个响应原样返回，同一个异常原样抛出；
 #   5. 账本写不进去时世界照常拿到结果；
-#   6. 账本和汇总里没有异常或响应带来的任何字符串。
+#   6. 账本和汇总里没有异常或响应带来的任何字符串；
+#   7. 每行账记着发出请求的那条线路、它的计费账户、上游主机和账户倍率（CFG-1
+#      §8.3），取自建 client 的同一份快照；花费乘过倍率；判分跟随生成时，线路
+#      仍是判分、账户、主机和倍率是生成那边的。
 #
 # 运行: python -m unittest discover -s tests -p test_usage_meter.py
+import dataclasses
 import json
 import os
 import sys
@@ -33,6 +37,7 @@ from pns.interfaces.composition import WorldControlPlane  # noqa: E402
 from pns.models.action import ActionId  # noqa: E402
 from pns.runtime.autonomy.audit import AuditRequest  # noqa: E402
 from pns.runtime.autonomy.generation import GenerationError  # noqa: E402
+from pns.runtime.provider_settings import AccountCatalog, Line, Secret, env_account  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.runtime import usage_ledger as ul  # noqa: E402
 
@@ -104,7 +109,7 @@ class MeterWiringTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
-        env = patch.dict(os.environ, {self.registry.models.key_name: KEY})
+        env = patch.dict(os.environ, {self.registry.models.env_key_name: KEY})
         env.start()
         self.addCleanup(env.stop)
         self.client = FakeClient()
@@ -116,7 +121,11 @@ class MeterWiringTest(unittest.TestCase):
             client_factory=lambda *a, **k: self.client,
             usage_ledger=self.ledger,
         )
-        adapters = self.plane.build_adapters(self.registry, world_id="yoake-mae")
+        self._wire(self.registry)
+
+    def _wire(self, registry):
+        self.registry = registry
+        adapters = self.plane.build_adapters(registry, world_id="yoake-mae")
         self.judge = adapters.auditor._judge
         self.call_model = self._call_model_of(self.plane, adapters)
 
@@ -156,6 +165,69 @@ class MeterWiringTest(unittest.TestCase):
         self.assertEqual(gen.usage, ul.Usage(120, 0, 3000, 40))
         self.assertEqual((gen.operation, judge.operation), ("ok", "ok"))
         self.assertIsNotNone(gen.cost_yuan)
+
+    def _panel_models(self, *, follows):
+        models = self.registry.models
+        generation = Line(
+            name="generation", account="gen-acct", api_format="anthropic",
+            base_url="https://gen.example/anthropic", model=models.generator_model,
+            token=Secret(KEY), provider="mimo", card="c-gen",
+        )
+        judge = dataclasses.replace(generation, name="judge", model=models.evaluator_model)
+        if not follows:
+            judge = dataclasses.replace(
+                judge, account="judge-acct", base_url="https://judge.example/anthropic",
+                provider="deepseek", card="c-judge",
+            )
+        models = dataclasses.replace(models, generation=generation, judge=judge, source="panel")
+        base = env_account(created_at="2026-10-25T00:00:00+00:00")
+        accounts = AccountCatalog(accounts={
+            "env": base,
+            "gen-acct": dataclasses.replace(base, account_id="gen-acct", kind="mimo", multiplier="1.5"),
+            "judge-acct": dataclasses.replace(base, account_id="judge-acct", kind="deepseek", multiplier="0.8"),
+        })
+        return dataclasses.replace(self.registry, models=models, accounts=accounts)
+
+    def assertCost(self, row, multiplier):
+        base = ul.estimate_cost(row.usage, row.prices)
+        self.assertIsNotNone(base)
+        self.assertAlmostEqual(row.cost_yuan, base * multiplier, places=12)
+
+    def test_rows_name_their_line_account_and_host(self):
+        self.generate()
+        self.audit()
+        gen, judge = self.rows()
+        env_host = self.registry.models.generation.host
+        self.assertTrue(env_host)
+        self.assertEqual((gen.line, gen.account, gen.host, gen.multiplier), ("generation", "env", env_host, "1"))
+        self.assertEqual((judge.line, judge.account, judge.host, judge.multiplier), ("judge", "env", env_host, "1"))
+        self.assertEqual((gen.card, judge.card), ("env", "env"))
+        self.assertCost(gen, 1)
+
+        # 两条线路账户、主机、倍率都不同：任何一个字段串到另一条线路上都对不上。
+        env_registry = self.registry
+        self._wire(self._panel_models(follows=False))
+        self.generate()
+        self.audit()
+        gen, judge = self.rows()[2:]
+        self.assertEqual((gen.path, gen.line, gen.account, gen.host, gen.multiplier),
+                         ("generation", "generation", "gen-acct", "gen.example", "1.5"))
+        self.assertEqual((judge.path, judge.line, judge.account, judge.host, judge.multiplier),
+                         ("judge", "judge", "judge-acct", "judge.example", "0.8"))
+        self.assertEqual((gen.card, judge.card), ("c-gen", "c-judge"))
+        self.assertCost(gen, 1.5)
+
+        self.registry = env_registry
+        self._wire(self._panel_models(follows=True))
+        self.audit()
+        judge = self.rows()[-1]
+        self.assertEqual((judge.line, judge.account, judge.host, judge.multiplier),
+                         ("judge", "gen-acct", "gen.example", "1.5"))
+        # 跟随时判分行的 line 是 judge，card 是实际用的那张生成卡片。
+        self.assertEqual(judge.card, "c-gen")
+        # 新字段读回来照样在。
+        reread = self.rows()[-1]
+        self.assertEqual(reread.card, "c-gen")
 
     def test_judge_payment_failure_is_seen_although_router_swallows_it(self):
         self.client.behaviour["judge"] = _status_error(402)

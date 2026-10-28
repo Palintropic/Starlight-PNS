@@ -1106,6 +1106,11 @@ class WorldLifecycleService:
             raise
 
     # ── 服务面 ──────────────────────────────────────────────────────────
+    def open_world_ids(self) -> Tuple[str, ...]:
+        """本进程持有句柄的世界：普通打开、关闭失败或超时、held 都算。"""
+        with self._lock:
+            return tuple(sorted(self._open))
+
     def opened(self, world_id: str) -> Optional[PersistentWorld]:
         with self._lock:
             return self._open.get(validate_world_id(world_id))

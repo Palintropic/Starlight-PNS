@@ -93,7 +93,7 @@ class WorldApiTestCase(unittest.TestCase):
         # 判分器需要一份服务器侧凭据才造得出来。CI 上没有 .env，所以这里显式
         # 给一个，用的是注册表自己报出来的变量名，不写死。
         self._env = patch.dict(
-            os.environ, {self.registry.models.key_name: "test-key-not-a-real-one"}
+            os.environ, {self.registry.models.env_key_name: "test-key-not-a-real-one"}
         )
         self._env.start()
         self.plane = WorldControlPlane(
@@ -886,7 +886,7 @@ class ForeignOwnerTests(WorldApiTestCase):
 # ── AC7 适配器缺席与绑定失败 ─────────────────────────────────────────────
 class AdapterTests(WorldApiTestCase):
     def test_a_missing_api_key_refuses_before_taking_any_ownership(self):
-        with patch.dict(os.environ, {self.registry.models.key_name: ""}):
+        with patch.dict(os.environ, {self.registry.models.env_key_name: ""}):
             response = self.create()
         self.assertEqual(response.status_code, 503, response.text)
         self.assertEqual(self.category(response), "adapters_unavailable")
@@ -920,7 +920,7 @@ class AdapterTests(WorldApiTestCase):
         def explode(api_key, **kwargs):
             raise RuntimeError(f"provider rejected {api_key}")
 
-        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+        with patch.dict(os.environ, {self.registry.models.env_key_name: CANARY}):
             plane = WorldControlPlane(root=self.root, client_factory=explode)
             response = TestClient(create_app(plane)).post(
                 "/api/persistent-worlds",
@@ -936,11 +936,32 @@ class AdapterTests(WorldApiTestCase):
         self.assert_no_canary(response)
         self.assertEqual(
             self.detail(response)["message"],
-            "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置",
+            "生成模型客户端建不起来；请检查服务器侧的 provider 与凭据配置",
         )
         # 而且这一档在拿所有权之前就断掉了。
         self.assertFalse(self.root.exists())
         self.assertEqual(owned_world_paths(), ())
+
+    def test_the_message_says_which_client_failed(self):
+        """生成那个建得起来、判分那个建不起来：文案说的是判分，不是笼统一句。"""
+
+        def judge_explodes(api_key, *, settings):
+            if settings.name == "judge":
+                raise RuntimeError(f"provider rejected {api_key}")
+            return object()
+
+        with patch.dict(os.environ, {self.registry.models.env_key_name: CANARY}):
+            plane = WorldControlPlane(root=self.root, client_factory=judge_explodes)
+            response = TestClient(create_app(plane)).post(
+                "/api/persistent-worlds",
+                json={"world_id": "nightcord", "scene": SCENE, "characters": CHARACTERS},
+            )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assert_no_canary(response)
+        self.assertEqual(
+            self.detail(response)["message"],
+            "判分模型客户端建不起来；请检查服务器侧的 provider 与凭据配置",
+        )
 
     def test_an_exception_type_name_is_untrusted_data_too(self):
         """连**类型名**都不能过边界。
@@ -957,7 +978,7 @@ class AdapterTests(WorldApiTestCase):
         def explode(api_key, **kwargs):
             raise type(api_key, (RuntimeError,), {})("rejected")
 
-        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+        with patch.dict(os.environ, {self.registry.models.env_key_name: CANARY}):
             plane = WorldControlPlane(root=self.root, client_factory=explode)
             response = TestClient(create_app(plane)).post(
                 "/api/persistent-worlds",
@@ -991,7 +1012,7 @@ class AdapterTests(WorldApiTestCase):
                 def explode(api_key, _make=make, **kwargs):
                     raise _make(api_key)
 
-                with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+                with patch.dict(os.environ, {self.registry.models.env_key_name: CANARY}):
                     plane = WorldControlPlane(root=self.root, client_factory=explode)
                     response = TestClient(create_app(plane)).post(
                         "/api/persistent-worlds",
@@ -1016,7 +1037,7 @@ class AdapterTests(WorldApiTestCase):
             raise RuntimeError(f"provider rejected {api_key}")
 
         plane = WorldControlPlane(root=self.root, client_factory=explode)
-        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+        with patch.dict(os.environ, {self.registry.models.env_key_name: CANARY}):
             with self.assertRaises(AdaptersUnavailable) as caught:
                 plane.build_adapters(BOUNDARY.active())
 
@@ -1035,7 +1056,7 @@ class AdapterTests(WorldApiTestCase):
         def explode(api_key, **kwargs):
             raise RuntimeError(f"provider rejected {api_key}")
 
-        with patch.dict(os.environ, {self.registry.models.key_name: CANARY}):
+        with patch.dict(os.environ, {self.registry.models.env_key_name: CANARY}):
             # 先用一个正常的工厂建出一个真实世界，再逐个撞失败路径。
             client = self.client
             self.open_world()
@@ -1496,7 +1517,7 @@ class CompositionBoundaryTests(unittest.TestCase):
     def test_two_apps_in_one_process_do_not_share_an_ownership_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "worlds"
-            with patch.dict(os.environ, {BOUNDARY.active().models.key_name: "k"}):
+            with patch.dict(os.environ, {BOUNDARY.active().models.env_key_name: "k"}):
                 first = WorldControlPlane(
                     root=root, client_factory=lambda *a, **k: _FakeModelClient()
                 )
@@ -1600,7 +1621,7 @@ class InitialStateTests(WorldApiTestCase):
             )
 
     def test_adapters_are_refused_without_server_side_credentials(self):
-        with patch.dict(os.environ, {self.registry.models.key_name: ""}):
+        with patch.dict(os.environ, {self.registry.models.env_key_name: ""}):
             with self.assertRaises(AdaptersUnavailable):
                 self.plane.build_adapters(self.registry)
 
