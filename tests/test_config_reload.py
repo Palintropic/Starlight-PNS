@@ -321,11 +321,11 @@ class ConcurrentReloadTests(BoundaryTestBase):
         builds = []
         real_build = build_content_registry
 
-        def slow_build(revision=0):
+        def slow_build(revision=0, **kwargs):
             builds.append(revision)
             entered.set()
             release.wait(timeout=5)
-            return real_build(revision=revision)
+            return real_build(revision=revision, **kwargs)
 
         with patch("pns.runtime.reload.build_content_registry", slow_build):
             worker_result = {}
@@ -397,9 +397,9 @@ class AdmissionTests(BoundaryTestBase):
         seen = []
         real_build = build_content_registry
 
-        def spy(revision=0):
+        def spy(revision=0, **kwargs):
             seen.append(self.supervisor.accepting)
-            return real_build(revision=revision)
+            return real_build(revision=revision, **kwargs)
 
         with patch("pns.runtime.reload.build_content_registry", spy):
             self.boundary.reload()
@@ -697,10 +697,10 @@ class ProviderTransactionTests(BoundaryTestBase):
         entered, release = threading.Event(), threading.Event()
         real_build = build_content_registry
 
-        def slow_build(revision=0):
+        def slow_build(revision=0, **kwargs):
             entered.set()
             release.wait(timeout=5)
-            return real_build(revision=revision)
+            return real_build(revision=revision, **kwargs)
 
         with patch("pns.runtime.reload.build_content_registry", slow_build):
             first = threading.Thread(target=self.boundary.reload)

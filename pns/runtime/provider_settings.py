@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Mapping, Optional, Tuple
 from urllib.parse import SplitResult, urlsplit
 
 from pns.runtime import settings_files
@@ -535,20 +535,32 @@ class ProviderDocument:
 
     cards: Mapping[str, Card]
     active: Active
+    # 删掉过的卡片 id：账本里可能还记着它们，新卡片永远不再用（卡片 id 不复用）。
+    retired_card_ids: FrozenSet[str] = frozenset()
 
     @property
     def is_default(self) -> bool:
-        """没有卡片、生效的是 env 且判分跟随 —— 等于文件不存在。"""
-        return not self.cards and self.active == DEFAULT_ACTIVE
+        """没有卡片、生效的是 env 且判分跟随、也没有要记住的退役 id —— 等于文件不存在。
+
+        有退役 id 时文件留着一个没有卡片的壳：加载结果跟文件不存在一模一样，只是
+        那些 id 还记着。
+        """
+        return not self.cards and self.active == DEFAULT_ACTIVE and not self.retired_card_ids
+
+    def taken_ids(self) -> FrozenSet[str]:
+        return frozenset(self.cards) | self.retired_card_ids
 
     def to_file(self, *, updated_by: str) -> Dict[str, Any]:
-        return {
+        payload = {
             "version": PROVIDER_VERSION,
             "cards": {cid: card.to_file() for cid, card in self.cards.items()},
             "active": self.active.to_dict(),
             "updated_at": _now(),
             "updated_by": updated_by,
         }
+        if self.retired_card_ids:
+            payload["retired_card_ids"] = sorted(self.retired_card_ids)
+        return payload
 
 
 EMPTY_DOCUMENT = ProviderDocument(cards={}, active=DEFAULT_ACTIVE)
@@ -669,7 +681,17 @@ def parse_document(raw: Mapping[str, Any], catalog: AccountCatalog) -> ProviderD
     if not isinstance(entries, dict):
         raise ProviderSettingsError("线路配置缺少 cards")
     cards = {card_id: _parse_card(card_id, entry, catalog) for card_id, entry in entries.items()}
-    return ProviderDocument(cards=cards, active=_parse_active(raw.get("active"), cards))
+    retired = raw.get("retired_card_ids", [])
+    if not isinstance(retired, list):
+        raise ProviderSettingsError("retired_card_ids 必须是列表")
+    for card_id in retired:
+        validate_card_id(card_id)
+        if card_id in cards:
+            raise ProviderSettingsError("退役的卡片 id 又出现在卡片里")
+    return ProviderDocument(
+        cards=cards, active=_parse_active(raw.get("active"), cards),
+        retired_card_ids=frozenset(retired),
+    )
 
 
 def read_document(settings_dir: Path, catalog: AccountCatalog) -> Optional[ProviderDocument]:
@@ -833,6 +855,22 @@ def validate_settings(settings: "ModelSettings", catalog: AccountCatalog) -> Non
     validate_line(settings.judge, catalog)
 
 
+def validate_for_publish(settings: "ModelSettings", catalog: AccountCatalog, env: Mapping[str, str]) -> None:
+    """保存发布用的有效线路校验：跟构建读同一份环境（进程环境 + 磁盘 .env）。
+
+    env 卡片的 key 按这份环境判断，不靠 EnvSecret 懒读进程环境 —— 构建时 .env
+    还没落进进程环境，懒读看到的是旧值，会替一份新的、缺 key 的候选作证明。
+    """
+    for line in (settings.generation, settings.judge):
+        if isinstance(line.token, EnvSecret):
+            validate_line(line, catalog, require_token=False)
+            if not env.get(line.token.key_name):
+                label = "生成线路" if line.name == LINE_GENERATION else "判分线路"
+                raise ProviderSettingsError(f"{label} 没有可用的 token")
+        else:
+            validate_line(line, catalog)
+
+
 @dataclass(frozen=True)
 class ModelSettings:
     """一份配置快照里的模型设定：两条解析好的线路 + 判分阈值，以及它们出自的卡片。"""
@@ -920,6 +958,9 @@ def settings_from_document(
     """
     if document is None:
         return ModelSettings.from_env(env, ooc_threshold=ooc_threshold)
+    if not document.cards and document.active == DEFAULT_ACTIVE:
+        # 只记着退役 id 的壳：跟文件不存在一模一样。
+        return replace(ModelSettings.from_env(env, ooc_threshold=ooc_threshold), document=document)
     generation, judge = expand(document, catalog, env)
     settings = ModelSettings(
         generation=generation, judge=judge, source=SOURCE_PANEL, ooc_threshold=ooc_threshold,
@@ -989,6 +1030,8 @@ def put_card(
     current = document.cards.get(card_id)
     if create and current is not None:
         raise ProviderSettingsError("这张卡片已经存在")
+    if create and card_id in document.retired_card_ids:
+        raise ProviderSettingsError("这个卡片 id 用过了，不再复用")
     if not create and current is None:
         raise KeyError(card_id)
     raw: Dict[str, Any] = {key: request.get(key) for key in _CARD_FIELDS}
@@ -1026,7 +1069,14 @@ def delete_card(document: ProviderDocument, card_id: str) -> ProviderDocument:
         raise CardInUse("这张卡片正在被生成或判分使用，先切到别的卡片再删除")
     cards = dict(document.cards)
     del cards[card_id]
-    return replace(document, cards=cards)
+    return replace(document, cards=cards, retired_card_ids=document.retired_card_ids | {card_id})
+
+
+def clear_cards(document: ProviderDocument) -> ProviderDocument:
+    """删掉全部卡片、回到 env。删掉的 id 照样记着。"""
+    return ProviderDocument(
+        cards={}, active=DEFAULT_ACTIVE, retired_card_ids=document.taken_ids(),
+    )
 
 
 def accounts_in_use(settings_dir: Path, active: ModelSettings) -> Tuple[str, ...]:

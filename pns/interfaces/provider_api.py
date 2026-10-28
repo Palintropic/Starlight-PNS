@@ -37,6 +37,7 @@ from pns.runtime.provider_settings import (
     EMPTY_DOCUMENT,
     accounts_in_use,
     candidate_payload,
+    clear_cards,
     create_account,
     delete_card,
     load_accounts,
@@ -115,11 +116,16 @@ def _read_for_write(settings_dir) -> tuple:
     return catalog, (EMPTY_DOCUMENT if document is None else document)
 
 
-def _check(before: ProviderDocument, after: ProviderDocument, catalog: AccountCatalog) -> None:
-    """候选的校验。
+def _check(before: ProviderDocument, after: ProviderDocument, catalog: AccountCatalog) -> bool:
+    """候选的预检；返回这次保存要不要在构建时做发布校验。
 
-    跟加载用同一套解析和展开；改变了生效线路的操作（切换、编辑生效中的卡片、
-    删光回到 .env）还要过完整的有效线路校验 —— 包括 env 卡片要有 key。
+    预检跟加载用同一套解析和展开，改变了生效线路的（切换、编辑生效中的卡片、
+    删光回到 .env）当场做完整的有效线路校验，早点给出 400。
+
+    预检看的是进程环境，构建读的是进程环境 + 磁盘 .env，两者可能不一样，所以
+    真正把关的是构建时的发布校验（见 load_models）：规则是**保存不许把能用的
+    线路变成不能用、切到的新线路必须能用**。只有"当前线路本来就不能用、这次也
+    没改生效线路"（开发机没有 env key 时先存备用卡片）才不开。
     """
     env = os.environ
     threshold = BOUNDARY.active().models.ooc_threshold
@@ -133,16 +139,26 @@ def _check(before: ProviderDocument, after: ProviderDocument, catalog: AccountCa
         new = settings_from_document(
             None if after.is_default else after, catalog, env, ooc_threshold=threshold
         )
-        if old is None or (new.generation, new.judge) != (old.generation, old.judge):
+        lines_change = old is None or (new.generation, new.judge) != (old.generation, old.judge)
+        if lines_change:
             validate_settings(new, catalog)
     except ProviderSettingsError as e:
         raise _error(400, "invalid_settings", str(e)) from None
+    live = BOUNDARY.active()
+    try:
+        validate_settings(live.models, live.accounts)
+        live_usable = True
+    except ProviderSettingsError:
+        live_usable = False
+    return lines_change or live_usable
 
 
-def _commit(candidate: Optional[bytes], reason: str) -> Dict[str, Any]:
+def _commit(candidate: Optional[bytes], reason: str, *, publish_check: bool) -> Dict[str, Any]:
     """在 P7 持锁入口里发布并切换；把结局翻译成 HTTP。调用方已持闸门。"""
     try:
-        outcome = provider_txn.save(BOUNDARY, content_registry.SETTINGS_DIR, candidate, reason=reason)
+        outcome = provider_txn.save(
+            BOUNDARY, content_registry.SETTINGS_DIR, candidate, reason=reason, publish_check=publish_check
+        )
     except ReloadBusy:
         raise _error(409, "reload_in_progress", "配置正在重新加载，本次保存未写入任何内容，请稍后重试") from None
     except SettingsQuarantined as e:
@@ -182,8 +198,10 @@ def _write(
                 raise _error(409, "card_in_use", str(e)) from None
             except ProviderSettingsError as e:
                 raise _error(400, "invalid_settings", str(e)) from None
-            _check(before, after, catalog)
-            return _commit(candidate_payload(after, updated_by=_updated_by(request)), reason)
+            publish_check = _check(before, after, catalog)
+            return _commit(
+                candidate_payload(after, updated_by=_updated_by(request)), reason, publish_check=publish_check
+            )
     except ProviderSwitchBusy as e:
         raise _error(409, "provider_switch_in_progress", str(e)) from None
 
@@ -221,7 +239,7 @@ def delete_card_route(
 @router.delete("", dependencies=_admin)
 def delete_provider_settings(request: Request, plane: WorldControlPlane = Depends(get_control_plane)):
     """删掉全部卡片、回到 .env。只想换回 .env 而留着卡片，用 PUT /active。"""
-    return _write(plane, request, lambda doc, _: EMPTY_DOCUMENT, "面板删除全部模型卡片")
+    return _write(plane, request, lambda doc, _: clear_cards(doc), "面板删除全部模型卡片")
 
 
 @router.post("/cards", status_code=201, dependencies=_admin)
@@ -256,7 +274,7 @@ def post_card(
             if BOUNDARY.quarantined:
                 raise _error(503, "settings_quarantined", QUARANTINE_MESSAGE)
             catalog, before = _read_for_write(settings_dir)
-            card_id = new_card_id([*before.cards, *catalog.accounts])
+            card_id = new_card_id([*before.taken_ids(), *catalog.accounts])
             created = None
             if account_request is not None:
                 body["account"] = card_id
@@ -273,7 +291,7 @@ def post_card(
                 except ProviderSettingsError as e:
                     raise _error(400, "invalid_settings", str(e)) from None
                 try:
-                    created = create_account(settings_dir, card_id, account.to_dict()).account_id
+                    written = create_account(settings_dir, card_id, account.to_dict())
                 except NotPublished:
                     raise _error(500, "not_written", "账户没建成，什么都没变") from None
                 except PublishedNotDurable:
@@ -284,18 +302,27 @@ def post_card(
                     ) from None
                 except ProviderSettingsError as e:
                     raise _error(400, "invalid_settings", str(e)) from None
-                catalog = load_accounts(settings_dir)
+                created = written.account_id
+                # 用刚写下的那个账户，不再回读目录：账户建好之后的每一步失败都要带回它的 id。
+                catalog = AccountCatalog(accounts={**catalog.accounts, created: written})
             try:
                 after = put_card(before, card_id, body, catalog, create=True)
-            except ProviderSettingsError as e:
-                raise _card_failed(created, 400, "invalid_settings", str(e)) from None
-            try:
-                _check(before, after, catalog)
-                result = _commit(candidate_payload(after, updated_by=_updated_by(request)), "面板新建模型卡片")
+                publish_check = _check(before, after, catalog)
+                result = _commit(
+                    candidate_payload(after, updated_by=_updated_by(request)),
+                    "面板新建模型卡片", publish_check=publish_check,
+                )
             except HTTPException as e:
                 if created is None:
                     raise
                 raise _card_failed(created, e.status_code, e.detail["category"], e.detail["message"]) from None
+            except ProviderSettingsError as e:
+                raise _card_failed(created, 400, "invalid_settings", str(e)) from None
+            except Exception:
+                if created is None:
+                    raise
+                # 账户已经在了：意料之外的失败也要把它的 id 带回去，文案固定。
+                raise _card_failed(created, 500, "unexpected", "卡片保存时出了意料之外的错误") from None
             return {**result, "card": card_id, "account": created}
     except ProviderSwitchBusy as e:
         raise _error(409, "provider_switch_in_progress", str(e)) from None

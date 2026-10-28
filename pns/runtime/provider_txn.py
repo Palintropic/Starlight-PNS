@@ -120,14 +120,17 @@ def save(
     candidate: Optional[bytes],
     *,
     reason: str,
+    publish_check: bool = False,
 ) -> SaveOutcome:
     """发布一份候选（None = 恢复默认，即删除 provider.json）并切换。
 
-    候选应当已经通过有效线路校验；这里的构建切换是第二道关。ReloadBusy /
-    SettingsQuarantined 由 provider_transaction() 原样抛出，此时什么都没写。
+    候选应当已经过预检；这里的构建切换是第二道关。publish_check 打开时构建
+    本身对生效线路做发布校验（跟构建读同一份 .env），不通过就照"切换失败"
+    回退。ReloadBusy / SettingsQuarantined 由 provider_transaction() 原样抛出，
+    此时什么都没写。
     """
     with boundary.provider_transaction() as tx:
-        return _save(tx, boundary, _Files(settings_dir), candidate, reason)
+        return _save(tx, boundary, _Files(settings_dir), candidate, reason, publish_check)
 
 
 def _save(
@@ -136,6 +139,7 @@ def _save(
     files: _Files,
     candidate: Optional[bytes],
     reason: str,
+    publish_check: bool = False,
 ) -> SaveOutcome:
     if files.txn.exists():
         # 遗留事务不该出现在这里（启动会拦、失败会隔离）；绝不在上面再叠一层。
@@ -174,7 +178,7 @@ def _save(
     # 3. 构建并切换。
     before = boundary.active_or_none()
     try:
-        result = tx.swap(reason)
+        result = tx.swap(reason, publish_check=publish_check)
     except Exception:
         if boundary.active_or_none() is not before:
             # 快照已经换了却没拿到结果：说不清磁盘该是哪一份。

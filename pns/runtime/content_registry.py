@@ -40,6 +40,7 @@ from pns.runtime.provider_settings import (
     ProviderSettingsError,
     builtin_catalog,
     load_model_settings,
+    validate_for_publish,
 )
 from pns.runtime.usage_ledger import Prices, parse_price_table
 from pns.world.channels import build_default_channel_registry
@@ -172,15 +173,23 @@ def _ooc_threshold(env: Mapping) -> float:
     return ooc_threshold
 
 
-def load_models(env: Mapping, settings_dir: Path = None):
-    """(ModelSettings, AccountCatalog)。面板文件存在以它为准，否则 env 派生。"""
+def load_models(env: Mapping, settings_dir: Path = None, *, publish_check: bool = False):
+    """(ModelSettings, AccountCatalog)。面板文件存在以它为准，否则 env 派生。
+
+    publish_check：模型设置保存时打开 —— 生效的两条线路必须按**这份** env 完整
+    有效（含 env 卡片的 key），否则这份配置不通过、保存回退。普通加载不要求，
+    开发环境没有 key 也要能起来。
+    """
     settings_dir = SETTINGS_DIR if settings_dir is None else settings_dir
     try:
-        return load_model_settings(
+        models, accounts = load_model_settings(
             settings_dir, env, ooc_threshold=_ooc_threshold(env)
         )
+        if publish_check:
+            validate_for_publish(models, accounts, env)
     except ProviderSettingsError as e:
         raise ConfigValidationError(str(e)) from e
+    return models, accounts
 
 
 # ── 角色内容 ──────────────────────────────────────────────────────────────
@@ -533,7 +542,7 @@ def _validate_scenes(scenes: Dict, default_scene: str, locations, channels) -> N
         )
 
 
-def build_content_registry(revision: int = 0) -> ContentRegistry:
+def build_content_registry(revision: int = 0, *, publish_check: bool = False) -> ContentRegistry:
     """从磁盘完整构建一份新的内容注册表。
 
     这是**唯一**的配置构建入口。任何一步失败都抛 ConfigValidationError，
@@ -548,7 +557,7 @@ def build_content_registry(revision: int = 0) -> ContentRegistry:
         k: v for k, v in dotenv_values(ENV_PATH).items() if v is not None
     } if ENV_PATH.exists() else {}
     # 与 load_dotenv(override=True) 同样的优先级：.env 覆盖进程环境。
-    models, accounts = load_models({**os.environ, **env_file})
+    models, accounts = load_models({**os.environ, **env_file}, publish_check=publish_check)
     settings = _load_settings(CONFIG_PATH)
     # 价目表写错了要让这份配置不通过，而不是让用量账本按错价记一个月。
     try:

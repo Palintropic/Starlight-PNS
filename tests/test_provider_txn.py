@@ -294,8 +294,8 @@ class SwapAndMaterialTests(TxnTestBase):
         self.fresh(A)
         real = ConfigBoundary._swap_locked
 
-        def swap_then_raise(boundary, reason):
-            real(boundary, reason)
+        def swap_then_raise(boundary, reason, **kwargs):
+            real(boundary, reason, **kwargs)
             raise RuntimeError("拿到快照之后炸了")
 
         with patch.object(ConfigBoundary, "_swap_locked", swap_then_raise):

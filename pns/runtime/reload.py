@@ -355,7 +355,7 @@ class ConfigBoundary:
             # 成功也好失败也好，服务都必须恢复到能开新 session 的状态。
             self._supervisor.open_gate()
 
-    def _swap_locked(self, reason: str) -> ReloadResult:
+    def _swap_locked(self, reason: str, *, publish_check: bool = False) -> ReloadResult:
         """停会话、等退出、构建、切换。持有 _reload_lock、准入已关；不碰准入。"""
         stopped = self._supervisor.stop_all(reason)
 
@@ -376,7 +376,7 @@ class ConfigBoundary:
             # 构建在锁外进行：它是整个流程里最慢的一步，而且必须在完全
             # 成功之后才允许影响任何人。构建期间读 active() 的人拿到的
             # 依然是旧快照。
-            candidate = build_content_registry(revision=next_revision)
+            candidate = build_content_registry(revision=next_revision, publish_check=publish_check)
         except Exception as e:
             # 校验失败和非预期异常一视同仁：这次重载不算数，绝不半途替换。
             detail = (
@@ -407,9 +407,13 @@ class ProviderTransaction:
     def __init__(self, boundary: ConfigBoundary) -> None:
         self._boundary = boundary
 
-    def swap(self, reason: str) -> ReloadResult:
-        """从磁盘构建并切换（含停止旧会话、等待退出）。失败时旧快照不动。"""
-        return self._boundary._swap_locked(reason)
+    def swap(self, reason: str, *, publish_check: bool = False) -> ReloadResult:
+        """从磁盘构建并切换（含停止旧会话、等待退出）。失败时旧快照不动。
+
+        publish_check：构建时对生效线路做发布校验（见 load_models），校验用的是
+        构建同一份环境，所以通过的就是将要切换上去的那一份。
+        """
+        return self._boundary._swap_locked(reason, publish_check=publish_check)
 
     def quarantine(self) -> None:
         """事务收不了尾：进入隔离。出门后准入保持关闭。"""

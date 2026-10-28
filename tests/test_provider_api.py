@@ -294,7 +294,10 @@ class CardTests(ProviderApiTestBase):
         self.assertEqual(self.boundary.active().models.generation.card, "env")
         response = self.client.delete(URL)
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertFalse(self.file.exists())
+        # 删掉的卡片 id 还记着（不复用），文件只剩一个没有卡片的壳，加载结果同 env。
+        self.assertEqual(self.stored()["cards"], {})
+        self.assertEqual(set(self.stored()["retired_card_ids"]), set(cards))
+        self.assertNotIn(GEN_KEY, self.file.read_text(encoding="utf-8"))
         self.assertEqual(response.json()["settings"]["source"], "env")
         self.assertEqual(response.json()["settings"]["cards"], [])
         # 账户目录不受影响。
@@ -339,10 +342,21 @@ class CardTests(ProviderApiTestBase):
         self.assertNotIn(spare, self.stored()["cards"])
         self.assertNotIn(SPARE_KEY, self.file.read_text(encoding="utf-8"))
 
-    def test_deleting_the_last_card_while_on_env_removes_the_file(self):
-        card = self.add(_card())
-        self.assertEqual(self.client.delete(f"{CARDS}/{card}").status_code, 200)
-        self.assertFalse(self.file.exists())
+    def test_card_ids_are_never_reused(self):
+        """审查 P3-1：挂已有账户的卡片删掉之后，同一个 id 也不再发出去。"""
+        draws = iter(["12345678", "12345678", "12345678", "9abcdef0"])
+        with patch.object(provider_settings.secrets, "token_hex", lambda n: next(draws)):
+            first = self.add(_card(account="mimo-main"))
+            self.assertEqual(first, "c-12345678")
+            self.assertEqual(self.client.delete(f"{CARDS}/{first}").status_code, 200)
+            self.assertEqual(self.stored()["retired_card_ids"], [first])
+            self.assertEqual(self.stored()["cards"], {})
+            second = self.add(_card(account="mimo-main"))
+        self.assertEqual(second, "c-9abcdef0")
+        # 清空之后照样记着。
+        self.assertEqual(self.client.delete(URL).status_code, 200)
+        self.assertEqual(set(self.stored()["retired_card_ids"]), {first, second})
+        self.assertEqual(self.client.get(URL).json()["settings"]["source"], "env")
 
     def test_a_broken_file_is_not_written_over(self):
         self.two_cards()
@@ -360,6 +374,59 @@ class CardTests(ProviderApiTestBase):
                     self.assert_no_tokens(response)
                     self.assertEqual(self.file.read_text(encoding="utf-8"), text)
                     self.assertIs(self.boundary.active(), snapshot)
+
+
+class DiskEnvTests(ProviderApiTestBase):
+    """审查 P2-1：预检看进程环境，构建读进程环境 + 磁盘 .env；把关的必须是构建。"""
+
+    def use_env_file(self, text):
+        path = self.tmp / "disk.env"
+        path.write_text(text, encoding="utf-8")
+        p = patch.object(content_registry, "ENV_PATH", path)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def key_name(self):
+        return self.boundary.active().models.env_key_name
+
+    def test_switching_to_an_env_whose_disk_key_is_gone_rolls_back(self):
+        gen, _ = self.two_cards()
+        self.use_env_file(f"{self.key_name()}=\n")
+        before, snapshot = self.file.read_bytes(), self.boundary.active()
+        for name, call in (
+            ("生成切 env", lambda: self.client.put(ACTIVE, json={"generation": "env", "judge": FOLLOW})),
+            ("只有判分用 env", lambda: self.client.put(ACTIVE, json={"generation": gen, "judge": {"card": "env"}})),
+            ("清空回 env", lambda: self.client.delete(URL)),
+        ):
+            with self.subTest(name):
+                response = call()
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["detail"]["category"], "rolled_back")
+                self.assert_unchanged(before, snapshot)
+                self.assertFalse((self.dir / provider_txn.TXN_FILE).exists())
+                self.assertEqual(os.environ[self.key_name()], ENV_KEY)
+        # env 没被引用时，磁盘 env 坏了不挡卡片保存。
+        self.add(_card(name="备用", token=SPARE_KEY))
+
+    def test_a_spare_save_cannot_break_a_working_env(self):
+        self.add(_card())
+        self.assertEqual(self.boundary.active().models.generation.card, "env")
+        self.use_env_file(f"{self.key_name()}=\n")
+        before, snapshot = self.file.read_bytes(), self.boundary.active()
+        response = self.client.post(CARDS, json=_card(name="备用", token=SPARE_KEY))
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["detail"]["category"], "rolled_back")
+        self.assert_unchanged(before, snapshot)
+
+    def test_a_dev_box_without_a_key_can_still_add_cards(self):
+        # 当前线路本来就不能用（没有 key）、这次也不改生效线路：不做发布校验。
+        os.environ.pop(self.key_name())
+        self.use_env_file("")
+        card = self.add(_card())
+        self.assertIn(card, self.stored()["cards"])
+        # 真要切到没 key 的 env 还是不行。
+        self.activate(card)
+        self.activate("env", status=400)
 
 
 class WorldInteractionTests(ProviderApiTestBase):
@@ -528,7 +595,7 @@ class CreateWithAccountTests(ProviderApiTestBase):
         self.assertEqual((response.status_code, detail["category"], detail["cause"]), (500, "card_failed", "not_written"))
         account = detail["account"]
         self.assertEqual(set(self.accounts_on_disk()) - accounts_before, {account})
-        self.assertFalse(self.file.exists())
+        self.assertFalse([c for c in self.stored()["cards"].values() if c["account"] == account])
         self.assertNotIn("retired_at", self.accounts_on_disk()[account])
 
     def test_a_card_that_lands_in_quarantine_names_its_account(self):
@@ -542,6 +609,45 @@ class CreateWithAccountTests(ProviderApiTestBase):
         self.assertEqual((response.status_code, detail["category"]), (503, "settings_quarantined"))
         self.assertIn(detail["account"], self.accounts_on_disk())
         self.assertTrue(self.boundary.quarantined)
+
+    def test_any_failure_after_the_account_names_it(self):
+        """审查 P2-2：账户建好之后，读取、构建、意外异常都要把账户 id 带回去。"""
+        real_put = provider_api.put_card
+        calls = []
+
+        def put_then_fail(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:  # 第一次是建账户前的试校验，第二次是真的写卡片
+                raise RuntimeError(f"boom {GEN_KEY}")
+            return real_put(*args, **kwargs)
+
+        before = set(self.accounts_on_disk())
+        with patch.object(provider_api, "put_card", put_then_fail):
+            response = self.client.post(CARDS, json=self.body())
+        detail = response.json()["detail"]
+        self.assertEqual((response.status_code, detail["category"], detail["cause"]), (500, "card_failed", "unexpected"))
+        self.assert_no_tokens(response)
+        account = detail["account"]
+        self.assertEqual(set(self.accounts_on_disk()) - before, {account})
+        self.assertFalse(self.file.exists())
+        # 明确挂到这个账户上重试：成功，而且不再建账户。
+        card = self.add(_card(name="DeepSeek", account=account))
+        self.assertEqual(self.stored()["cards"][card]["account"], account)
+        self.assertEqual(set(self.accounts_on_disk()) - before, {account})
+
+    def test_the_catalog_is_not_read_back_after_creating_the_account(self):
+        real_load = provider_api.load_accounts
+        reads = []
+
+        def load_once(*args, **kwargs):
+            reads.append(1)
+            if len(reads) > 1:
+                raise provider_settings.ProviderSettingsError("账户目录文件读不出来")
+            return real_load(*args, **kwargs)
+
+        with patch.object(provider_api, "load_accounts", load_once):
+            card = self.add(self.body())
+        self.assertEqual(self.stored()["cards"][card]["account"], card)
 
     def test_concurrent_writes_and_retiring_wait_for_the_gate(self):
         reached, release = threading.Event(), threading.Event()
