@@ -66,6 +66,7 @@ from pns.runtime.memory.encoding import (
     read_signals,
 )
 from pns.runtime.memory.projection import (
+    _said_display,
     prompt_block,
     prompt_projection,
     recalled_lines,
@@ -1566,8 +1567,32 @@ class PromptProjectionTests(unittest.TestCase):
         ]
         for line in recalled_lines(self.result):
             self.assertTrue(
-                any(summary and summary in line for summary in summaries), line
+                any(summary and _said_display(summary) in line for summary in summaries), line
             )
+
+    def test_a_clipped_line_is_not_rendered_as_if_it_trailed_off(self):
+        """片段截断标记不能落在引号里：模型会当成"我说话就是拖着省略号的"去学。"""
+        stored = [s.record.content["summary"] for s in self.result.memories
+                  if s.record.content.get("summary", "").startswith("说了")]
+        self.assertTrue(stored)
+        # 存储不变（恢复时要从观察重新推导核对）：截断标记还在引号里。
+        self.assertTrue(all(summary.endswith("…」") for summary in stored), stored)
+        rendered = [line for line in recalled_lines(self.result) if "说了" in line]
+        self.assertTrue(rendered)
+        for line in rendered:
+            self.assertIn("，开头是「", line)
+            self.assertFalse(line.endswith("…」"), line)
+
+    def test_the_speakers_own_ellipses_survive_only_the_marker_goes(self):
+        state, encoder = _rig()
+        encoder.commit_and_encode(_message(state, "……灯，……先调暗。……然后，……我，……要念了，你听着。"))
+        (line,) = [l for l in recalled_lines(MemoryRecall(state).recall_for("mizuki")) if "说了" in l]
+        quoted = line.split("开头是「", 1)[1]
+        self.assertTrue(quoted.startswith("……灯，……先调暗。"), line)
+        self.assertTrue(quoted.endswith("」"), line)
+        self.assertNotIn("…」", line)
+        for summary in ("去了 gate", "说了一段话", "说了句什么", "说了一句话：「没有截断标记」"):
+            self.assertEqual(_said_display(summary), summary)
 
     def test_the_same_line_is_not_repeated_once_per_class(self):
         lines = recalled_lines(self.result)
