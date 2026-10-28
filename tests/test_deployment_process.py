@@ -229,6 +229,9 @@ class ProcessTestCase(unittest.TestCase):
         cls._tree_dir = tempfile.TemporaryDirectory()
         cls.tree = build_image_tree(Path(cls._tree_dir.name) / "app")
         if not (cls.tree / "dashboard" / "dist").exists():
+            if os.environ.get("PNS_REQUIRE_DIST"):
+                # CI 构建了 Dashboard：这时缺产物是配置错了，不能悄悄跳过。
+                raise AssertionError("PNS_REQUIRE_DIST 已设置，但 dashboard/dist 不存在")
             raise unittest.SkipTest("Dashboard 未构建，生产模式起不来")
 
     @classmethod
