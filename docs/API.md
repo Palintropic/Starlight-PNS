@@ -475,6 +475,80 @@ admin 账户的浏览器会话、开放开发模式的主体一律 403。主体�
 
 ---
 
+## 4.3 Accord feed（只读，默认关）
+
+给桌面端（ClassIsland 枢纽、桌宠插件）用的只读投影：一份快照，加一条按 Accord 词汇推送的
+SSE 事件流。PNS 只供数据，怎么显示、谁来说由桌面那边决定。
+
+- **开关**：`PNS_ACCORD_FEED=1` 才挂上这三条路由；不设或设成 `0/false/no/off` 时路由不存在
+  （404），其它路由一条不多一条不少。值看不懂时进程起不来。
+- **权限**：全是 `GET`，守卫照常给 `read`，`observer` 账户就能用；没登录 401；不进公开清单。
+  不开 WebSocket，也不开 MCP（两者都要 `operate`）。桌面程序用 observer 账户
+  `POST /api/auth/login` 换会话 Cookie，不要放 `PNS_ADMIN_TOKEN`。
+- **只透出 overview 已经透出的东西**：位置、活动、在线频道、台词正文、时钟。不透出 prompt、记忆、
+  观察、provenance、存档路径、模型信息。读取不改世界（revision、dirty 不变）。
+
+### `GET /api/accord/worlds`
+
+```json
+[{"id": "yoake-mae", "name": "夜明け前", "state": "running"}]
+```
+
+`state` 是 `running`（在本进程里开着、运行时接受写入）或 `stopped`。
+
+### `GET /api/accord/worlds/{world_id}/hello`
+
+```json
+{
+  "node": {"id": "pns:yoake-mae", "name": "夜明け前", "protocol": 1, "kind": "world"},
+  "clock": "2026-10-31T01:30:00",
+  "state": "running",
+  "residents": [
+    {"id": "mizuki", "name": "暁山瑞希", "place": "瑞希家·房间", "activity": "editing_video", "online": ["Nightcord"]}
+  ],
+  "cursor": "812.9f3a2b1c4d5e6f70",
+  "at": "2026-10-31T01:30:00"
+}
+```
+
+居民 `id` 是 PNS 的角色 ID（`mizuki` / `kanade` / `mafuyu` / `ena` …），桌面那边靠它对上桌宠。
+`place`、`online` 给的是名字，不是 ID。没开着的世界返回 `state: "stopped"`、`residents: []`、
+`cursor: null`，`clock` 取存档里的时钟。没有存档的世界 404 `archive_not_found`，非法 ID 400。
+
+### `GET /api/accord/worlds/{world_id}/events`（SSE）
+
+`Content-Type: text/event-stream`。每条消息是 `id:`（可选）+ `event:` + 一行 JSON 的 `data:`，
+JSON 里都带 `at`（世界时间，ISO 8601）。开头一行 `retry: 3000`；没有消息时每 20 秒一行 `: ping`。
+
+| 事件 | 字段 | 说明 |
+|---|---|---|
+| `hello` | 同快照 | 连上先推这一条 |
+| `line` | `text` `speaker` `source: "world"` `kind` `place` 或 `channel` | `kind` 是 `dialogue`（`dialogue.spoken`，带 `place`）或 `message`（`message.sent`，带 `channel`） |
+| `resident` | `id` `name` `place` `activity` `online` | 居民的位置 / 活动 / 在线变了。是**状态**不是历史：断线期间的几次变化合成一条 |
+| `clock` | `clock` | 世界时钟变了，最多一分钟一条 |
+| `world` | `state`：`running` / `stopped` / `restored` | 见下 |
+
+**游标与续传。** 游标形如 `<下标>.<16 位十六进制>`：下标是世界历史里的序号（同 overview 的 `seq`），
+后半段是到这一条为止全部台词的滚动摘要。每条 `line` 的 `id:` 是它自己的游标，其它消息的 `id:`
+是流当前的位置。断线重连带 `Last-Event-ID`（优先），或者 `?after=<cursor>`，服务器从那之后接着推，
+顺序与历史一致，不漏、不重复。续传时 `hello` 的 `id:` 仍是客户端交来的位置，所以补发中途再断
+也不会跳句。格式不对的游标 400 `invalid_cursor`。
+
+**世界开关与恢复。**
+
+- 世界被关掉：推一条 `world: stopped`，流不断，继续保活。
+- 干净关闭后再恢复：历史没变，推 `world: running`，接着补发、接着推。
+- 恢复回到了更早的 checkpoint，客户端见过的台词有的已经不在了：推 `world: restored`，紧跟一条
+  新的 `hello`，之后从新快照的位置往后推。旧台词不重放；恢复之后、客户端发现之前那一小段新台词
+  也不补发。判据是摘要而不是事件 ID：恢复后同一个下标上长出一条 ID 相同、正文不同的台词，
+  照样是 `restored`。
+- 连上时交来的游标在当前历史上对不上：先 `world: restored`，再 `hello`。
+
+**连接本身。** 每条流最多活 30 分钟，到点由服务器关掉，EventSource 会带着 `Last-Event-ID` 自己重连。
+流活着时每 5 秒重新认一次主体：账户被停用、权威变了、会话被撤销，流当场结束。
+
+---
+
 ## 5. 数据文件
 
 | 路径 | 写入时机 | 说明 |

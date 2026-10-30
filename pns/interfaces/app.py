@@ -35,7 +35,7 @@ from pns.runtime.provider_settings import (
     validate_settings,
 )
 
-from . import accounts_api
+from . import accord, accounts_api
 from . import auth as auth_routes
 from . import config, health, persistent_worlds, provider_api, review, simulate, usage, world
 from .accounts import AccountError, AccountStore
@@ -240,6 +240,8 @@ def create_app(
     registry_provider: Optional[Callable[[], object]] = None,
 ) -> FastAPI:
     deployment = settings if settings is not None else DeploymentSettings.from_env()
+    # 开关在最前面读：值看不懂时进程起不来，而且那时还什么都没打开。
+    accord_feed = accord.feed_enabled()
     plane = (
         control_plane
         if control_plane is not None
@@ -354,6 +356,11 @@ def create_app(
     app.include_router(persistent_worlds.router)
     app.include_router(usage.router)
     app.include_router(simulate.router)
+    # Accord feed（只读）默认关。关着时路由根本不挂，进程跟没有这个模块一样。
+    if accord_feed:
+        app.state.accord_feed = accord.AccordFeed(plane)
+        app.state.accord_feed_settings = accord.FeedSettings()
+        app.include_router(accord.router)
 
     # 挂在所有 API/WS 路由之后，作为兜底：`dashboard/` 是唯一前端（`npm run
     # build` 产出 dist/），未构建时给出提示而不是裸 404。
