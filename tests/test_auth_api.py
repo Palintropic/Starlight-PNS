@@ -1124,6 +1124,35 @@ class GuardLookupTests(ApiTestCase):
         self.assertEqual(set(statuses), {503})
         self.assertLessEqual(max(peak), 2, "卡在账户库里的查询线程超过了上限")
 
+    def test_break_glass_does_not_queue_behind_stuck_lookups(self):
+        """绘名 F2：默认名额被编造的服务 token 占满、那些请求已经 503、线程还卡在
+        库里——这时应急钥匙、没凭据、格式不对的 bearer 都不查库，必须当场答。"""
+        from pns.interfaces.security import GUARD_LOOKUPS_IN_FLIGHT
+
+        self.auth.lookup_timeout_seconds = 0.2
+        self.lock(3.0)
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        statuses = self.gather(*([bogus] * GUARD_LOOKUPS_IN_FLIGHT))
+        self.assertEqual(set(statuses), {503})
+        # 再确认一次名额确实还被占着：又一个编造的 token 照旧拿不到。
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.BOGUS).status_code, 503
+        )
+        for headers, expected in (
+            (self.bearer, 200),
+            ({}, 401),
+            ({"Authorization": "Bearer not-a-token-at-all"}, 401),
+            ({"Authorization": "Basic abc"}, 401),
+        ):
+            with self.subTest(headers=headers):
+                began = time.monotonic()
+                response = self.client.get("/api/persistent-worlds", headers=headers)
+                self.assertEqual(response.status_code, expected)
+                self.assertLess(time.monotonic() - began, 0.15, "不查库的判断排到了查库的队里")
+
 
 # ── 7. bootstrap 与生产 fail-closed ─────────────────────────────────────
 class BootstrapAndProductionTests(unittest.TestCase):

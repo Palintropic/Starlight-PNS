@@ -637,7 +637,9 @@ CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），
 守卫认主体（会话、服务 token）要查账户库，这一步在工作线程里跑：同时在途最多 16 条，一次认证
 最多等 2 秒（含排队、锁和 SQLite 的等待）。账户库被锁住时，别的请求（含 `/healthz`）不受影响；
 等不到的那一次返回 `503 {"detail": {"category": "auth_unavailable"}}` 并带 `Retry-After: 1`
-（WebSocket 握手以 1013 关闭）——不是 401，凭据本身没错。break-glass 不查库，不受影响。
+（WebSocket 握手以 1013 关闭）——不是 401，凭据本身没错。不查库就能答的——break-glass、格式不对的
+`Authorization`、没有凭据、内存里没有的会话——在事件循环里当场答、不占名额，所以名额被占满时
+应急钥匙照样进得来。
 
 公开面、scope 档和服务 token 白名单判的都是**路由真正匹配的那条路径**：部署在 `root_path` 下时
 先去掉它再判，跟 Starlette 路由用的是同一个函数。

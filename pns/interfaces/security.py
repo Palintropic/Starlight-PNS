@@ -129,6 +129,7 @@ LOGIN_MAX_TRACKED_KEYS = 512
 GUARD_LOOKUPS_IN_FLIGHT = 16
 GUARD_LOOKUP_TIMEOUT_SECONDS = 2.0
 _GUARD_RETRY_STEP_SECONDS = 0.01
+_GUARD_RETRY_MAX_STEP_SECONDS = 0.2
 
 
 class DeploymentConfigError(RuntimeError):
@@ -738,35 +739,51 @@ class AdminAuth:
         用的是哪个凭据"变成一个说不清的问题。重复的 Authorization 头一律拒绝
         ——两份凭据的请求没有唯一答案，不许挑一个能过的。
         """
+        done, answer = self._triage(scope)
+        return answer if done else answer()
+
+    def _triage(self, scope: Mapping):
+        """不查账户库就能答的，当场答；要查库的，交回一个零参数的查询。
+
+        返回 `(True, 主体或 None)` 或者 `(False, lookup)`。分开是为了
+        `resolve_async`：break-glass、头部格式不对、没有凭据、内存里没有这张
+        会话——这些都不该去排查库的名额。否则一把编造的 `pns_svc_…` 占满名额
+        的时候，应急那把钥匙也跟着进不来。
+        """
         if not self.required:
             # 开发模式且既没配 token 也没有账户：保持既有本地行为。生产模式
             # 永远到不了这里——没有 token、没有管理员的生产进程根本起不来。
-            return open_development_principal()
+            return True, open_development_principal()
 
         auth_headers = _header_values(scope, b"authorization")
         if auth_headers:
             if len(auth_headers) != 1:
-                return None
+                return True, None
             try:
                 raw = auth_headers[0].decode("latin-1")
             except UnicodeDecodeError:  # pragma: no cover - latin-1 不会失败
-                return None
+                return True, None
             scheme, sep, value = raw.partition(" ")
             if not sep or scheme.lower() != "bearer":
-                return None
+                return True, None
             token = value.strip()
             if self.verify_token(token):
-                return break_glass_principal()
-            return self._resolve_service_token(token)
+                return True, break_glass_principal()
+            if self.accounts is None or not looks_like_service_token(token):
+                return True, None
+            return False, lambda: self._resolve_service_token(token)
 
         sid = self.session_id(scope)
         record = self.sessions.get(sid)
         if record is None:
-            return None
+            return True, None
         if self.accounts is None:
             # 有会话却没有账户库：这张会话不可能是本进程签发的。
             self.sessions.revoke(sid)
-            return None
+            return True, None
+        return False, lambda: self._resolve_session(sid, record)
+
+    def _resolve_session(self, sid: str, record: SessionRecord) -> Optional[RequestPrincipal]:
         account = self.accounts.find(record.principal_id)
         if (
             account is None
@@ -811,23 +828,28 @@ class AdminAuth:
         return self.resolve(scope) is not None
 
     async def resolve_async(self, scope: Mapping):
-        """守卫用的 `resolve`：在线程里查、有名额上限和总时限。
+        """守卫用的 `resolve`：要查库的那一步在线程里跑、有名额上限和总时限。
 
         返回主体、None（认不出来），或者 `LOOKUP_UNAVAILABLE`（此刻查不了）。
-        不需要凭据的开发服务器不碰账户库，直接在循环里答。
+        不查库就能答的（break-glass、格式不对、没凭据、开发服务器）在循环里
+        当场答，不占名额，所以名额满了它们也照常。
         """
-        if not self.required:
-            return self.resolve(scope)
+        done, answer = self._triage(scope)
+        if done:
+            return answer
+        step = _GUARD_RETRY_STEP_SECONDS
         with anyio.move_on_after(self.lookup_timeout_seconds):
             while True:
                 # 超时就不等这次查询了：线程自己跑完，结果丢掉，名额到那时才还。
                 result = await anyio.to_thread.run_sync(
-                    self.lookup_slots.run, self.resolve, scope,
-                    abandon_on_cancel=True,
+                    self.lookup_slots.run, answer, abandon_on_cancel=True,
                 )
                 if result is not LookupSlots.BUSY:
                     return result
-                await anyio.sleep(_GUARD_RETRY_STEP_SECONDS)
+                # 名额满时退避着重试：每次重试都要往返一次工作线程，并发一高，
+                # 固定的短间隔自己就成了负担。
+                await anyio.sleep(step)
+                step = min(step * 2, _GUARD_RETRY_MAX_STEP_SECONDS)
         return LOOKUP_UNAVAILABLE
 
 
