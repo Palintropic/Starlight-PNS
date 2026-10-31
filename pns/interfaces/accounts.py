@@ -77,8 +77,11 @@ KINDS: Tuple[str, ...] = (KIND_HUMAN, KIND_SERVICE)
 #
 # 摘要存在 `password_hash` 列里（`sha256$<hex>`），**不加新列**：加列要推进
 # SCHEMA_VERSION，而旧进程读到新版本会拒绝打开账户库——生产的回滚只换镜像，
-# 回滚之后服务器就起不来了。旧进程的每一条读写路径都只看 `kind='human'`，
-# 所以它看见一行 service 也只是当它不存在。
+# 回滚之后服务器就起不来了。旧进程的登录、改密、重置、改权威、列表和管理员
+# 计数都只看 `kind='human'`，看不见 service 行；看得见它的只有三处：`count()`
+# 和 bootstrap 把它算成"库不是空的"（所以一个只有服务账户的库不会再自动
+# bootstrap，开发模式也会因此要求凭据），`find_by_username()` 会按名字找到它
+# （离线脚本的 set-role / reset-password 对它会报错，不会改到它）。
 SERVICE_TOKEN_PREFIX = "pns_svc_"
 SERVICE_TOKEN_BYTES = 32
 _SERVICE_DIGEST_PREFIX = "sha256$"

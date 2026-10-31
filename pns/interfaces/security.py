@@ -37,7 +37,14 @@ from hmac import compare_digest
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+import anyio
 from fastapi import HTTPException, Request
+# 路由用这一个函数把 `root_path` 从路径上剥掉再去匹配。守卫用**同一个**函数，
+# 而不是自己再写一份：公开面、scope 档、服务 token 白名单判的必须是路由真正
+# 匹配的那条路径，否则挂在子路径下时 `/api/accord` + `/api/config` 会过前缀
+# 检查、进的却是 `/api/config`。它是私有模块；哪天 Starlette 挪走了，进程在
+# import 时就起不来，而不是悄悄换一套判据。
+from starlette._utils import get_route_path
 
 from .accounts import (
     KIND_SERVICE,
@@ -112,6 +119,17 @@ LOGIN_FAILURE_WINDOW_SECONDS = 60.0
 # 同时跟踪多少个账户桶。超了就丢最老的——节流不该变成一条内存增长路径。
 LOGIN_MAX_TRACKED_KEYS = 512
 
+# 守卫认主体时要查账户库（会话、服务 token）。这一步放在线程里跑，不在事件
+# 循环里同步等：账户库被别的写者锁住时，同步等会把整个循环停住，连 /healthz
+# 一起——而一个随便编的 `pns_svc_…` 就能触发这次查询，不需要任何有效凭据。
+#   * 在途的查询最多这么多条。超时的那条不再被等，但它的线程还排在账户库那儿，
+#     名额要等线程真正退出才还，所以卡住的线程不会随着一次次超时越积越多。
+#   * 一次认证最多等这么久（含排名额、`RLock`、SQLite 的等待）。到点按"鉴权
+#     暂时不可用"回 503——不回 401：凭据没错，错的是此刻查不了。
+GUARD_LOOKUPS_IN_FLIGHT = 16
+GUARD_LOOKUP_TIMEOUT_SECONDS = 2.0
+_GUARD_RETRY_STEP_SECONDS = 0.01
+
 
 class DeploymentConfigError(RuntimeError):
     """这台服务器的部署配置不成立，不能启动。
@@ -119,6 +137,34 @@ class DeploymentConfigError(RuntimeError):
     它**只**在启动路径上抛：生产模式缺必填项时，正确的结果是进程起不来，
     而不是起来之后带着一个开着的管理面。
     """
+
+
+class LookupSlots:
+    """守卫查询的在途名额，整个进程共用。名额在线程里拿：拿不到就立刻返回
+    `BUSY`，由调用方稍后再试——不会有一个名额拿到了、线程却没跑起来、永远还
+    不回去。跟 Accord 的 `RecheckSlots` 是同一个形状。"""
+
+    BUSY = object()
+
+    def __init__(self, limit: int = GUARD_LOOKUPS_IN_FLIGHT) -> None:
+        self._lock = threading.Lock()
+        self._free = limit
+
+    def run(self, fn, *args):
+        with self._lock:
+            if self._free <= 0:
+                return self.BUSY
+            self._free -= 1
+        try:
+            return fn(*args)
+        finally:
+            with self._lock:
+                self._free += 1
+
+
+def route_path(scope: Mapping) -> str:
+    """路由真正拿去匹配的那条路径（去掉了 `root_path`）。"""
+    return get_route_path(scope)  # type: ignore[arg-type]
 
 
 # ── 部署设定 ────────────────────────────────────────────────────────────
@@ -649,6 +695,8 @@ class AdminAuth:
         )
         self.throttle = throttle if throttle is not None else LoginThrottle()
         self.accounts = accounts
+        self.lookup_slots = LookupSlots()
+        self.lookup_timeout_seconds = GUARD_LOOKUP_TIMEOUT_SECONDS
         # "这台服务器要不要凭据"在**启动时**定下来，不是每次请求现算。
         # 现算的话，一台开着的开发服务器会在有人建出第一个账户的那一刻突然
         # 开始要求登录——一个随请求变化的安全姿态，比两种姿态里的任何一种都糟。
@@ -756,11 +804,35 @@ class AdminAuth:
     def allows(self, scope: Mapping) -> bool:
         """只回答"进不进得来"。**能做什么由 authz.required_scope 决定。**"""
         kind = scope.get("type", "http")
-        path = scope.get("path", "")
+        path = route_path(scope)
         method = scope.get("method", "GET")
         if is_public(path, method, kind):
             return True
         return self.resolve(scope) is not None
+
+    async def resolve_async(self, scope: Mapping):
+        """守卫用的 `resolve`：在线程里查、有名额上限和总时限。
+
+        返回主体、None（认不出来），或者 `LOOKUP_UNAVAILABLE`（此刻查不了）。
+        不需要凭据的开发服务器不碰账户库，直接在循环里答。
+        """
+        if not self.required:
+            return self.resolve(scope)
+        with anyio.move_on_after(self.lookup_timeout_seconds):
+            while True:
+                # 超时就不等这次查询了：线程自己跑完，结果丢掉，名额到那时才还。
+                result = await anyio.to_thread.run_sync(
+                    self.lookup_slots.run, self.resolve, scope,
+                    abandon_on_cancel=True,
+                )
+                if result is not LookupSlots.BUSY:
+                    return result
+                await anyio.sleep(_GUARD_RETRY_STEP_SECONDS)
+        return LOOKUP_UNAVAILABLE
+
+
+# `resolve_async` 在时限内没查完时的答案。它不是主体，也不是"认不出来"。
+LOOKUP_UNAVAILABLE = object()
 
 
 # ── 生产不可变边界 ──────────────────────────────────────────────────────
@@ -821,6 +893,12 @@ _FORBIDDEN_BODY = (
     b'\\u8fd9\\u6b21\\u64cd\\u4f5c\\u7684\\u6743\\u9650"}}'
 )
 
+_UNAVAILABLE_BODY = (
+    b'{"detail":{"category":"auth_unavailable",'
+    b'"message":"\\u9274\\u6743\\u6682\\u65f6\\u4e0d\\u53ef\\u7528\\uff0c'
+    b'\\u8bf7\\u7a0d\\u540e\\u91cd\\u8bd5"}}'
+)
+
 _CROSS_ORIGIN_BODY = (
     b'{"detail":{"category":"cross_origin",'
     b'"message":"\\u8de8\\u6e90\\u5199\\u8bf7\\u6c42\\u88ab\\u62d2\\u7edd"}}'
@@ -852,7 +930,8 @@ class AdminAuthMiddleware:
         if scope["type"] == "websocket":
             # 握手阶段直接关掉。ASGI 服务器会把"accept 之前的 close"翻译成
             # 一次失败的握手，浏览器那边不会拿到一条已建立的连接。
-            await send({"type": "websocket.close", "code": 1008})
+            # 1013 = try again later：查不了不是拒绝。
+            await send({"type": "websocket.close", "code": 1013 if status == 503 else 1008})
             return
         headers = [
             (b"content-type", b"application/json"),
@@ -861,6 +940,8 @@ class AdminAuthMiddleware:
         ]
         if status == 401:
             headers.insert(1, (b"www-authenticate", b"Bearer"))
+        if status == 503:
+            headers.insert(1, (b"retry-after", b"1"))
         await send(
             {"type": "http.response.start", "status": status, "headers": headers}
         )
@@ -871,7 +952,8 @@ class AdminAuthMiddleware:
             await self.app(scope, receive, send)
             return
         kind = scope["type"]
-        path = scope.get("path", "")
+        # 判据一律用路由真正匹配的那条路径，见 `route_path`。
+        path = route_path(scope)
         method = scope.get("method", "GET")
 
         # 跨源检查在认证之前，而且**公开面也算**：一次跨站发起的 POST 不该
@@ -886,7 +968,10 @@ class AdminAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        principal = self.auth.resolve(scope)
+        principal = await self.auth.resolve_async(scope)
+        if principal is LOOKUP_UNAVAILABLE:
+            await self._deny(scope, send, 503, _UNAVAILABLE_BODY)
+            return
         if principal is None:
             await self._deny(scope, send, 401, _DENIED_BODY)
             return
@@ -919,8 +1004,12 @@ __all__ = [
     "ENV_SESSION_TTL",
     "ENV_TRUSTED_ORIGINS",
     "LOGIN_GLOBAL_MAX_FAILURES",
+    "GUARD_LOOKUPS_IN_FLIGHT",
+    "GUARD_LOOKUP_TIMEOUT_SECONDS",
     "LOGIN_MAX_FAILURES",
+    "LOOKUP_UNAVAILABLE",
     "LoginThrottle",
+    "LookupSlots",
     "MIN_ADMIN_TOKEN_CHARS",
     "PLACEHOLDER_TOKENS",
     "PRODUCTION",
@@ -932,5 +1021,6 @@ __all__ = [
     "SessionStore",
     "is_public",
     "refuse_in_production",
+    "route_path",
     "same_origin",
 ]

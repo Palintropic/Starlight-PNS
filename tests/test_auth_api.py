@@ -18,6 +18,10 @@
 #   9. **服务 token 只读、可撤、只露一次**（TODO 51）。它过的是跟 observer
 #      一样的方法判据；停用 / 换 token 在下一次请求生效；明文只在建号和换
 #      token 的那一次响应里，带 no-store；它不是 Cookie、不是登录口令。
+#      白名单判的是路由真正匹配的那条路径（挂在 root_path 下也一样）。
+#  10. **守卫不卡事件循环**（TODO 50 / 绘名 K1）。账户库被锁时，一个随便编的
+#      bearer 不能把 /healthz 一起拖住；等太久回 503 而不是 401；卡住的查询
+#      线程有上限。
 #
 # 运行: python -m unittest tests.test_auth_api -v
 import os
@@ -25,6 +29,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -875,6 +880,31 @@ class ServiceTokenTests(ApiTestCase):
             with self.subTest(path=sneaky):
                 self.assertNotEqual(client.get(sneaky).status_code, 200)
 
+    def test_the_whitelist_judges_the_path_the_router_matches(self):
+        """绘名 F1：挂在 root_path 下时，`/api/accord` + `/api/config` 不能过前缀
+        检查、进的却是 `/api/config`；合法的 Accord 路径也不能反被拒。"""
+        token = self.create_service().json()["token"]
+        headers = self.bearer_of(token)
+        mounted = TestClient(self.app, root_path="/api/accord", headers=headers)
+        self.assertEqual(mounted.get("/api/accord/api/config").status_code, 403)
+        self.assertEqual(mounted.get("/api/accord/api/accord/worlds").status_code, 200)
+        observer = self.as_observer()
+        observer_mounted = TestClient(self.app, root_path="/api/accord", cookies=observer.cookies)
+        self.assertEqual(
+            observer_mounted.get("/api/accord/api/config").status_code, 200,
+            "这条路径在 root_path 下确实路由到了 /api/config，否则上面那个 403 证明不了什么",
+        )
+        prefixed = TestClient(self.app, root_path="/pns", headers=headers)
+        self.assertEqual(prefixed.get("/pns/api/accord/worlds").status_code, 200)
+        self.assertEqual(prefixed.get("/pns/api/config").status_code, 403)
+
+    def test_the_guard_strips_root_path_with_the_routers_own_function(self):
+        import starlette.routing
+
+        from pns.interfaces import security
+
+        self.assertIs(security.get_route_path, starlette.routing.get_route_path)
+
     def test_it_has_no_password_and_is_no_cookie(self):
         created = self.create_service().json()
         token = created["token"]
@@ -977,6 +1007,122 @@ class ServiceTokenTests(ApiTestCase):
             if r["action"] == "service.create"
         ]
         self.assertEqual(actors, [BREAK_GLASS_PRINCIPAL_ID])
+
+
+# ── 6c. 守卫查询不卡事件循环 ────────────────────────────────────────────
+class GuardLookupTests(ApiTestCase):
+    """另开一条连接把账户库独占锁住，模拟一个慢的维护写者。"""
+
+    BOGUS = {"Authorization": "Bearer pns_svc_" + "A" * 43}
+
+    def setUp(self):
+        super().setUp()
+        self.locker = sqlite3.connect(
+            self.tmp / "accounts.sqlite3", isolation_level=None, check_same_thread=False
+        )
+        self.addCleanup(self.locker.close)
+        self.addCleanup(self.unlock)
+        self.auth = self.app.state.admin_auth
+
+    def lock(self, seconds=None):
+        self.locker.execute("BEGIN EXCLUSIVE")
+        if seconds is not None:
+            timer = threading.Timer(seconds, self.unlock)
+            timer.start()
+            self.addCleanup(timer.join)
+
+    def unlock(self):
+        if self.locker.in_transaction:
+            self.locker.execute("ROLLBACK")
+
+    def gather(self, *calls):
+        import asyncio
+
+        import httpx
+
+        async def run():
+            transport = httpx.ASGITransport(app=self.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+                return await asyncio.gather(*(call(c) for call in calls))
+
+        return asyncio.run(run())
+
+    def test_a_made_up_bearer_does_not_stall_healthz(self):
+        import asyncio
+
+        self.lock(0.6)
+        began = time.monotonic()
+
+        async def health(c):
+            await asyncio.sleep(0.05)
+            response = await c.get("/healthz")
+            return response.status_code, time.monotonic() - began
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        (health_status, health_at), bogus_status = self.gather(health, bogus)
+        self.assertEqual(health_status, 200)
+        self.assertLess(health_at, 0.4, "账户库被锁时 /healthz 被守卫拖住了")
+        self.assertEqual(bogus_status, 401)
+
+    def test_a_lookup_that_cannot_finish_is_503_not_401(self):
+        self.auth.lookup_timeout_seconds = 0.2
+        self.lock()
+        response = self.client.get("/api/persistent-worlds", headers=self.BOGUS)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["category"], "auth_unavailable")
+        self.assertEqual(response.headers.get("retry-after"), "1")
+        # break-glass 不查账户库，锁着也照样进得来；什么凭据都没有的照旧 401。
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.bearer).status_code, 200
+        )
+        self.assertEqual(self.client.get("/api/persistent-worlds").status_code, 401)
+        self.unlock()
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.BOGUS).status_code, 401
+        )
+
+    def test_a_session_lookup_is_bounded_too(self):
+        observer = self.as_observer()
+        self.auth.lookup_timeout_seconds = 0.2
+        self.lock()
+        began = time.monotonic()
+        response = observer.get("/api/persistent-worlds")
+        self.assertEqual(response.status_code, 503)
+        self.assertLess(time.monotonic() - began, 2.0)
+        self.unlock()
+        self.assertEqual(observer.get("/api/persistent-worlds").status_code, 200)
+
+    def test_stuck_lookups_are_capped(self):
+        from pns.interfaces.security import LookupSlots
+
+        self.auth.lookup_slots = LookupSlots(2)
+        self.auth.lookup_timeout_seconds = 0.3
+        inside = []
+        peak = []
+        guard = threading.Lock()
+        real = self.accounts.find_by_service_token
+
+        def counted(token):
+            with guard:
+                inside.append(1)
+                peak.append(len(inside))
+            try:
+                return real(token)
+            finally:
+                with guard:
+                    inside.pop()
+
+        self.accounts.find_by_service_token = counted
+        self.lock(1.0)
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        statuses = self.gather(*([bogus] * 10))
+        self.assertEqual(set(statuses), {503})
+        self.assertLessEqual(max(peak), 2, "卡在账户库里的查询线程超过了上限")
 
 
 # ── 7. bootstrap 与生产 fail-closed ─────────────────────────────────────
