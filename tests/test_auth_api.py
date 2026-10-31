@@ -15,9 +15,13 @@
 #   6. **跨源的写请求在认证之前就被挡掉。** SameSite 是第一把锁，这是第二把。
 #   7. **生产 fail-closed。** 没有启用着的管理员就起不来，不是"起来但登不进"。
 #   8. **这些绿灯是机制挣来的。** 把中间件摘掉，同一批 403 必须变成 200。
+#   9. **服务 token 只读、可撤、只露一次**（TODO 51）。它过的是跟 observer
+#      一样的方法判据；停用 / 换 token 在下一次请求生效；明文只在建号和换
+#      token 的那一次响应里，带 no-store；它不是 Cookie、不是登录口令。
 #
 # 运行: python -m unittest tests.test_auth_api -v
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -773,6 +777,169 @@ class AuditTests(ApiTestCase):
         self.assertEqual(self.as_operator().get("/api/accounts/audit").status_code, 403)
         self.assertEqual(self.as_observer().get("/api/accounts/audit").status_code, 403)
         self.assertEqual(self.as_admin().get("/api/accounts/audit").status_code, 200)
+
+
+# ── 6b. 服务账户 token ──────────────────────────────────────────────────
+class ServiceTokenTests(ApiTestCase):
+    def create_service(self, client=None, username="accord-desktop"):
+        client = client if client is not None else self.as_admin()
+        response = client.post("/api/accounts/services", json={"username": username})
+        self.assertEqual(response.status_code, 201, response.text)
+        return response
+
+    @staticmethod
+    def bearer_of(token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_the_token_is_returned_once_and_never_listed(self):
+        response = self.create_service()
+        self.assertEqual(response.headers.get("cache-control"), "no-store")
+        created = response.json()
+        token = created["token"]
+        self.assertTrue(token.startswith("pns_svc_"))
+        self.assertEqual(created["kind"], "service")
+        self.assertEqual(created["role"], "observer")
+        listing = self.client.get("/api/accounts", headers=self.bearer)
+        self.assertNotIn(token, listing.text)
+        payload = listing.json()
+        self.assertEqual(
+            [s["principal_id"] for s in payload["services"]], [created["principal_id"]]
+        )
+        self.assertNotIn(created["principal_id"], [u["principal_id"] for u in payload["users"]])
+        audit = self.client.get("/api/accounts/audit", headers=self.bearer).text
+        self.assertNotIn(token[len("pns_svc_"):], audit)
+        self.assertIn("service.create", audit)
+
+    def test_the_token_is_an_observer_and_says_so(self):
+        token = self.create_service().json()["token"]
+        view = self.client.get("/api/auth/session", headers=self.bearer_of(token)).json()
+        self.assertTrue(view["authenticated"])
+        principal = view["principal"]
+        self.assertEqual(principal["kind"], "service")
+        self.assertEqual(principal["role"], "observer")
+        self.assertEqual(principal["via"], "service-token")
+        self.assertEqual(principal["scopes"], ["read"])
+        self.assertEqual(principal["username"], "accord-desktop")
+
+    def test_the_token_reads_but_cannot_mutate_through_any_declared_route(self):
+        token = self.create_service().json()["token"]
+        client = TestClient(self.app, headers=self.bearer_of(token))
+        self.assertEqual(client.get("/api/persistent-worlds").status_code, 200)
+        self.assertEqual(client.get("/api/accounts").status_code, 403)
+        checked = 0
+        for method, path in declared_operations(self.app):
+            if method == "GET" or path.startswith("/api/auth/"):
+                continue
+            checked += 1
+            with self.subTest(operation=f"{method} {path}"):
+                response = client.request(method, path)
+                self.assertEqual(response.status_code, 403, f"{method} {path} 放行了服务 token")
+        self.assertGreater(checked, 8)
+        with self.assertRaises(Exception):
+            with client.websocket_connect("/ws/run", headers=self.bearer_of(token)):
+                pass  # pragma: no cover - 握手不该成功
+
+    def test_it_has_no_password_and_is_no_cookie(self):
+        created = self.create_service().json()
+        token = created["token"]
+        changed = self.client.post(
+            "/api/auth/password",
+            headers=self.bearer_of(token),
+            json={"current_password": token, "new_password": OTHER_PASSWORD},
+        )
+        self.assertEqual(changed.status_code, 409)
+        login = TestClient(self.app).post(
+            "/api/auth/login", json={"username": "accord-desktop", "password": token}
+        )
+        self.assertEqual(login.status_code, 401)
+        cookie_only = TestClient(self.app, cookies={"pns_session": token})
+        self.assertEqual(cookie_only.get("/api/persistent-worlds").status_code, 401)
+        reset = self.as_admin().post(
+            f"/api/accounts/{created['principal_id']}/password",
+            json={"password": OTHER_PASSWORD},
+        )
+        self.assertEqual(reset.status_code, 404)
+
+    def test_disabling_takes_effect_on_the_next_request(self):
+        created = self.create_service().json()
+        headers = self.bearer_of(created["token"])
+        self.assertEqual(self.client.get("/api/persistent-worlds", headers=headers).status_code, 200)
+        admin = self.as_admin()
+        off = admin.post(f"/api/accounts/{created['principal_id']}/enabled", json={"enabled": False})
+        self.assertEqual(off.status_code, 200, off.text)
+        self.assertFalse(off.json()["enabled"])
+        self.assertNotIn("revoked_sessions", off.json())
+        self.assertEqual(self.client.get("/api/persistent-worlds", headers=headers).status_code, 401)
+        admin.post(f"/api/accounts/{created['principal_id']}/enabled", json={"enabled": True})
+        self.assertEqual(self.client.get("/api/persistent-worlds", headers=headers).status_code, 200)
+
+    def test_rotating_kills_the_old_token_and_shows_the_new_one_once(self):
+        created = self.create_service().json()
+        rotated = self.as_admin().post(f"/api/accounts/{created['principal_id']}/token")
+        self.assertEqual(rotated.status_code, 200, rotated.text)
+        self.assertEqual(rotated.headers.get("cache-control"), "no-store")
+        fresh = rotated.json()["token"]
+        self.assertNotEqual(fresh, created["token"])
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.bearer_of(created["token"])).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.bearer_of(fresh)).status_code,
+            200,
+        )
+        human = self.as_admin().post(f"/api/accounts/{self.observer.principal_id}/token")
+        self.assertEqual(human.status_code, 404)
+
+    def test_the_role_cannot_be_raised(self):
+        created = self.create_service().json()
+        response = self.as_admin().post(
+            f"/api/accounts/{created['principal_id']}/role", json={"role": "admin"}
+        )
+        self.assertEqual(response.status_code, 400)
+        view = self.client.get(
+            "/api/auth/session", headers=self.bearer_of(created["token"])
+        ).json()
+        self.assertEqual(view["principal"]["role"], "observer")
+
+    def test_a_tampered_row_is_still_only_ever_an_observer(self):
+        """库里那一行被人直接改成 admin：这条路也不认，而不是把它放大。"""
+        created = self.create_service().json()
+        db = sqlite3.connect(self.tmp / "accounts.sqlite3", isolation_level=None)
+        self.addCleanup(db.close)
+        db.execute(
+            "UPDATE principals SET role='admin' WHERE principal_id=?",
+            (created["principal_id"],),
+        )
+        response = self.client.get("/api/accounts", headers=self.bearer_of(created["token"]))
+        self.assertEqual(response.status_code, 401)
+
+    def test_only_account_admins_can_mint_tokens(self):
+        for client in (self.as_operator(), self.as_observer()):
+            response = client.post("/api/accounts/services", json={"username": "sneaky"})
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.accounts.list_services(), [])
+
+    def test_a_wrong_service_token_fails_like_any_other_bad_bearer(self):
+        self.create_service()
+        bodies = set()
+        for value in ("pns_svc_" + "A" * 43, "not-a-token-at-all", ADMIN_TOKEN + "x"):
+            response = self.client.get("/api/persistent-worlds", headers=self.bearer_of(value))
+            self.assertEqual(response.status_code, 401)
+            bodies.add(response.text)
+        self.assertEqual(len(bodies), 1)
+
+    def test_break_glass_can_mint_too(self):
+        response = self.client.post(
+            "/api/accounts/services", headers=self.bearer, json={"username": "accord-2"}
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        actors = [
+            r["actor_principal_id"]
+            for r in self.accounts.audit_records()
+            if r["action"] == "service.create"
+        ]
+        self.assertEqual(actors, [BREAK_GLASS_PRINCIPAL_ID])
 
 
 # ── 7. bootstrap 与生产 fail-closed ─────────────────────────────────────

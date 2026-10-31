@@ -9,6 +9,8 @@
 //      不说出来的话，操作者没法确认撤销真的发生了。
 //   4. **失败要照服务端那句话说。** 最后一个管理员那条 409 是有用信息，
 //      不能被翻译成一句泛泛的"操作失败"。
+//   5. **服务 token 只露一次。** 建号 / 换 token 之后显示出来，点"我已保存"
+//      就从 DOM 里消失；换 token 被取消时一条请求都不发。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import Accounts from './Accounts';
@@ -29,9 +31,19 @@ const account = (over: Partial<Account> = {}): Account => ({
 
 const ena = account({ principal_id: 'p-2', username: 'ena', role: 'operator' });
 
-function stubList(users: Account[]) {
-  return vi.spyOn(api, 'fetchAccounts').mockResolvedValue({ users });
+function stubList(users: Account[], services: Account[] = []) {
+  return vi.spyOn(api, 'fetchAccounts').mockResolvedValue({ users, services });
 }
+
+const desk = account({
+  principal_id: 's-1',
+  username: 'accord-desktop',
+  kind: 'service',
+  role: 'observer',
+  scopes: ['read'],
+});
+
+const TOKEN = 'pns_svc_canary-token-value-0123456789abcdefABCDEF';
 
 afterEach(() => {
   cleanup();
@@ -161,5 +173,75 @@ describe('用户管理', () => {
     await flush();
 
     expect(screen.getByText(/最后一个可用的管理员/)).toBeTruthy();
+  });
+
+  it('服务账户单独列出来，不混进人类账户表', async () => {
+    stubList([account()], [desk]);
+    vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });
+
+    render(<Accounts />);
+    await flush();
+
+    expect(screen.getByText('accord-desktop')).toBeTruthy();
+    // 人类表里每行一个重置密码；服务账户那行没有。
+    expect(screen.getAllByText('重置密码')).toHaveLength(1);
+    expect(screen.getByText('换 token')).toBeTruthy();
+  });
+
+  it('新建服务账户之后 token 只显示到点"我已保存"为止', async () => {
+    stubList([account()]);
+    vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });
+    const create = vi
+      .spyOn(api, 'createServiceAccount')
+      .mockResolvedValue({ ...desk, token: TOKEN });
+
+    render(<Accounts />);
+    await flush();
+
+    const name = screen.getByPlaceholderText('比如 accord-desktop') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(name, { target: { value: 'accord-desktop' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('创建服务账户'));
+    });
+    await flush();
+
+    expect(create).toHaveBeenCalledWith('accord-desktop');
+    expect((screen.getByLabelText('服务 token') as HTMLInputElement).value).toBe(TOKEN);
+    expect(name.value).toBe('');
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('我已保存，关闭'));
+    });
+    expect(document.body.innerHTML).not.toContain(TOKEN);
+  });
+
+  it('换 token 被取消时一条请求都不发，确认了才显示新的', async () => {
+    stubList([account()], [desk]);
+    vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });
+    const rotate = vi
+      .spyOn(api, 'rotateServiceToken')
+      .mockResolvedValue({ ...desk, token: TOKEN });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<Accounts />);
+    await flush();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('换 token'));
+    });
+    await flush();
+    expect(rotate).not.toHaveBeenCalled();
+    expect(document.body.innerHTML).not.toContain(TOKEN);
+
+    confirm.mockReturnValue(true);
+    await act(async () => {
+      fireEvent.click(screen.getByText('换 token'));
+    });
+    await flush();
+    expect(rotate).toHaveBeenCalledWith('s-1');
+    expect((screen.getByLabelText('服务 token') as HTMLInputElement).value).toBe(TOKEN);
+    expect(screen.getByText('已给 accord-desktop 换了新 token，旧的已失效')).toBeTruthy();
   });
 });

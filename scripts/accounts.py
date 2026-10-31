@@ -91,15 +91,16 @@ def open_store(args) -> AccountStore:
 
 
 def print_principals(store: AccountStore) -> None:
-    rows = store.list_humans()
+    """人类账户和服务账户都列；服务账户的 token 在库里只有摘要，这里也拿不到。"""
+    rows = store.list_humans() + store.list_services()
     if not rows:
         print("（没有账户）")
         return
     width = max(len(p.username) for p in rows)
-    print(f"{'用户名'.ljust(width)}  {'角色':<9} {'状态':<6} principal_id")
+    print(f"{'用户名'.ljust(width)}  {'类型':<8} {'角色':<9} {'状态':<6} principal_id")
     for p in rows:
         print(
-            f"{p.username.ljust(width)}  {p.role:<9} "
+            f"{p.username.ljust(width)}  {p.kind:<8} {p.role:<9} "
             f"{'启用' if p.enabled else '已停用':<6} {p.principal_id}"
         )
 
@@ -193,7 +194,9 @@ def cmd_reset_password(args) -> int:
 
 def cmd_audit(args) -> int:
     store = open_store(args)
-    names = {p.principal_id: p.username for p in store.list_humans()}
+    names = {
+        p.principal_id: p.username for p in store.list_humans() + store.list_services()
+    }
     for record in reversed(store.audit_records(args.limit)):
         actor = names.get(record["actor_principal_id"]) or record["actor_principal_id"]
         target = (

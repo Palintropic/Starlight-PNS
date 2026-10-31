@@ -12,6 +12,9 @@
 #      改密码不需要"通知"任何人就已经生效了。
 #   5. bootstrap 幂等，且永远不覆盖已有账户。并发启动只会创建一个。
 #   6. 库能重开。容器换掉之后账户和审计还在——它是数据，不是进程状态。
+#   7. 服务账户（TODO 51）：token 明文只在建号 / 换 token 的返回值里出现一次，
+#      库里只有摘要；换掉就是旧的当场作废；角色焊死在 observer；它进不了
+#      人类的登录、改密、"最后一个管理员"这些路径；schema 版本不动。
 #
 # 运行: python -m unittest tests.test_accounts -v
 import stat
@@ -39,9 +42,11 @@ from pns.interfaces.accounts import (  # noqa: E402
     SCOPE_ACCOUNTS,
     SCOPE_OPERATE,
     SCOPE_READ,
+    SERVICE_TOKEN_PREFIX,
     AccountConflict,
     AccountStore,
     AccountStoreError,
+    AccountError,
     InvalidPassword,
     InvalidUsername,
     LastAdminError,
@@ -472,6 +477,118 @@ class StoreFileTests(StoreTestCase):
         self.assertGreater(default.memory_cost, CHEAP_HASHER.memory_cost)
         encoded = default.hash("a-real-password-here")
         self.assertTrue(encoded.startswith("$argon2id$"))
+
+
+# ── 7. 服务账户 ─────────────────────────────────────────────────────────
+class ServiceAccountTests(StoreTestCase):
+    def test_the_token_is_shown_once_and_only_its_digest_is_stored(self):
+        self.admin()
+        issued = self.store.create_service("accord-desktop")
+        self.assertTrue(issued.token.startswith(SERVICE_TOKEN_PREFIX))
+        self.assertGreaterEqual(len(issued.token), len(SERVICE_TOKEN_PREFIX) + 40)
+        self.assertEqual(issued.principal.kind, "service")
+        self.assertEqual(issued.principal.role, "observer")
+        self.assertEqual(issued.principal.scopes, frozenset({SCOPE_READ}))
+        self.assertNotIn(issued.token, repr(issued))
+        self.assertNotIn(issued.token, str(issued.principal.public_dict()))
+        blob = self.path.read_bytes()
+        self.assertNotIn(issued.token.encode(), blob)
+        secret = issued.token[len(SERVICE_TOKEN_PREFIX):]
+        self.assertNotIn(secret.encode(), blob)
+        self.assertIn(b"sha256$", blob)
+        for record in self.store.audit_records():
+            self.assertNotIn(secret, str(record))
+
+    def test_the_token_finds_its_account_and_nothing_else_does(self):
+        issued = self.store.create_service("accord-desktop")
+        found = self.store.find_by_service_token(issued.token)
+        self.assertEqual(found.principal_id, issued.principal.principal_id)
+        for candidate in (
+            issued.token[:-1],
+            issued.token + "x",
+            issued.token[len(SERVICE_TOKEN_PREFIX):],
+            "",
+            None,
+            SERVICE_TOKEN_PREFIX,
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertIsNone(self.store.find_by_service_token(candidate))
+
+    def test_a_human_password_hash_is_not_a_service_token(self):
+        """摘要和人类的 Argon2 哈希住在同一列，查找必须只看 service 行。"""
+        self.admin()
+        self.assertIsNone(self.store.find_by_service_token(SERVICE_TOKEN_PREFIX + ADMIN_PASSWORD))
+
+    def test_rotating_kills_the_old_token_in_the_same_commit(self):
+        issued = self.store.create_service("accord-desktop")
+        rotated = self.store.rotate_service_token(issued.principal.principal_id)
+        self.assertNotEqual(rotated.token, issued.token)
+        self.assertIsNone(self.store.find_by_service_token(issued.token))
+        self.assertEqual(
+            self.store.find_by_service_token(rotated.token).principal_id,
+            issued.principal.principal_id,
+        )
+        self.assertGreater(
+            rotated.principal.security_revision, issued.principal.security_revision
+        )
+        actions = [r["action"] for r in self.store.audit_records()]
+        self.assertIn("service.token_rotate", actions)
+
+    def test_rotating_keeps_a_disabled_account_disabled(self):
+        issued = self.store.create_service("accord-desktop")
+        self.store.set_authority(issued.principal.principal_id, enabled=False)
+        rotated = self.store.rotate_service_token(issued.principal.principal_id)
+        self.assertFalse(rotated.principal.enabled)
+
+    def test_only_service_accounts_can_be_rotated(self):
+        human = self.admin()
+        with self.assertRaises(KeyError):
+            self.store.rotate_service_token(human.principal_id)
+        with self.assertRaises(KeyError):
+            self.store.rotate_service_token("p-unknown")
+
+    def test_the_role_is_welded_to_observer(self):
+        issued = self.store.create_service("accord-desktop")
+        for role in ("admin", "operator"):
+            with self.subTest(role=role):
+                with self.assertRaises(AccountError):
+                    self.store.set_authority(issued.principal.principal_id, role=role)
+        self.assertEqual(self.store.get(issued.principal.principal_id).role, "observer")
+        disabled = self.store.set_authority(issued.principal.principal_id, enabled=False)
+        self.assertFalse(disabled.enabled)
+        self.assertIn("service.enabled", [r["action"] for r in self.store.audit_records()])
+
+    def test_a_service_account_is_not_a_human_anywhere(self):
+        self.admin()
+        issued = self.store.create_service("accord-desktop")
+        pid = issued.principal.principal_id
+        self.assertNotIn(pid, [p.principal_id for p in self.store.list_humans()])
+        self.assertEqual([p.principal_id for p in self.store.list_services()], [pid])
+        self.assertEqual(self.store.enabled_admin_count(), 1)
+        # 拿 token 当密码登录、改密码、重置密码——全都不是它的路。
+        self.assertFalse(self.store.authenticate("accord-desktop", issued.token).ok)
+        with self.assertRaises(KeyError):
+            self.store.set_password(pid, OTHER_PASSWORD)
+        with self.assertRaises(KeyError):
+            self.store.change_own_password(pid, issued.token, OTHER_PASSWORD)
+        self.assertEqual(self.store.find_by_service_token(issued.token).principal_id, pid)
+
+    def test_service_and_human_names_share_one_namespace(self):
+        self.admin()
+        with self.assertRaises(AccountConflict):
+            self.store.create_service(ADMIN_USERNAME.upper())
+        self.store.create_service("accord-desktop")
+        with self.assertRaises(AccountConflict):
+            self.store.create_human("Accord-Desktop", OTHER_PASSWORD, "observer")
+
+    def test_the_schema_version_did_not_move(self):
+        """推进它，回滚的旧镜像就打不开账户库了（见 accounts.py 里的说明）。"""
+        self.assertEqual(SCHEMA_VERSION, 1)
+        columns = [
+            row[1]
+            for row in sqlite3.connect(self.path).execute("PRAGMA table_info(principals)")
+        ]
+        self.assertEqual(len(columns), 10)
 
 
 if __name__ == "__main__":

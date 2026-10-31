@@ -18,7 +18,8 @@
 #     它在路由匹配、请求体解析、依赖求解之前就决定放不放行。所以一次被拒绝
 #     的请求连请求体都没被读过，更不可能改到任何状态。
 #   * **浏览器不持有 bearer 密钥。** `PNS_ADMIN_TOKEN` 是 break-glass /
-#     自动化用的**非人类**主体，只走 `Authorization: Bearer`。浏览器登录走
+#     自动化用的**非人类**主体，只走 `Authorization: Bearer`；端点程序用的
+#     服务账户 token（`pns_svc_…`，只读）也只走这一条。浏览器登录走
 #     用户名 + 密码（AUTH-1），换回来的是 HttpOnly / SameSite=Strict 的会话
 #     Cookie。任何一种凭据都不进 JS 包、不进 localStorage、不进 URL。
 #   * **会话跟着账户的权威走。** 每张会话记着签发时的 `security_revision`；
@@ -38,7 +39,14 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 
-from .accounts import AccountStore, InvalidPassword, _validate_argon2id
+from .accounts import (
+    KIND_SERVICE,
+    SERVICE_ROLE,
+    AccountStore,
+    InvalidPassword,
+    _validate_argon2id,
+    looks_like_service_token,
+)
 from .authz import (
     PRINCIPAL_SCOPE_KEY,
     SAFE_METHODS,
@@ -46,6 +54,7 @@ from .authz import (
     break_glass_principal,
     open_development_principal,
     required_scope,
+    service_principal,
     session_principal,
 )
 
@@ -695,7 +704,10 @@ class AdminAuth:
             scheme, sep, value = raw.partition(" ")
             if not sep or scheme.lower() != "bearer":
                 return None
-            return break_glass_principal() if self.verify_token(value.strip()) else None
+            token = value.strip()
+            if self.verify_token(token):
+                return break_glass_principal()
+            return self._resolve_service_token(token)
 
         sid = self.session_id(scope)
         record = self.sessions.get(sid)
@@ -716,6 +728,25 @@ class AdminAuth:
             self.sessions.revoke(sid)
             return None
         return session_principal(account, record.session_id)
+
+    def _resolve_service_token(self, token: str) -> Optional[RequestPrincipal]:
+        """服务账户的 bearer。**每次请求都回库里看一眼**，没有进程内缓存。
+
+        所以停用、换 token 都在下一次请求生效——包括 Accord 那种长连接：它的
+        复核走的也是 `resolve`。认出来之后再核一遍 kind 和角色：库里那一行要是
+        被人改成了别的角色，这条路也只肯认 observer，不肯把它放大。
+        """
+        if self.accounts is None or not looks_like_service_token(token):
+            return None
+        account = self.accounts.find_by_service_token(token)
+        if (
+            account is None
+            or not account.enabled
+            or account.kind != KIND_SERVICE
+            or account.role != SERVICE_ROLE
+        ):
+            return None
+        return service_principal(account)
 
     def authenticated(self, scope: Mapping) -> bool:
         return self.resolve(scope) is not None

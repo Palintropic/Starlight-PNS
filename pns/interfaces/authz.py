@@ -42,6 +42,10 @@ PRINCIPAL_SCOPE_KEY = "pns_principal"
 # 使用都看起来像一次普通登录。
 VIA_SESSION = "session"
 VIA_BEARER = "bearer"
+# 服务账户的 bearer token。跟 break-glass 分开记：两者都走 `Authorization:
+# Bearer`，但一个是部署时注入、不属于任何账户的管理钥匙，一个是账户库里一行
+# 能停用、能换的 observer。
+VIA_SERVICE_TOKEN = "service-token"
 VIA_OPEN_DEVELOPMENT = "open-development"
 
 # break-glass bearer 是一个**不在账户库里**的主体。它有稳定的 ID，所以审计和
@@ -108,6 +112,17 @@ def open_development_principal() -> RequestPrincipal:
         role=ROLE_ADMIN,
         scopes=ALL_SCOPES,
         via=VIA_OPEN_DEVELOPMENT,
+    )
+
+
+def service_principal(account: Principal) -> RequestPrincipal:
+    return RequestPrincipal(
+        principal_id=account.principal_id,
+        username=account.username,
+        kind=account.kind,
+        role=account.role,
+        scopes=account.scopes,
+        via=VIA_SERVICE_TOKEN,
     )
 
 
@@ -197,6 +212,7 @@ __all__ = [
     "SELF_SERVICE_PATHS",
     "VIA_BEARER",
     "VIA_OPEN_DEVELOPMENT",
+    "VIA_SERVICE_TOKEN",
     "VIA_SESSION",
     "break_glass_principal",
     "current_principal",
@@ -204,5 +220,6 @@ __all__ = [
     "principal_of",
     "require_scope",
     "required_scope",
+    "service_principal",
     "session_principal",
 ]
