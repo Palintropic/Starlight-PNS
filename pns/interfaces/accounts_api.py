@@ -8,6 +8,7 @@
 #     POST /api/accounts/{id}/enabled           停用 / 启用（两种账户都行）
 #     POST /api/accounts/{id}/password          重置密码（只有人类账户）
 #     POST /api/accounts/{id}/token             给服务账户换 token（返回一次）
+#     DELETE /api/accounts/{id}                 删除服务账户（人类账户只能停用）
 #
 # 整个路由器挂在 `require_scope("accounts:manage")` 上，而不是逐条路由挂：
 # 这个路由器以后新增的每一条路由都自动继承那道门。**operator 有 `operate`，
@@ -146,8 +147,15 @@ def list_audit(
         p.principal_id: p.username
         for p in (*store.list_humans(), *store.list_services())
     }
+    audit = store.audit_records(limit)
+    # 删掉的服务账户翻不出名字了，用它删除那条审计里记下的用户名补上。
+    for record in audit:
+        if record.get("action") == "service.delete":
+            username = record["detail"].get("username")
+            if isinstance(username, str):
+                names.setdefault(record.get("target_principal_id"), username)
     records: List[Dict[str, Any]] = []
-    for record in store.audit_records(limit):
+    for record in audit:
         records.append(
             {
                 **record,
@@ -214,6 +222,22 @@ def rotate_service_token(
     except (AccountError, KeyError) as exc:
         raise _fail(exc) from exc
     return _issued(issued, response)
+
+
+@router.delete("/{principal_id}")
+def delete_service_account(
+    principal_id: str,
+    request: Request,
+    actor: RequestPrincipal = Depends(current_principal),
+) -> Dict[str, Any]:
+    """删除服务账户。人类账户返回 400——它们只能停用。"""
+    try:
+        deleted = _store(request).delete_service(
+            principal_id, actor=actor.principal_id
+        )
+    except (AccountError, KeyError) as exc:
+        raise _fail(exc) from exc
+    return _view(deleted)
 
 
 @router.post("/{principal_id}/role")

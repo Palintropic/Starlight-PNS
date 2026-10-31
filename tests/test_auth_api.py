@@ -958,6 +958,40 @@ class ServiceTokenTests(ApiTestCase):
         human = self.as_admin().post(f"/api/accounts/{self.observer.principal_id}/token")
         self.assertEqual(human.status_code, 404)
 
+    def test_deleting_kills_the_token_and_keeps_its_name_in_the_audit(self):
+        created = self.create_service().json()
+        headers = self.bearer_of(created["token"])
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 200)
+        admin = self.as_admin()
+        deleted = admin.delete(f"/api/accounts/{created['principal_id']}")
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertEqual(deleted.json()["username"], "accord-desktop")
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 401)
+        self.assertEqual(admin.get("/api/accounts").json()["services"], [])
+        records = admin.get("/api/accounts/audit").json()["records"]
+        mentions = [
+            r for r in records if r["target_principal_id"] == created["principal_id"]
+        ]
+        self.assertTrue(mentions)
+        self.assertEqual({r["target_username"] for r in mentions}, {"accord-desktop"})
+        again = admin.delete(f"/api/accounts/{created['principal_id']}")
+        self.assertEqual(again.status_code, 404)
+
+    def test_humans_cannot_be_deleted_and_only_account_admins_can_delete(self):
+        human = self.as_admin().delete(f"/api/accounts/{self.observer.principal_id}")
+        self.assertEqual(human.status_code, 400)
+        self.assertIsNotNone(self.accounts.find(self.observer.principal_id))
+        created = self.create_service().json()
+        for client in (self.as_operator(), self.as_observer()):
+            response = client.delete(f"/api/accounts/{created['principal_id']}")
+            self.assertEqual(response.status_code, 403)
+        service = self.client.delete(
+            f"/api/accounts/{created['principal_id']}",
+            headers=self.bearer_of(created["token"]),
+        )
+        self.assertEqual(service.status_code, 403)
+        self.assertEqual(len(self.accounts.list_services()), 1)
+
     def test_the_role_cannot_be_raised(self):
         created = self.create_service().json()
         response = self.as_admin().post(

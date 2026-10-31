@@ -627,7 +627,7 @@ CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），
 
 - token 由管理员在用户管理里新建账户或"换 token"时生成，**只在那一次响应里出现**（响应带
   `Cache-Control: no-store`），之后服务端也给不出第二次——库里只存它的 SHA-256 摘要。
-- 每次请求都回账户库核对，没有进程内缓存：停用、换 token 都在**下一次请求**生效，开着的
+- 每次请求都回账户库核对，没有进程内缓存：停用、换 token、删除都在**下一次请求**生效，开着的
   Accord 流也在下一次复核时结束。PNS 重启不影响它。
 - 库里那一行就算被直接改成了别的角色，这条路也只认 `observer`，不认就是 401。
 - 跟 break-glass 共用 `Authorization` 头：先比 `PNS_ADMIN_TOKEN`，不对再按 `pns_svc_` 前缀
@@ -686,6 +686,7 @@ CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），
 | `POST /api/accounts/{principal_id}/enabled` | `{"enabled"}`。同上；对服务账户也管用（它没有会话，响应里没有 `revoked_sessions`，停用在下一次请求生效） |
 | `POST /api/accounts/{principal_id}/password` | `{"password"}`，管理员重置，不需要旧密码。同上。服务账户没有密码，返回 404 |
 | `POST /api/accounts/{principal_id}/token` | 给服务账户换 token：旧的立刻失效，响应带新的 `token`，只此一次，`no-store`。目标不是服务账户返回 404 |
+| `DELETE /api/accounts/{principal_id}` | 删除服务账户：token 立刻失效，用户名可以再用，响应是被删账户的最后一份视图。审计记一条 `service.delete`，`detail.username` 留着名字，审计列表靠它继续显示用户名。人类账户返回 400 `account_error`（只能停用），不存在返回 404 |
 
 最后一个启用着的管理员不能被停用或降级：返回 409 `last_admin`。这条裁决发生在数据库写锁
 之下，所以两个并发的降级请求不可能都通过。

@@ -547,6 +547,32 @@ class ServiceAccountTests(StoreTestCase):
         with self.assertRaises(KeyError):
             self.store.rotate_service_token("p-unknown")
 
+    def test_deleting_kills_the_token_and_frees_the_name(self):
+        issued = self.store.create_service("accord-desktop")
+        target = issued.principal.principal_id
+        deleted = self.store.delete_service(target, actor="p-actor")
+        self.assertEqual(deleted.username, "accord-desktop")
+        self.assertIsNone(self.store.find_by_service_token(issued.token))
+        self.assertIsNone(self.store.find(target))
+        self.assertEqual(self.store.list_services(), [])
+        record = self.store.audit_records()[0]
+        self.assertEqual(record["action"], "service.delete")
+        self.assertEqual(record["target_principal_id"], target)
+        self.assertEqual(record["actor_principal_id"], "p-actor")
+        self.assertEqual(record["detail"], {"username": "accord-desktop"})
+        again = self.store.create_service("accord-desktop")
+        self.assertNotEqual(again.principal.principal_id, target)
+
+    def test_only_service_accounts_can_be_deleted(self):
+        human = self.admin()
+        with self.assertRaises(AccountError):
+            self.store.delete_service(human.principal_id)
+        self.assertIsNotNone(self.store.find(human.principal_id))
+        with self.assertRaises(KeyError):
+            self.store.delete_service("p-unknown")
+        actions = [r["action"] for r in self.store.audit_records()]
+        self.assertNotIn("service.delete", actions)
+
     def test_the_role_is_welded_to_observer(self):
         issued = self.store.create_service("accord-desktop")
         for role in ("admin", "operator"):

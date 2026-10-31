@@ -244,4 +244,37 @@ describe('用户管理', () => {
     expect((screen.getByLabelText('服务 token') as HTMLInputElement).value).toBe(TOKEN);
     expect(screen.getByText('已给 accord-desktop 换了新 token，旧的已失效')).toBeTruthy();
   });
+
+  it('删除服务账户被取消时一条请求都不发，确认了才删，并收起它刚发的 token', async () => {
+    stubList([account()], [desk]);
+    vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });
+    vi.spyOn(api, 'rotateServiceToken').mockResolvedValue({ ...desk, token: TOKEN });
+    const remove = vi.spyOn(api, 'deleteServiceAccount').mockResolvedValue(desk);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<Accounts />);
+    await flush();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('换 token'));
+    });
+    await flush();
+    expect((screen.getByLabelText('服务 token') as HTMLInputElement).value).toBe(TOKEN);
+
+    confirm.mockReturnValue(false);
+    await act(async () => {
+      fireEvent.click(screen.getByText('删除'));
+    });
+    await flush();
+    expect(remove).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await act(async () => {
+      fireEvent.click(screen.getByText('删除'));
+    });
+    await flush();
+    expect(remove).toHaveBeenCalledWith('s-1');
+    expect(screen.getByText('已删除服务账户 accord-desktop')).toBeTruthy();
+    expect(document.body.innerHTML).not.toContain(TOKEN);
+  });
 });

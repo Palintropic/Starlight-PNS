@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   createAccount,
   createServiceAccount,
+  deleteServiceAccount,
   fetchAccounts,
   fetchAuditRecords,
   resetAccountPassword,
@@ -198,6 +199,25 @@ export default function Accounts() {
       `${account.principal_id}:enabled`,
       () => setAccountEnabled(account.principal_id, next),
       (updated) => `${updated.username} 已${updated.enabled ? '启用' : '停用'}`,
+    );
+  };
+
+  const onDeleteService = (account: Account) => {
+    const confirmed = window.confirm(
+      `删除服务账户 ${account.username}？它的 token 会立刻失效，开着的连接也会断。删了就找不回来，要用得重新建一个。`,
+    );
+    if (!confirmed) return;
+    void run(
+      `${account.principal_id}:delete`,
+      async () => {
+        const deleted = await deleteServiceAccount(account.principal_id);
+        // 刚发出去的 token 如果属于它，留在屏幕上只会让人以为还能用。
+        setIssued((current) =>
+          current?.principal_id === deleted.principal_id ? null : current,
+        );
+        return deleted;
+      },
+      (deleted) => `已删除服务账户 ${deleted.username}`,
     );
   };
 
@@ -495,6 +515,13 @@ export default function Accounts() {
                       >
                         换 token
                       </button>
+                      <button
+                        className="btn accounts-danger"
+                        disabled={rowBusy}
+                        onClick={() => onDeleteService(account)}
+                      >
+                        删除
+                      </button>
                     </td>
                   </tr>
                 );
@@ -507,7 +534,7 @@ export default function Accounts() {
       <section className="accounts-audit">
         <h3>安全审计</h3>
         <p className="accounts-hint">
-          登录成功/失败、登出、改密码、建号、改角色、停用启用、重置密码和换 token 都在这里。
+          登录成功/失败、登出、改密码、建号、改角色、停用启用、重置密码、换 token 和删除服务账户都在这里。
           记录里没有密码、没有 token、没有哈希、也没有尝试过的用户名。
         </p>
         {records.length === 0 ? (

@@ -200,3 +200,6 @@
   gap: 8px;
   max-width: none;
 }
+.accounts-danger {
+  color: var(--warn);
+}
