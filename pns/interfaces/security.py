@@ -781,9 +781,14 @@ class AdminAuth:
             # 有会话却没有账户库：这张会话不可能是本进程签发的。
             self.sessions.revoke(sid)
             return True, None
-        return False, lambda: self._resolve_session(sid, record)
+        return False, lambda: self._resolve_session(sid)
 
-    def _resolve_session(self, sid: str, record: SessionRecord) -> Optional[RequestPrincipal]:
+    def _resolve_session(self, sid: str) -> Optional[RequestPrincipal]:
+        # 会话在**这里**重读，不用分诊时那一份：从分诊到拿到名额之间可能排了
+        # 好一会儿，这段里登出或者到期的会话不能凭一份旧快照放行。
+        record = self.sessions.get(sid)
+        if record is None:
+            return None
         account = self.accounts.find(record.principal_id)
         if (
             account is None
@@ -838,6 +843,7 @@ class AdminAuth:
         if done:
             return answer
         step = _GUARD_RETRY_STEP_SECONDS
+        deadline = anyio.current_time() + self.lookup_timeout_seconds
         with anyio.move_on_after(self.lookup_timeout_seconds):
             while True:
                 # 超时就不等这次查询了：线程自己跑完，结果丢掉，名额到那时才还。
@@ -848,7 +854,10 @@ class AdminAuth:
                     return result
                 # 名额满时退避着重试：每次重试都要往返一次工作线程，并发一高，
                 # 固定的短间隔自己就成了负担。
-                await anyio.sleep(step)
+                # 睡眠不越过截止时间：最后一次重试要落在时限之内，否则一个
+                # 名额刚好在最后那 200 毫秒里空出来的请求会白白变成 503。
+                remaining = deadline - anyio.current_time() - _GUARD_RETRY_STEP_SECONDS
+                await anyio.sleep(max(0.0, min(step, remaining)))
                 step = min(step * 2, _GUARD_RETRY_MAX_STEP_SECONDS)
         return LOOKUP_UNAVAILABLE
 

@@ -1124,6 +1124,79 @@ class GuardLookupTests(ApiTestCase):
         self.assertEqual(set(statuses), {503})
         self.assertLessEqual(max(peak), 2, "卡在账户库里的查询线程超过了上限")
 
+    def test_a_session_revoked_while_queued_does_not_get_through(self):
+        """绘名 F3：请求排队等名额时会话被登出，拿到名额以后不能凭排队前那份
+        会话快照放行——尤其是一次写操作。"""
+        import asyncio
+
+        admin = self.as_admin()
+        cookie = "; ".join(f"{k}={v}" for k, v in admin.cookies.items())
+        gate = threading.Event()
+        real = self.accounts.find_by_service_token
+
+        def held(token):
+            gate.wait(5)
+            return real(token)
+
+        self.accounts.find_by_service_token = held
+        self.addCleanup(gate.set)
+        before = len(self.accounts.list_humans())
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        async def create(c):
+            await asyncio.sleep(0.1)  # 等名额被占满
+            response = await c.post(
+                "/api/accounts",
+                headers={"cookie": cookie},
+                json={"username": "queued-one", "password": OTHER_PASSWORD, "role": "admin"},
+            )
+            return response.status_code
+
+        async def logout_then_release(c):
+            await asyncio.sleep(0.3)  # 建号请求已经在排队
+            response = await c.post("/api/auth/logout", headers={"cookie": cookie})
+            gate.set()
+            return response.status_code
+
+        results = self.gather(*([bogus] * 16), create, logout_then_release)
+        self.assertEqual(results[-1], 200)
+        self.assertEqual(results[-2], 401, "排队期间登出的会话被放行了")
+        self.assertEqual(len(self.accounts.list_humans()), before)
+
+    def test_a_lookup_rereads_the_session_it_was_triaged_with(self):
+        admin = self.as_admin()
+        scope = {
+            "type": "http",
+            "headers": [(b"cookie", f"pns_session={admin.cookies['pns_session']}".encode())],
+        }
+        done, lookup = self.auth._triage(scope)
+        self.assertFalse(done)
+        self.auth.sessions.revoke(admin.cookies["pns_session"])
+        self.assertIsNone(lookup())
+
+    def test_backoff_never_sleeps_past_the_deadline(self):
+        """绘名 F4：名额在时限的最后一刻空出来，请求也要赶得上。"""
+        from pns.interfaces.security import LookupSlots
+
+        token = self.accounts.create_service("accord-late").token
+        self.auth.lookup_timeout_seconds = 1.0
+        slots = LookupSlots(1)
+        self.auth.lookup_slots = slots
+        release = threading.Event()
+        holder = threading.Thread(target=slots.run, args=(lambda: release.wait(5),))
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        # 退避序列 10/20/40/80/160/200/200… 毫秒；0.93 秒时放开，落在两次长睡之间。
+        threading.Timer(0.93, release.set).start()
+        # 受保护路径才走守卫（/api/auth/session 是公开面）。认出来了，但不在白名单里：403。
+        response = self.client.get(
+            "/api/persistent-worlds", headers={"Authorization": f"Bearer {token}"}
+        )
+        self.assertEqual(response.status_code, 403)
+
     def test_break_glass_does_not_queue_behind_stuck_lookups(self):
         """绘名 F2：默认名额被编造的服务 token 占满、那些请求已经 503、线程还卡在
         库里——这时应急钥匙、没凭据、格式不对的 bearer 都不查库，必须当场答。"""
