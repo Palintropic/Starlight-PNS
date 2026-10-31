@@ -1,11 +1,13 @@
 # pns/interfaces/accounts_api.py — 账户管理面
 #
-#     GET  /api/accounts                        列出人类账户
+#     GET  /api/accounts                        列出人类账户和服务账户
 #     POST /api/accounts                        新建账户
+#     POST /api/accounts/services               新建服务账户（返回一次 token）
 #     GET  /api/accounts/audit                  安全审计记录
-#     POST /api/accounts/{id}/role              改角色
-#     POST /api/accounts/{id}/enabled           停用 / 启用
-#     POST /api/accounts/{id}/password          重置密码
+#     POST /api/accounts/{id}/role              改角色（服务账户不行）
+#     POST /api/accounts/{id}/enabled           停用 / 启用（两种账户都行）
+#     POST /api/accounts/{id}/password          重置密码（只有人类账户）
+#     POST /api/accounts/{id}/token             给服务账户换 token（返回一次）
 #
 # 整个路由器挂在 `require_scope("accounts:manage")` 上，而不是逐条路由挂：
 # 这个路由器以后新增的每一条路由都自动继承那道门。**operator 有 `operate`，
@@ -18,9 +20,13 @@
 #     的会话表（于是"立刻"不依赖于下一次请求什么时候来）。两条都要有。
 #   * **"最后一个管理员"由存储层在写事务里裁决**，不在这里先查后写：那种写法
 #     在两个并发请求下会双双通过，然后这台服务器就再也没有管理员了。
+#
+# 服务 token 的明文只出现在建号和换 token 这两个响应里，响应带 `no-store`。
+# 服务账户没有会话可踢：它每次请求都回库里核对，停用和换 token 在下一次请求
+# 就生效，所以那两个响应里没有 `revoked_sessions`。
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from .accounts import (
@@ -29,6 +35,8 @@ from .accounts import (
     AccountConflict,
     AccountError,
     AccountStore,
+    IssuedToken,
+    KIND_SERVICE,
     LastAdminError,
     Principal,
     SCOPE_ACCOUNTS,
@@ -47,6 +55,10 @@ class CreateUserRequest(BaseModel):
     username: str = Field(min_length=1, max_length=256)
     password: str = Field(min_length=1, max_length=MAX_PASSWORD_CHARS)
     role: str = Field(min_length=1, max_length=32)
+
+
+class CreateServiceRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=256)
 
 
 class RoleRequest(BaseModel):
@@ -105,9 +117,19 @@ def _view(principal: Principal, revoked: Optional[int] = None) -> Dict[str, Any]
     return payload
 
 
+def _issued(issued: IssuedToken, response: Response) -> Dict[str, Any]:
+    """带着 token 明文的那一份响应。**只此一次**，所以不许任何一层缓存它。"""
+    response.headers["Cache-Control"] = "no-store"
+    return {**_view(issued.principal), "token": issued.token}
+
+
 @router.get("")
 def list_accounts(request: Request) -> Dict[str, Any]:
-    return {"users": [_view(p) for p in _store(request).list_humans()]}
+    store = _store(request)
+    return {
+        "users": [_view(p) for p in store.list_humans()],
+        "services": [_view(p) for p in store.list_services()],
+    }
 
 
 @router.get("/audit")
@@ -120,7 +142,10 @@ def list_audit(
     （break-glass 这类不在账户库里的主体翻不出名字，如实留 null）。
     """
     store = _store(request)
-    names = {p.principal_id: p.username for p in store.list_humans()}
+    names = {
+        p.principal_id: p.username
+        for p in (*store.list_humans(), *store.list_services())
+    }
     records: List[Dict[str, Any]] = []
     for record in store.audit_records(limit):
         records.append(
@@ -155,6 +180,40 @@ def create_account(
     except (AccountError, KeyError) as exc:
         raise _fail(exc) from exc
     return _view(created)
+
+
+@router.post("/services", status_code=201)
+def create_service_account(
+    payload: CreateServiceRequest,
+    request: Request,
+    response: Response,
+    actor: RequestPrincipal = Depends(current_principal),
+) -> Dict[str, Any]:
+    """新建一个只读的服务账户。响应里的 `token` 之后再也拿不到。"""
+    try:
+        issued = _store(request).create_service(
+            payload.username, actor=actor.principal_id
+        )
+    except (AccountError, KeyError) as exc:
+        raise _fail(exc) from exc
+    return _issued(issued, response)
+
+
+@router.post("/{principal_id}/token")
+def rotate_service_token(
+    principal_id: str,
+    request: Request,
+    response: Response,
+    actor: RequestPrincipal = Depends(current_principal),
+) -> Dict[str, Any]:
+    """给服务账户换 token。旧的那把在这次响应发出之前就已经失效了。"""
+    try:
+        issued = _store(request).rotate_service_token(
+            principal_id, actor=actor.principal_id
+        )
+    except (AccountError, KeyError) as exc:
+        raise _fail(exc) from exc
+    return _issued(issued, response)
 
 
 @router.post("/{principal_id}/role")
@@ -196,6 +255,8 @@ def set_account_enabled(
         )
     except (AccountError, KeyError) as exc:
         raise _fail(exc) from exc
+    if updated.kind == KIND_SERVICE:
+        return _view(updated)
     return _view(updated, auth.sessions.revoke_principal(principal_id))
 
 

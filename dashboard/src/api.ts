@@ -167,11 +167,26 @@ export interface AuditRecord {
   detail: Record<string, unknown>;
 }
 
+/** 建服务账户 / 换 token 的响应。`token` 只在这一次响应里出现，之后谁也取不回。 */
+export interface IssuedServiceToken extends Account {
+  token: string;
+}
+
 const accountPath = (principalId: string) =>
   `/api/accounts/${encodeURIComponent(principalId)}`;
 
-export const fetchAccounts = (): Promise<{ users: Account[] }> =>
+export const fetchAccounts = (): Promise<{ users: Account[]; services?: Account[] }> =>
   fetch('/api/accounts').then((res) => json(res));
+
+export const createServiceAccount = (username: string): Promise<IssuedServiceToken> =>
+  fetch('/api/accounts/services', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  }).then((res) => json(res));
+
+export const rotateServiceToken = (principalId: string): Promise<IssuedServiceToken> =>
+  fetch(`${accountPath(principalId)}/token`, { method: 'POST' }).then((res) => json(res));
 
 export const fetchAuditRecords = (limit = 200): Promise<{ records: AuditRecord[] }> =>
   fetch(`/api/accounts/audit?limit=${limit}`).then((res) => json(res));

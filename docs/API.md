@@ -483,8 +483,10 @@ SSE 事件流。PNS 只供数据，怎么显示、谁来说由桌面那边决定
 - **开关**：`PNS_ACCORD_FEED=1` 才挂上这三条路由；不设或设成 `0/false/no/off` 时路由不存在
   （404），其它路由一条不多一条不少。值看不懂时进程起不来。
 - **权限**：全是 `GET`，守卫照常给 `read`，`observer` 账户就能用；没登录 401；不进公开清单。
-  不开 WebSocket，也不开 MCP（两者都要 `operate`）。桌面程序用 observer 账户
-  `POST /api/auth/login` 换会话 Cookie，不要放 `PNS_ADMIN_TOKEN`。
+  不开 WebSocket，也不开 MCP（两者都要 `operate`）。桌面程序用**服务账户 token**
+  （`Authorization: Bearer pns_svc_…`，见 6.2），不要放 `PNS_ADMIN_TOKEN`，也不必再拿观察者
+  密码换会话 Cookie。服务 token 只能读这一组路由。流开着时服务账户被停用或换了 token，流在
+  下一次复核时结束。
 - **只透出 overview 已经透出的东西**：位置、活动、在线频道、台词正文、时钟。不透出 prompt、记忆、
   观察、provenance、存档路径、模型信息。读取不改世界（revision、dirty 不变）。
 
@@ -614,6 +616,34 @@ CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），
 
 管理 token 本身**不是**会话 id：拿 token 当 Cookie 值发过来会被拒绝。
 
+**`Authorization: Bearer pns_svc_…`（服务账户 token）** —— 给桌面端这类程序用。服务账户是
+账户库里 `kind` = `service` 的一行，角色**固定**是 `observer`（只有 `read`），`via` 是
+`service-token`。它没有密码：登不了网页，token 也不能当 Cookie 用。
+
+- **只能碰 `/api/accord/**` 和 `GET /api/auth/session`**（加上公开面）。这是在 observer 的
+  `read` 之上再收窄一层：observer 能 GET 的审核记录、配置、用量、overview，服务 token 一律 403
+  `forbidden`；`POST /api/auth/password` 也是 403。清单是显式的，以后新加的只读路由默认对它关着。
+  带 `..` 段或空段的路径不认。
+
+- token 由管理员在用户管理里新建账户或"换 token"时生成，**只在那一次响应里出现**（响应带
+  `Cache-Control: no-store`），之后服务端也给不出第二次——库里只存它的 SHA-256 摘要。
+- 每次请求都回账户库核对，没有进程内缓存：停用、换 token 都在**下一次请求**生效，开着的
+  Accord 流也在下一次复核时结束。PNS 重启不影响它。
+- 库里那一行就算被直接改成了别的角色，这条路也只认 `observer`，不认就是 401。
+- 跟 break-glass 共用 `Authorization` 头：先比 `PNS_ADMIN_TOKEN`，不对再按 `pns_svc_` 前缀
+  查库。认不出来的 bearer 一律是同一个 401。
+- 短期、自动轮换的 token 不在这里做，等 SSO 的 client credentials。
+
+守卫认主体（会话、服务 token）要查账户库，这一步在工作线程里跑：同时在途最多 16 条，一次认证
+最多等 2 秒（含排队、锁和 SQLite 的等待）。账户库被锁住时，别的请求（含 `/healthz`）不受影响；
+等不到的那一次返回 `503 {"detail": {"category": "auth_unavailable"}}` 并带 `Retry-After: 1`
+（WebSocket 握手以 1013 关闭）——不是 401，凭据本身没错。不查库就能答的——break-glass、格式不对的
+`Authorization`、没有凭据、内存里没有的会话——在事件循环里当场答、不占名额，所以名额被占满时
+应急钥匙照样进得来。
+
+公开面、scope 档和服务 token 白名单判的都是**路由真正匹配的那条路径**：部署在 `root_path` 下时
+先去掉它再判，跟 Starlette 路由用的是同一个函数。
+
 ### 6.2.1 角色与 scope
 
 角色是**权限的捆绑**，路由问的永远是"有没有这个 scope"，不是"是不是管理员"：
@@ -648,12 +678,14 @@ CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），
 
 | 接口 | 行为 |
 |---|---|
-| `GET /api/accounts` | `{"users": [...]}`，只列人类账户；每条是 `{principal_id, username, kind, role, scopes, enabled, created_at, updated_at}` |
+| `GET /api/accounts` | `{"users": [...], "services": [...]}`，人类账户和服务账户分开列；每条是 `{principal_id, username, kind, role, scopes, enabled, created_at, updated_at}`，**不含 token** |
 | `GET /api/accounts/audit?limit=` | `{"records": [...]}`，倒序。每条含时间、动作、结果、操作者/目标 principal（顺带翻成用户名）和一个结构化 `detail`。**没有凭据、没有哈希、没有原始异常，也不记尝试过的用户名** |
 | `POST /api/accounts` | `{"username", "password", "role"}` → 201。用户名重复（含大小写/全角折叠之后重复）返回 409 `account_conflict` |
-| `POST /api/accounts/{principal_id}/role` | `{"role"}`。改完立刻作废目标的全部会话，响应里带 `revoked_sessions` |
-| `POST /api/accounts/{principal_id}/enabled` | `{"enabled"}`。同上 |
-| `POST /api/accounts/{principal_id}/password` | `{"password"}`，管理员重置，不需要旧密码。同上 |
+| `POST /api/accounts/services` | `{"username"}` → 201，新建服务账户（角色固定 `observer`），响应多一个 `token` 字段，**只此一次**，带 `no-store`。用户名跟人类账户共用判重，重复返回 409 `account_conflict` |
+| `POST /api/accounts/{principal_id}/role` | `{"role"}`。改完立刻作废目标的全部会话，响应里带 `revoked_sessions`。服务账户只能是 `observer`，改成别的返回 400 |
+| `POST /api/accounts/{principal_id}/enabled` | `{"enabled"}`。同上；对服务账户也管用（它没有会话，响应里没有 `revoked_sessions`，停用在下一次请求生效） |
+| `POST /api/accounts/{principal_id}/password` | `{"password"}`，管理员重置，不需要旧密码。同上。服务账户没有密码，返回 404 |
+| `POST /api/accounts/{principal_id}/token` | 给服务账户换 token：旧的立刻失效，响应带新的 `token`，只此一次，`no-store`。目标不是服务账户返回 404 |
 
 最后一个启用着的管理员不能被停用或降级：返回 409 `last_admin`。这条裁决发生在数据库写锁
 之下，所以两个并发的降级请求不可能都通过。

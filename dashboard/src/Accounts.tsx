@@ -11,16 +11,23 @@
 //   * **改权威要先确认，并且如实说出后果。** 停用、改角色、重置密码都会立刻
 //     踢掉目标的全部会话——那是安全承诺，不是副作用，所以它出现在确认文案里，
 //     也出现在操作结果里（"踢掉了 N 张会话"）。
+//
+// 服务账户（桌面端这类程序用的只读 bearer token）单独一节。它的 token 只在
+// 建号 / 换 token 的那一次响应里出现：界面显示一次，关掉就从 state 里清掉，
+// 之后服务端也给不出第二次。
 import { useCallback, useEffect, useState } from 'react';
 import {
   createAccount,
+  createServiceAccount,
   fetchAccounts,
   fetchAuditRecords,
   resetAccountPassword,
+  rotateServiceToken,
   setAccountEnabled,
   setAccountRole,
   type Account,
   type AuditRecord,
+  type IssuedServiceToken,
 } from './api';
 import { usePrincipal } from './principal';
 import './accounts.css';
@@ -44,6 +51,7 @@ type Feedback = { kind: 'ok' | 'error'; message: string } | null;
 export default function Accounts() {
   const me = usePrincipal();
   const [users, setUsers] = useState<Account[] | null>(null);
+  const [services, setServices] = useState<Account[]>([]);
   const [records, setRecords] = useState<AuditRecord[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -54,11 +62,18 @@ export default function Accounts() {
   const [newRole, setNewRole] = useState<string>('observer');
   const [resetTarget, setResetTarget] = useState<Account | null>(null);
   const [resetPassword, setResetPassword] = useState('');
+  const [newServiceName, setNewServiceName] = useState('');
+  // 刚生成的 token。只活到操作者点"我已保存"或者下一次生成为止。
+  const [issued, setIssued] = useState<IssuedServiceToken | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(() => {
     setLoadError(null);
     fetchAccounts()
-      .then((payload) => setUsers(payload.users))
+      .then((payload) => {
+        setUsers(payload.users);
+        setServices(payload.services ?? []);
+      })
       .catch((e) => setLoadError(e instanceof Error ? e.message : '加载账户失败'));
     fetchAuditRecords(100)
       .then((payload) => setRecords(payload.records))
@@ -130,6 +145,68 @@ export default function Accounts() {
       (updated) =>
         `${updated.username} 已${updated.enabled ? '启用' : '停用'}${revokedNote(updated)}`,
     );
+  };
+
+  const reveal = (token: IssuedServiceToken) => {
+    setCopied(false);
+    setIssued(token);
+  };
+
+  const onCreateService = (event: React.FormEvent) => {
+    event.preventDefault();
+    const username = newServiceName.trim();
+    if (!username) return;
+    void run(
+      'service-create',
+      async () => {
+        const created = await createServiceAccount(username);
+        reveal(created);
+        return created;
+      },
+      (account) => {
+        setNewServiceName('');
+        return `已创建服务账户 ${account.username}（观察者）`;
+      },
+    );
+  };
+
+  const onRotate = (account: Account) => {
+    const confirmed = window.confirm(
+      `给 ${account.username} 换一把新 token？旧的那把会立刻失效，用它的程序要换上新的才能再连。`,
+    );
+    if (!confirmed) return;
+    void run(
+      `${account.principal_id}:token`,
+      async () => {
+        const rotated = await rotateServiceToken(account.principal_id);
+        reveal(rotated);
+        return rotated;
+      },
+      (updated) => `已给 ${updated.username} 换了新 token，旧的已失效`,
+    );
+  };
+
+  const onToggleService = (account: Account) => {
+    const next = !account.enabled;
+    const confirmed = window.confirm(
+      next
+        ? `启用 ${account.username}？它现有的 token 会重新能用。`
+        : `停用 ${account.username}？用它 token 的程序下一次请求就会被拒，开着的连接也会断。`,
+    );
+    if (!confirmed) return;
+    void run(
+      `${account.principal_id}:enabled`,
+      () => setAccountEnabled(account.principal_id, next),
+      (updated) => `${updated.username} 已${updated.enabled ? '启用' : '停用'}`,
+    );
+  };
+
+  const copyIssued = () => {
+    if (issued === null) return;
+    navigator.clipboard
+      ?.writeText(issued.token)
+      .then(() => setCopied(true))
+      .catch(() => undefined);
   };
 
   const onReset = (account: Account) => {
@@ -315,11 +392,123 @@ export default function Accounts() {
         </table>
       )}
 
+      <section className="accounts-services">
+        <h3>服务账户</h3>
+        <p className="accounts-hint">
+          给桌面端这类程序用的只读账户，凭 <code>Authorization: Bearer</code> 访问，
+          只能读 Accord feed，不能登录网页、不能改任何东西。token 只在创建或更换时显示一次。
+        </p>
+
+        {issued ? (
+          <div className="accounts-token" role="status">
+            <p>
+              <strong>{issued.username}</strong> 的 token——只显示这一次，关掉之后服务端也拿不出来：
+            </p>
+            <input
+              className="accounts-token-value"
+              readOnly
+              spellCheck={false}
+              value={issued.token}
+              onFocus={(event) => event.currentTarget.select()}
+              aria-label="服务 token"
+            />
+            <div className="accounts-create-actions">
+              <button className="btn" type="button" onClick={copyIssued}>
+                {copied ? '已复制' : '复制'}
+              </button>
+              <button
+                className="btn btn-accent"
+                type="button"
+                onClick={() => {
+                  setIssued(null);
+                  setCopied(false);
+                }}
+              >
+                我已保存，关闭
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <form className="accounts-create" onSubmit={onCreateService}>
+          <div className="accounts-create-row">
+            <label>
+              <span>名称</span>
+              <input
+                value={newServiceName}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(e) => setNewServiceName(e.target.value)}
+                placeholder="比如 accord-desktop"
+              />
+            </label>
+          </div>
+          <div className="accounts-create-actions">
+            <button
+              className="btn btn-accent"
+              type="submit"
+              disabled={busy === 'service-create' || !newServiceName.trim()}
+            >
+              {busy === 'service-create' ? '创建中…' : '创建服务账户'}
+            </button>
+          </div>
+        </form>
+
+        {services.length === 0 ? (
+          <div className="accounts-empty">（还没有服务账户）</div>
+        ) : (
+          <table className="accounts-table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>状态</th>
+                <th>创建于</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {services.map((account) => {
+                const rowBusy = busy !== null && busy.startsWith(account.principal_id);
+                return (
+                  <tr key={account.principal_id} className={account.enabled ? '' : 'off'}>
+                    <td>{account.username}</td>
+                    <td>
+                      <span className={`accounts-badge ${account.enabled ? 'ok' : 'off'}`}>
+                        {account.enabled ? '启用' : '已停用'}
+                      </span>
+                    </td>
+                    <td className="accounts-time">
+                      {account.created_at.slice(0, 19).replace('T', ' ')}
+                    </td>
+                    <td className="accounts-row-actions">
+                      <button
+                        className="btn"
+                        disabled={rowBusy}
+                        onClick={() => onToggleService(account)}
+                      >
+                        {account.enabled ? '停用' : '启用'}
+                      </button>
+                      <button
+                        className="btn"
+                        disabled={rowBusy}
+                        onClick={() => onRotate(account)}
+                      >
+                        换 token
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
       <section className="accounts-audit">
         <h3>安全审计</h3>
         <p className="accounts-hint">
-          登录成功/失败、登出、改密码、建号、改角色、停用启用和重置密码都在这里。
-          记录里没有密码、没有哈希、也没有尝试过的用户名。
+          登录成功/失败、登出、改密码、建号、改角色、停用启用、重置密码和换 token 都在这里。
+          记录里没有密码、没有 token、没有哈希、也没有尝试过的用户名。
         </p>
         {records.length === 0 ? (
           <div className="accounts-empty">（还没有记录）</div>

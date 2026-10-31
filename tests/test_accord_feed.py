@@ -944,6 +944,34 @@ class AccessTests(FeedTestCase):
         self.assertLess(elapsed, 5.0, "停用账户之后流应当当场结束，而不是活到寿命上限")
         self.assertEqual(self.hello(client=observer).status_code, 401)
 
+    def test_a_service_token_reads_the_feed_and_disabling_it_ends_the_stream(self):
+        """桌面端用的那条路（TODO 51）：bearer 服务 token，复核同样当场生效。"""
+        self.client.post(
+            "/api/persistent-worlds",
+            json={"world_id": "nightcord", "scene": SCENE, "characters": CHARACTERS},
+            headers=self.admin(),
+        )
+        issued = self.accounts.create_service("accord-pet")
+        desk = TestClient(self.app, headers={"Authorization": f"Bearer {issued.token}"})
+        self.assertEqual(self.hello(client=desk).status_code, 200)
+        self.app.state.accord_feed_settings = FeedSettings(
+            poll_seconds=0.01, keepalive_seconds=0.05, clock_seconds=60.0,
+            recheck_seconds=0.02, lifetime_seconds=10.0,
+        )
+        timer = threading.Timer(
+            0.3,
+            lambda: self.accounts.set_authority(issued.principal.principal_id, enabled=False),
+        )
+        began = time.monotonic()
+        timer.start()
+        response = self.stream(client=desk)
+        elapsed = time.monotonic() - began
+        timer.join()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(parse_sse(response.text)[0][1], "hello")
+        self.assertLess(elapsed, 5.0, "停用服务账户之后流应当当场结束")
+        self.assertEqual(self.hello(client=desk).status_code, 401)
+
 
     def _observer_on_open_world(self, **settings):
         created = self.client.post(

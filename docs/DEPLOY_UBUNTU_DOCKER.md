@@ -428,6 +428,19 @@ docker compose run --rm --entrypoint "" app python scripts/accounts.py audit --l
   了"，那种时候留着手上这张恰好留错了。
 - 登录失败按账户分桶节流，另有一个宽得多的全局桶。一次成功登录只清掉自己那个桶。
 
+### 8.3.1 服务账户（给桌面端用）
+
+桌面端（Accord feed 的客户端、桌宠）不要用观察者的密码登录，也不要放 `PNS_ADMIN_TOKEN`。在
+用户管理 →「服务账户」里新建一个，把只显示一次的 `pns_svc_…` token 填进桌面端，它用
+`Authorization: Bearer` 访问。
+
+- 只能是观察者，而且只能读 Accord feed（`/api/accord/**`）：审核、配置、用量这些观察者能看的
+  东西它也看不到。登不了网页，没有密码。
+- 停用或"换 token"在下一次请求生效，开着的流也会断；PNS 重启不用重新配。
+- 审计里它是自己的名字，跟人分得开。
+- token 丢了或者怀疑泄露了就换一把，旧的当场作废。服务端只存摘要，找不回原来那串。
+- `scripts/accounts.py list` 会一起列出服务账户；`disable` / `enable --username` 对它也管用。
+
 ### 8.4 最后一个管理员
 
 最后一个启用着的管理员**不能**被停用或降级，API 会返回 409 `last_admin`，并发的两次降级也

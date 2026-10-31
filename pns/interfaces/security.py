@@ -18,7 +18,8 @@
 #     它在路由匹配、请求体解析、依赖求解之前就决定放不放行。所以一次被拒绝
 #     的请求连请求体都没被读过，更不可能改到任何状态。
 #   * **浏览器不持有 bearer 密钥。** `PNS_ADMIN_TOKEN` 是 break-glass /
-#     自动化用的**非人类**主体，只走 `Authorization: Bearer`。浏览器登录走
+#     自动化用的**非人类**主体，只走 `Authorization: Bearer`；端点程序用的
+#     服务账户 token（`pns_svc_…`，只读）也只走这一条。浏览器登录走
 #     用户名 + 密码（AUTH-1），换回来的是 HttpOnly / SameSite=Strict 的会话
 #     Cookie。任何一种凭据都不进 JS 包、不进 localStorage、不进 URL。
 #   * **会话跟着账户的权威走。** 每张会话记着签发时的 `security_revision`；
@@ -36,16 +37,33 @@ from hmac import compare_digest
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+import anyio
 from fastapi import HTTPException, Request
+# 路由用这一个函数把 `root_path` 从路径上剥掉再去匹配。守卫用**同一个**函数，
+# 而不是自己再写一份：公开面、scope 档、服务 token 白名单判的必须是路由真正
+# 匹配的那条路径，否则挂在子路径下时 `/api/accord` + `/api/config` 会过前缀
+# 检查、进的却是 `/api/config`。它是私有模块；哪天 Starlette 挪走了，进程在
+# import 时就起不来，而不是悄悄换一套判据。
+from starlette._utils import get_route_path
 
-from .accounts import AccountStore, InvalidPassword, _validate_argon2id
+from .accounts import (
+    KIND_SERVICE,
+    SERVICE_ROLE,
+    AccountStore,
+    InvalidPassword,
+    _validate_argon2id,
+    looks_like_service_token,
+)
 from .authz import (
     PRINCIPAL_SCOPE_KEY,
     SAFE_METHODS,
     RequestPrincipal,
     break_glass_principal,
     open_development_principal,
+    VIA_SERVICE_TOKEN,
     required_scope,
+    service_principal,
+    service_token_allows,
     session_principal,
 )
 
@@ -101,6 +119,18 @@ LOGIN_FAILURE_WINDOW_SECONDS = 60.0
 # 同时跟踪多少个账户桶。超了就丢最老的——节流不该变成一条内存增长路径。
 LOGIN_MAX_TRACKED_KEYS = 512
 
+# 守卫认主体时要查账户库（会话、服务 token）。这一步放在线程里跑，不在事件
+# 循环里同步等：账户库被别的写者锁住时，同步等会把整个循环停住，连 /healthz
+# 一起——而一个随便编的 `pns_svc_…` 就能触发这次查询，不需要任何有效凭据。
+#   * 在途的查询最多这么多条。超时的那条不再被等，但它的线程还排在账户库那儿，
+#     名额要等线程真正退出才还，所以卡住的线程不会随着一次次超时越积越多。
+#   * 一次认证最多等这么久（含排名额、`RLock`、SQLite 的等待）。到点按"鉴权
+#     暂时不可用"回 503——不回 401：凭据没错，错的是此刻查不了。
+GUARD_LOOKUPS_IN_FLIGHT = 16
+GUARD_LOOKUP_TIMEOUT_SECONDS = 2.0
+_GUARD_RETRY_STEP_SECONDS = 0.01
+_GUARD_RETRY_MAX_STEP_SECONDS = 0.2
+
 
 class DeploymentConfigError(RuntimeError):
     """这台服务器的部署配置不成立，不能启动。
@@ -108,6 +138,34 @@ class DeploymentConfigError(RuntimeError):
     它**只**在启动路径上抛：生产模式缺必填项时，正确的结果是进程起不来，
     而不是起来之后带着一个开着的管理面。
     """
+
+
+class LookupSlots:
+    """守卫查询的在途名额，整个进程共用。名额在线程里拿：拿不到就立刻返回
+    `BUSY`，由调用方稍后再试——不会有一个名额拿到了、线程却没跑起来、永远还
+    不回去。跟 Accord 的 `RecheckSlots` 是同一个形状。"""
+
+    BUSY = object()
+
+    def __init__(self, limit: int = GUARD_LOOKUPS_IN_FLIGHT) -> None:
+        self._lock = threading.Lock()
+        self._free = limit
+
+    def run(self, fn, *args):
+        with self._lock:
+            if self._free <= 0:
+                return self.BUSY
+            self._free -= 1
+        try:
+            return fn(*args)
+        finally:
+            with self._lock:
+                self._free += 1
+
+
+def route_path(scope: Mapping) -> str:
+    """路由真正拿去匹配的那条路径（去掉了 `root_path`）。"""
+    return get_route_path(scope)  # type: ignore[arg-type]
 
 
 # ── 部署设定 ────────────────────────────────────────────────────────────
@@ -638,6 +696,8 @@ class AdminAuth:
         )
         self.throttle = throttle if throttle is not None else LoginThrottle()
         self.accounts = accounts
+        self.lookup_slots = LookupSlots()
+        self.lookup_timeout_seconds = GUARD_LOOKUP_TIMEOUT_SECONDS
         # "这台服务器要不要凭据"在**启动时**定下来，不是每次请求现算。
         # 现算的话，一台开着的开发服务器会在有人建出第一个账户的那一刻突然
         # 开始要求登录——一个随请求变化的安全姿态，比两种姿态里的任何一种都糟。
@@ -679,31 +739,55 @@ class AdminAuth:
         用的是哪个凭据"变成一个说不清的问题。重复的 Authorization 头一律拒绝
         ——两份凭据的请求没有唯一答案，不许挑一个能过的。
         """
+        done, answer = self._triage(scope)
+        return answer if done else answer()
+
+    def _triage(self, scope: Mapping):
+        """不查账户库就能答的，当场答；要查库的，交回一个零参数的查询。
+
+        返回 `(True, 主体或 None)` 或者 `(False, lookup)`。分开是为了
+        `resolve_async`：break-glass、头部格式不对、没有凭据、内存里没有这张
+        会话——这些都不该去排查库的名额。否则一把编造的 `pns_svc_…` 占满名额
+        的时候，应急那把钥匙也跟着进不来。
+        """
         if not self.required:
             # 开发模式且既没配 token 也没有账户：保持既有本地行为。生产模式
             # 永远到不了这里——没有 token、没有管理员的生产进程根本起不来。
-            return open_development_principal()
+            return True, open_development_principal()
 
         auth_headers = _header_values(scope, b"authorization")
         if auth_headers:
             if len(auth_headers) != 1:
-                return None
+                return True, None
             try:
                 raw = auth_headers[0].decode("latin-1")
             except UnicodeDecodeError:  # pragma: no cover - latin-1 不会失败
-                return None
+                return True, None
             scheme, sep, value = raw.partition(" ")
             if not sep or scheme.lower() != "bearer":
-                return None
-            return break_glass_principal() if self.verify_token(value.strip()) else None
+                return True, None
+            token = value.strip()
+            if self.verify_token(token):
+                return True, break_glass_principal()
+            if self.accounts is None or not looks_like_service_token(token):
+                return True, None
+            return False, lambda: self._resolve_service_token(token)
 
         sid = self.session_id(scope)
         record = self.sessions.get(sid)
         if record is None:
-            return None
+            return True, None
         if self.accounts is None:
             # 有会话却没有账户库：这张会话不可能是本进程签发的。
             self.sessions.revoke(sid)
+            return True, None
+        return False, lambda: self._resolve_session(sid)
+
+    def _resolve_session(self, sid: str) -> Optional[RequestPrincipal]:
+        # 会话在**这里**重读，不用分诊时那一份：从分诊到拿到名额之间可能排了
+        # 好一会儿，这段里登出或者到期的会话不能凭一份旧快照放行。
+        record = self.sessions.get(sid)
+        if record is None:
             return None
         account = self.accounts.find(record.principal_id)
         if (
@@ -717,17 +801,76 @@ class AdminAuth:
             return None
         return session_principal(account, record.session_id)
 
+    def _resolve_service_token(self, token: str) -> Optional[RequestPrincipal]:
+        """服务账户的 bearer。**每次请求都回库里看一眼**，没有进程内缓存。
+
+        所以停用、换 token 都在下一次请求生效——包括 Accord 那种长连接：它的
+        复核走的也是 `resolve`。认出来之后再核一遍 kind 和角色：库里那一行要是
+        被人改成了别的角色，这条路也只肯认 observer，不肯把它放大。
+        """
+        if self.accounts is None or not looks_like_service_token(token):
+            return None
+        account = self.accounts.find_by_service_token(token)
+        if (
+            account is None
+            or not account.enabled
+            or account.kind != KIND_SERVICE
+            or account.role != SERVICE_ROLE
+        ):
+            return None
+        return service_principal(account)
+
     def authenticated(self, scope: Mapping) -> bool:
         return self.resolve(scope) is not None
 
     def allows(self, scope: Mapping) -> bool:
         """只回答"进不进得来"。**能做什么由 authz.required_scope 决定。**"""
         kind = scope.get("type", "http")
-        path = scope.get("path", "")
+        path = route_path(scope)
         method = scope.get("method", "GET")
         if is_public(path, method, kind):
             return True
         return self.resolve(scope) is not None
+
+    async def resolve_async(self, scope: Mapping):
+        """守卫用的 `resolve`：要查库的那一步在线程里跑、有名额上限和总时限。
+
+        返回主体、None（认不出来），或者 `LOOKUP_UNAVAILABLE`（此刻查不了）。
+        不查库就能答的（break-glass、格式不对、没凭据、开发服务器）在循环里
+        当场答，不占名额，所以名额满了它们也照常。
+        """
+        done, answer = self._triage(scope)
+        if done:
+            return answer
+        step = _GUARD_RETRY_STEP_SECONDS
+        tail_tried = False
+        deadline = anyio.current_time() + self.lookup_timeout_seconds
+        with anyio.move_on_after(self.lookup_timeout_seconds):
+            while True:
+                # 超时就不等这次查询了：线程自己跑完，结果丢掉，名额到那时才还。
+                result = await anyio.to_thread.run_sync(
+                    self.lookup_slots.run, answer, abandon_on_cancel=True,
+                )
+                if result is not LookupSlots.BUSY:
+                    return result
+                # 名额满时退避着重试：每次重试都要往返一次工作线程，并发一高，
+                # 固定的短间隔自己就成了负担。
+                # 睡眠不越过截止时间：最后一次重试要落在时限之内，否则一个
+                # 名额刚好在最后那 200 毫秒里空出来的请求会白白变成 503。
+                # 进了最后那一小段只再补试一次，之后就等时限到点，不退化成零间隔
+                # 地反复往工作线程里投。
+                remaining = deadline - anyio.current_time() - _GUARD_RETRY_STEP_SECONDS
+                if remaining <= 0:
+                    if tail_tried:
+                        await anyio.sleep_forever()
+                    tail_tried = True
+                await anyio.sleep(max(0.0, min(step, remaining)))
+                step = min(step * 2, _GUARD_RETRY_MAX_STEP_SECONDS)
+        return LOOKUP_UNAVAILABLE
+
+
+# `resolve_async` 在时限内没查完时的答案。它不是主体，也不是"认不出来"。
+LOOKUP_UNAVAILABLE = object()
 
 
 # ── 生产不可变边界 ──────────────────────────────────────────────────────
@@ -788,6 +931,12 @@ _FORBIDDEN_BODY = (
     b'\\u8fd9\\u6b21\\u64cd\\u4f5c\\u7684\\u6743\\u9650"}}'
 )
 
+_UNAVAILABLE_BODY = (
+    b'{"detail":{"category":"auth_unavailable",'
+    b'"message":"\\u9274\\u6743\\u6682\\u65f6\\u4e0d\\u53ef\\u7528\\uff0c'
+    b'\\u8bf7\\u7a0d\\u540e\\u91cd\\u8bd5"}}'
+)
+
 _CROSS_ORIGIN_BODY = (
     b'{"detail":{"category":"cross_origin",'
     b'"message":"\\u8de8\\u6e90\\u5199\\u8bf7\\u6c42\\u88ab\\u62d2\\u7edd"}}'
@@ -807,7 +956,8 @@ class AdminAuthMiddleware:
       3. 认证：认不出主体就 401；
       4. 授权：按方法/路径算出这次至少要什么 scope，不够就 403。
          第 4 步的判据来自方法而不是路由表，所以明天新加的那条 POST 也默认
-         要 `operate`——observer 进不去，不靠有人记得挂依赖。
+         要 `operate`——observer 进不去，不靠有人记得挂依赖。服务 token 在这
+         之上还要过一份路径白名单（`authz.service_token_allows`）。
     """
 
     def __init__(self, app, auth: AdminAuth) -> None:
@@ -818,7 +968,8 @@ class AdminAuthMiddleware:
         if scope["type"] == "websocket":
             # 握手阶段直接关掉。ASGI 服务器会把"accept 之前的 close"翻译成
             # 一次失败的握手，浏览器那边不会拿到一条已建立的连接。
-            await send({"type": "websocket.close", "code": 1008})
+            # 1013 = try again later：查不了不是拒绝。
+            await send({"type": "websocket.close", "code": 1013 if status == 503 else 1008})
             return
         headers = [
             (b"content-type", b"application/json"),
@@ -827,6 +978,8 @@ class AdminAuthMiddleware:
         ]
         if status == 401:
             headers.insert(1, (b"www-authenticate", b"Bearer"))
+        if status == 503:
+            headers.insert(1, (b"retry-after", b"1"))
         await send(
             {"type": "http.response.start", "status": status, "headers": headers}
         )
@@ -837,7 +990,8 @@ class AdminAuthMiddleware:
             await self.app(scope, receive, send)
             return
         kind = scope["type"]
-        path = scope.get("path", "")
+        # 判据一律用路由真正匹配的那条路径，见 `route_path`。
+        path = route_path(scope)
         method = scope.get("method", "GET")
 
         # 跨源检查在认证之前，而且**公开面也算**：一次跨站发起的 POST 不该
@@ -852,13 +1006,19 @@ class AdminAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        principal = self.auth.resolve(scope)
+        principal = await self.auth.resolve_async(scope)
+        if principal is LOOKUP_UNAVAILABLE:
+            await self._deny(scope, send, 503, _UNAVAILABLE_BODY)
+            return
         if principal is None:
             await self._deny(scope, send, 401, _DENIED_BODY)
             return
 
         needed = required_scope(path, method, kind)
         if needed is not None and not principal.has(needed):
+            await self._deny(scope, send, 403, _FORBIDDEN_BODY)
+            return
+        if principal.via == VIA_SERVICE_TOKEN and not service_token_allows(path):
             await self._deny(scope, send, 403, _FORBIDDEN_BODY)
             return
 
@@ -882,8 +1042,12 @@ __all__ = [
     "ENV_SESSION_TTL",
     "ENV_TRUSTED_ORIGINS",
     "LOGIN_GLOBAL_MAX_FAILURES",
+    "GUARD_LOOKUPS_IN_FLIGHT",
+    "GUARD_LOOKUP_TIMEOUT_SECONDS",
     "LOGIN_MAX_FAILURES",
+    "LOOKUP_UNAVAILABLE",
     "LoginThrottle",
+    "LookupSlots",
     "MIN_ADMIN_TOKEN_CHARS",
     "PLACEHOLDER_TOKENS",
     "PRODUCTION",
@@ -895,5 +1059,6 @@ __all__ = [
     "SessionStore",
     "is_public",
     "refuse_in_production",
+    "route_path",
     "same_origin",
 ]

@@ -42,6 +42,7 @@
 /* Forms read as settings groups: a Base header, fields 8 below it, no panel around them. */
 .accounts-create,
 .accounts-reset,
+.accounts-services,
 .accounts-audit {
   display: flex;
   flex-direction: column;
@@ -49,6 +50,7 @@
 }
 .accounts-create h3,
 .accounts-reset h3,
+.accounts-services h3,
 .accounts-audit h3 {
   font: var(--type-base);
   color: var(--SystemBaseHigh);
@@ -137,6 +139,26 @@
   color: var(--SystemBaseMedium);
 }
 
+/* The one-time token: a settings group like the forms, the value in the mono face so a
+   copied-by-hand token has no ambiguous glyphs. Full width up to the form width, by eye. */
+.accounts-token {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+  font: var(--type-body);
+  color: var(--SystemBaseHigh);
+}
+.accounts-token strong {
+  font-weight: 600;
+}
+.accounts-token-value {
+  max-width: 560px; /* by eye */
+  font: 400 12px/20px var(--mono);
+}
+.accounts-hint code {
+  font-family: var(--mono);
+}
+
 @media (max-width: 680px) {
   .accounts-head {
     flex-direction: column;
@@ -152,6 +174,7 @@
   .accounts-table {
     min-width: 620px;
   }
+  .accounts-services,
   .accounts-audit {
     overflow-x: auto;
   }

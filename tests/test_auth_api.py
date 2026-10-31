@@ -15,12 +15,21 @@
 #   6. **跨源的写请求在认证之前就被挡掉。** SameSite 是第一把锁，这是第二把。
 #   7. **生产 fail-closed。** 没有启用着的管理员就起不来，不是"起来但登不进"。
 #   8. **这些绿灯是机制挣来的。** 把中间件摘掉，同一批 403 必须变成 200。
+#   9. **服务 token 只读、可撤、只露一次**（TODO 51）。它过的是跟 observer
+#      一样的方法判据；停用 / 换 token 在下一次请求生效；明文只在建号和换
+#      token 的那一次响应里，带 no-store；它不是 Cookie、不是登录口令。
+#      白名单判的是路由真正匹配的那条路径（挂在 root_path 下也一样）。
+#  10. **守卫不卡事件循环**（TODO 50 / 绘名 K1）。账户库被锁时，一个随便编的
+#      bearer 不能把 /healthz 一起拖住；等太久回 503 而不是 401；卡住的查询
+#      线程有上限。
 #
 # 运行: python -m unittest tests.test_auth_api -v
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -35,6 +44,7 @@ for _path in (str(REPO_ROOT), str(REPO_ROOT / "scripts"), str(REPO_ROOT / "tests
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from pns.interfaces.accord import ENV_ACCORD_FEED  # noqa: E402
 from pns.interfaces.app import create_app  # noqa: E402
 from pns.interfaces.authz import (  # noqa: E402
     BREAK_GLASS_PRINCIPAL_ID,
@@ -50,6 +60,7 @@ from pns.interfaces.security import (  # noqa: E402
     ENV_TRUSTED_ORIGINS,
     DeploymentConfigError,
     DeploymentSettings,
+    is_public,
 )
 from pns.runtime.provider_settings import (  # noqa: E402
     ModelSettings,
@@ -773,6 +784,474 @@ class AuditTests(ApiTestCase):
         self.assertEqual(self.as_operator().get("/api/accounts/audit").status_code, 403)
         self.assertEqual(self.as_observer().get("/api/accounts/audit").status_code, 403)
         self.assertEqual(self.as_admin().get("/api/accounts/audit").status_code, 200)
+
+
+# ── 6b. 服务账户 token ──────────────────────────────────────────────────
+class ServiceTokenTests(ApiTestCase):
+    PROBE = "/api/accord/worlds"
+
+    def setUp(self):
+        # 服务 token 的白名单只有 Accord，所以这组用例把 Accord 开着。
+        flag = patch.dict(os.environ, {ENV_ACCORD_FEED: "1"})
+        flag.start()
+        self.addCleanup(flag.stop)
+        super().setUp()
+
+    def create_service(self, client=None, username="accord-desktop"):
+        client = client if client is not None else self.as_admin()
+        response = client.post("/api/accounts/services", json={"username": username})
+        self.assertEqual(response.status_code, 201, response.text)
+        return response
+
+    @staticmethod
+    def bearer_of(token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_the_token_is_returned_once_and_never_listed(self):
+        response = self.create_service()
+        self.assertEqual(response.headers.get("cache-control"), "no-store")
+        created = response.json()
+        token = created["token"]
+        self.assertTrue(token.startswith("pns_svc_"))
+        self.assertEqual(created["kind"], "service")
+        self.assertEqual(created["role"], "observer")
+        listing = self.client.get("/api/accounts", headers=self.bearer)
+        self.assertNotIn(token, listing.text)
+        payload = listing.json()
+        self.assertEqual(
+            [s["principal_id"] for s in payload["services"]], [created["principal_id"]]
+        )
+        self.assertNotIn(created["principal_id"], [u["principal_id"] for u in payload["users"]])
+        audit = self.client.get("/api/accounts/audit", headers=self.bearer).text
+        self.assertNotIn(token[len("pns_svc_"):], audit)
+        self.assertIn("service.create", audit)
+
+    def test_the_token_is_an_observer_and_says_so(self):
+        token = self.create_service().json()["token"]
+        view = self.client.get("/api/auth/session", headers=self.bearer_of(token)).json()
+        self.assertTrue(view["authenticated"])
+        principal = view["principal"]
+        self.assertEqual(principal["kind"], "service")
+        self.assertEqual(principal["role"], "observer")
+        self.assertEqual(principal["via"], "service-token")
+        self.assertEqual(principal["scopes"], ["read"])
+        self.assertEqual(principal["username"], "accord-desktop")
+
+    def test_the_token_reads_but_cannot_mutate_through_any_declared_route(self):
+        token = self.create_service().json()["token"]
+        client = TestClient(self.app, headers=self.bearer_of(token))
+        self.assertEqual(client.get(self.PROBE).status_code, 200)
+        self.assertEqual(client.get("/api/accounts").status_code, 403)
+        checked = 0
+        for method, path in declared_operations(self.app):
+            if method == "GET" or path.startswith("/api/auth/"):
+                continue
+            checked += 1
+            with self.subTest(operation=f"{method} {path}"):
+                response = client.request(method, path)
+                self.assertEqual(response.status_code, 403, f"{method} {path} 放行了服务 token")
+        self.assertGreater(checked, 8)
+        with self.assertRaises(Exception):
+            with client.websocket_connect("/ws/run", headers=self.bearer_of(token)):
+                pass  # pragma: no cover - 握手不该成功
+
+    def test_only_the_accord_feed_is_readable_not_everything_an_observer_sees(self):
+        """白名单：observer 能 GET 的东西，服务 token 只能看 Accord 那一份。"""
+        token = self.create_service().json()["token"]
+        client = TestClient(self.app, headers=self.bearer_of(token))
+        observer = self.as_observer()
+        checked = 0
+        for method, path in declared_operations(self.app):
+            if method != "GET" or path.startswith("/api/accord/") or is_public(path, method):
+                continue
+            if observer.get(path).status_code != 200:
+                continue  # 只比 observer 真能读到的那些
+            checked += 1
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 403, f"GET {path} 放行了服务 token")
+                self.assertEqual(response.json()["detail"]["category"], "forbidden")
+        self.assertGreater(checked, 5, "observer 可读的路由看起来没被真的遍历到")
+        for sneaky in (
+            "/api/accord/../config",
+            "/api/accord//worlds",
+            "/api/accordx/worlds",
+        ):
+            with self.subTest(path=sneaky):
+                self.assertNotEqual(client.get(sneaky).status_code, 200)
+
+    def test_the_whitelist_judges_the_path_the_router_matches(self):
+        """绘名 F1：挂在 root_path 下时，`/api/accord` + `/api/config` 不能过前缀
+        检查、进的却是 `/api/config`；合法的 Accord 路径也不能反被拒。"""
+        token = self.create_service().json()["token"]
+        headers = self.bearer_of(token)
+        mounted = TestClient(self.app, root_path="/api/accord", headers=headers)
+        self.assertEqual(mounted.get("/api/accord/api/config").status_code, 403)
+        self.assertEqual(mounted.get("/api/accord/api/accord/worlds").status_code, 200)
+        observer = self.as_observer()
+        observer_mounted = TestClient(self.app, root_path="/api/accord", cookies=observer.cookies)
+        self.assertEqual(
+            observer_mounted.get("/api/accord/api/config").status_code, 200,
+            "这条路径在 root_path 下确实路由到了 /api/config，否则上面那个 403 证明不了什么",
+        )
+        prefixed = TestClient(self.app, root_path="/pns", headers=headers)
+        self.assertEqual(prefixed.get("/pns/api/accord/worlds").status_code, 200)
+        self.assertEqual(prefixed.get("/pns/api/config").status_code, 403)
+
+    def test_the_guard_strips_root_path_with_the_routers_own_function(self):
+        import starlette.routing
+
+        from pns.interfaces import security
+
+        self.assertIs(security.get_route_path, starlette.routing.get_route_path)
+
+    def test_it_has_no_password_and_is_no_cookie(self):
+        created = self.create_service().json()
+        token = created["token"]
+        changed = self.client.post(
+            "/api/auth/password",
+            headers=self.bearer_of(token),
+            json={"current_password": token, "new_password": OTHER_PASSWORD},
+        )
+        # 自服务清单不在服务 token 的白名单里，所以它在守卫那一层就停了。
+        self.assertEqual(changed.status_code, 403)
+        login = TestClient(self.app).post(
+            "/api/auth/login", json={"username": "accord-desktop", "password": token}
+        )
+        self.assertEqual(login.status_code, 401)
+        cookie_only = TestClient(self.app, cookies={"pns_session": token})
+        self.assertEqual(cookie_only.get(self.PROBE).status_code, 401)
+        reset = self.as_admin().post(
+            f"/api/accounts/{created['principal_id']}/password",
+            json={"password": OTHER_PASSWORD},
+        )
+        self.assertEqual(reset.status_code, 404)
+
+    def test_disabling_takes_effect_on_the_next_request(self):
+        created = self.create_service().json()
+        headers = self.bearer_of(created["token"])
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 200)
+        admin = self.as_admin()
+        off = admin.post(f"/api/accounts/{created['principal_id']}/enabled", json={"enabled": False})
+        self.assertEqual(off.status_code, 200, off.text)
+        self.assertFalse(off.json()["enabled"])
+        self.assertNotIn("revoked_sessions", off.json())
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 401)
+        admin.post(f"/api/accounts/{created['principal_id']}/enabled", json={"enabled": True})
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 200)
+
+    def test_rotating_kills_the_old_token_and_shows_the_new_one_once(self):
+        created = self.create_service().json()
+        rotated = self.as_admin().post(f"/api/accounts/{created['principal_id']}/token")
+        self.assertEqual(rotated.status_code, 200, rotated.text)
+        self.assertEqual(rotated.headers.get("cache-control"), "no-store")
+        fresh = rotated.json()["token"]
+        self.assertNotEqual(fresh, created["token"])
+        self.assertEqual(
+            self.client.get(self.PROBE, headers=self.bearer_of(created["token"])).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(self.PROBE, headers=self.bearer_of(fresh)).status_code,
+            200,
+        )
+        human = self.as_admin().post(f"/api/accounts/{self.observer.principal_id}/token")
+        self.assertEqual(human.status_code, 404)
+
+    def test_the_role_cannot_be_raised(self):
+        created = self.create_service().json()
+        response = self.as_admin().post(
+            f"/api/accounts/{created['principal_id']}/role", json={"role": "admin"}
+        )
+        self.assertEqual(response.status_code, 400)
+        view = self.client.get(
+            "/api/auth/session", headers=self.bearer_of(created["token"])
+        ).json()
+        self.assertEqual(view["principal"]["role"], "observer")
+
+    def test_a_tampered_row_is_still_only_ever_an_observer(self):
+        """库里那一行被人直接改成 admin：这条路也不认，而不是把它放大。"""
+        created = self.create_service().json()
+        db = sqlite3.connect(self.tmp / "accounts.sqlite3", isolation_level=None)
+        self.addCleanup(db.close)
+        db.execute(
+            "UPDATE principals SET role='admin' WHERE principal_id=?",
+            (created["principal_id"],),
+        )
+        response = self.client.get("/api/accounts", headers=self.bearer_of(created["token"]))
+        self.assertEqual(response.status_code, 401)
+
+    def test_only_account_admins_can_mint_tokens(self):
+        for client in (self.as_operator(), self.as_observer()):
+            response = client.post("/api/accounts/services", json={"username": "sneaky"})
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.accounts.list_services(), [])
+
+    def test_a_wrong_service_token_fails_like_any_other_bad_bearer(self):
+        self.create_service()
+        bodies = set()
+        for value in ("pns_svc_" + "A" * 43, "not-a-token-at-all", ADMIN_TOKEN + "x"):
+            response = self.client.get(self.PROBE, headers=self.bearer_of(value))
+            self.assertEqual(response.status_code, 401)
+            bodies.add(response.text)
+        self.assertEqual(len(bodies), 1)
+
+    def test_break_glass_can_mint_too(self):
+        response = self.client.post(
+            "/api/accounts/services", headers=self.bearer, json={"username": "accord-2"}
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        actors = [
+            r["actor_principal_id"]
+            for r in self.accounts.audit_records()
+            if r["action"] == "service.create"
+        ]
+        self.assertEqual(actors, [BREAK_GLASS_PRINCIPAL_ID])
+
+
+# ── 6c. 守卫查询不卡事件循环 ────────────────────────────────────────────
+class GuardLookupTests(ApiTestCase):
+    """另开一条连接把账户库独占锁住，模拟一个慢的维护写者。"""
+
+    BOGUS = {"Authorization": "Bearer pns_svc_" + "A" * 43}
+
+    def setUp(self):
+        super().setUp()
+        self.locker = sqlite3.connect(
+            self.tmp / "accounts.sqlite3", isolation_level=None, check_same_thread=False
+        )
+        self.addCleanup(self.locker.close)
+        self.addCleanup(self.unlock)
+        self.auth = self.app.state.admin_auth
+
+    def lock(self, seconds=None):
+        self.locker.execute("BEGIN EXCLUSIVE")
+        if seconds is not None:
+            timer = threading.Timer(seconds, self.unlock)
+            timer.start()
+            self.addCleanup(timer.join)
+
+    def unlock(self):
+        if self.locker.in_transaction:
+            self.locker.execute("ROLLBACK")
+
+    def gather(self, *calls):
+        import asyncio
+
+        import httpx
+
+        async def run():
+            transport = httpx.ASGITransport(app=self.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+                return await asyncio.gather(*(call(c) for call in calls))
+
+        return asyncio.run(run())
+
+    def test_a_made_up_bearer_does_not_stall_healthz(self):
+        import asyncio
+
+        self.lock(0.6)
+        began = time.monotonic()
+
+        async def health(c):
+            await asyncio.sleep(0.05)
+            response = await c.get("/healthz")
+            return response.status_code, time.monotonic() - began
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        (health_status, health_at), bogus_status = self.gather(health, bogus)
+        self.assertEqual(health_status, 200)
+        self.assertLess(health_at, 0.4, "账户库被锁时 /healthz 被守卫拖住了")
+        self.assertEqual(bogus_status, 401)
+
+    def test_a_lookup_that_cannot_finish_is_503_not_401(self):
+        self.auth.lookup_timeout_seconds = 0.2
+        self.lock()
+        response = self.client.get("/api/persistent-worlds", headers=self.BOGUS)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["category"], "auth_unavailable")
+        self.assertEqual(response.headers.get("retry-after"), "1")
+        # break-glass 不查账户库，锁着也照样进得来；什么凭据都没有的照旧 401。
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.bearer).status_code, 200
+        )
+        self.assertEqual(self.client.get("/api/persistent-worlds").status_code, 401)
+        self.unlock()
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.BOGUS).status_code, 401
+        )
+
+    def test_a_session_lookup_is_bounded_too(self):
+        observer = self.as_observer()
+        self.auth.lookup_timeout_seconds = 0.2
+        self.lock()
+        began = time.monotonic()
+        response = observer.get("/api/persistent-worlds")
+        self.assertEqual(response.status_code, 503)
+        self.assertLess(time.monotonic() - began, 2.0)
+        self.unlock()
+        self.assertEqual(observer.get("/api/persistent-worlds").status_code, 200)
+
+    def test_stuck_lookups_are_capped(self):
+        from pns.interfaces.security import LookupSlots
+
+        self.auth.lookup_slots = LookupSlots(2)
+        self.auth.lookup_timeout_seconds = 0.3
+        inside = []
+        peak = []
+        guard = threading.Lock()
+        real = self.accounts.find_by_service_token
+
+        def counted(token):
+            with guard:
+                inside.append(1)
+                peak.append(len(inside))
+            try:
+                return real(token)
+            finally:
+                with guard:
+                    inside.pop()
+
+        self.accounts.find_by_service_token = counted
+        self.lock(1.0)
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        statuses = self.gather(*([bogus] * 10))
+        self.assertEqual(set(statuses), {503})
+        self.assertLessEqual(max(peak), 2, "卡在账户库里的查询线程超过了上限")
+
+    def test_a_session_revoked_while_queued_does_not_get_through(self):
+        """绘名 F3：请求排队等名额时会话被登出，拿到名额以后不能凭排队前那份
+        会话快照放行——尤其是一次写操作。"""
+        import asyncio
+
+        admin = self.as_admin()
+        cookie = "; ".join(f"{k}={v}" for k, v in admin.cookies.items())
+        gate = threading.Event()
+        real = self.accounts.find_by_service_token
+
+        def held(token):
+            gate.wait(5)
+            return real(token)
+
+        self.accounts.find_by_service_token = held
+        self.addCleanup(gate.set)
+        before = len(self.accounts.list_humans())
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        async def create(c):
+            await asyncio.sleep(0.1)  # 等名额被占满
+            response = await c.post(
+                "/api/accounts",
+                headers={"cookie": cookie},
+                json={"username": "queued-one", "password": OTHER_PASSWORD, "role": "admin"},
+            )
+            return response.status_code
+
+        async def logout_then_release(c):
+            await asyncio.sleep(0.3)  # 建号请求已经在排队
+            response = await c.post("/api/auth/logout", headers={"cookie": cookie})
+            gate.set()
+            return response.status_code
+
+        results = self.gather(*([bogus] * 16), create, logout_then_release)
+        self.assertEqual(results[-1], 200)
+        self.assertEqual(results[-2], 401, "排队期间登出的会话被放行了")
+        self.assertEqual(len(self.accounts.list_humans()), before)
+
+    def test_a_lookup_rereads_the_session_it_was_triaged_with(self):
+        admin = self.as_admin()
+        scope = {
+            "type": "http",
+            "headers": [(b"cookie", f"pns_session={admin.cookies['pns_session']}".encode())],
+        }
+        done, lookup = self.auth._triage(scope)
+        self.assertFalse(done)
+        self.auth.sessions.revoke(admin.cookies["pns_session"])
+        self.assertIsNone(lookup())
+
+    def test_backoff_never_sleeps_past_the_deadline(self):
+        """绘名 F4：名额在时限的最后一刻空出来，请求也要赶得上。"""
+        from pns.interfaces.security import LookupSlots
+
+        token = self.accounts.create_service("accord-late").token
+        self.auth.lookup_timeout_seconds = 1.0
+        slots = LookupSlots(1)
+        self.auth.lookup_slots = slots
+        release = threading.Event()
+        holder = threading.Thread(target=slots.run, args=(lambda: release.wait(5),))
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        # 退避序列 10/20/40/80/160/200/200… 毫秒；0.93 秒时放开，落在两次长睡之间。
+        threading.Timer(0.93, release.set).start()
+        # 受保护路径才走守卫（/api/auth/session 是公开面）。认出来了，但不在白名单里：403。
+        response = self.client.get(
+            "/api/persistent-worlds", headers={"Authorization": f"Bearer {token}"}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_full_pool_is_not_retried_in_a_tight_loop(self):
+        """绘名 F5：名额一直满着时，时限最后那一小段不能变成零间隔重试。"""
+        from pns.interfaces.security import LookupSlots
+
+        class Counting(LookupSlots):
+            attempts = 0
+
+            def run(self, fn, *args):
+                Counting.attempts += 1
+                return super().run(fn, *args)
+
+        token = self.accounts.create_service("accord-busy").token
+        slots = Counting(1)
+        self.auth.lookup_slots = slots
+        self.auth.lookup_timeout_seconds = 2.0
+        release = threading.Event()
+        holder = threading.Thread(target=LookupSlots.run, args=(slots, lambda: release.wait(5)))
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        response = self.client.get(
+            "/api/persistent-worlds", headers={"Authorization": f"Bearer {token}"}
+        )
+        self.assertEqual(response.status_code, 503)
+        # 退避 10→200 毫秒、2 秒里大约 14 次，再加尾段一次补试。
+        self.assertLess(Counting.attempts, 25, f"重试了 {Counting.attempts} 次")
+
+    def test_break_glass_does_not_queue_behind_stuck_lookups(self):
+        """绘名 F2：默认名额被编造的服务 token 占满、那些请求已经 503、线程还卡在
+        库里——这时应急钥匙、没凭据、格式不对的 bearer 都不查库，必须当场答。"""
+        from pns.interfaces.security import GUARD_LOOKUPS_IN_FLIGHT
+
+        self.auth.lookup_timeout_seconds = 0.2
+        self.lock(3.0)
+
+        async def bogus(c):
+            return (await c.get("/api/persistent-worlds", headers=self.BOGUS)).status_code
+
+        statuses = self.gather(*([bogus] * GUARD_LOOKUPS_IN_FLIGHT))
+        self.assertEqual(set(statuses), {503})
+        # 再确认一次名额确实还被占着：又一个编造的 token 照旧拿不到。
+        self.assertEqual(
+            self.client.get("/api/persistent-worlds", headers=self.BOGUS).status_code, 503
+        )
+        for headers, expected in (
+            (self.bearer, 200),
+            ({}, 401),
+            ({"Authorization": "Bearer not-a-token-at-all"}, 401),
+            ({"Authorization": "Basic abc"}, 401),
+        ):
+            with self.subTest(headers=headers):
+                began = time.monotonic()
+                response = self.client.get("/api/persistent-worlds", headers=headers)
+                self.assertEqual(response.status_code, expected)
+                self.assertLess(time.monotonic() - began, 0.15, "不查库的判断排到了查库的队里")
 
 
 # ── 7. bootstrap 与生产 fail-closed ─────────────────────────────────────

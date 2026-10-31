@@ -42,6 +42,10 @@ PRINCIPAL_SCOPE_KEY = "pns_principal"
 # 使用都看起来像一次普通登录。
 VIA_SESSION = "session"
 VIA_BEARER = "bearer"
+# 服务账户的 bearer token。跟 break-glass 分开记：两者都走 `Authorization:
+# Bearer`，但一个是部署时注入、不属于任何账户的管理钥匙，一个是账户库里一行
+# 能停用、能换的 observer。
+VIA_SERVICE_TOKEN = "service-token"
 VIA_OPEN_DEVELOPMENT = "open-development"
 
 # break-glass bearer 是一个**不在账户库里**的主体。它有稳定的 ID，所以审计和
@@ -61,6 +65,13 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # 东西"那一类——observer 也必须能改自己的密码，否则一个被重置了密码的只读
 # 账户就再也换不掉那个由别人设定的密码。
 SELF_SERVICE_PATHS = frozenset({"/api/auth/password"})
+
+# 服务账户 token 能碰的路径。它在 observer 的 `read` 之上**再收窄**一层：这把
+# token 要明文存在桌面上，泄露了的话，能被看到的应该只是桌面端本来就在看的那份
+# 投影，而不是审核记录、配置、用量这些 observer 也能 GET 的东西。清单是显式的
+# ——以后新加的只读路由，服务 token 默认进不去。
+SERVICE_TOKEN_PATHS = frozenset({"/api/auth/session"})
+SERVICE_TOKEN_PREFIXES = ("/api/accord/",)
 
 
 @dataclass(frozen=True)
@@ -111,6 +122,17 @@ def open_development_principal() -> RequestPrincipal:
     )
 
 
+def service_principal(account: Principal) -> RequestPrincipal:
+    return RequestPrincipal(
+        principal_id=account.principal_id,
+        username=account.username,
+        kind=account.kind,
+        role=account.role,
+        scopes=account.scopes,
+        via=VIA_SERVICE_TOKEN,
+    )
+
+
 def session_principal(account: Principal, session_id: str) -> RequestPrincipal:
     return RequestPrincipal(
         principal_id=account.principal_id,
@@ -138,6 +160,20 @@ def required_scope(path: str, method: str, kind: str = "http") -> Optional[str]:
     if (method or "GET").upper() in SAFE_METHODS:
         return SCOPE_READ
     return SCOPE_OPERATE
+
+
+def service_token_allows(path: str) -> bool:
+    """服务 token 能不能碰这条路径。只看路径本身，跟方法无关：方法那一档
+    仍然由 `required_scope` 管，两道都要过。
+
+    带 `..` 段或空段的路径一律不认：路由按原样匹配不会把它们折叠掉，但这里
+    没必要去赌某一层以后会不会。
+    """
+    if not isinstance(path, str) or "/../" in path or path.endswith("/..") or "//" in path:
+        return False
+    if path in SERVICE_TOKEN_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in SERVICE_TOKEN_PREFIXES)
 
 
 def principal_of(request: Request) -> Optional[RequestPrincipal]:
@@ -195,8 +231,11 @@ __all__ = [
     "RequestPrincipal",
     "SAFE_METHODS",
     "SELF_SERVICE_PATHS",
+    "SERVICE_TOKEN_PATHS",
+    "SERVICE_TOKEN_PREFIXES",
     "VIA_BEARER",
     "VIA_OPEN_DEVELOPMENT",
+    "VIA_SERVICE_TOKEN",
     "VIA_SESSION",
     "break_glass_principal",
     "current_principal",
@@ -204,5 +243,7 @@ __all__ = [
     "principal_of",
     "require_scope",
     "required_scope",
+    "service_principal",
+    "service_token_allows",
     "session_principal",
 ]

@@ -7,8 +7,9 @@
 #
 #   * **人不是角色。** Dashboard 账户和世界里的角色是两种实体。用户名叫
 #     "mizuki" 不会让谁变成 25 时的那个 mizuki——`kind` 是 `human`，而角色
-#     根本不在这张表里。以后 Sekai Times 的 service principal 走 `service`，
-#     用同一套 principal_id / scopes / 审计词汇，但同样不是人、也不是角色。
+#     根本不在这张表里。端点用的服务账户（桌面 Accord 客户端这类）走
+#     `service`，用同一套 principal_id / scopes / 审计词汇，但同样不是人、
+#     也不是角色；它没有密码，只有一把建号时生成的 bearer token。
 #   * **权威是 principal_id，不是用户名。** 用户名可以改、可以复用显示形式；
 #     一次授权、一条审计记录指向的永远是那个不变的不透明 ID。
 #   * **明文密码在这个模块里活不过一次函数调用。** 只存 Argon2id 哈希，
@@ -23,6 +24,7 @@
 # 数据卷一起备份，WAL 会让"拷走这一个文件"不再等于"拷走这个库"。
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -30,7 +32,7 @@ import sqlite3
 import threading
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,6 +68,26 @@ ROLE_SCOPES: Dict[str, frozenset] = {
 KIND_HUMAN = "human"
 KIND_SERVICE = "service"
 KINDS: Tuple[str, ...] = (KIND_HUMAN, KIND_SERVICE)
+
+# 服务账户的 token。前缀让它在日志、配置文件和密钥扫描里一眼认得出来，也让
+# 鉴权层不必对每一个 bearer 都去查一次库。随机部分 32 字节——这是一把在线猜
+# 不出来的钥匙，所以库里存一次 SHA-256 就够了，不需要 Argon2：后者每次请求
+# 跑一遍会把 Accord 的复核和每一次 GET 都拖慢几十毫秒，而它防的离线猜测对
+# 256 位的随机串本来就不成立。
+#
+# 摘要存在 `password_hash` 列里（`sha256$<hex>`），**不加新列**：加列要推进
+# SCHEMA_VERSION，而旧进程读到新版本会拒绝打开账户库——生产的回滚只换镜像，
+# 回滚之后服务器就起不来了。旧进程的登录、改密、重置、改权威、列表和管理员
+# 计数都只看 `kind='human'`，看不见 service 行；看得见它的只有三处：`count()`
+# 和 bootstrap 把它算成"库不是空的"（所以一个只有服务账户的库不会再自动
+# bootstrap，开发模式也会因此要求凭据），`find_by_username()` 会按名字找到它
+# （离线脚本的 set-role / reset-password 对它会报错，不会改到它）。
+SERVICE_TOKEN_PREFIX = "pns_svc_"
+SERVICE_TOKEN_BYTES = 32
+_SERVICE_DIGEST_PREFIX = "sha256$"
+# 服务账户只有这一种角色。它的 token 要明文存在桌面上，所以它能做的事必须
+# 是"泄露了也只是被人看到"那一档。
+SERVICE_ROLE = ROLE_OBSERVER
 
 # 用户名是**登录标识**，不是密码。它的规则只服务一件事：两个看起来一样的
 # 名字不能同时存在。
@@ -152,6 +174,19 @@ class Principal:
 
 
 @dataclass(frozen=True)
+class IssuedToken:
+    """一个服务账户和它**刚生成**的 token。
+
+    这是 token 明文唯一一次存在于服务端的地方：调用方把它交给管理员看一眼，
+    然后这个对象就该被丢掉。库里只有摘要，之后谁也取不回这串字符。
+    """
+
+    principal: Principal
+    # repr 里不带它：一行顺手的 logging / 断言失败信息就能把它写进磁盘。
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class LoginOutcome:
     """一次登录尝试的结果。
 
@@ -190,6 +225,25 @@ def canonical_username(value: object) -> Tuple[str, str]:
     if not display[0].isalnum():
         raise InvalidUsername("用户名必须以字母或数字开头")
     return display, display.casefold()
+
+
+def _new_service_token() -> str:
+    return SERVICE_TOKEN_PREFIX + secrets.token_urlsafe(SERVICE_TOKEN_BYTES)
+
+
+def service_token_digest(token: str) -> str:
+    """库里存的那一份。只给形状对的 token 用——调用方先查前缀。"""
+    return _SERVICE_DIGEST_PREFIX + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def looks_like_service_token(candidate: object) -> bool:
+    """形状像不像一把服务 token。**不说明它有效**，只决定值不值得查库。"""
+    return (
+        isinstance(candidate, str)
+        and candidate.startswith(SERVICE_TOKEN_PREFIX)
+        and len(candidate) <= 128
+        and candidate.isascii()
+    )
 
 
 def _validate_argon2id(encoded: object) -> str:
@@ -453,11 +507,34 @@ class AccountStore:
         return self._principal(row) if row is not None else None
 
     def list_humans(self) -> List[Principal]:
+        return self._list_kind(KIND_HUMAN)
+
+    def list_services(self) -> List[Principal]:
+        return self._list_kind(KIND_SERVICE)
+
+    def _list_kind(self, kind: str) -> List[Principal]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM principals WHERE kind='human' ORDER BY canonical_username"
+                "SELECT * FROM principals WHERE kind=? ORDER BY canonical_username",
+                (kind,),
             ).fetchall()
         return [self._principal(row) for row in rows]
+
+    def find_by_service_token(self, token: object) -> Optional[Principal]:
+        """这把 token 属于哪个服务账户。**不看 enabled**，那是鉴权层的判断。
+
+        按摘要查而不是按明文比：库里本来就没有明文。摘要是 256 位随机串的
+        SHA-256，SQL 等值比较的时间差泄露不出任何能拿来逼近它的东西。
+        """
+        if not looks_like_service_token(token):
+            return None
+        digest = service_token_digest(token)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM principals WHERE kind='service' AND password_hash=?",
+                (digest,),
+            ).fetchone()
+        return self._principal(row) if row is not None else None
 
     def count(self) -> int:
         with self._lock:
@@ -516,6 +593,68 @@ class AccountStore:
                 self._db.execute("ROLLBACK")
                 raise
         return self.get(principal_id)
+
+    def create_service(
+        self, username: str, *, actor: Optional[str] = None
+    ) -> IssuedToken:
+        """建一个服务账户，同时生成它的第一把 token。角色固定是 observer。
+
+        用户名和人类账户共用一个判重键：审计和界面上"accord-desktop"只能指一个
+        主体，不管它是人还是程序。
+        """
+        display, canonical = canonical_username(username)
+        token = _new_service_token()
+        principal_id = str(uuid.uuid4())
+        now = self._now()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "INSERT INTO principals VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        principal_id, display, canonical, KIND_SERVICE, SERVICE_ROLE,
+                        1, service_token_digest(token), 1, now, now,
+                    ),
+                )
+                self._audit(
+                    actor, principal_id, "service.create", "success",
+                    {"role": SERVICE_ROLE},
+                )
+                self._db.execute("COMMIT")
+            except sqlite3.IntegrityError as exc:
+                self._db.execute("ROLLBACK")
+                raise AccountConflict("这个用户名已经被占用了") from exc
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return IssuedToken(self.get(principal_id), token)
+
+    def rotate_service_token(
+        self, target: str, *, actor: Optional[str] = None
+    ) -> IssuedToken:
+        """给服务账户换一把新 token。**旧的那把在这个事务提交时就作废了**：
+        库里只存一份摘要，被覆盖掉的那份再也对不上任何请求。
+
+        停用状态不变——给一个停用的账户换钥匙是正常的"先换再启用"顺序。
+        """
+        token = _new_service_token()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                changed = self._db.execute(
+                    "UPDATE principals SET password_hash=?,"
+                    "security_revision=security_revision+1,updated_at=?"
+                    " WHERE principal_id=? AND kind='service'",
+                    (service_token_digest(token), self._now(), target),
+                ).rowcount
+                if not changed:
+                    raise KeyError(target)
+                self._audit(actor, target, "service.token_rotate", "success")
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return IssuedToken(self.get(target), token)
 
     def bootstrap_admin(
         self, username: str, password_hash: str
@@ -576,7 +715,12 @@ class AccountStore:
                 if row is None:
                     raise KeyError(target)
                 old = self._principal(row)
-                if old.kind != KIND_HUMAN:
+                if old.kind == KIND_SERVICE:
+                    # 服务账户只能停用 / 启用。它的角色是建号时就定死的 observer
+                    # ——一把明文存在桌面上的钥匙不该有机会被"升级"成能操作世界的。
+                    if role is not None and role != SERVICE_ROLE:
+                        raise AccountError("服务账户只能是观察者")
+                elif old.kind != KIND_HUMAN:
                     raise AccountError("这个主体不是人类账户")
                 new_role = old.role if role is None else role
                 new_enabled = old.enabled if enabled is None else bool(enabled)
@@ -594,9 +738,10 @@ class AccountStore:
                     " WHERE principal_id=?",
                     (new_role, int(new_enabled), self._now(), target),
                 )
+                prefix = "service" if old.kind == KIND_SERVICE else "account"
                 self._audit(
                     actor, target,
-                    "account.role" if role is not None else "account.enabled",
+                    f"{prefix}.role" if role is not None else f"{prefix}.enabled",
                     "success",
                     {"role": new_role, "enabled": new_enabled},
                 )
@@ -726,6 +871,7 @@ __all__ = [
     "AccountStoreError",
     "InvalidPassword",
     "InvalidUsername",
+    "IssuedToken",
     "KINDS",
     "KIND_HUMAN",
     "KIND_SERVICE",
@@ -748,5 +894,9 @@ __all__ = [
     "SCOPE_ACCOUNTS",
     "SCOPE_OPERATE",
     "SCOPE_READ",
+    "SERVICE_ROLE",
+    "SERVICE_TOKEN_PREFIX",
     "canonical_username",
+    "looks_like_service_token",
+    "service_token_digest",
 ]
