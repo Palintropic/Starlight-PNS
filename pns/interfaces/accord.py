@@ -12,8 +12,8 @@
 #
 # 一条流活着的时候，主体每隔几秒重新认一次：账户被停用、权威变了、会话被撤销，
 # 流当场结束，而不是靠连上那一刻的身份一直推下去。每条流还有寿命上限，到点由
-# 服务器关掉；EventSource 会带着 Last-Event-ID 自己重连，续传一条不漏。
-import asyncio
+# 服务器关掉；EventSource 会带着 Last-Event-ID 自己重连，续传一条不漏。这两样
+# 检查由一只看门狗做，不排在写出后面：客户端读得慢、send() 卡住时照样按时掐断。
 import os
 from dataclasses import dataclass
 from typing import Mapping, Optional
@@ -78,12 +78,37 @@ def _still_allowed(auth, scope) -> bool:
     return principal is not None and principal.has(SCOPE_READ)
 
 
-async def _stream(request: Request, session: FeedSession, settings: FeedSettings):
-    auth = getattr(request.app.state, "admin_auth", None)
-    loop = asyncio.get_running_loop()
-    started = last_write = last_check = loop.time()
+class _Watch:
+    """一条流还该不该活着。寿命按此刻的时间算；身份由 `watch()` 每隔几秒重认一次。"""
+
+    def __init__(self, request: Request, settings: FeedSettings) -> None:
+        self._auth = getattr(request.app.state, "admin_auth", None)
+        self._scope = request.scope
+        self._recheck = settings.recheck_seconds
+        self._deadline = anyio.current_time() + settings.lifetime_seconds
+        self._denied = False
+
+    def open(self) -> bool:
+        return not self._denied and anyio.current_time() < self._deadline
+
+    async def watch(self) -> None:
+        """流该结束时返回。"""
+        while True:
+            remaining = self._deadline - anyio.current_time()
+            if remaining <= 0:
+                return
+            await anyio.sleep(min(self._recheck, remaining))
+            if not self.open():
+                return
+            if not await anyio.to_thread.run_sync(_still_allowed, self._auth, self._scope):
+                self._denied = True
+                return
+
+
+async def _stream(watch: _Watch, session: FeedSession, settings: FeedSettings):
+    last_write = anyio.current_time()
     yield f"retry: {int(settings.retry_ms)}\n\n"
-    while True:
+    while watch.open():
         try:
             messages = await anyio.to_thread.run_sync(session.poll)
         except Exception as e:
@@ -91,20 +116,56 @@ async def _stream(request: Request, session: FeedSession, settings: FeedSettings
             # 会带着 Last-Event-ID 重连，位置不会丢。
             print(f"[accord] 事件流中断: {type(e).__name__}: {e}", flush=True)
             return
-        now = loop.time()
+        # 读的这一阵里可能已经到了寿命：那这一批就不写了。
+        if not watch.open():
+            return
+        now = anyio.current_time()
         if messages:
             yield "".join(message.encode() for message in messages)
             last_write = now
         elif now - last_write >= settings.keepalive_seconds:
             yield ": ping\n\n"
             last_write = now
-        if now - started >= settings.lifetime_seconds:
-            return
-        if now - last_check >= settings.recheck_seconds:
-            last_check = now
-            if not await anyio.to_thread.run_sync(_still_allowed, auth, request.scope):
-                return
-        await asyncio.sleep(settings.poll_seconds)
+        await anyio.sleep(settings.poll_seconds)
+
+
+class _FeedResponse(StreamingResponse):
+    """SSE 响应，外面套着看门狗。
+
+    寿命到了、或者主体不再能读，看门狗直接取消整个写出——哪怕这时正卡在一次
+    `send()` 上（客户端读得慢，传输层背压）。检查要是排在写出后面，慢客户端就能
+    让撤了权、过了寿命的连接继续收到之后才有的台词。
+    """
+
+    def __init__(self, request: Request, session: FeedSession, settings: FeedSettings):
+        super().__init__(
+            iter(()),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+        self._request = request
+        self._session = session
+        self._settings = settings
+
+    async def stream_response(self, send) -> None:
+        # 寿命从真正开始写的那一刻算，所以看门狗在这里才装上。
+        watch = _Watch(self._request, self._settings)
+        self.body_iterator = _stream(watch, self._session, self._settings)
+        finished = False
+        async with anyio.create_task_group() as group:
+
+            async def guard() -> None:
+                await watch.watch()
+                group.cancel_scope.cancel()
+
+            group.start_soon(guard)
+            await super().stream_response(send)
+            finished = True
+            group.cancel_scope.cancel()
+        if not finished:
+            # 被看门狗掐断的：试着把响应正常收尾；还写不出去就算了，连接交给服务器关。
+            with anyio.move_on_after(1):
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 @router.get("/worlds")
@@ -151,8 +212,4 @@ def accord_events(
         except CursorError as e:
             raise _error(400, "invalid_cursor", e)
     session = feed.subscribe(world_id, cursor, clock_interval=settings.clock_seconds)
-    return StreamingResponse(
-        _stream(request, session, settings),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    return _FeedResponse(request, session, settings)

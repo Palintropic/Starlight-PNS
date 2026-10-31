@@ -124,8 +124,11 @@ class _LineChain:
             for seq in range(self._scanned, len(events)):
                 event = events[seq]
                 if event.type in LINE_KINDS:
+                    # 下标也算进去：同样的台词挪了位置，就不是同一段历史。
                     previous = self._rolling[-1] if self._rolling else b""
-                    self._rolling.append(_hash(previous, _canonical(event)))
+                    self._rolling.append(
+                        _hash(previous, str(seq).encode("ascii"), _canonical(event))
+                    )
                     self._seqs.append(seq)
             self._scanned = max(self._scanned, len(events))
 
@@ -416,15 +419,18 @@ class FeedSession:
         return chain.cursor_at(frame.events, cursor.seq) == cursor
 
     def _greet(self, world) -> List[Message]:
-        self._greeted = True
+        # 首批消息真造出来了才算打过招呼：第一次读超时、被 fence，下一轮还是从
+        # hello 开始，而不是被当成已经在跟的流。
         if world is None:
             # 客户端交来的游标原样留着：世界开起来以后照它判断能不能续上。
             hello = self._feed._stopped_hello(self._world_id)
+            self._greeted = True
             self._state = STATE_STOPPED
             self._clock = hello["clock"]
             self._clock_sent_at = self._now()
             return [Message("hello", hello, self._id())]
         frame = self._feed._read(world, with_events=True)
+        self._greeted = True
         head = self._feed._chain(world).cursor_at(frame.events, frame.length - 1)
         messages = []
         resume = self._cursor
