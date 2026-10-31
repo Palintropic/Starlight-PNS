@@ -14,6 +14,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -89,6 +90,75 @@ def parse_sse(text):
         field, _, value = line.partition(": ")
         block[field] = value
     return messages
+
+
+def drive_stream(app, *, client=None, on_hello=None, on_final=None, query=b"", timeout=5.0):
+    """不经 TestClient、直接按 ASGI 跑一条流，返回 (写出的正文, 耗时)。
+
+    `on_hello` 在写出 hello 的那次 send 里跑，可以卡在里面不返回（客户端读得慢、
+    传输层背压）；`on_final` 在收尾那次 send 里跑。不管流怎么结束，收尾都得恰好一次。
+    """
+    headers = [(b"host", b"testserver")]
+    if client is not None:
+        cookie = "; ".join(f"{k}={v}" for k, v in client.cookies.items())
+        headers.append((b"cookie", cookie.encode()))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/accord/worlds/nightcord/events",
+        "raw_path": b"/api/accord/worlds/nightcord/events",
+        "query_string": query,
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    sent = []
+
+    async def send(message):
+        if message["type"] != "http.response.body":
+            return
+        sent.append(message)
+        if not message.get("more_body", False):
+            if on_final is not None:
+                await on_final()
+        elif on_hello is not None and b"event: hello\n" in message.get("body", b""):
+            await on_hello()
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def run():
+        began = asyncio.get_running_loop().time()
+        await asyncio.wait_for(app(scope, receive, send), timeout=timeout)
+        return asyncio.get_running_loop().time() - began
+
+    elapsed = asyncio.run(run())
+    finals = [m for m in sent if not m.get("more_body", False)]
+    assert len(finals) == 1, f"收尾应当恰好一次，实际 {len(finals)} 次"
+    assert sent[-1] is finals[0], "收尾之后不该再写"
+    return "".join(m.get("body", b"").decode() for m in sent), elapsed
+
+
+class _LockedAccounts:
+    """另开一个连接把账户库独占锁住，模拟账户库被别的写入占着。"""
+
+    def __init__(self, path):
+        self._db = sqlite3.connect(path, isolation_level=None)
+
+    def lock(self):
+        self._db.execute("BEGIN EXCLUSIVE")
+
+    def release(self):
+        if self._db.in_transaction:
+            self._db.execute("COMMIT")
+
+    def close(self):
+        self.release()
+        self._db.close()
 
 
 def lines_of(messages):
@@ -658,6 +728,59 @@ class SessionTests(FeedTestCase):
         self.assertEqual([m.event for m in fresh], ["world", "hello"])
         self.assertEqual(fresh[0].data["state"], "restored")
 
+    def test_a_read_that_outlives_the_stream_is_not_written(self):
+        world = self.open_world()
+        cursor = self.feed().hello("nightcord")["cursor"]
+        self.app.state.accord_feed_settings = replace(FAST, recheck_seconds=60.0, lifetime_seconds=0.04)
+        entered, release = threading.Event(), threading.Event()
+
+        def writer():
+            # 占着提交闸门，让流的第一次读一直等；放手前说一句。
+            with world.state.atomic_commit():
+                entered.set()
+                release.wait(2)
+                self.say("读完时寿命已经到了")
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        self.assertTrue(entered.wait(1))
+
+        async def no_op():
+            pass
+
+        threading.Timer(0.12, release.set).start()
+        try:
+            # 写出不等待：读完之后要是不再查一次，这一批在取消生效前就写出去了。
+            body, _ = drive_stream(self.app, query=f"after={cursor}".encode(), on_final=no_op)
+        finally:
+            release.set()
+            thread.join(2)
+        self.assertNotIn("读完时寿命已经到了", body)
+
+    def test_a_stream_cut_off_mid_read_is_ended_exactly_once(self):
+        world = self.open_world()
+        self.app.state.accord_feed_settings = replace(FAST, recheck_seconds=60.0, lifetime_seconds=0.04)
+        entered, release = threading.Event(), threading.Event()
+
+        def writer():
+            with world.state.atomic_commit():
+                entered.set()
+                release.wait(2)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        self.assertTrue(entered.wait(1))
+
+        async def yield_once():
+            await asyncio.sleep(0)
+
+        threading.Timer(0.12, release.set).start()
+        try:
+            drive_stream(self.app, on_final=yield_once)
+        finally:
+            release.set()
+            thread.join(2)
+
     def test_every_kind_of_message_stays_inside_the_overview(self):
         self.open_world()
         self.client.post("/api/persistent-worlds/nightcord/checkpoint")
@@ -808,45 +931,6 @@ class AccessTests(FeedTestCase):
         self.assertEqual(self.hello(client=observer).status_code, 401)
 
 
-    def _drive(self, client, on_hello, *, timeout=5.0):
-        """不经 TestClient、直接按 ASGI 跑一条流；`on_hello` 在写出 hello 那次 send 里跑，
-        可以在里面卡住不返回（模拟客户端读得慢、传输层背压）。返回 (写出的正文, 耗时)。"""
-        cookie = "; ".join(f"{k}={v}" for k, v in client.cookies.items())
-        scope = {
-            "type": "http",
-            "asgi": {"version": "3.0", "spec_version": "2.4"},
-            "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/api/accord/worlds/nightcord/events",
-            "raw_path": b"/api/accord/worlds/nightcord/events",
-            "query_string": b"",
-            "root_path": "",
-            "headers": [(b"host", b"testserver"), (b"cookie", cookie.encode())],
-            "client": ("127.0.0.1", 12345),
-            "server": ("testserver", 80),
-        }
-        sent = []
-
-        async def send(message):
-            if message["type"] != "http.response.body":
-                return
-            sent.append(message)
-            if b"event: hello\n" in message.get("body", b""):
-                await on_hello()
-
-        async def receive():
-            await asyncio.Event().wait()
-
-        async def run():
-            began = asyncio.get_running_loop().time()
-            await asyncio.wait_for(self.app(scope, receive, send), timeout=timeout)
-            return asyncio.get_running_loop().time() - began
-
-        elapsed = asyncio.run(run())
-        self.assertFalse(sent[-1].get("more_body", False), "被掐断的流也要正常收尾")
-        return "".join(m.get("body", b"").decode() for m in sent), elapsed
-
     def _observer_on_open_world(self, **settings):
         created = self.client.post(
             "/api/persistent-worlds",
@@ -865,7 +949,7 @@ class AccessTests(FeedTestCase):
             self.say("停用以后才说的")
             await asyncio.sleep(3.0)
 
-        body, elapsed = self._drive(observer, stall)
+        body, elapsed = drive_stream(self.app, client=observer, on_hello=stall)
         self.assertNotIn("停用以后才说的", body)
         self.assertLess(elapsed, 2.0, "复核不该等卡住的那次写出返回")
         self.assertEqual(self.hello(client=observer).status_code, 401)
@@ -877,9 +961,63 @@ class AccessTests(FeedTestCase):
             await asyncio.sleep(0.2)
             self.say("寿命到了以后才说的")
 
-        body, elapsed = self._drive(observer, stall)
+        body, elapsed = drive_stream(self.app, client=observer, on_hello=stall)
         self.assertNotIn("寿命到了以后才说的", body)
         self.assertLess(elapsed, 2.0)
+
+    def test_a_locked_account_store_does_not_stretch_the_revocation_window(self):
+        observer = self._observer_on_open_world(
+            recheck_seconds=0.2, recheck_timeout_seconds=5.0, lifetime_seconds=30.0
+        )
+        locked = _LockedAccounts(self.accounts.path)
+        self.addCleanup(locked.close)
+
+        async def revoke_then_lock():
+            self.accounts.set_authority(self.observer.principal_id, enabled=False)
+            locked.lock()
+            loop = asyncio.get_running_loop()
+            # 到点该重认了，重认卡在账户库上：这段时间里说的话不能写出去。
+            loop.call_later(0.35, self.say, "复核卡住时说的")
+            loop.call_later(0.7, locked.release)
+
+        body, elapsed = drive_stream(self.app, client=observer, on_hello=revoke_then_lock)
+        self.assertNotIn("复核卡住时说的", body)
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(self.hello(client=observer).status_code, 401)
+
+    def test_a_recheck_that_never_answers_ends_the_stream(self):
+        observer = self._observer_on_open_world(
+            recheck_seconds=0.05, recheck_timeout_seconds=0.2, lifetime_seconds=30.0
+        )
+        locked = _LockedAccounts(self.accounts.path)
+        self.addCleanup(locked.close)
+
+        async def lock():
+            locked.lock()
+
+        try:
+            body, elapsed = drive_stream(self.app, client=observer, on_hello=lock)
+        finally:
+            locked.release()
+        self.assertLess(elapsed, 1.0, "认不出来就按认不出来处理，不等账户库")
+        self.assertIn("event: hello", body)
+
+    def test_a_locked_account_store_does_not_hold_off_the_lifetime(self):
+        observer = self._observer_on_open_world(
+            recheck_seconds=0.02, recheck_timeout_seconds=5.0, lifetime_seconds=0.1
+        )
+        locked = _LockedAccounts(self.accounts.path)
+        self.addCleanup(locked.close)
+
+        async def lock_and_stall():
+            locked.lock()
+            await asyncio.sleep(3.0)
+
+        try:
+            body, elapsed = drive_stream(self.app, client=observer, on_hello=lock_and_stall)
+        finally:
+            locked.release()
+        self.assertLess(elapsed, 0.5, "寿命不跟着身份复核一起卡住")
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,8 @@
 # 一条流活着的时候，主体每隔几秒重新认一次：账户被停用、权威变了、会话被撤销，
 # 流当场结束，而不是靠连上那一刻的身份一直推下去。每条流还有寿命上限，到点由
 # 服务器关掉；EventSource 会带着 Last-Event-ID 自己重连，续传一条不漏。这两样
-# 检查由一只看门狗做，不排在写出后面：客户端读得慢、send() 卡住时照样按时掐断。
+# 检查由看门狗做，不排在写出后面，也互不牵连：客户端读得慢、send() 卡住，或者
+# 账户库被锁住、重认迟迟回不来，都照样按时掐断。
 import os
 from dataclasses import dataclass
 from typing import Mapping, Optional
@@ -34,6 +35,9 @@ ENV_ACCORD_FEED = "PNS_ACCORD_FEED"
 # 游标是 `<下标>.<16 位十六进制>`，再长的不可能是我们发的。
 MAX_CURSOR_CHARS = 64
 
+# 正在重认身份时，写的那一边隔多久看一眼认完没有。
+_READY_STEP = 0.01
+
 
 def feed_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
     """开关看不懂就起不来，跟其它布尔配置一样（见 security._env_flag）。"""
@@ -48,6 +52,7 @@ class FeedSettings:
     keepalive_seconds: float = 20.0
     clock_seconds: float = 60.0
     recheck_seconds: float = 5.0
+    recheck_timeout_seconds: float = 2.0
     lifetime_seconds: float = 1800.0
     retry_ms: int = 3000
 
@@ -79,36 +84,60 @@ def _still_allowed(auth, scope) -> bool:
 
 
 class _Watch:
-    """一条流还该不该活着。寿命按此刻的时间算；身份由 `watch()` 每隔几秒重认一次。"""
+    """一条流还能不能写。
+
+    寿命按此刻的时间算，到点就停。身份每 `recheck_seconds` 重认一次：上一次认过
+    已经超过这个间隔、新的一次还没认完，就先不写；一次重认超过
+    `recheck_timeout_seconds` 还没回来，按认不出来处理。所以撤权之后流最多再写
+    `recheck_seconds` 那么久，账户库被锁住也一样。
+    """
 
     def __init__(self, request: Request, settings: FeedSettings) -> None:
         self._auth = getattr(request.app.state, "admin_auth", None)
         self._scope = request.scope
         self._recheck = settings.recheck_seconds
-        self._deadline = anyio.current_time() + settings.lifetime_seconds
+        self._recheck_timeout = settings.recheck_timeout_seconds
+        now = anyio.current_time()
+        self._deadline = now + settings.lifetime_seconds
+        # 守卫在连上的那一刻认过一次。
+        self._verified_until = now + settings.recheck_seconds
         self._denied = False
 
-    def open(self) -> bool:
+    def alive(self) -> bool:
         return not self._denied and anyio.current_time() < self._deadline
 
-    async def watch(self) -> None:
-        """流该结束时返回。"""
+    async def ready(self) -> bool:
+        """等到可以写为止；流该结束了就是 False。"""
+        while self.alive():
+            if anyio.current_time() < self._verified_until:
+                return True
+            await anyio.sleep(_READY_STEP)
+        return False
+
+    async def expire(self) -> None:
+        await anyio.sleep_until(self._deadline)
+
+    async def recheck(self) -> None:
+        """主体不再能读、或者认不出来时返回。"""
         while True:
-            remaining = self._deadline - anyio.current_time()
-            if remaining <= 0:
-                return
-            await anyio.sleep(min(self._recheck, remaining))
-            if not self.open():
-                return
-            if not await anyio.to_thread.run_sync(_still_allowed, self._auth, self._scope):
+            await anyio.sleep_until(self._verified_until)
+            started = anyio.current_time()
+            allowed = False
+            with anyio.move_on_after(self._recheck_timeout):
+                # 超时就不等那次查询了：线程自己跑完（账户库有它自己的超时），结果丢掉。
+                allowed = await anyio.to_thread.run_sync(
+                    _still_allowed, self._auth, self._scope, abandon_on_cancel=True
+                )
+            if not allowed:
                 self._denied = True
                 return
+            self._verified_until = started + self._recheck
 
 
 async def _stream(watch: _Watch, session: FeedSession, settings: FeedSettings):
     last_write = anyio.current_time()
     yield f"retry: {int(settings.retry_ms)}\n\n"
-    while watch.open():
+    while await watch.ready():
         try:
             messages = await anyio.to_thread.run_sync(session.poll)
         except Exception as e:
@@ -116,8 +145,9 @@ async def _stream(watch: _Watch, session: FeedSession, settings: FeedSettings):
             # 会带着 Last-Event-ID 重连，位置不会丢。
             print(f"[accord] 事件流中断: {type(e).__name__}: {e}", flush=True)
             return
-        # 读的这一阵里可能已经到了寿命：那这一批就不写了。
-        if not watch.open():
+        # 读的这一阵里可能到了寿命、被撤了权，或者该重认身份了。看门狗的取消要等
+        # 这次读完、到下一个等待点才生效，写出要是不等待，这一批就漏出去了。
+        if not await watch.ready():
             return
         now = anyio.current_time()
         if messages:
@@ -132,7 +162,7 @@ async def _stream(watch: _Watch, session: FeedSession, settings: FeedSettings):
 class _FeedResponse(StreamingResponse):
     """SSE 响应，外面套着看门狗。
 
-    寿命到了、或者主体不再能读，看门狗直接取消整个写出——哪怕这时正卡在一次
+    寿命到了、或者主体不再能读，看门狗直接取消整个写出，哪怕这时正卡在一次
     `send()` 上（客户端读得慢，传输层背压）。检查要是排在写出后面，慢客户端就能
     让撤了权、过了寿命的连接继续收到之后才有的台词。
     """
@@ -150,22 +180,34 @@ class _FeedResponse(StreamingResponse):
     async def stream_response(self, send) -> None:
         # 寿命从真正开始写的那一刻算，所以看门狗在这里才装上。
         watch = _Watch(self._request, self._settings)
-        self.body_iterator = _stream(watch, self._session, self._settings)
-        finished = False
+        body = _stream(watch, self._session, self._settings)
+        await send(
+            {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
+        )
+        broken: Optional[OSError] = None
         async with anyio.create_task_group() as group:
 
-            async def guard() -> None:
-                await watch.watch()
+            async def stop_after(waiter) -> None:
+                await waiter()
                 group.cancel_scope.cancel()
 
-            group.start_soon(guard)
-            await super().stream_response(send)
-            finished = True
+            group.start_soon(stop_after, watch.expire)
+            group.start_soon(stop_after, watch.recheck)
+            try:
+                async for chunk in body:
+                    await send(
+                        {"type": "http.response.body", "body": chunk.encode(self.charset), "more_body": True}
+                    )
+            except OSError as e:
+                broken = e
             group.cancel_scope.cancel()
-        if not finished:
-            # 被看门狗掐断的：试着把响应正常收尾；还写不出去就算了，连接交给服务器关。
-            with anyio.move_on_after(1):
-                await send({"type": "http.response.body", "body": b"", "more_body": False})
+        await body.aclose()
+        if broken is not None:
+            # 客户端已经走了。原样抛给 Starlette，它认得这一种，别让任务组包成异常组。
+            raise broken
+        # 收尾只在这一处，不管是写完了还是被看门狗掐断的。还写不出去就算了，连接交给服务器关。
+        with anyio.move_on_after(1):
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 @router.get("/worlds")
