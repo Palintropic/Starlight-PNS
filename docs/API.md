@@ -485,7 +485,8 @@ SSE 事件流。PNS 只供数据，怎么显示、谁来说由桌面那边决定
 - **权限**：全是 `GET`，守卫照常给 `read`，`observer` 账户就能用；没登录 401；不进公开清单。
   不开 WebSocket，也不开 MCP（两者都要 `operate`）。桌面程序用**服务账户 token**
   （`Authorization: Bearer pns_svc_…`，见 6.2），不要放 `PNS_ADMIN_TOKEN`，也不必再拿观察者
-  密码换会话 Cookie。流开着时服务账户被停用或换了 token，流在下一次复核时结束。
+  密码换会话 Cookie。服务 token 只能读这一组路由。流开着时服务账户被停用或换了 token，流在
+  下一次复核时结束。
 - **只透出 overview 已经透出的东西**：位置、活动、在线频道、台词正文、时钟。不透出 prompt、记忆、
   观察、provenance、存档路径、模型信息。读取不改世界（revision、dirty 不变）。
 
@@ -617,8 +618,12 @@ CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），
 
 **`Authorization: Bearer pns_svc_…`（服务账户 token）** —— 给桌面端这类程序用。服务账户是
 账户库里 `kind` = `service` 的一行，角色**固定**是 `observer`（只有 `read`），`via` 是
-`service-token`。它没有密码：登不了网页、`POST /api/auth/password` 返回 409 `not_an_account`，
-token 也不能当 Cookie 用。
+`service-token`。它没有密码：登不了网页，token 也不能当 Cookie 用。
+
+- **只能碰 `/api/accord/**` 和 `GET /api/auth/session`**（加上公开面）。这是在 observer 的
+  `read` 之上再收窄一层：observer 能 GET 的审核记录、配置、用量、overview，服务 token 一律 403
+  `forbidden`；`POST /api/auth/password` 也是 403。清单是显式的，以后新加的只读路由默认对它关着。
+  带 `..` 段或空段的路径不认。
 
 - token 由管理员在用户管理里新建账户或"换 token"时生成，**只在那一次响应里出现**（响应带
   `Cache-Control: no-store`），之后服务端也给不出第二次——库里只存它的 SHA-256 摘要。

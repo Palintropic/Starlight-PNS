@@ -396,7 +396,7 @@ export default function Accounts() {
         <h3>服务账户</h3>
         <p className="accounts-hint">
           给桌面端这类程序用的只读账户，凭 <code>Authorization: Bearer</code> 访问，
-          不能登录网页、不能改任何东西。token 只在创建或更换时显示一次。
+          只能读 Accord feed，不能登录网页、不能改任何东西。token 只在创建或更换时显示一次。
         </p>
 
         {issued ? (

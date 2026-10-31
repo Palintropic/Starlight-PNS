@@ -39,6 +39,7 @@ for _path in (str(REPO_ROOT), str(REPO_ROOT / "scripts"), str(REPO_ROOT / "tests
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from pns.interfaces.accord import ENV_ACCORD_FEED  # noqa: E402
 from pns.interfaces.app import create_app  # noqa: E402
 from pns.interfaces.authz import (  # noqa: E402
     BREAK_GLASS_PRINCIPAL_ID,
@@ -54,6 +55,7 @@ from pns.interfaces.security import (  # noqa: E402
     ENV_TRUSTED_ORIGINS,
     DeploymentConfigError,
     DeploymentSettings,
+    is_public,
 )
 from pns.runtime.provider_settings import (  # noqa: E402
     ModelSettings,
@@ -781,6 +783,15 @@ class AuditTests(ApiTestCase):
 
 # ── 6b. 服务账户 token ──────────────────────────────────────────────────
 class ServiceTokenTests(ApiTestCase):
+    PROBE = "/api/accord/worlds"
+
+    def setUp(self):
+        # 服务 token 的白名单只有 Accord，所以这组用例把 Accord 开着。
+        flag = patch.dict(os.environ, {ENV_ACCORD_FEED: "1"})
+        flag.start()
+        self.addCleanup(flag.stop)
+        super().setUp()
+
     def create_service(self, client=None, username="accord-desktop"):
         client = client if client is not None else self.as_admin()
         response = client.post("/api/accounts/services", json={"username": username})
@@ -824,7 +835,7 @@ class ServiceTokenTests(ApiTestCase):
     def test_the_token_reads_but_cannot_mutate_through_any_declared_route(self):
         token = self.create_service().json()["token"]
         client = TestClient(self.app, headers=self.bearer_of(token))
-        self.assertEqual(client.get("/api/persistent-worlds").status_code, 200)
+        self.assertEqual(client.get(self.PROBE).status_code, 200)
         self.assertEqual(client.get("/api/accounts").status_code, 403)
         checked = 0
         for method, path in declared_operations(self.app):
@@ -839,6 +850,31 @@ class ServiceTokenTests(ApiTestCase):
             with client.websocket_connect("/ws/run", headers=self.bearer_of(token)):
                 pass  # pragma: no cover - 握手不该成功
 
+    def test_only_the_accord_feed_is_readable_not_everything_an_observer_sees(self):
+        """白名单：observer 能 GET 的东西，服务 token 只能看 Accord 那一份。"""
+        token = self.create_service().json()["token"]
+        client = TestClient(self.app, headers=self.bearer_of(token))
+        observer = self.as_observer()
+        checked = 0
+        for method, path in declared_operations(self.app):
+            if method != "GET" or path.startswith("/api/accord/") or is_public(path, method):
+                continue
+            if observer.get(path).status_code != 200:
+                continue  # 只比 observer 真能读到的那些
+            checked += 1
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 403, f"GET {path} 放行了服务 token")
+                self.assertEqual(response.json()["detail"]["category"], "forbidden")
+        self.assertGreater(checked, 5, "observer 可读的路由看起来没被真的遍历到")
+        for sneaky in (
+            "/api/accord/../config",
+            "/api/accord//worlds",
+            "/api/accordx/worlds",
+        ):
+            with self.subTest(path=sneaky):
+                self.assertNotEqual(client.get(sneaky).status_code, 200)
+
     def test_it_has_no_password_and_is_no_cookie(self):
         created = self.create_service().json()
         token = created["token"]
@@ -847,13 +883,14 @@ class ServiceTokenTests(ApiTestCase):
             headers=self.bearer_of(token),
             json={"current_password": token, "new_password": OTHER_PASSWORD},
         )
-        self.assertEqual(changed.status_code, 409)
+        # 自服务清单不在服务 token 的白名单里，所以它在守卫那一层就停了。
+        self.assertEqual(changed.status_code, 403)
         login = TestClient(self.app).post(
             "/api/auth/login", json={"username": "accord-desktop", "password": token}
         )
         self.assertEqual(login.status_code, 401)
         cookie_only = TestClient(self.app, cookies={"pns_session": token})
-        self.assertEqual(cookie_only.get("/api/persistent-worlds").status_code, 401)
+        self.assertEqual(cookie_only.get(self.PROBE).status_code, 401)
         reset = self.as_admin().post(
             f"/api/accounts/{created['principal_id']}/password",
             json={"password": OTHER_PASSWORD},
@@ -863,15 +900,15 @@ class ServiceTokenTests(ApiTestCase):
     def test_disabling_takes_effect_on_the_next_request(self):
         created = self.create_service().json()
         headers = self.bearer_of(created["token"])
-        self.assertEqual(self.client.get("/api/persistent-worlds", headers=headers).status_code, 200)
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 200)
         admin = self.as_admin()
         off = admin.post(f"/api/accounts/{created['principal_id']}/enabled", json={"enabled": False})
         self.assertEqual(off.status_code, 200, off.text)
         self.assertFalse(off.json()["enabled"])
         self.assertNotIn("revoked_sessions", off.json())
-        self.assertEqual(self.client.get("/api/persistent-worlds", headers=headers).status_code, 401)
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 401)
         admin.post(f"/api/accounts/{created['principal_id']}/enabled", json={"enabled": True})
-        self.assertEqual(self.client.get("/api/persistent-worlds", headers=headers).status_code, 200)
+        self.assertEqual(self.client.get(self.PROBE, headers=headers).status_code, 200)
 
     def test_rotating_kills_the_old_token_and_shows_the_new_one_once(self):
         created = self.create_service().json()
@@ -881,11 +918,11 @@ class ServiceTokenTests(ApiTestCase):
         fresh = rotated.json()["token"]
         self.assertNotEqual(fresh, created["token"])
         self.assertEqual(
-            self.client.get("/api/persistent-worlds", headers=self.bearer_of(created["token"])).status_code,
+            self.client.get(self.PROBE, headers=self.bearer_of(created["token"])).status_code,
             401,
         )
         self.assertEqual(
-            self.client.get("/api/persistent-worlds", headers=self.bearer_of(fresh)).status_code,
+            self.client.get(self.PROBE, headers=self.bearer_of(fresh)).status_code,
             200,
         )
         human = self.as_admin().post(f"/api/accounts/{self.observer.principal_id}/token")
@@ -924,7 +961,7 @@ class ServiceTokenTests(ApiTestCase):
         self.create_service()
         bodies = set()
         for value in ("pns_svc_" + "A" * 43, "not-a-token-at-all", ADMIN_TOKEN + "x"):
-            response = self.client.get("/api/persistent-worlds", headers=self.bearer_of(value))
+            response = self.client.get(self.PROBE, headers=self.bearer_of(value))
             self.assertEqual(response.status_code, 401)
             bodies.add(response.text)
         self.assertEqual(len(bodies), 1)

@@ -53,8 +53,10 @@ from .authz import (
     RequestPrincipal,
     break_glass_principal,
     open_development_principal,
+    VIA_SERVICE_TOKEN,
     required_scope,
     service_principal,
+    service_token_allows,
     session_principal,
 )
 
@@ -838,7 +840,8 @@ class AdminAuthMiddleware:
       3. 认证：认不出主体就 401；
       4. 授权：按方法/路径算出这次至少要什么 scope，不够就 403。
          第 4 步的判据来自方法而不是路由表，所以明天新加的那条 POST 也默认
-         要 `operate`——observer 进不去，不靠有人记得挂依赖。
+         要 `operate`——observer 进不去，不靠有人记得挂依赖。服务 token 在这
+         之上还要过一份路径白名单（`authz.service_token_allows`）。
     """
 
     def __init__(self, app, auth: AdminAuth) -> None:
@@ -890,6 +893,9 @@ class AdminAuthMiddleware:
 
         needed = required_scope(path, method, kind)
         if needed is not None and not principal.has(needed):
+            await self._deny(scope, send, 403, _FORBIDDEN_BODY)
+            return
+        if principal.via == VIA_SERVICE_TOKEN and not service_token_allows(path):
             await self._deny(scope, send, 403, _FORBIDDEN_BODY)
             return
 

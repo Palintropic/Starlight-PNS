@@ -434,7 +434,8 @@ docker compose run --rm --entrypoint "" app python scripts/accounts.py audit --l
 用户管理 →「服务账户」里新建一个，把只显示一次的 `pns_svc_…` token 填进桌面端，它用
 `Authorization: Bearer` 访问。
 
-- 只能是观察者：只读，登不了网页，没有密码。
+- 只能是观察者，而且只能读 Accord feed（`/api/accord/**`）：审核、配置、用量这些观察者能看的
+  东西它也看不到。登不了网页，没有密码。
 - 停用或"换 token"在下一次请求生效，开着的流也会断；PNS 重启不用重新配。
 - 审计里它是自己的名字，跟人分得开。
 - token 丢了或者怀疑泄露了就换一把，旧的当场作废。服务端只存摘要，找不回原来那串。
