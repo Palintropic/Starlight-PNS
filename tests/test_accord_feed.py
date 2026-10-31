@@ -92,17 +92,12 @@ def parse_sse(text):
     return messages
 
 
-def drive_stream(app, *, client=None, on_hello=None, on_final=None, query=b"", timeout=5.0):
-    """不经 TestClient、直接按 ASGI 跑一条流，返回 (写出的正文, 耗时)。
-
-    `on_hello` 在写出 hello 的那次 send 里跑，可以卡在里面不返回（客户端读得慢、
-    传输层背压）；`on_final` 在收尾那次 send 里跑。不管流怎么结束，收尾都得恰好一次。
-    """
+def stream_scope(client=None, query=b""):
     headers = [(b"host", b"testserver")]
     if client is not None:
         cookie = "; ".join(f"{k}={v}" for k, v in client.cookies.items())
         headers.append((b"cookie", cookie.encode()))
-    scope = {
+    return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.4"},
         "http_version": "1.1",
@@ -116,10 +111,29 @@ def drive_stream(app, *, client=None, on_hello=None, on_final=None, query=b"", t
         "client": ("127.0.0.1", 12345),
         "server": ("testserver", 80),
     }
+
+
+async def never_disconnect():
+    await asyncio.Event().wait()
+
+
+def drive_stream(
+    app, *, client=None, on_start=None, on_hello=None, on_final=None, query=b"", timeout=5.0,
+    expect_final=True,
+):
+    """不经 TestClient、直接按 ASGI 跑一条流，返回 (写出的正文, 耗时)。
+
+    `on_start` / `on_hello` 在发响应头、写出 hello 的那次 send 里跑，可以卡在里面
+    不返回（客户端读得慢、传输层背压）；`on_final` 在收尾那次 send 里跑。不管流
+    怎么结束，收尾都得恰好一次——响应头都没发完就被掐断的除外（`expect_final=False`）。
+    """
+    scope = stream_scope(client, query)
     sent = []
 
     async def send(message):
         if message["type"] != "http.response.body":
+            if on_start is not None:
+                await on_start()
             return
         sent.append(message)
         if not message.get("more_body", False):
@@ -128,18 +142,18 @@ def drive_stream(app, *, client=None, on_hello=None, on_final=None, query=b"", t
         elif on_hello is not None and b"event: hello\n" in message.get("body", b""):
             await on_hello()
 
-    async def receive():
-        await asyncio.Event().wait()
-
     async def run():
         began = asyncio.get_running_loop().time()
-        await asyncio.wait_for(app(scope, receive, send), timeout=timeout)
+        await asyncio.wait_for(app(scope, never_disconnect, send), timeout=timeout)
         return asyncio.get_running_loop().time() - began
 
     elapsed = asyncio.run(run())
     finals = [m for m in sent if not m.get("more_body", False)]
-    assert len(finals) == 1, f"收尾应当恰好一次，实际 {len(finals)} 次"
-    assert sent[-1] is finals[0], "收尾之后不该再写"
+    if expect_final:
+        assert len(finals) == 1, f"收尾应当恰好一次，实际 {len(finals)} 次"
+        assert sent[-1] is finals[0], "收尾之后不该再写"
+    else:
+        assert not sent, "响应头没发完，不该有正文"
     return "".join(m.get("body", b"").decode() for m in sent), elapsed
 
 
@@ -964,6 +978,80 @@ class AccessTests(FeedTestCase):
         body, elapsed = drive_stream(self.app, client=observer, on_hello=stall)
         self.assertNotIn("寿命到了以后才说的", body)
         self.assertLess(elapsed, 2.0)
+
+    def test_a_stalled_response_start_does_not_outlive_the_lifetime(self):
+        observer = self._observer_on_open_world(recheck_seconds=60.0, lifetime_seconds=0.05)
+
+        async def stall():
+            await asyncio.sleep(1.0)
+
+        _, elapsed = drive_stream(
+            self.app, client=observer, on_start=stall, expect_final=False
+        )
+        self.assertLess(elapsed, 0.5, "响应头那次 send 卡住时看门狗也要在")
+
+    def test_an_account_revoked_while_the_stream_queued_gets_nothing(self):
+        from pns.integrations.accord.feed import AccordFeed
+
+        observer = self._observer_on_open_world(recheck_seconds=30.0, lifetime_seconds=30.0)
+        subscribe = AccordFeed.subscribe
+
+        def revoke_then_subscribe(feed, *args, **kwargs):
+            # 守卫已经放行、流还没开始：排队期间账户被停用。
+            self.accounts.set_authority(self.observer.principal_id, enabled=False)
+            return subscribe(feed, *args, **kwargs)
+
+        with patch.object(AccordFeed, "subscribe", revoke_then_subscribe):
+            body, elapsed = drive_stream(self.app, client=observer)
+        self.assertNotIn("event: hello", body)
+        self.assertLess(elapsed, 2.0, "第一次写之前就该认出来，不等下一个复核周期")
+
+    def test_rechecks_stuck_on_the_account_store_are_capped(self):
+        from pns.interfaces.accord import RecheckSlots
+
+        observer = self._observer_on_open_world(
+            recheck_seconds=0.05, recheck_timeout_seconds=0.1, lifetime_seconds=30.0
+        )
+        self.app.state.accord_rechecks = RecheckSlots(2)
+        locked = _LockedAccounts(self.accounts.path)
+        self.addCleanup(locked.close)
+        streams = 5
+
+        def in_recheck():
+            count = 0
+            for frame in sys._current_frames().values():
+                while frame is not None:
+                    if frame.f_code.co_name == "_still_allowed":
+                        count += 1
+                        break
+                    frame = frame.f_back
+            return count
+
+        async def run():
+            hellos = 0
+
+            async def send(message):
+                nonlocal hellos
+                if b"event: hello\n" in message.get("body", b""):
+                    hellos += 1
+                    if hellos == streams:
+                        locked.lock()
+
+            scope = stream_scope(observer)
+            await asyncio.wait_for(
+                asyncio.gather(*(self.app(scope, never_disconnect, send) for _ in range(streams))),
+                timeout=5,
+            )
+
+        try:
+            asyncio.run(run())
+            self.assertLessEqual(in_recheck(), 2, "卡在账户库里的复核线程不该比名额多")
+        finally:
+            locked.release()
+        deadline = time.monotonic() + 5
+        while in_recheck() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(in_recheck(), 0)
 
     def test_a_locked_account_store_does_not_stretch_the_revocation_window(self):
         observer = self._observer_on_open_world(

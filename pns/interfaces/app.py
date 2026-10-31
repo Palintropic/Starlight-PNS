@@ -360,6 +360,7 @@ def create_app(
     if accord_feed:
         app.state.accord_feed = accord.AccordFeed(plane)
         app.state.accord_feed_settings = accord.FeedSettings()
+        app.state.accord_rechecks = accord.RecheckSlots()
         app.include_router(accord.router)
 
     # 挂在所有 API/WS 路由之后，作为兜底：`dashboard/` 是唯一前端（`npm run

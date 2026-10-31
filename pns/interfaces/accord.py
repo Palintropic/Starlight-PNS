@@ -16,6 +16,7 @@
 # 检查由看门狗做，不排在写出后面，也互不牵连：客户端读得慢、send() 卡住，或者
 # 账户库被锁住、重认迟迟回不来，都照样按时掐断。
 import os
+import threading
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
@@ -35,8 +36,11 @@ ENV_ACCORD_FEED = "PNS_ACCORD_FEED"
 # 游标是 `<下标>.<16 位十六进制>`，再长的不可能是我们发的。
 MAX_CURSOR_CHARS = 64
 
-# 正在重认身份时，写的那一边隔多久看一眼认完没有。
+# 正在重认身份时，写的那一边隔多久看一眼认完没有；复核名额满了时隔多久再试。
 _READY_STEP = 0.01
+
+# 整个进程里同时在查账户库的流复核最多几次（见 RecheckSlots）。
+MAX_RECHECKS_IN_FLIGHT = 8
 
 
 def feed_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -71,6 +75,40 @@ def get_feed_settings(request: Request) -> FeedSettings:
     return getattr(request.app.state, "accord_feed_settings", None) or FeedSettings()
 
 
+class RecheckSlots:
+    """流复核的在途名额，整个进程共用。
+
+    复核超时以后流不再等它，但线程还在账户库那儿排着；名额要等那个线程真正
+    退出才还。所以账户库卡住的时候，卡在里面的复核线程最多这么多条，不会随着
+    一条条超时的流越积越多。名额是在线程里拿的：拿不到就立刻返回，由调用方
+    稍后再试，不会有一个名额拿到了、线程却没跑起来、永远还不回去。
+    """
+
+    BUSY = object()
+
+    def __init__(self, limit: int = MAX_RECHECKS_IN_FLIGHT) -> None:
+        self._lock = threading.Lock()
+        self._free = limit
+
+    def run(self, fn, *args):
+        with self._lock:
+            if self._free <= 0:
+                return self.BUSY
+            self._free -= 1
+        try:
+            return fn(*args)
+        finally:
+            with self._lock:
+                self._free += 1
+
+
+def get_recheck_slots(request: Request) -> RecheckSlots:
+    slots = getattr(request.app.state, "accord_rechecks", None)
+    if slots is None:  # pragma: no cover - 路由挂上时 create_app 总会装一个
+        slots = request.app.state.accord_rechecks = RecheckSlots()
+    return slots
+
+
 def _require_world(feed: AccordFeed, world_id: str) -> None:
     if not feed.exists(world_id):
         raise _error(404, "archive_not_found", f"世界 '{world_id}' 还没有存档")
@@ -90,17 +128,20 @@ class _Watch:
     已经超过这个间隔、新的一次还没认完，就先不写；一次重认超过
     `recheck_timeout_seconds` 还没回来，按认不出来处理。所以撤权之后流最多再写
     `recheck_seconds` 那么久，账户库被锁住也一样。
+
+    第一次写之前也要先认一次：守卫放行和流真正开始之间可能排了很久的队，那一刻
+    的放行不能拿来顶这一段。
     """
 
     def __init__(self, request: Request, settings: FeedSettings) -> None:
         self._auth = getattr(request.app.state, "admin_auth", None)
         self._scope = request.scope
+        self._slots = get_recheck_slots(request)
         self._recheck = settings.recheck_seconds
         self._recheck_timeout = settings.recheck_timeout_seconds
         now = anyio.current_time()
         self._deadline = now + settings.lifetime_seconds
-        # 守卫在连上的那一刻认过一次。
-        self._verified_until = now + settings.recheck_seconds
+        self._verified_until = now
         self._denied = False
 
     def alive(self) -> bool:
@@ -124,10 +165,16 @@ class _Watch:
             started = anyio.current_time()
             allowed = False
             with anyio.move_on_after(self._recheck_timeout):
-                # 超时就不等那次查询了：线程自己跑完（账户库有它自己的超时），结果丢掉。
-                allowed = await anyio.to_thread.run_sync(
-                    _still_allowed, self._auth, self._scope, abandon_on_cancel=True
-                )
+                while True:
+                    # 超时就不等那次查询了：线程自己跑完，结果丢掉，名额到那时才还。
+                    result = await anyio.to_thread.run_sync(
+                        self._slots.run, _still_allowed, self._auth, self._scope,
+                        abandon_on_cancel=True,
+                    )
+                    if result is not RecheckSlots.BUSY:
+                        allowed = result
+                        break
+                    await anyio.sleep(_READY_STEP)
             if not allowed:
                 self._denied = True
                 return
@@ -135,6 +182,8 @@ class _Watch:
 
 
 async def _stream(watch: _Watch, session: FeedSession, settings: FeedSettings):
+    if not await watch.ready():
+        return
     last_write = anyio.current_time()
     yield f"retry: {int(settings.retry_ms)}\n\n"
     while await watch.ready():
@@ -181,9 +230,7 @@ class _FeedResponse(StreamingResponse):
         # 寿命从真正开始写的那一刻算，所以看门狗在这里才装上。
         watch = _Watch(self._request, self._settings)
         body = _stream(watch, self._session, self._settings)
-        await send(
-            {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
-        )
+        started = False
         broken: Optional[OSError] = None
         async with anyio.create_task_group() as group:
 
@@ -194,6 +241,11 @@ class _FeedResponse(StreamingResponse):
             group.start_soon(stop_after, watch.expire)
             group.start_soon(stop_after, watch.recheck)
             try:
+                # 响应头也在看门狗底下发：这一次 send() 一样可能卡在背压上。
+                await send(
+                    {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
+                )
+                started = True
                 async for chunk in body:
                     await send(
                         {"type": "http.response.body", "body": chunk.encode(self.charset), "more_body": True}
@@ -205,6 +257,9 @@ class _FeedResponse(StreamingResponse):
         if broken is not None:
             # 客户端已经走了。原样抛给 Starlette，它认得这一种，别让任务组包成异常组。
             raise broken
+        if not started:
+            # 响应头都没发完就被掐断了：没有响应可收尾，连接交给服务器关。
+            return
         # 收尾只在这一处，不管是写完了还是被看门狗掐断的。还写不出去就算了，连接交给服务器关。
         with anyio.move_on_after(1):
             await send({"type": "http.response.body", "body": b"", "more_body": False})
