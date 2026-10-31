@@ -843,6 +843,7 @@ class AdminAuth:
         if done:
             return answer
         step = _GUARD_RETRY_STEP_SECONDS
+        tail_tried = False
         deadline = anyio.current_time() + self.lookup_timeout_seconds
         with anyio.move_on_after(self.lookup_timeout_seconds):
             while True:
@@ -856,7 +857,13 @@ class AdminAuth:
                 # 固定的短间隔自己就成了负担。
                 # 睡眠不越过截止时间：最后一次重试要落在时限之内，否则一个
                 # 名额刚好在最后那 200 毫秒里空出来的请求会白白变成 503。
+                # 进了最后那一小段只再补试一次，之后就等时限到点，不退化成零间隔
+                # 地反复往工作线程里投。
                 remaining = deadline - anyio.current_time() - _GUARD_RETRY_STEP_SECONDS
+                if remaining <= 0:
+                    if tail_tried:
+                        await anyio.sleep_forever()
+                    tail_tried = True
                 await anyio.sleep(max(0.0, min(step, remaining)))
                 step = min(step * 2, _GUARD_RETRY_MAX_STEP_SECONDS)
         return LOOKUP_UNAVAILABLE

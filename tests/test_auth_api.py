@@ -1197,6 +1197,33 @@ class GuardLookupTests(ApiTestCase):
         )
         self.assertEqual(response.status_code, 403)
 
+    def test_a_full_pool_is_not_retried_in_a_tight_loop(self):
+        """绘名 F5：名额一直满着时，时限最后那一小段不能变成零间隔重试。"""
+        from pns.interfaces.security import LookupSlots
+
+        class Counting(LookupSlots):
+            attempts = 0
+
+            def run(self, fn, *args):
+                Counting.attempts += 1
+                return super().run(fn, *args)
+
+        token = self.accounts.create_service("accord-busy").token
+        slots = Counting(1)
+        self.auth.lookup_slots = slots
+        self.auth.lookup_timeout_seconds = 2.0
+        release = threading.Event()
+        holder = threading.Thread(target=LookupSlots.run, args=(slots, lambda: release.wait(5)))
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        response = self.client.get(
+            "/api/persistent-worlds", headers={"Authorization": f"Bearer {token}"}
+        )
+        self.assertEqual(response.status_code, 503)
+        # 退避 10→200 毫秒、2 秒里大约 14 次，再加尾段一次补试。
+        self.assertLess(Counting.attempts, 25, f"重试了 {Counting.attempts} 次")
+
     def test_break_glass_does_not_queue_behind_stuck_lookups(self):
         """绘名 F2：默认名额被编造的服务 token 占满、那些请求已经 503、线程还卡在
         库里——这时应急钥匙、没凭据、格式不对的 bearer 都不查库，必须当场答。"""
