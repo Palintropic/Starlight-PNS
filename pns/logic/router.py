@@ -78,6 +78,12 @@ def extract_anthropic_text(response) -> str:
     return "\n".join(texts).strip()
 
 
+def _log_truncated(reason: object, limit_reason: str) -> None:
+    # 只跟固定的常量比较：provider 给的值本身绝不进日志。
+    if reason == limit_reason:
+        print("[Router] judge unusable hint: truncated at max_tokens")
+
+
 def _call(client, model: str, system: str, user_msg: str, *, settings=None) -> str:
     api_format = settings.api_format if settings is not None else API_FORMAT
     base_url = settings.base_url if settings is not None else BASE_URL
@@ -92,6 +98,7 @@ def _call(client, model: str, system: str, user_msg: str, *, settings=None) -> s
                 {"role": "user",   "content": user_msg},
             ],
         )
+        _log_truncated(getattr(resp.choices[0], "finish_reason", None), "length")
         return resp.choices[0].message.content.strip()
     else:
         request = dict(
@@ -109,6 +116,7 @@ def _call(client, model: str, system: str, user_msg: str, *, settings=None) -> s
         if judge_thinking == "off" or (judge_thinking == "auto" and "xiaomimimo.com" in base_url):
             request["thinking"] = {"type": "disabled"}
         resp = client.messages.create(**request)
+        _log_truncated(getattr(resp, "stop_reason", None), "max_tokens")
         return extract_anthropic_text(resp)
 
 
@@ -241,6 +249,35 @@ def _normalize_dimensions(raw_dimensions) -> tuple[dict, bool]:
     return normalized, complete
 
 
+def _log_unusable(category: str, *, chars: int | None = None, missing: tuple = ()) -> None:
+    """说清判分为什么不能用，但不带 provider 原文。
+
+    只输出固定的类别、长度和 DIMENSION_KEYS 里的维度名，原文可能含凭据或内部提示。
+    """
+    parts = [f"category={category}"]
+    if chars is not None:
+        parts.append(f"chars={chars}")
+    if missing:
+        parts.append("missing=" + ",".join(missing))
+    print("[Router] judge unusable " + " ".join(parts))
+
+
+def _unparsable_category(raw: str) -> str:
+    if not raw:
+        return "empty"
+    if not raw.startswith("{"):
+        return "no_json"
+    return "json_malformed" if raw.endswith("}") else "json_unclosed"
+
+
+def _missing_dimensions(raw_dimensions) -> tuple:
+    source = raw_dimensions if isinstance(raw_dimensions, dict) else {}
+    return tuple(
+        key for key in DIMENSION_KEYS
+        if not isinstance(source.get(key), dict) or "score" not in source[key]
+    )
+
+
 def _format_recent_history(history: list | None, limit: int = 8) -> str:
     if not history:
         return "（无）"
@@ -309,6 +346,7 @@ def judge(
         "请按七个维度判断是否OOC或违反任务，并只输出指定JSON。"
     )
 
+    raw = ""
     try:
         raw = _call(client, model, router_system, prompt, settings=settings)
 
@@ -319,8 +357,16 @@ def judge(
         raw = raw.strip()
 
         result = json.loads(raw)
+        if not isinstance(result, dict):
+            _log_unusable("not_object", chars=len(raw))
 
         dimensions, dimensions_complete = _normalize_dimensions(result.get("dimensions"))
+        if not dimensions_complete:
+            _log_unusable(
+                "dimensions_incomplete",
+                chars=len(raw),
+                missing=_missing_dimensions(result.get("dimensions")),
+            )
         dimension_max = max(item["score"] for item in dimensions.values())
         drift_score = max(_bounded_score(result.get("drift_score")), dimension_max)
         result["drift_score"] = drift_score
@@ -343,6 +389,7 @@ def judge(
         # provider 原文可能含凭据、内部提示或其他敏感数据；解析失败只报告固定
         # 状态，绝不把原文或由它派生的异常文本回显到日志。
         print("[Router] ⚠️ JSON解析失败（供应商原文已隐藏）")
+        _log_unusable(_unparsable_category(raw), chars=len(raw))
         return {
             "character": character, "drift_score": 0, "confidence": 0.0,
             "drift_type": "解析失败", "reason": "解析失败", "is_ooc": False,
