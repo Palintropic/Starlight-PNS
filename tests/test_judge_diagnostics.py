@@ -43,6 +43,17 @@ class UnusableCategoryTests(unittest.TestCase):
     def test_closed_json_that_still_does_not_parse(self):
         self.assert_category('{"reason": ' + CANARY + "}", "json_malformed")
 
+    def test_parser_error_and_position_are_reported(self):
+        raw = '{"reason": "他说"' + CANARY + '"", "drift_score": 1}'
+        printed = self.assert_category(raw, "json_malformed")
+        self.assertIn("error=Expecting ',' delimiter", printed)
+        self.assertIn(f"pos={raw.index(CANARY)}", printed)
+        self.assertIn("after_quote=1", printed)
+
+    def test_failure_not_right_after_a_quote_says_so(self):
+        printed = self.assert_category('{"drift_score": 1,}', "json_malformed")
+        self.assertIn("after_quote=0", printed)
+
     def test_prose_with_no_json(self):
         self.assert_category(CANARY + " 这句没问题", "no_json")
 

@@ -249,14 +249,27 @@ def _normalize_dimensions(raw_dimensions) -> tuple[dict, bool]:
     return normalized, complete
 
 
-def _log_unusable(category: str, *, chars: int | None = None, missing: tuple = ()) -> None:
+def _log_unusable(
+    category: str,
+    *,
+    chars: int | None = None,
+    missing: tuple = (),
+    decode_error: json.JSONDecodeError | None = None,
+) -> None:
     """说清判分为什么不能用，但不带 provider 原文。
 
-    只输出固定的类别、长度和 DIMENSION_KEYS 里的维度名，原文可能含凭据或内部提示。
+    只输出固定的类别、长度、DIMENSION_KEYS 里的维度名和解析器的报错。原文可能含凭据
+    或内部提示。报错只取 `.msg`（json 模块的固定措辞）和位置；after_quote 说明出错处前一个字符是不是引号，那是字符串里混进了没转义
+    引号的典型形状。
     """
     parts = [f"category={category}"]
     if chars is not None:
         parts.append(f"chars={chars}")
+    if decode_error is not None:
+        after_quote = decode_error.pos > 0 and decode_error.doc[decode_error.pos - 1] == '"'
+        parts.append(f"error={decode_error.msg}")
+        parts.append(f"pos={decode_error.pos}")
+        parts.append(f"after_quote={int(after_quote)}")
     if missing:
         parts.append("missing=" + ",".join(missing))
     print("[Router] judge unusable " + " ".join(parts))
@@ -385,11 +398,11 @@ def judge(
         result["evaluator_provider"] = evaluator_provider
         return result
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         # provider 原文可能含凭据、内部提示或其他敏感数据；解析失败只报告固定
         # 状态，绝不把原文或由它派生的异常文本回显到日志。
         print("[Router] ⚠️ JSON解析失败（供应商原文已隐藏）")
-        _log_unusable(_unparsable_category(raw), chars=len(raw))
+        _log_unusable(_unparsable_category(raw), chars=len(raw), decode_error=exc)
         return {
             "character": character, "drift_score": 0, "confidence": 0.0,
             "drift_type": "解析失败", "reason": "解析失败", "is_ooc": False,
