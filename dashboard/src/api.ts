@@ -188,6 +188,9 @@ export const createServiceAccount = (username: string): Promise<IssuedServiceTok
 export const rotateServiceToken = (principalId: string): Promise<IssuedServiceToken> =>
   fetch(`${accountPath(principalId)}/token`, { method: 'POST' }).then((res) => json(res));
 
+export const deleteServiceAccount = (principalId: string): Promise<Account> =>
+  fetch(accountPath(principalId), { method: 'DELETE' }).then((res) => json(res));
+
 export const fetchAuditRecords = (limit = 200): Promise<{ records: AuditRecord[] }> =>
   fetch(`/api/accounts/audit?limit=${limit}`).then((res) => json(res));
 

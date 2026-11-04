@@ -656,6 +656,37 @@ class AccountStore:
                 raise
         return IssuedToken(self.get(target), token)
 
+    def delete_service(self, target: str, *, actor: Optional[str] = None) -> Principal:
+        """删掉一个服务账户。它的 token 在这个事务提交时就再也对不上任何请求。
+
+        只有服务账户能删：人类账户是审计里"谁做的"的那个主体，还牵着"最后一个
+        管理员"的不变量，它们只能停用。行删掉之后审计里的 ID 就翻不出名字了，
+        所以删除这条审计自己带上用户名。
+        """
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute(
+                    "SELECT * FROM principals WHERE principal_id=?", (target,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(target)
+                old = self._principal(row)
+                if old.kind != KIND_SERVICE:
+                    raise AccountError("只有服务账户能删除，人类账户请停用")
+                self._db.execute(
+                    "DELETE FROM principals WHERE principal_id=?", (target,)
+                )
+                self._audit(
+                    actor, target, "service.delete", "success",
+                    {"username": old.username},
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return old
+
     def bootstrap_admin(
         self, username: str, password_hash: str
     ) -> Optional[Principal]:
