@@ -12,7 +12,7 @@
 //   5. **服务 token 只露一次。** 建号 / 换 token 之后显示出来，点"我已保存"
 //      就从 DOM 里消失；换 token 被取消时一条请求都不发。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import Accounts from './Accounts';
 import * as api from './api';
 import type { Account } from './api';
@@ -276,5 +276,48 @@ describe('用户管理', () => {
     expect(remove).toHaveBeenCalledWith('s-1');
     expect(screen.getByText('已删除服务账户 accord-desktop')).toBeTruthy();
     expect(document.body.innerHTML).not.toContain(TOKEN);
+  });
+
+  it('换 token 的响应迟到时，已删除账户的 token 不会再显示出来', async () => {
+    const other = { ...desk, principal_id: 's-2', username: 'other-service' };
+    const OTHER_TOKEN = 'pns_svc_other-token-value-0123456789abcdefABCDEF';
+    stubList([account()], [desk, other]);
+    vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });
+    let release: (value: api.IssuedServiceToken) => void = () => undefined;
+    vi.spyOn(api, 'rotateServiceToken').mockImplementation((id) =>
+      id === 's-1'
+        ? new Promise((resolve) => {
+            release = resolve;
+          })
+        : Promise.resolve({ ...other, token: OTHER_TOKEN }),
+    );
+    vi.spyOn(api, 'deleteServiceAccount').mockResolvedValue(desk);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<Accounts />);
+    await flush();
+    const row = (name: string) => within(screen.getByText(name).closest('tr') as HTMLElement);
+
+    await act(async () => {
+      fireEvent.click(row('accord-desktop').getByText('换 token'));
+    });
+    // 另一个账户的操作结束时会清掉全局 busy，这一行的删除按钮就又能点了。
+    await act(async () => {
+      fireEvent.click(row('other-service').getByText('换 token'));
+    });
+    await flush();
+    await act(async () => {
+      fireEvent.click(row('accord-desktop').getByText('删除'));
+    });
+    await flush();
+    await act(async () => {
+      release({ ...desk, token: TOKEN });
+    });
+    await flush();
+
+    expect(document.body.innerHTML).not.toContain(TOKEN);
+    expect((screen.getByLabelText('服务 token') as HTMLInputElement).value).toBe(OTHER_TOKEN);
+    expect(screen.queryByText('已给 accord-desktop 换了新 token，旧的已失效')).toBeNull();
+    expect(screen.getByText('accord-desktop 已被删除，这次换 token 的结果作废')).toBeTruthy();
   });
 });

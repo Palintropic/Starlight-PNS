@@ -15,7 +15,7 @@
 // 服务账户（桌面端这类程序用的只读 bearer token）单独一节。它的 token 只在
 // 建号 / 换 token 的那一次响应里出现：界面显示一次，关掉就从 state 里清掉，
 // 之后服务端也给不出第二次。
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createAccount,
   createServiceAccount,
@@ -67,6 +67,8 @@ export default function Accounts() {
   // 刚生成的 token。只活到操作者点"我已保存"或者下一次生成为止。
   const [issued, setIssued] = useState<IssuedServiceToken | null>(null);
   const [copied, setCopied] = useState(false);
+  // 这一屏里删掉的服务账户。迟到的换 token 响应不能把它们的 token 再显示出来。
+  const deletedServices = useRef(new Set<string>());
 
   const refresh = useCallback(() => {
     setLoadError(null);
@@ -180,6 +182,9 @@ export default function Accounts() {
       `${account.principal_id}:token`,
       async () => {
         const rotated = await rotateServiceToken(account.principal_id);
+        if (deletedServices.current.has(account.principal_id)) {
+          throw new Error(`${account.username} 已被删除，这次换 token 的结果作废`);
+        }
         reveal(rotated);
         return rotated;
       },
@@ -211,6 +216,7 @@ export default function Accounts() {
       `${account.principal_id}:delete`,
       async () => {
         const deleted = await deleteServiceAccount(account.principal_id);
+        deletedServices.current.add(deleted.principal_id);
         // 刚发出去的 token 如果属于它，留在屏幕上只会让人以为还能用。
         setIssued((current) =>
           current?.principal_id === deleted.principal_id ? null : current,
