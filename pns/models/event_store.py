@@ -6,10 +6,11 @@
 #
 # 排序策略是显式的：事件的模拟时间不允许倒退，时间相同的事件按追加顺序排列。
 # 因此追加顺序本身就是确定的世界历史顺序，不需要事后再排序。
+from bisect import bisect_left
 from datetime import datetime
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
-from pns.models.event import Event
+from pns.models.event import Event, EventType
 
 
 class EventStoreError(ValueError):
@@ -27,6 +28,10 @@ class EventStore:
         # event_id → 序号。记忆层按来源事件的序号判事实先后（FIX-46），每次召回
         # 都要问，线性扫描会让成本随世界寿命一起涨。
         self._ids: Dict[str, int] = {}
+        # 不是时间推进的那些事件的序号，升序。时间推进每模拟分钟一条，占了历史的
+        # 大头；看板每几秒要一次"最近的 N 条别的事件"，没有这份索引就得把整份
+        # 历史拷一遍再倒着扫。
+        self._non_clock: List[int] = []
         for event in events:
             self._append(event)
 
@@ -48,8 +53,11 @@ class EventStore:
         """提交边界内部追加一条已验证事件，返回它的序号。"""
         self._check_can_append(event)
         self._events.append(event)
-        self._ids[event.event_id] = len(self._events) - 1
-        return len(self._events) - 1
+        sequence = len(self._events) - 1
+        self._ids[event.event_id] = sequence
+        if event.type is not EventType.WORLD_TIME_ADVANCED:
+            self._non_clock.append(sequence)
+        return sequence
 
     def _rollback_to(self, length: int) -> None:
         """中止一次进行中的提交时回退到之前的长度。
@@ -64,6 +72,7 @@ class EventStore:
         for event in self._events[length:]:
             self._ids.pop(event.event_id, None)
         del self._events[length:]
+        del self._non_clock[bisect_left(self._non_clock, length):]
 
     # ── 读取 ────────────────────────────────────────────────────────────
     def __len__(self) -> int:
@@ -93,6 +102,20 @@ class EventStore:
 
     def latest(self) -> Optional[Event]:
         return self._events[-1] if self._events else None
+
+    def first(self) -> Optional[Event]:
+        return self._events[0] if self._events else None
+
+    def recent_non_clock(self, limit: int) -> Tuple[Tuple[int, Event], ...]:
+        """最近 `limit` 条不是时间推进的事件，带全历史序号，旧的在前。
+
+        成本只跟 `limit` 有关，跟世界活了多久无关。
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise EventStoreError("limit 必须是非负整数")
+        if limit == 0:
+            return ()
+        return tuple((seq, self._events[seq]) for seq in self._non_clock[-limit:])
 
     def since(self, occurred_at: datetime) -> Tuple[Event, ...]:
         """`occurred_at` 那一刻及之后的事件，按世界历史顺序。
