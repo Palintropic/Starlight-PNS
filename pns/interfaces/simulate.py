@@ -78,16 +78,22 @@ async def run_simulation(ws: WebSocket):
     # 显式 close()：run() 正常走完会自己注销，但如果中途返回或抛异常，
     # 异步生成器的 finally 要等 GC 才跑，会让准入记账里挂着一个死会话。
     revoked = False
+    gone = False
     try:
         async for msg in runtime.run():
             # 身份失效后只把那条 stopped 发出去。run() 还要走完，已提交的轮次要
             # 存进历史，但收尾内容不再给这条连接。
             if revoked:
                 continue
-            if not await _sent(ws.send_json(msg)):
-                return
+            # gate 在产出 stopped 之前就已经拒绝，所以这里先看：stopped 发送时
+            # 客户端刚好断开，也要走完收尾。普通断连不能这样，run() 还没停，
+            # 走下去会继续调用模型。
             revoked = gate is not None and gate.denied
+            if not await _sent(ws.send_json(msg)):
+                if not revoked:
+                    return
+                gone = True
     finally:
         runtime.close()
-    if revoked:
+    if revoked and not gone:
         await _sent(ws.close(code=_CLOSE_UNAUTHORIZED))

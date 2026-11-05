@@ -213,8 +213,9 @@ class _FakeRuntime:
         self.closed = True
 
 
-def _socket(auth):
-    """带 app 的 WebSocket。app.state 只有 admin_auth，没有 Accord 的任何东西。"""
+def _socket(auth, sends_before_gone=99):
+    """带 app 的 WebSocket。app.state 只有 admin_auth，没有 Accord 的任何东西。
+    第 sends_before_gone 条起，ASGI send 抛 OSError，像对端已断开。"""
     queue = [
         {"type": "websocket.connect"},
         {"type": "websocket.receive", "text": json.dumps({})},
@@ -225,6 +226,9 @@ def _socket(auth):
         return queue.pop(0) if queue else {"type": "websocket.disconnect", "code": 1006}
 
     async def send(message):
+        if message["type"] in ("websocket.send", "websocket.close"):
+            if len([m for m in sent if m["type"] == "websocket.send"]) >= sends_before_gone:
+                raise OSError("peer went away")
         sent.append(message)
 
     app = SimpleNamespace(state=SimpleNamespace(admin_auth=auth))
@@ -269,6 +273,38 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(_close_codes(sent), [1008])
         self.assertTrue(holder["runtime"].finished)
         self.assertTrue(holder["runtime"].closed)
+
+    def test_a_client_gone_while_sending_stopped_still_lets_run_finish(self):
+        ws, sent = _socket(_Auth(OPERATOR), sends_before_gone=1)
+        holder = {}
+
+        def create(params, authorize=None):
+            holder["runtime"] = _FakeRuntime(authorize)
+            return holder["runtime"]
+
+        with patch.object(simulate.SessionRuntime, "create", side_effect=create):
+            asyncio.run(simulate.run_simulation(ws))  # 不抛
+        self.assertEqual([m["type"] for m in _sent_json(sent)], ["start"])
+        self.assertEqual(_close_codes(sent), [])
+        self.assertTrue(holder["runtime"].finished)
+        self.assertTrue(holder["runtime"].closed)
+
+    def test_an_ordinary_disconnect_does_not_drain_the_run(self):
+        """run() 还没停时走下去会继续调用模型。"""
+        ws, sent = _socket(_Auth(OPERATOR), sends_before_gone=0)
+        drained = []
+
+        class Running:
+            async def run(self):
+                yield {"type": "generating"}
+                drained.append(True)
+
+            def close(self):
+                pass
+
+        with patch.object(simulate.SessionRuntime, "create", return_value=Running()):
+            asyncio.run(simulate.run_simulation(ws))
+        self.assertEqual(drained, [])
 
     def test_the_gate_reaches_the_runtime_and_a_healthy_run_is_untouched(self):
         ws, sent = _socket(_Auth(OPERATOR))
