@@ -81,6 +81,27 @@ class TruncationBeforeEmptyTest(unittest.TestCase):
             _call(_OpenAI(response), "openai")
         self.assertNotIsInstance(caught.exception, GenerationTruncated)
 
+class RegistryIsRequiredTest(unittest.TestCase):
+    """遗留的 registry=None 路径已经删掉：生成必须拿本次会话的 ContentRegistry。"""
+
+    def test_none_is_refused_before_any_model_call(self):
+        calls = []
+        client = SimpleNamespace(
+            messages=SimpleNamespace(create=lambda **kw: calls.append(kw))
+        )
+        with self.assertRaises(TypeError):
+            call_character(
+                client, "kanade", [{"role": "user", "content": "在吗"}], None, "m",
+                1024, 0.7, registry=None,
+            )
+        self.assertEqual(calls, [])
+
+    def test_leaving_it_out_is_a_type_error(self):
+        with self.assertRaises(TypeError):
+            call_character(
+                object(), "kanade", [], None, "m", 1024, 0.7,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
