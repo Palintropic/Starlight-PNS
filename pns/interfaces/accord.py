@@ -16,7 +16,6 @@
 # 检查由看门狗做，不排在写出后面，也互不牵连：客户端读得慢、send() 卡住，或者
 # 账户库被锁住、重认迟迟回不来，都照样按时掐断。
 import os
-import threading
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
@@ -29,6 +28,7 @@ from pns.integrations.accord.feed import AccordFeed, Cursor, CursorError, FeedSe
 from .accounts import SCOPE_READ
 from .composition import WorldControlPlane
 from .persistent_worlds import _error, _translated, get_control_plane
+from .recheck import RecheckSlots
 from .security import _env_flag
 
 ENV_ACCORD_FEED = "PNS_ACCORD_FEED"
@@ -38,9 +38,6 @@ MAX_CURSOR_CHARS = 64
 
 # 正在重认身份时，写的那一边隔多久看一眼认完没有；复核名额满了时隔多久再试。
 _READY_STEP = 0.01
-
-# 整个进程里同时在查账户库的流复核最多几次（见 RecheckSlots）。
-MAX_RECHECKS_IN_FLIGHT = 8
 
 
 def feed_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -75,37 +72,10 @@ def get_feed_settings(request: Request) -> FeedSettings:
     return getattr(request.app.state, "accord_feed_settings", None) or FeedSettings()
 
 
-class RecheckSlots:
-    """流复核的在途名额，整个进程共用。
-
-    复核超时以后流不再等它，但线程还在账户库那儿排着；名额要等那个线程真正
-    退出才还。所以账户库卡住的时候，卡在里面的复核线程最多这么多条，不会随着
-    一条条超时的流越积越多。名额是在线程里拿的：拿不到就立刻返回，由调用方
-    稍后再试，不会有一个名额拿到了、线程却没跑起来、永远还不回去。
-    """
-
-    BUSY = object()
-
-    def __init__(self, limit: int = MAX_RECHECKS_IN_FLIGHT) -> None:
-        self._lock = threading.Lock()
-        self._free = limit
-
-    def run(self, fn, *args):
-        with self._lock:
-            if self._free <= 0:
-                return self.BUSY
-            self._free -= 1
-        try:
-            return fn(*args)
-        finally:
-            with self._lock:
-                self._free += 1
-
-
 def get_recheck_slots(request: Request) -> RecheckSlots:
-    slots = getattr(request.app.state, "accord_rechecks", None)
-    if slots is None:  # pragma: no cover - 路由挂上时 create_app 总会装一个
-        slots = request.app.state.accord_rechecks = RecheckSlots()
+    slots = getattr(request.app.state, "identity_rechecks", None)
+    if slots is None:  # pragma: no cover - create_app 总会装一个
+        slots = request.app.state.identity_rechecks = RecheckSlots()
     return slots
 
 

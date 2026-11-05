@@ -1040,7 +1040,7 @@ class AccessTests(FeedTestCase):
         observer = self._observer_on_open_world(
             recheck_seconds=0.05, recheck_timeout_seconds=0.1, lifetime_seconds=30.0
         )
-        self.app.state.accord_rechecks = RecheckSlots(2)
+        self.app.state.identity_rechecks = RecheckSlots(2)
         locked = _LockedAccounts(self.accounts.path)
         self.addCleanup(locked.close)
         streams = 5
