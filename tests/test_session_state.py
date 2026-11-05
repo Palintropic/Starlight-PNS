@@ -84,7 +84,10 @@ class SessionStateTests(unittest.TestCase):
             correction="correct it",
         )
 
-        self.state.record_turn(turn)
+        histories_before = {cid: list(h) for cid, h in self.state.histories.items()}
+        # 角色历史按观察投影（投影本身在 test_event_commit 里经提交路径测）；
+        # 这里不给任何观察，所以历史不该多出一行。
+        self.state.record_turn(turn, [])
         self.state.advance_character()
 
         self.assertEqual(self.state.turns, [turn])
@@ -92,8 +95,7 @@ class SessionStateTests(unittest.TestCase):
         self.assertEqual(self.state.final_stats()["corrections"], 1)
         self.assertEqual(self.state.pending_corrections["mizuki"], "correct it")
         self.assertEqual(self.state.current_character, "ena")
-        self.assertEqual(self.state.histories["mizuki"][-1]["role"], "assistant")
-        self.assertEqual(self.state.histories["ena"][-1]["role"], "user")
+        self.assertEqual(self.state.histories, histories_before)
         self.assertEqual(self.state.final_stats()["total_turns"], 1)
 
     def test_record_turn_rejects_state_invariant_violations(self):

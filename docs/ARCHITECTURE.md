@@ -401,9 +401,10 @@ rather than recomputed on read.
 `SessionState.histories` is now a projection of observations, not a fan-out.
 A character with no observation of a line does not get that line in its prompt
 context, so two characters in a session can hold genuinely different context.
-`record_turn()` still accepts no observations for un-migrated pure-record
-callers and falls back to the legacy copy-to-everyone behaviour; the runtime
-never takes that path. Legacy scene fixtures keep working because
+`record_turn()` accepts a turn without observations only on a plain record
+state that has no runtime histories; on a runtime session it raises. The old
+copy-to-everyone fallback has been removed, so a caller that forgets to pass
+observations fails instead of silently becoming omniscient. Legacy scene fixtures keep working because
 `scene_compat` explicitly co-locates or channel-joins the characters, not
 because they were selected together.
 
