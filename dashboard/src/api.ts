@@ -690,8 +690,43 @@ export interface WorldOverview {
   speech_occupancy_checked_from: number | null;
 }
 
+const isStringOrNull = (value: unknown): value is string | null =>
+  value === null || typeof value === 'string';
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * 只留形状符合 `OverviewEvent` 的事件，其余丢掉。
+ *
+ * 服务器的 response_model 现在保证这些字段都在；这里是在取回的那一处统一
+ * 设防，而不是让每个用到 `at` / `participants` / `payload` 的组件各自判断。
+ * 一条畸形事件只会让它自己消失，不会让整张时间线崩掉。
+ */
+export function keepWellFormedEvents(events: unknown): OverviewEvent[] {
+  if (!Array.isArray(events)) return [];
+  return events.filter(
+    (e): e is OverviewEvent =>
+      isPlainObject(e) &&
+      typeof e.seq === 'number' &&
+      Number.isFinite(e.seq) &&
+      typeof e.event_id === 'string' &&
+      typeof e.type === 'string' &&
+      typeof e.at === 'string' &&
+      typeof e.scope === 'string' &&
+      isStringOrNull(e.actor) &&
+      Array.isArray(e.participants) &&
+      e.participants.every((p) => typeof p === 'string') &&
+      isStringOrNull(e.location_id) &&
+      isStringOrNull(e.channel_id) &&
+      isPlainObject(e.payload),
+  );
+}
+
 export const fetchWorldOverview = (worldId: string, limit = 200): Promise<WorldOverview> =>
-  fetch(`${worldPath(worldId)}/overview?limit=${limit}`).then((res) => json(res));
+  fetch(`${worldPath(worldId)}/overview?limit=${limit}`)
+    .then((res) => json<WorldOverview>(res))
+    .then((data) => ({ ...data, events: keepWellFormedEvents(data.events) }));
 
 // ── 用量账本（COST-1）────────────────────────────────────────────────────
 //
