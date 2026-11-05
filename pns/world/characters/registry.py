@@ -18,8 +18,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PACKS_ROOT = REPO_ROOT / "packs"
 ACTIVE_PACK = "pjsk"
 
-_cache: Optional[Dict] = None
-
 
 class CharacterNotReadyError(Exception):
     """角色存在于 pack 里，但还没有可用的 system prompt（status=partial/not_ready 且未补内容）。"""
@@ -36,17 +34,14 @@ def _read_yaml(path: Path) -> Dict:
 
 
 def _load_pack() -> Dict:
-    """读取并校验 active pack，结果按进程缓存一次。
+    """读取并校验 active pack，每次都回磁盘读。
 
-    这条缓存路径只服务于还没拿到 ContentRegistry 的遗留调用方。运行时的配置
-    重载不走它 —— 重载调用 load_pack_data()，每次都真的回磁盘读一遍。
+    只有还没拿到 ContentRegistry 的遗留调用方走这里（生产路径都传 registry）。
+    以前这里按进程缓存一次，但配置重载从来不清它，于是重载之后遗留调用方
+    看到的还是上一份角色包。不缓存就没有"跟重载后的配置不一致"这回事；
+    代价是每次多读一遍盘，而这条路已经只剩测试和离线脚本在用。
     """
-    global _cache
-    if _cache is not None:
-        return _cache
-
-    _cache = load_pack_data()
-    return _cache
+    return load_pack_data()
 
 
 def load_pack_data(pack_name: Optional[str] = None) -> Dict:
@@ -98,12 +93,6 @@ def load_pack_data(pack_name: Optional[str] = None) -> Dict:
         "characters": characters,
         "pack_dir": pack_dir,
     }
-
-
-def reset_cache() -> None:
-    """丢弃遗留缓存。重载配置时调用，免得遗留调用方继续看到上一份角色包。"""
-    global _cache
-    _cache = None
 
 
 def get_character_prompt(character_id: str) -> str:
