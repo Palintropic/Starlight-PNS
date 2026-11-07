@@ -41,6 +41,7 @@ from . import config, health, persistent_worlds, provider_api, review, simulate,
 from .accounts import AccountError, AccountStore
 from .composition import AutonomySettings, WorldControlPlane
 from .paths import ACCOUNTS_DB_FILE, DASHBOARD_DIST
+from .recheck import RecheckSlots
 from .security import (
     ENV_ACCOUNTS_DB,
     ENV_BOOTSTRAP_PASSWORD_HASH,
@@ -355,12 +356,13 @@ def create_app(
     app.include_router(world.router)
     app.include_router(persistent_worlds.router)
     app.include_router(usage.router)
+    # 长连接身份复核的名额池，/ws/run 和 Accord 共用，跟 Accord 开不开无关。
+    app.state.identity_rechecks = RecheckSlots()
     app.include_router(simulate.router)
     # Accord feed（只读）默认关。关着时路由根本不挂，进程跟没有这个模块一样。
     if accord_feed:
         app.state.accord_feed = accord.AccordFeed(plane)
         app.state.accord_feed_settings = accord.FeedSettings()
-        app.state.accord_rechecks = accord.RecheckSlots()
         app.include_router(accord.router)
 
     # 挂在所有 API/WS 路由之后，作为兜底：`dashboard/` 是唯一前端（`npm run

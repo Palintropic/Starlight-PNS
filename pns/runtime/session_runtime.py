@@ -6,7 +6,7 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Awaitable, Callable, Optional
 from uuid import uuid4
 
 import pns.logic.router as router_mod
@@ -47,6 +47,9 @@ from pns.world.scene_compat import SceneMappingError
 _ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_HISTORY_DIR = _ROOT_DIR / "history"
 _DEFAULT_DRIFT_SCORES_FILE = _ROOT_DIR / "data" / "drift_scores.jsonl"
+
+# 发起这次会话的身份不再成立时的停止原因。
+STOP_AUTHORIZATION_LOST = "authorization_lost"
 
 
 class SessionSetupError(Exception):
@@ -99,12 +102,15 @@ class SessionRuntime:
         supervisor: Optional[SessionSupervisor] = None,
         history_dir: Path = _DEFAULT_HISTORY_DIR,
         drift_scores_file: Path = _DEFAULT_DRIFT_SCORES_FILE,
+        authorize: Optional[Callable[[], Awaitable[bool]]] = None,
     ):
         # 本次会话锁定的配置快照。整个生命周期只认这一份 —— 中途重载换掉全局
         # 引用，也影响不到已经开跑的会话。
         self.registry = registry
         self.supervisor = supervisor
         self._stop_reason: Optional[str] = None
+        # 传输层给的"还能继续吗"。runtime 不懂身份，只在花钱和提交之前问一句。
+        self._authorize = authorize
         self.scene = scene
         self.client = client
         # 判分线路可以是另一家、另一种协议，所以有自己的 client；没给就跟生成共用。
@@ -163,6 +169,20 @@ class SessionRuntime:
         if self._stop_reason is None:
             self._stop_reason = reason
 
+    async def _still_authorized(self) -> bool:
+        if self._authorize is None or await self._authorize():
+            return True
+        self.request_stop(STOP_AUTHORIZATION_LOST)
+        return False
+
+    def _stopped_message(self, turn: int) -> dict:
+        return {
+            "type": "stopped",
+            "session_id": self.session_id,
+            "turn": turn,
+            "reason": self._stop_reason,
+        }
+
     def close(self) -> None:
         """从准入记账里注销本会话。"""
         if self.supervisor is not None:
@@ -177,6 +197,7 @@ class SessionRuntime:
         supervisor: Optional[SessionSupervisor] = None,
         history_dir: Path = _DEFAULT_HISTORY_DIR,
         drift_scores_file: Path = _DEFAULT_DRIFT_SCORES_FILE,
+        authorize: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> "SessionRuntime":
         if not isinstance(params, dict):
             raise SessionSetupError("会话参数必须是 JSON 对象")
@@ -265,6 +286,7 @@ class SessionRuntime:
             supervisor=supervisor,
             history_dir=history_dir,
             drift_scores_file=drift_scores_file,
+            authorize=authorize,
         )
 
         # 登记是准入的唯一权威判断点：闸门关着就在这里被拒，转成 SessionSetupError
@@ -315,12 +337,7 @@ class SessionRuntime:
 
         for turn in range(1, self.max_turns + 1):
             if self._stop_reason is not None:
-                yield {
-                    "type": "stopped",
-                    "session_id": self.session_id,
-                    "turn": turn,
-                    "reason": self._stop_reason,
-                }
+                yield self._stopped_message(turn)
                 break
 
             current = self.state.current_character
@@ -338,6 +355,12 @@ class SessionRuntime:
                 scene.get("trigger", ""),
             )
             correction_applied = self.state.correction_for(current)
+
+            # 下面三处检查都紧贴被保护的动作：上面的 yield 可能因为发送背压等很久，
+            # 在 yield 之前查过不算数。
+            if not await self._still_authorized():
+                yield self._stopped_message(turn)
+                break
 
             try:
                 reply = await call_character_async(
@@ -360,6 +383,10 @@ class SessionRuntime:
                 break
 
             yield {"type": "judging", "turn": turn, "character": char_key, "char_name": char_name}
+
+            if not await self._still_authorized():
+                yield self._stopped_message(turn)
+                break
 
             try:
                 result = await judge_async(
@@ -407,6 +434,11 @@ class SessionRuntime:
                 evaluator_provider=result.get("evaluator_provider", ""),
                 evaluator_model=result.get("evaluator_model", ""),
             )
+            # 判分期间身份失效：这一轮的候选输出不写审计、不进世界。
+            if not await self._still_authorized():
+                yield self._stopped_message(turn)
+                break
+
             try:
                 append_drift_record(
                     self.drift_scores_file,

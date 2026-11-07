@@ -43,6 +43,7 @@ for _path in (str(REPO_ROOT), str(REPO_ROOT / "scripts"), str(REPO_ROOT / "tests
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 from pns.interfaces.accord import ENV_ACCORD_FEED  # noqa: E402
 from pns.interfaces.app import create_app  # noqa: E402
@@ -356,6 +357,25 @@ class ScopeBoundaryTests(ApiTestCase):
         with self.assertRaises(Exception):
             with observer.websocket_connect("/ws/run"):
                 pass  # pragma: no cover - 握手不该成功
+
+    def _assert_handshake_identity_expires(self, **change):
+        """握手时身份还在，发参数时已经变了：不建会话，关连接。"""
+        operator = self.as_operator()
+        with operator.websocket_connect("/ws/run") as ws:
+            self.accounts.set_authority(self.operator.principal_id, **change)
+            with patch("pns.interfaces.simulate.SessionRuntime.create") as create:
+                ws.send_json({})
+                self.assertEqual(ws.receive_json()["type"], "error")
+                with self.assertRaises(WebSocketDisconnect) as closed:
+                    ws.receive_json()
+        self.assertEqual(closed.exception.code, 1008)
+        create.assert_not_called()
+
+    def test_a_websocket_does_not_outlive_a_disabled_account(self):
+        self._assert_handshake_identity_expires(enabled=False)
+
+    def test_a_websocket_does_not_outlive_a_downgrade_to_observer(self):
+        self._assert_handshake_identity_expires(role="observer")
 
     def test_without_the_middleware_the_same_requests_succeed(self):
         """把守卫拿掉，上面那批 403 必须变成 200。
