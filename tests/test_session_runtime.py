@@ -80,6 +80,9 @@ class SessionSetupTests(unittest.TestCase):
         runtime = SessionRuntime.create(
             {"characters": ["mizuki", "ena"], "scene": "definitely_not_a_scene"}
         )
+        # 没传 supervisor 时会话登记在进程全局的 BOUNDARY.supervisor 上。不注销的话，
+        # 同一进程里后面的配置重载会等它 60 秒然后失败（例如紧接着跑 test_auth_api）。
+        self.addCleanup(runtime.close)
         self.assertEqual(runtime.scene["id"], "gate")
         self.assertEqual(
             runtime.world.characters_at("kamiyama_high_gate"), ["ena", "mizuki"]
@@ -90,7 +93,9 @@ class SessionSetupTests(unittest.TestCase):
     def test_session_ids_are_unique(self, _mock_client, _mock_key):
         params = {"characters": ["mizuki", "ena"]}
         first = SessionRuntime.create(params)
+        self.addCleanup(first.close)
         second = SessionRuntime.create(params)
+        self.addCleanup(second.close)
         self.assertNotEqual(first.session_id, second.session_id)
 
 

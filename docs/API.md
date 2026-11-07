@@ -55,7 +55,7 @@ scope 决定，非安全方法默认要求 `operate`。既没配管理凭据、�
 | `judging` | 台词生成完毕，Router 开始判分前 | `turn`、`character`、`char_name` |
 | `turn` | 这一轮判分完成 | `turn`、`character`、`char_name`、`reply`、`score`、`is_ooc`、`drift_type`、`reason`、`correction`、`needs_human_review`、`dimensions`、`dimensions_complete`、`methodology_version`、`generator_provider`、`generator_model`、`evaluator_provider`、`evaluator_model`、`event_id` |
 | `error` | 角色调用失败／没有 API Key／重载期间被拒绝开新会话 | `turn`（可能没有）、`message` |
-| `stopped` | 配置重载要求停止本会话，在轮次边界收到 | `session_id`、`turn`（本该开始的那一轮）、`reason` |
+| `stopped` | 配置重载要求停止本会话（在轮次边界收到，之后还有 `done`）；或身份失效（`reason` 为 `authorization_lost`，可能在一轮中途，之后直接关闭、没有 `done`） | `session_id`、`turn`（本该开始的那一轮；中途停止时是被丢弃的那一轮）、`reason` |
 | `done` | 全部轮次结束，或被停止后收尾 | `session_id`、`stats`（`total_turns`/`ooc_count`/`corrections`/`avg_score`/`max_score`）、`history_file` |
 
 `start` 的 `scene` 块字段不变，但 `time` / `location` 现在是当前 `WorldState` 的投影，
