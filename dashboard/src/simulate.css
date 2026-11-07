@@ -181,6 +181,10 @@
   color: var(--SystemBaseMedium);
   animation: sim-pulse 1s linear infinite;
 }
+/* Dropped：会话在这一轮中途被停止。不闪烁，免得看起来还在跑。 */
+.sim-line-text.dropped {
+  color: var(--SystemBaseMedium);
+}
 
 .sim-router-badge {
   display: inline-flex;

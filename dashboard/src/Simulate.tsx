@@ -19,7 +19,9 @@ type ScriptItem =
       turn: number;
       charKey: string;
       charName: string;
-      phase: 'generating' | 'judging' | 'filled';
+      // dropped：会话在这一轮中途被停止，服务端丢弃了这一轮的候选，
+      // 不会再有 `turn` 消息来填它。
+      phase: 'generating' | 'judging' | 'filled' | 'dropped';
       reply?: string;
       score?: number;
       driftType?: string;
@@ -29,6 +31,18 @@ type ScriptItem =
     }
   | { kind: 'sys'; text: string; error?: boolean }
   | { kind: 'done'; stats: SimStats; historyFile?: string };
+
+// 与 pns/runtime/session_runtime.py 的 STOP_AUTHORIZATION_LOST 一致。
+const AUTHORIZATION_LOST = 'authorization_lost';
+
+const stoppedNotice = (reason: string | undefined): ScriptItem =>
+  reason === AUTHORIZATION_LOST
+    ? {
+        kind: 'sys',
+        text: '登录已失效或权限已收回，模拟已停止。这一轮没有完成；之前完成的轮次已存入历史。',
+        error: true,
+      }
+    : { kind: 'sys', text: `会话被停止${reason ? `（${reason}）` : ''}，正在收尾` };
 
 const levelOf = (score: number) => (score <= 2 ? 'ok' : score <= 5 ? 'warn' : 'ooc');
 
@@ -144,6 +158,28 @@ function Simulate() {
             needsReview: msg.needs_human_review,
           });
           break;
+        case 'stopped': {
+          // 停止可能发生在一轮中途（判分或提交前身份失效），这时 `generating`
+          // 已经发出来了。服务端会丢弃这一轮，所以把没填上的那行标成已丢弃，
+          // 不让它一直停在"生成中…"。
+          setItems((prev) => [
+            ...prev.map((item) =>
+              item.kind === 'line' && item.phase !== 'filled' ? { ...item, phase: 'dropped' as const } : item,
+            ),
+            stoppedNotice(msg.reason),
+          ]);
+          if (msg.reason === AUTHORIZATION_LOST) {
+            // 服务端接着以 1008 关闭，之后不再发任何消息（没有 `done`）。
+            endedRef.current = true;
+            setRunning(false);
+            setStatus('身份已失效');
+            setStatusError(true);
+          } else {
+            // 其他原因的停止（配置重载）后面还会有 `done`。
+            setStatus('正在收尾');
+          }
+          break;
+        }
         case 'done':
           endedRef.current = true;
           setItems((prev) => [...prev, { kind: 'done', stats: msg.stats, historyFile: msg.history_file }]);
@@ -327,8 +363,12 @@ function Simulate() {
                       <div className="turn-num">#{item.turn}</div>
                     </div>
                     <div className="sim-line-col">
-                      <div className={`sim-line-text${item.phase !== 'filled' ? ' generating' : ''}`}>
-                        {item.phase === 'filled' ? item.reply : '生成中…'}
+                      <div
+                        className={`sim-line-text${
+                          item.phase === 'dropped' ? ' dropped' : item.phase !== 'filled' ? ' generating' : ''
+                        }`}
+                      >
+                        {item.phase === 'filled' ? item.reply : item.phase === 'dropped' ? '本轮未完成，已丢弃' : '生成中…'}
                       </div>
                       {level && (
                         <div className={`sim-router-badge ${level}`}>
