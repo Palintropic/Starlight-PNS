@@ -868,7 +868,7 @@ class ProviderLeakTests(MvpTestCase):
             self.plane.create(
                 world_id="notready",
                 scene_id=SCENE,
-                character_ids=["mizuki", "akito"],
+                character_ids=["mizuki", "tsukasa"],
             )
         self.assertFalse((self.root / "notready").exists())
 

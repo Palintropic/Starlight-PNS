@@ -8,9 +8,12 @@ school: 宮益坂女子学院
 school_note: "VBS成员中唯一跨校归属宫益坂女子学院者（本人游戏自述台词'我是宫益坂女子学院一年级学生'），与队友杏、彰人、冬弥的神山高校不同校"
 grade: 2
 class: "2-A"
-status: not_ready
-sample_coverage: 0.0
+status: ready
+sample_coverage: 1.0  # 三件套齐全时的占位值，评分口径未最终确定，后续可能重新定义
 prompt_file: kohane_prompt.md
+prompt_file_compat: kohane_prompt_compat.md
+constitution_file: kohane_constitution.md
+router_reference_file: kohane_router_reference.md
 
 family:
   - relation: 父亲
