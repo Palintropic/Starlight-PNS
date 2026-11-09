@@ -1,5 +1,15 @@
 # 技术债务清单
 
+## 状态更新（2026-11-10）
+
+本文档是分阶段快照，下文原文保留不改。经与当前代码核对，以下条目所述状态已被后续实现改变，阅读时以本节为准：
+
+- **鉴权**：API 鉴权已由 AUTH-1 实现（默认拒绝中间件，见 `docs/API.md` §6 与 `pns/interfaces/security.py`、`pns/interfaces/authz.py`）。下文「配置重载（P7）」一节中"整个 API 层目前没有任何鉴权"与"重载不做鉴权"条目已失效（该节其余关于重载本身的口子不在此列）。
+- **compat 覆盖**：「compat（flash-lite）prompt 目前只覆盖 ena/mizuki 两人」一节已失效——现 12 名 ready 角色的 yaml 均有 `prompt_file_compat`，仅 8 名 not_ready 角色没有。
+- **观察与记忆**：「Exposure（P6）」一节中"观察还不是记忆……没有衰减、没有编码、没有取回"所述状态已改变——记忆层已实现：`SessionState.memories`（`MemoryStore`）、`pns/runtime/memory/encoder.py` 编码、`pns/runtime/memory/recall.py` 取回，working 记忆带 120 分钟衰减（`pns/models/memory.py`）。
+- **到期消费**：「持久化调度器（P8）」一节中"到期不等于有人接……现在没有任何一层消费它"已失效——`AutonomousRuntime.process_due`（`pns/runtime/autonomy/coordinator.py`）消费 `ActivationDue`，并经 Agency/Planner（`pns/runtime/agency/`）决定与处理。
+- **落盘与生命周期**：同节"存档形状有了，落盘还没有……跨进程重启还救不回来"已失效——`pns/runtime/persistence/` 已实现落盘（`store.py`：临时文件 → fsync → `os.replace` 原子替换）与恢复生命周期（`lifecycle.py` 的 `PersistentWorld`、`POST /api/persistent-worlds/{world_id}/restore`）。
+
 ## data/drift_scores.jsonl 的 methodology_version 标注
 
 **状态更新（2026-08-13）**：新运行记录现在由服务端自动写入
