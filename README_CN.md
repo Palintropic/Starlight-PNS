@@ -4,6 +4,8 @@
 
 **基于宪法 AI 对齐的封闭世界 AI 角色一致性研究框架**
 
+**Starlight-PNS — an open-source framework for preventing persona drift and maintaining long-horizon character consistency in LLM roleplay agents.**
+
 > 别名：Project Nightcord Sanctuary (PNS)
 
 > *“科技不再是高高在上，而是服务于每一个人。”*
