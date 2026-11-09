@@ -4,6 +4,8 @@
 
 **基于宪法 AI 对齐的封闭世界 AI 角色一致性研究框架**
 
+**Starlight-PNS — an open-source framework for preventing persona drift and maintaining long-horizon character consistency in LLM roleplay agents.**
+
 > 别名：Project Nightcord Sanctuary (PNS)
 
 > *“科技不再是高高在上，而是服务于每一个人。”*
@@ -162,7 +164,7 @@ Router 属于**完整性/一致性层（integrity layer）**，不是 Agency 层
 - 已完成的 `Turn` 记录
 - 从这些 Turn 派生的运行统计
 
-`WorldState` 仍是显式的基础模型，但尚未接入实时 runtime。Scene fixture 在 WorldState 阶段之前继续保持独立。
+`WorldState` 仍是显式的基础模型，现已接入实时 runtime，是会话运行时与自主运行时共同的世界现实权威。Scene fixture 在 WorldState 阶段之前继续保持独立。
 
 ---
 
@@ -282,9 +284,17 @@ PNS 不在框架代码中定义固定角色阵容。系统从当前启用的可�
 
 ### Vivid BAD SQUAD
 
-**彰人（東雲彰人 / akito）** ⚪ · **杏（白石杏 / an）** ⚪ · **冬弥（青柳冬弥 / toya）** ⚪ · **心羽（小豆泽心羽 / kohane）** ⚪
+**彰人（東雲彰人 / akito）** ✅  
+VBS 成员、街头歌手。当前角色档案已经包含他的核心性格、角色关系和语气研究——按三层方法论结构组织。
 
-已在角色包中登记基础元数据；可运行提示词尚未创建。
+**杏（白石杏 / an）** ✅  
+VBS 成员，在父亲经营的 WEEKEND GARAGE 帮忙。当前角色档案已经包含她的核心性格、角色关系和语气研究——按三层方法论结构组织。
+
+**冬弥（青柳冬弥 / toya）** ✅  
+VBS 成员，出身古典音乐家庭。当前角色档案已经包含他与父亲的严格古典训练冲突、转向街头音乐的过程，以及角色关系和语气研究——按三层方法论结构组织。
+
+**心羽（小豆泽心羽 / kohane）** ✅  
+VBS 成员。当前角色档案已经包含她的核心性格、角色关系和语气研究——按三层方法论结构组织。
 
 ### Wonderlands×Showtime
 
@@ -300,9 +310,11 @@ PNS 不在框架代码中定义固定角色阵容。系统从当前启用的可�
 **爱莉（桃井愛莉 / airi）** ✅  
 偶像、MMJ 成员，曾是偶像组合 QT 的成员。当前角色档案已经包含她退出 QT 后的持续恢复过程、由经验校准的“把模糊团队问题转化为具体下一步”的行动机制，以及与实乃理/遥/雫的团队关系动态——按三层方法论结构组织。
 
-**遥（桐谷遥 / haruka）** ⚪ · **雫（日野森雫 / shizuku）** ⚪
+**遥（桐谷遥 / haruka）** ✅  
+偶像、MMJ 成员，曾是偶像组合 ASRUN 的成员。当前角色档案已经包含她退出 ASRUN 后的舞台恐惧与恢复过程，以及与实乃理/爱莉/雫的团队关系动态——按三层方法论结构组织。
 
-已在角色包中登记基础元数据；可运行提示词尚未创建。
+**雫（日野森雫 / shizuku）** ✅  
+偶像、MMJ 成员，出道较早的资深偶像。当前角色档案已经包含她的核心性格、角色关系和语气研究，以及与实乃理/遥/爱莉的团队关系动态——按三层方法论结构组织。
 
 ### Leo/need
 
@@ -343,14 +355,14 @@ PNS 不在框架代码中定义固定角色阵容。系统从当前启用的可�
 - [x] 面向会话的生成 / Router 编排已抽到 `pns.runtime.SessionRuntime`
 - [x] `SessionState` 与 `WorldState` 基础数据模型
 - [x] 让 `SessionState` 成为实时 runtime 的权威状态
-- [ ] 将 `WorldState` 接入实时 runtime
+- [x] 将 `WorldState` 接入实时 runtime
 - [x] 分离生成模型与评估模型的配置 / provenance
-- [ ] Event model
-- [ ] Exposure / perceptual gate
-- [ ] 持久 Scheduler 与 Lifecycle
-- [ ] Agency / Planner
-- [ ] 持久化主观角色 Memory
-- [ ] World event history 与 memory write-back
+- [x] Event model
+- [x] Exposure / perceptual gate
+- [x] 持久 Scheduler 与 Lifecycle
+- [x] Agency / Planner
+- [x] 持久化主观角色 Memory
+- [x] World event history 与 memory write-back
 - [ ] 角色头像
 - [ ] Haiku 漂移分数输出
 - [ ] 延迟漂移注入（第 10 轮触发）

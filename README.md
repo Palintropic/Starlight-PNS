@@ -4,6 +4,8 @@
 
 **A closed-world life simulation framework for AI persona consistency research, grounded in Constitutional AI alignment.**
 
+**Starlight-PNS — an open-source framework for preventing persona drift and maintaining long-horizon character consistency in LLM roleplay agents.**
+
 > Also known as: Project Nightcord Sanctuary (PNS)
 
 > *"Technology was never meant to be a privilege. It was meant to be for everyone."*
@@ -155,8 +157,9 @@ authoritative `SessionState`, which maintains:
 - completed `Turn` records
 - statistics derived from those turns
 
-`WorldState` remains an explicit foundational model, but is not connected to the
-live runtime yet. Scene fixtures remain separate until the WorldState phase.
+`WorldState` remains an explicit foundational model and is now connected to the
+live runtime, serving as the world-reality authority shared by the session runtime
+and the autonomous runtime. Scene fixtures remain separate until the WorldState phase.
 
 ---
 
@@ -278,9 +281,17 @@ Lyricist. Her current character sheet includes her family history under a contro
 
 ### Vivid BAD SQUAD
 
-**akito (東雲彰人)** ⚪ · **an (白石杏)** ⚪ · **toya (青柳冬弥)** ⚪ · **kohane (小豆泽心羽)** ⚪
+**akito (東雲彰人)** ✅  
+VBS member and street singer. His current character sheet includes his core personality, relationships, and tone research — structured across the three-layer methodology.
 
-Registered in the pack with basic metadata; runnable prompts have not yet been created.
+**an (白石杏)** ✅  
+VBS member who helps out at WEEKEND GARAGE, the live café-bar run by her father. Her current character sheet includes her core personality, relationships, and tone research — structured across the three-layer methodology.
+
+**toya (青柳冬弥)** ✅  
+VBS member from a classical-music family. His current character sheet includes his conflict with his father over strict classical training, his turn to street music, his relationships, and tone research — structured across the three-layer methodology.
+
+**kohane (小豆泽心羽)** ✅  
+VBS member. Her current character sheet includes her core personality, relationships, and tone research — structured across the three-layer methodology.
 
 ### Wonderlands×Showtime
 
@@ -296,9 +307,11 @@ Idol and MMJ member. Her current character sheet includes her pre-debut audition
 **airi (桃井愛莉)** ✅  
 Idol, MMJ member, and former member of idol group QT. Her current character sheet includes her ongoing recovery from her QT retirement, her experience-calibrated action-translation mechanism — turning ambiguous team problems into concrete next steps — and her team relationship dynamics with minori/haruka/shizuku — structured across the three-layer methodology.
 
-**haruka (桐谷遥)** ⚪ · **shizuku (日野森雫)** ⚪
+**haruka (桐谷遥)** ✅  
+Idol and MMJ member, and a former member of idol group ASRUN. Her current character sheet includes her stage fright and recovery after leaving ASRUN, and her team relationship dynamics with minori/airi/shizuku — structured across the three-layer methodology.
 
-Registered in the pack with basic metadata; runnable prompts have not yet been created.
+**shizuku (日野森雫)** ✅  
+Idol and MMJ member, a veteran idol who debuted early. Her current character sheet includes her core personality, relationships, and tone research, and her team relationship dynamics with minori/airi/haruka — structured across the three-layer methodology.
 
 ### Leo/need
 
@@ -339,14 +352,14 @@ Stage: Active development — Demo v6 complete
 - [x] Session-oriented generation / Router orchestration extracted into `pns.runtime.SessionRuntime`
 - [x] `SessionState` and `WorldState` foundational data models
 - [x] Make `SessionState` authoritative in the live runtime path
-- [ ] Integrate `WorldState` into the live runtime path
+- [x] Integrate `WorldState` into the live runtime path
 - [x] Separate generation-model and evaluator-model configuration / provenance
-- [ ] Event model
-- [ ] Exposure / perceptual gate
-- [ ] Persistent scheduler and lifecycle
-- [ ] Agency / planner
-- [ ] Persistent subjective character memory
-- [ ] World-event history and memory write-back
+- [x] Event model
+- [x] Exposure / perceptual gate
+- [x] Persistent scheduler and lifecycle
+- [x] Agency / planner
+- [x] Persistent subjective character memory
+- [x] World-event history and memory write-back
 - [ ] Character portraits
 - [ ] Haiku drift score output
 - [ ] Deferred drift injection (turn 10 trigger)
