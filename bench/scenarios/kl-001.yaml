@@ -1,0 +1,127 @@
+# KL-001 — BENCH-1A（知识泄漏）的场景即代码。
+#
+# 事实来源：Issue #43 正文与其评论里的 KL-001 首轮正式结果，以及该轮的
+# artifact（BENCH-1-KL-001-prompt-plus-shared-memory-rag-20.zip，Issue #43
+# 附件）。探针问题逐字原文、目标事件与隐藏事实已于 2026-11-10 从 artifact
+# 逐字转录（见 probe.question、target_event.criterion.hidden_facts 与
+# corpus.artifact）；转录口径与 artifact 原文不符时以 artifact 为准。
+
+id: kl-001
+benchmark: BENCH-1A
+dimension: knowledge_leakage
+# bench 自己的方法论版本，跟 Router 的 methodology_version（运行时七维口径）
+# 是两套账，不许混写——漂移分跨版本不可比的教训在 TODO_TECH_DEBT 里有案底。
+methodology_version: bench-1a-v1
+
+world:
+  id: yoake-mae
+  snapshot:
+    revision: 98
+    sha256: "4e15bf1359e716b3497f66dca17a177a95922b173528b30932b4bc6adf29005d"
+  # 角色在快照里的落位。真实快照的落位要从快照本身恢复（见
+  # bench/conditions/pns.py 的接缝说明）；这里留空，mock/夹具运行用
+  # bench/fixtures.py 的合成落位。
+  placements: null
+
+model:
+  # KL-001 首轮所用模型。新一轮默认用当前默认模型（mimo-v2.6-pro），
+  # 用 --model 覆盖即可；覆盖值会记进 manifest，不改这里的首轮事实。
+  name: mimo-v2.5-pro
+  temperature: 0.85
+  max_tokens: 1024
+
+characters:
+  # 目标事件在场、可以正当地知道这件事的人。
+  observers: [kanade, mafuyu]
+  # 被探针问题问到的人。她们不在场，答案里出现目标事件的事实就是泄漏。
+  probed: [mizuki, ena]
+
+target_event:
+  kind: dialogue.spoken
+  participants: [kanade, mafuyu]
+  visible_to: [kanade, mafuyu]
+  hidden_from: [mizuki, ena]
+  # 目标事件在 artifact 语料里的落点（逐字转录自 memory-corpus.jsonl 与
+  # corpus-manifest.json）：rev-98 快照 2026-10-01 21:29、宵崎家·奏的房间，
+  # 奏对真冬说的一句私下问话；同场的私下互动还包括 21:27–21:30 的备茶
+  # 对话（语料 025/026/028 条），但首轮标注的目标项只有 027 这一条。
+  artifact_item:
+    memory_id: KL-001-rev98-dialogue-027
+    occurred_at: "2026-10-01T21:29:00"
+    speaker: kanade
+    location_id: kanade_home_room
+    text: "水，烧开了吗？"
+  criterion:
+    # 结构化判据：被问角色的回答只要陈述或转述了"唯一在世界内的来源是
+    # 目标事件"的事实，即记泄漏；把别处发生的互动说成与自己的互动的，
+    # 记归属错误（单列，不进泄漏数）——与首轮人工标注口径一致。
+    leak: "回答陈述或转述了仅能从目标事件获得的事实"
+    attribution_error: "回答把目标事件中的互动归属到错误的参与者或频道"
+    # 隐藏事实清单（2026-11-10 从 artifact 逐字转录）。首轮人工标注的
+    # 实际判定（见 artifact README 与 PNS-20-summary.md）：回答直接引述
+    # 或转述了"奏私下问真冬水是否烧开"即记目标泄漏。
+    hidden_facts:
+      - "奏在 21:29 于自家房间私下问真冬：水，烧开了吗？"
+      - "奏当时正在烧水/备茶，这件事只有在场的奏与真冬知道"
+
+# 自动轨的泄漏标记：回答命中任一标记即自动记 leak 候选（人工标签仍是金标准）。
+# 2026-11-10 从 hidden_facts 的目标句转录：核心标记是目标句本身及其
+# 关键词（烧开/烧水）；命中只产生候选，泄漏以人工标签为准。
+leak_markers: ["水，烧开了吗", "烧开", "烧水"]
+
+probe:
+  asked_to: [mizuki, ena]
+  # 三个条件、所有轮次用同一个问题，逐字不变——这是首轮设计的一部分。
+  unchanged_across_conditions: true
+  # 问题的逐字原文（2026-11-10 从 artifact 转录：summary.json、
+  # provenance.json 与 artifact README 三处一致）。问题本身不包含目标句。
+  question: "奏刚才在做什么？她最近有没有说什么？"
+  question_status: verbatim
+
+corpus:
+  # 检索/转录的语料 = 固定快照里的全部 dialogue.spoken 事件。
+  source: snapshot_dialogue_spoken
+  event_count: 28
+  # 语料工件（2026-11-10 从 artifact 原样存入仓库）：rev-98 快照截至
+  # 世界时钟 21:47 的全部 28 条 dialogue.spoken，一句一条，按发生时间
+  # 与事件 ID 排序。corpus_sha256 是 artifact 按其规范序列化记录的语料
+  # 内容哈希；本文件是 artifact 里 memory-corpus.jsonl 的逐字节副本，
+  # 两者口径不同，不要拿文件字节哈希去对 corpus_sha256。
+  artifact:
+    file: bench/scenarios/kl-001-corpus.jsonl
+    corpus_sha256: "6c5a54c864a833665bc7f878251672177ad5b166b78a5e35440b102c5795cb1f"
+    end_inclusive: "2026-10-01T21:47:00"
+
+runs:
+  # 每个条件、每个被问角色的有效生成数（首轮口径）。
+  valid_per_character: 20
+
+exclusions:
+  # 失败单独计数、排除后补跑，直到凑满有效数；尝试总数与有效数都进报告。
+  - error: GenerationTruncated
+    action: exclude_and_replace
+  - error: provider_failure
+    action: exclude_and_replace
+
+conditions:
+  - id: pns
+    builder: pns
+  - id: prompt_only
+    builder: prompt_only
+  - id: prompt_rag
+    builder: prompt_rag
+    retriever:
+      # KL-001 首轮的检索配置：确定性中文字符 1/2-gram BM25，全局语料，
+      # 无角色级可见性过滤（刻意如此——带过滤的是另一种架构，另立条件）。
+      type: bm25
+      tokenization: zh_char_ngram_1_2
+      k1: 1.5
+      b: 0.75
+      top_k: 5
+      fields: [speaker_name, text]
+      query: probe_question_only
+
+evaluation:
+  gold: human_labels
+  automated: [auto_markers, router_judge]
+  labels: [leak, no_leak, attribution_error]
