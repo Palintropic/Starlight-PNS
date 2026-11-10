@@ -6,6 +6,8 @@
 
 **Starlight-PNS — an open-source framework for preventing persona drift and maintaining long-horizon character consistency in LLM roleplay agents.**
 
+**Yoake** is the product name of this framework; **Project Nightcord Sanctuary (PNS)** is its internal development codename.
+
 > Also known as: Project Nightcord Sanctuary (PNS)
 
 > *"Technology was never meant to be a privilege. It was meant to be for everyone."*
@@ -29,6 +31,34 @@ The first Runtime Foundation milestone has now been completed. Generator and eva
 Longer-lived capabilities — event propagation, perception/exposure, autonomous agency, planning, persistent world state, subjective memory and lifecycle management — are therefore intended as an evolution of PNS's existing runtime capabilities, not as a replacement for PNS or a parallel duplicate runtime.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current ownership boundaries and long-term architecture direction, and [`docs/DEPLOY_UBUNTU_DOCKER.md`](docs/DEPLOY_UBUNTU_DOCKER.md) to run this on an Ubuntu Server VM with Docker Engine and Compose.
+
+---
+
+## Status at a Glance
+
+| Subsystem | Status | Notes |
+|---|---|---|
+| WorldState runtime | ✅ Implemented | The live source of truth for world reality in both the session runtime and the autonomous persistent world. |
+| Event / Exposure model | ✅ Implemented | All world changes are typed events committed in a single transaction; an event's scope is its propagation boundary, and each character's observations are derived from world state at commit time. |
+| Router judging | ✅ Implemented | Every generated turn is scored on seven dimensions (character facts, psychological mechanism, language structure, media authenticity, task compliance, unsupported invention, timeline boundary); the drift score is the maximum of the judge's self-report and the highest dimension, and diagnoses feed a per-character correction queue. |
+| Agency suite | ✅ Implemented | Typed action catalog with legality preconditions, policy and planning. Wired into the autonomous persistent-world path. |
+| Subjective memory | ✅ Implemented | Six memory record types (working, episodic, semantic, relational, commitment, identity), derived only from a character's own observations. Wired into the autonomous persistent-world path. |
+| Persistent scheduler | ✅ Implemented | Durable due-queue and outbox that advance the persistent world's clock and drive autonomous activity across restarts. |
+| BENCH continuity benchmark | 🧪 Experimental | The BENCH-1 harness is under active development; a first knowledge-leakage experiment (KL-001) has been run ad hoc, but the repeatable harness has not landed yet. |
+| Sekai Times publishing | 🧪 Experimental | An outbound delivery library with an audit-gated outbox (posts are only queued for turns the Router accepted) is written; no automated publisher is wired to it yet. |
+| Router human gold set | 📋 Planned | A human-labelled calibration set for measuring judge reliability (false positives, false negatives, repeatability) is on the roadmap; not yet built. |
+
+## How It Differs
+
+PNS is often mentioned alongside agent-memory platforms, roleplay frontends and persona-simulation research. They solve different problems:
+
+| Dimension | PNS (Yoake) | Letta | SillyTavern | CoSER |
+|---|---|---|---|---|
+| Primary purpose | Research framework: characters live in a closed world while a constitutional judge scores persona drift turn by turn | Framework for building stateful agents with self-managed long-term memory | User-facing chat frontend for roleplaying with LLM characters | Research on simulating established literary characters: dataset, benchmark and method |
+| Drift measurement | Built-in: a seven-dimension Router score for every turn, logged as drift records | — | — | Character fidelity is measured by benchmark evaluation, not per-turn runtime scoring |
+| Knowledge-boundary enforcement | Runtime-enforced: event scope is the propagation boundary, so a character can only perceive what the world state exposes to it | — | Prompt-level only (character cards, lorebooks); not runtime-enforced | Grounded in source texts; character knowledge is tested by evaluation, not enforced at runtime |
+| Correction loop | Judge diagnoses are queued per character and injected into that character's next turn | — | Manual: the user edits or regenerates messages | — |
+| Evaluation | Router scoring plus a human review queue; BENCH-1 continuity benchmark in development | General agent evaluation tooling | — | CoSER benchmark: tests of character knowledge and behaviour against the source books |
 
 ---
 
@@ -262,6 +292,8 @@ PNS does not define its cast in framework code. Characters are discovered from t
 The current reference implementation is `packs/pjsk/`, which registers 20 characters from the PJSK universe across five units. Registration means that a character exists in the pack; it does not necessarily mean that the character has enough research and prompt material to run yet.
 
 Status legend: ✅ ready to run · 🟡 partial metadata, prompt not yet available · ⚪ registered, not yet built out
+
+**Original characters.** Nothing about a pack is specific to an existing franchise. A pack is a directory of data files — a `pack.yaml` manifest, unit definitions, and one directory per character holding a YAML metadata file plus Markdown layers (fact-layer prompt, constitution, judge-only Router reference, and a compat prompt for weaker model routes); see [`packs/`](packs/) and the pack-loading description in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Framework code contains no pack-specific content, so an entirely original cast can be authored in exactly the same format as the reference pack below.
 
 ### 25-ji, Nightcord de.
 
