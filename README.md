@@ -44,7 +44,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current ownership bou
 | Agency suite | ✅ Implemented | Typed action catalog with legality preconditions, policy and planning. Wired into the autonomous persistent-world path. |
 | Subjective memory | ✅ Implemented | Six memory record types (working, episodic, semantic, relational, commitment, identity), derived only from a character's own observations. Wired into the autonomous persistent-world path. |
 | Persistent scheduler | ✅ Implemented | Durable due-queue and outbox that advance the persistent world's clock and drive autonomous activity across restarts. |
-| BENCH continuity benchmark | 🧪 Experimental | The BENCH-1 harness is under active development; a first knowledge-leakage experiment (KL-001) has been run ad hoc, but the repeatable harness has not landed yet. |
+| BENCH continuity benchmark | 🧪 Experimental | The BENCH-1 harness has landed (`bench/`). First results — KL-001 (knowledge leakage, fixed world snapshot, same model and question across conditions): target leakage **0/20 under PNS**, **6/20** for a prompt-only global transcript, **20/20** for shared-memory RAG without visibility filtering. See [KL-001 results](bench/results/KL-001.md). |
 | Sekai Times publishing | 🧪 Experimental | An outbound delivery library with an audit-gated outbox (posts are only queued for turns the Router accepted) is written; no automated publisher is wired to it yet. |
 | Router human gold set | 📋 Planned | A human-labelled calibration set for measuring judge reliability (false positives, false negatives, repeatability) is on the roadmap; not yet built. |
 
@@ -58,7 +58,7 @@ PNS is often mentioned alongside agent-memory platforms, roleplay frontends and 
 | Drift measurement | Built-in: a seven-dimension Router score for every turn, logged as drift records | — | — | Character fidelity is measured by benchmark evaluation, not per-turn runtime scoring |
 | Knowledge-boundary enforcement | Runtime-enforced: event scope is the propagation boundary, so a character can only perceive what the world state exposes to it | — | Prompt-level only (character cards, lorebooks); not runtime-enforced | Grounded in source texts; character knowledge is tested by evaluation, not enforced at runtime |
 | Correction loop | Judge diagnoses are queued per character and injected into that character's next turn | — | Manual: the user edits or regenerates messages | — |
-| Evaluation | Router scoring plus a human review queue; BENCH-1 continuity benchmark in development | General agent evaluation tooling | — | CoSER benchmark: tests of character knowledge and behaviour against the source books |
+| Evaluation | Router scoring plus a human review queue; BENCH-1 continuity benchmark: KL-001 first results reported ([details](bench/results/KL-001.md)) | General agent evaluation tooling | — | CoSER benchmark: tests of character knowledge and behaviour against the source books |
 
 ---
 
