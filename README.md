@@ -18,7 +18,7 @@
 
 PNS is a research framework built around one question: when AI agents live inside a closed world and are monitored turn-by-turn by a constitutional judge, can they hold their persona consistently across many turns, instead of gradually drifting into generic assistant-style responses?
 
-PNS treats persona consistency as a framework problem, not an experiment with a fixed cast. Character data is loaded from a pluggable character pack, and the session runner can rotate through a selected pool of two or more characters. Each character lives in the same offline world container; lore, schedules, relationships, locations, and the current scene together constrain what the agent should know and how it should act. A Router model evaluates every turn against constitutional and character-specific constraints, records a drift score, and can inject a correction into the next turn.
+PNS treats persona consistency as a framework problem, not an experiment with a fixed cast. Character data is loaded from a pluggable character pack, and the session runner can rotate through a selected pool of two or more characters. Each character lives in the same offline world container; lore, schedules, relationships, locations, and the current scene together constrain what the agent should know and how it should act. A Router model evaluates every turn against constitutional and character-specific constraints, records a drift score, and — in the session runtime — can inject a correction into a later turn (the autonomous runtime never injects corrections; its scores only gate output).
 
 The current reference implementation is the PJSK character pack: 20 characters across five units, at varying levels of completion. PJSK is the first test world, not the boundary of the architecture; the longer-term goal is to study the same consistency framework using other fictional or original character packs.
 
@@ -40,7 +40,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current ownership bou
 |---|---|---|
 | WorldState runtime | ✅ Implemented | The live source of truth for world reality in both the session runtime and the autonomous persistent world. |
 | Event / Exposure model | ✅ Implemented | All world changes are typed events committed in a single transaction; an event's scope is its propagation boundary, and each character's observations are derived from world state at commit time. |
-| Router judging | ✅ Implemented | Every generated turn is scored on seven dimensions (character facts, psychological mechanism, language structure, media authenticity, task compliance, unsupported invention, timeline boundary); the drift score is the maximum of the judge's self-report and the highest dimension, and diagnoses feed a per-character correction queue. |
+| Router judging | ✅ Implemented | Every generated turn is scored on seven dimensions (character facts, psychological mechanism, language structure, media authenticity, task compliance, unsupported invention, timeline boundary); the drift score is the maximum of the judge's self-report and the highest dimension, and diagnoses feed a per-character correction queue in the session runtime. In the autonomous runtime the scores only gate output — lines that fail do not enter the world — and no corrections are injected. |
 | Agency suite | ✅ Implemented | Typed action catalog with legality preconditions, policy and planning. Wired into the autonomous persistent-world path. |
 | Subjective memory | ✅ Implemented | Six memory record types (working, episodic, semantic, relational, commitment, identity), derived only from a character's own observations. Wired into the autonomous persistent-world path. |
 | Persistent scheduler | ✅ Implemented | Durable due-queue and outbox that advance the persistent world's clock and drive autonomous activity across restarts. |
@@ -57,7 +57,7 @@ PNS is often mentioned alongside agent-memory platforms, roleplay frontends and 
 | Primary purpose | Research framework: characters live in a closed world while a constitutional judge scores persona drift turn by turn | Framework for building stateful agents with self-managed long-term memory | User-facing chat frontend for roleplaying with LLM characters | Research on simulating established literary characters: dataset, benchmark and method |
 | Drift measurement | Built-in: a seven-dimension Router score for every turn, logged as drift records | — | — | Character fidelity is measured by benchmark evaluation, not per-turn runtime scoring |
 | Knowledge-boundary enforcement | Runtime-enforced: event scope is the propagation boundary, so a character can only perceive what the world state exposes to it | — | Prompt-level only (character cards, lorebooks); not runtime-enforced | Grounded in source texts; character knowledge is tested by evaluation, not enforced at runtime |
-| Correction loop | Judge diagnoses are queued per character and injected into that character's next turn | — | Manual: the user edits or regenerates messages | — |
+| Correction loop | Session runtime only: judge diagnoses are queued per character and injected into that character's next turn; the autonomous runtime injects no corrections, its judge scores only gate what enters the world | — | Manual: the user edits or regenerates messages | — |
 | Evaluation | Router scoring plus a human review queue; BENCH-1 continuity benchmark in development | General agent evaluation tooling | — | CoSER benchmark: tests of character knowledge and behaviour against the source books |
 
 ---
@@ -164,7 +164,7 @@ The Router evaluates each turn with the original request, recent conversation hi
 6. unsupported invention
 7. timeline boundary
 
-The overall drift score cannot be lower than the highest dimension score. Corrections are queued per character and injected only when that same character acts again, preventing cross-character correction leakage during rotation.
+The overall drift score cannot be lower than the highest dimension score. In the session runtime, corrections are queued per character and injected only when that same character acts again, preventing cross-character correction leakage during rotation. The autonomous runtime keeps no correction queue: there, a turn that fails judging is rejected instead of corrected.
 
 This `v3_contextual_multidimensional` Router is the first infrastructure step toward fine-grained acceptance, **not yet a validated autonomous acceptance authority**. Boundary cases still require human review until a human-labeled benchmark establishes false-negative, false-positive, and repeatability performance. Scores from different methodology versions must not be pooled directly.
 
@@ -189,7 +189,7 @@ authoritative `SessionState`, which maintains:
 
 `WorldState` remains an explicit foundational model and is now connected to the
 live runtime, serving as the world-reality authority shared by the session runtime
-and the autonomous runtime. Scene fixtures remain separate until the WorldState phase.
+and the autonomous runtime. The legacy scene fixtures in `pns/world/scenes.py` remain in place as seed content; they are not the world authority.
 
 ---
 
@@ -380,7 +380,7 @@ Stage: Active development — Demo v6 complete
 - [x] Three-layer character methodology (fact/principle/scoring separation)
 - [x] Router dynamic loading of per-character `_router_reference.md`
 - [x] Router context injection (original request, recent history, correction state)
-- [x] Seven-dimension evaluation and per-character correction queues
+- [x] Seven-dimension evaluation and per-character correction queues (session runtime)
 - [x] Session-oriented generation / Router orchestration extracted into `pns.runtime.SessionRuntime`
 - [x] `SessionState` and `WorldState` foundational data models
 - [x] Make `SessionState` authoritative in the live runtime path
