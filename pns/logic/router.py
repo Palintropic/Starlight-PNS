@@ -317,11 +317,52 @@ def _escape_inner_quotes(raw: str) -> str | None:
     return "".join(out) if changed else None
 
 
+_JUDGE_TOP_KEYS = frozenset({
+    "character", "drift_score", "dimensions", "confidence", "drift_type",
+    "reason", "needs_human_review", "correction",
+})
+_JUDGE_DIMENSION_FIELDS = frozenset({"score", "reason"})
+
+
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _pairs_without_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateKey(key)
+        result[key] = value
+    return result
+
+
+def _matches_judge_shape(result) -> bool:
+    """修复后的结果只许有输出格式里列出的字段。
+
+    reason 里引用的原文如果长得像 JSON（`"score":1`），猜错的收尾引号会把它
+    变成真字段。重复的键在解析时就拒绝；这里再挡住格式外冒出来的新字段。
+    """
+    if not isinstance(result, dict) or not set(result) <= _JUDGE_TOP_KEYS:
+        return False
+    dimensions = result.get("dimensions")
+    if dimensions is None:
+        return True
+    if not isinstance(dimensions, dict) or not set(dimensions) <= set(DIMENSION_KEYS):
+        return False
+    return all(
+        isinstance(item, dict) and set(item) <= _JUDGE_DIMENSION_FIELDS
+        for item in dimensions.values()
+    )
+
+
 def _loads_judge_json(raw: str):
     """解析判分 JSON；失败时补转义内部引号再试一次。
 
-    修复没改动任何东西、或者修完仍解析不过，就抛出第一次的解析错误，
-    这样诊断日志里的位置仍然对应原文。修复成功只打一行固定日志，不带原文。
+    修复没改动任何东西、修完仍解析不过、修完出现重复的键或格式外的字段，
+    都抛出第一次的解析错误：这条判分照旧不可用，诊断日志里的位置仍然对应
+    原文。只是"重新解析成功"不能证明修对了 —— 重复键会让后面的值悄悄覆盖
+    前面的分数。修复成功只打一行固定日志，不带原文。
     """
     try:
         return json.loads(raw)
@@ -330,8 +371,10 @@ def _loads_judge_json(raw: str):
         if repaired is None:
             raise
         try:
-            result = json.loads(repaired)
-        except json.JSONDecodeError:
+            result = json.loads(repaired, object_pairs_hook=_pairs_without_duplicates)
+        except (json.JSONDecodeError, _DuplicateKey):
+            raise first from None
+        if not _matches_judge_shape(result):
             raise first from None
         print("[Router] judge repaired category=inner_quotes")
         return result

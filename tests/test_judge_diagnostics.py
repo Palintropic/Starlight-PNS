@@ -135,6 +135,39 @@ class InnerQuoteRepairTests(unittest.TestCase):
         self.assertIn("category=json_malformed", printed)
         self.assertNotIn("repaired", printed)
 
+    def assert_repair_refused(self, raw):
+        result, printed = run_judge(raw)
+        self.assertFalse(result["dimensions_complete"])
+        self.assertEqual(result["drift_type"], "解析失败")
+        self.assertTrue(result["needs_human_review"])
+        self.assertIn("category=json_malformed", printed)
+        self.assertNotIn("repaired", printed)
+
+    def test_quoted_json_in_a_reason_cannot_overwrite_a_score(self):
+        # Review finding on #97: a reason quoting `"score":1` used to re-parse
+        # with a duplicate key, and the later 1 silently replaced the real 8.
+        raw = judge_text_with_bare_quotes(score=1).replace(
+            '"unsupported_invention": {"score": 1, "reason": "没问题"}',
+            '"unsupported_invention": {"score": 8, '
+            '"reason": "包含"台词", "score":1, "reason":"后文""}',
+        )
+        self.assertIn('"score": 8', raw)
+        self.assert_repair_refused(raw)
+
+    def test_quoted_json_cannot_add_fields_outside_the_format(self):
+        raw = judge_text_with_bare_quotes().replace(
+            '"reason": "他说"好"。"',
+            '"reason": "他说"好", "accepted": true, "x":"。"',
+        )
+        self.assert_repair_refused(raw)
+
+    def test_quoted_json_cannot_add_a_dimension_field(self):
+        raw = judge_text_with_bare_quotes().replace(
+            '"timeline_boundary": {"score": 3, "reason": "没问题"}',
+            '"timeline_boundary": {"score": 3, "reason": "说"好", "weight":"0"}',
+        )
+        self.assert_repair_refused(raw)
+
     def test_prompt_asks_for_corner_brackets(self):
         self.assertIn("一律用「」", router.ROUTER_SYSTEM)
         self.assertNotIn("“", router.ROUTER_SYSTEM)
