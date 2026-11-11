@@ -44,7 +44,9 @@ class UnusableCategoryTests(unittest.TestCase):
         self.assert_category('{"reason": ' + CANARY + "}", "json_malformed")
 
     def test_parser_error_and_position_are_reported(self):
-        raw = '{"reason": "他说"' + CANARY + '"", "drift_score": 1}'
+        # The trailing comma keeps it broken after the inner-quote repair, so the
+        # error reported must still be the first one, at the original position.
+        raw = '{"reason": "他说"' + CANARY + '"", "drift_score": 1,}'
         printed = self.assert_category(raw, "json_malformed")
         self.assertIn("error=Expecting ',' delimiter", printed)
         self.assertIn(f"pos={raw.index(CANARY)}", printed)
@@ -76,6 +78,66 @@ class UnusableCategoryTests(unittest.TestCase):
         result, printed = run_judge(json.dumps({"drift_score": 1, "dimensions": complete_dimensions()}))
         self.assertTrue(result["dimensions_complete"])
         self.assertEqual(printed, "")
+
+
+def judge_text_with_bare_quotes(*, score=3, quote_in="task_compliance"):
+    """A full judge response whose `quote_in` reason quotes a line with bare `"`."""
+    parts = []
+    for key in router.DIMENSION_KEYS:
+        reason = '没有照"只输出下一句话"做' if key == quote_in else "没问题"
+        parts.append(f'"{key}": {{"score": {score}, "reason": "{reason}"}}')
+    return (
+        '{"character": "ena", "drift_score": ' + str(score) + ', '
+        '"dimensions": {' + ", ".join(parts) + '}, '
+        '"confidence": 0.8, "drift_type": "无", "reason": "他说"好"。", '
+        '"needs_human_review": false, "correction": null}'
+    )
+
+
+class InnerQuoteRepairTests(unittest.TestCase):
+    def test_production_shape_is_broken_without_the_repair(self):
+        with self.assertRaises(json.JSONDecodeError) as caught:
+            json.loads(judge_text_with_bare_quotes())
+        exc = caught.exception
+        self.assertEqual(exc.msg, "Expecting ',' delimiter")
+        self.assertEqual(exc.doc[exc.pos - 1], '"')
+
+    def test_bare_quotes_in_reasons_are_repaired_and_scored(self):
+        result, printed = run_judge(judge_text_with_bare_quotes(score=6))
+        self.assertTrue(result["dimensions_complete"])
+        self.assertEqual(result["drift_score"], 6)
+        self.assertTrue(result["is_ooc"])
+        self.assertEqual(
+            result["dimensions"]["task_compliance"]["reason"], '没有照"只输出下一句话"做')
+        self.assertEqual(result["reason"], '他说"好"。')
+        self.assertEqual(printed, "[Router] judge repaired category=inner_quotes\n")
+
+    def test_repair_message_carries_no_provider_text(self):
+        raw = judge_text_with_bare_quotes().replace("没问题", CANARY)
+        _, printed = run_judge(raw)
+        self.assertIn("category=inner_quotes", printed)
+        self.assertNotIn(CANARY, printed)
+
+    def test_escaped_quotes_are_left_alone(self):
+        self.assertIsNone(router._escape_inner_quotes('{"reason": "他说\\"好\\"", "a": [1, "x"]}'))
+
+    def test_valid_json_is_never_rewritten(self):
+        raw = json.dumps({"reason": '他说"好"', "n": {"k": ["a", "b"]}}, ensure_ascii=False)
+        self.assertIsNone(router._escape_inner_quotes(raw))
+
+    def test_quote_before_a_comma_inside_a_reason_stays_unusable(self):
+        # Ambiguous: the repair takes `"好",` as the end of the string and the
+        # rest no longer parses. It must stay unusable rather than guess.
+        raw = '{"drift_score": 1, "reason": "他说"好", 然后走了"}'
+        result, printed = run_judge(raw)
+        self.assertFalse(result["dimensions_complete"])
+        self.assertEqual(result["drift_type"], "解析失败")
+        self.assertIn("category=json_malformed", printed)
+        self.assertNotIn("repaired", printed)
+
+    def test_prompt_asks_for_corner_brackets(self):
+        self.assertIn("一律用「」", router.ROUTER_SYSTEM)
+        self.assertNotIn("“", router.ROUTER_SYSTEM)
 
 
 class TruncationTests(unittest.TestCase):

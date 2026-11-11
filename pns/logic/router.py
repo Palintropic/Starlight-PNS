@@ -132,8 +132,8 @@ OOC判断分为两个独立层次，必须分别评估：
 
 层次2：内容具体性层（你可能判断不准）
 - 内容是否真的贴近角色的具体表达习惯
-- 这层需要对PJSK剧情的真实积累，你可能被"形式对了"骗过
-- 当你不确定时，在reason里注明"内容具体性待人工校验"
+- 这层需要对PJSK剧情的真实积累，你可能被「形式对了」骗过
+- 当你不确定时，在reason里注明「内容具体性待人工校验」
 
 【两种助手化漂移的区分】
 类型A：角色语气层面的助手化
@@ -141,13 +141,13 @@ OOC判断分为两个独立层次，必须分别评估：
 → 纠正方式：调整语气和说话结构
 
 类型B：任务执行层面的助手化
-→ 被要求"写一段角色的台词"时，
-  本能地把决定权交还给用户（"发不发随你"）
+→ 被要求「写一段角色的台词」时，
+  本能地把决定权交还给用户（「发不发随你」）
   而不是直接产出完整台词
 → 纠正方式：明确要求直接产出，不留选择给用户
 
 【媒介真实性判断】
-判断输出是"被写出来的对话"还是"被打出来的对话"：
+判断输出是「被写出来的对话」还是「被打出来的对话」：
 
 被写出来的（OOC信号）：
 - 书面化的拟声词表演兴奋（啊哈哈哈哈）
@@ -173,12 +173,12 @@ OOC判断分为两个独立层次，必须分别评估：
 注意：结构性漂移即使内容100%符合性格，也单独触发3-4分
 
 【精细验收维度】
-你必须分别评估以下七个维度，不能让“内容很像角色”掩盖其他问题：
+你必须分别评估以下七个维度，不能让「内容很像角色」掩盖其他问题：
 1. character_facts：身份、关系、既有事实是否正确
 2. psychological_mechanism：动机、触发条件与应对路径是否符合角色
 3. language_structure：句式、密度、停顿和表达收放是否符合角色与场景
 4. media_authenticity：是否像即时对话，而非完整书面稿、总结稿或会议纪要
-5. task_compliance：是否遵守原始任务，例如“只输出下一句话”、指定语言或格式
+5. task_compliance：是否遵守原始任务，例如「只输出下一句话」、指定语言或格式
 6. unsupported_invention：是否擅自补出原输入与既有资料未提供的具体事实
 7. timeline_boundary：是否越过当前时间线或把未发生内容写成既成事实
 
@@ -187,6 +187,7 @@ OOC判断分为两个独立层次，必须分别评估：
 不得用其他维度的低分抵消。
 
 【输出格式（只输出JSON，不要其他内容）】
+所有字符串里引用台词或原文时一律用「」，不要用英文双引号。
 {
   "character": "角色id",
   "drift_score": 数字(0-10),
@@ -273,6 +274,67 @@ def _log_unusable(
     if missing:
         parts.append("missing=" + ",".join(missing))
     print("[Router] judge unusable " + " ".join(parts))
+
+
+_STRING_CLOSERS = frozenset(",:}]")
+
+
+def _escape_inner_quotes(raw: str) -> str | None:
+    """给 JSON 字符串里没转义的双引号补上转义；什么都没改就返回 None。
+
+    判分在 reason 里引用台词时偶尔直接用 `"`，字符串就被提前截断了。在字符串
+    内部，一个裸引号只有在后面第一个非空白字符能接在字符串值后面（`,` `:` `}`
+    `]`）或者已到结尾时，才当作收尾引号；其余裸引号一律转义。调用方仍要重新
+    解析：猜错的结果解析不过，这条判分照旧算不可用，不会硬凑出分数。
+    """
+    out = []
+    in_string = False
+    changed = False
+    i, n = 0, len(raw)
+    while i < n:
+        ch = raw[i]
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+        elif ch == "\\" and i + 1 < n:
+            out.append(raw[i:i + 2])
+            i += 2
+            continue
+        elif ch == '"':
+            j = i + 1
+            while j < n and raw[j] in " \t\r\n":
+                j += 1
+            if j == n or raw[j] in _STRING_CLOSERS:
+                in_string = False
+                out.append(ch)
+            else:
+                out.append('\\"')
+                changed = True
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out) if changed else None
+
+
+def _loads_judge_json(raw: str):
+    """解析判分 JSON；失败时补转义内部引号再试一次。
+
+    修复没改动任何东西、或者修完仍解析不过，就抛出第一次的解析错误，
+    这样诊断日志里的位置仍然对应原文。修复成功只打一行固定日志，不带原文。
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as first:
+        repaired = _escape_inner_quotes(raw)
+        if repaired is None:
+            raise
+        try:
+            result = json.loads(repaired)
+        except json.JSONDecodeError:
+            raise first from None
+        print("[Router] judge repaired category=inner_quotes")
+        return result
 
 
 def _unparsable_category(raw: str) -> str:
@@ -369,7 +431,7 @@ def judge(
                 raw = raw[4:]
         raw = raw.strip()
 
-        result = json.loads(raw)
+        result = _loads_judge_json(raw)
         if not isinstance(result, dict):
             _log_unusable("not_object", chars=len(raw))
 
