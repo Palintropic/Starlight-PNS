@@ -78,6 +78,28 @@ class UnusableCategoryTests(unittest.TestCase):
         self.assertEqual(printed, "")
 
 
+
+class QuoteStyleTests(unittest.TestCase):
+    def test_prompt_asks_for_corner_brackets(self):
+        self.assertIn("一律用「」", router.ROUTER_SYSTEM)
+        self.assertNotIn("“", router.ROUTER_SYSTEM)
+
+    def test_prompt_prose_models_no_bare_double_quotes(self):
+        # The prose used to tell the judge to write "内容具体性待人工校验" in
+        # reason, with ASCII quotes that end a JSON string early. Only the
+        # JSON template at the end may contain them.
+        prose = router.ROUTER_SYSTEM.split("【输出格式")[0]
+        self.assertNotIn('"', prose)
+
+    def test_bare_quotes_are_still_not_guessed_at(self):
+        # Repairing them was tried in #97 and dropped: every heuristic could
+        # turn quoted text into real fields. The verdict stays unusable.
+        raw = '{"drift_score": 6, "reason": "多输出了"台词", "correction":"改用英文""}'
+        result, printed = run_judge(raw)
+        self.assertFalse(result["dimensions_complete"])
+        self.assertIsNone(result["correction"])
+        self.assertIn("category=json_malformed", printed)
+
 class TruncationTests(unittest.TestCase):
     def call(self, api_format, response):
         client = SimpleNamespace(
