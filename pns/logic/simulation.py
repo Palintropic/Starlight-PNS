@@ -7,9 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from pns.world import get_character_system
 from pns.world.context import render_clock, render_session_location
-from pns.world.characters import registry as character_registry
 import pns.logic.router as router_mod
 
 
@@ -34,7 +32,7 @@ def _strip_prefix(text: str, char_name: str) -> str:
 def call_character(
     client, character: str, history: list, context, model: str,
     max_tokens: int, temperature: float, correction: str = None,
-    *, registry=None,
+    *, registry,
 ) -> str:
     """调用角色模型（同步）。
 
@@ -44,34 +42,24 @@ def call_character(
 
     registry 是本次会话锁定的 ContentRegistry 快照：提示词文本和 provider 设定
     都从它取，所以会话跑到一半有人重载配置，这一路调用不会串到新配置上去。
-    传 None 走遗留路径（直接读磁盘上的角色包），只给还没迁移的调用方用。
+    它是必填的：以前传 None 会走遗留路径直接读磁盘上的角色包，那条路已经没有
+    调用方了。
 
     这是**唯一**一处按 provider 分支调用生成模型的地方：研究会话走
     call_character_async()，自主路径由 pns/interfaces/composition.py 接给
     pns/runtime/autonomy/prompt.py 的生成适配器 —— 两条路进来的都是这个函数。
     多写一份分支就会出现"一条路修好了、另一条还在用旧写法"。
     """
+    if registry is None:
+        raise TypeError("call_character 需要本次会话的 ContentRegistry")
     use_compat = "flash-lite" in model.lower()
-    if registry is not None:
-        system = registry.character_system(character, context, compat=use_compat)
-        char_name = registry.character_name(character)
-    else:
-        try:
-            system = get_character_system(character, context, compat=use_compat)
-        except ValueError as e:
-            # 角色存在于 pack 但还没有 prompt（not_ready/partial 且未补内容）
-            raise character_registry.CharacterNotReadyError(character, str(e)) from e
-        meta = character_registry.get_character_metadata(character)
-        char_name = meta.get("name", character)
+    system = registry.character_system(character, context, compat=use_compat)
+    char_name = registry.character_name(character)
 
     if correction:
         system += f"\n\n【注意】{correction}"
 
-    api_format = (
-        registry.models.generation.api_format
-        if registry is not None
-        else router_mod.API_FORMAT
-    )
+    api_format = registry.models.generation.api_format
 
     if api_format == "openai":
         oai_history = [{"role": "system", "content": system}] + history
@@ -108,7 +96,7 @@ def call_character(
 async def call_character_async(
     client, character: str, history: list, context, model: str,
     max_tokens: int, temperature: float, correction: str = None,
-    *, registry=None,
+    *, registry,
 ) -> str:
     """call_character() 的异步包装：模型调用挪到线程池，事件循环不被阻塞。"""
     loop = asyncio.get_event_loop()
