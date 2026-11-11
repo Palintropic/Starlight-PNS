@@ -32,7 +32,7 @@ import os
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hmac import compare_digest
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
@@ -209,6 +209,61 @@ def _normalize_origin(value: str) -> Optional[str]:
     return None if split is None else f"{split[0]}://{split[1]}"
 
 
+SSO_ENV_NAMES = tuple("PNS_SSO_" + suffix for suffix in (
+    "ISSUER", "CLIENT_ID", "CLIENT_SECRET", "REDIRECT_URI", "SESSION_MINUTES",
+))
+
+
+def sso_url_origin(value: str, *, development: bool = False) -> Tuple[str, str, int]:
+    """Validate a configured/provider URL before any request sends credentials."""
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+        allowed = parts.scheme == "https" or (
+            development and parts.scheme == "http"
+            and parts.hostname in ("localhost", "127.0.0.1")
+        )
+        if (not allowed or not parts.hostname or parts.username is not None
+                or parts.password is not None or parts.fragment
+                or any(ord(c) <= 32 or 127 <= ord(c) <= 159 for c in value)
+                or "\\" in value):
+            raise ValueError
+        return parts.scheme, parts.hostname, port or (443 if parts.scheme == "https" else 80)
+    except (ValueError, TypeError):
+        raise DeploymentConfigError("SSO URL 必须是 HTTPS（开发仅允许 HTTP localhost / 127.0.0.1），不能带凭据或 fragment") from None
+
+
+@dataclass(frozen=True)
+class SsoSettings:
+    issuer: str
+    client_id: str
+    client_secret: str = field(repr=False)
+    redirect_uri: str
+    session_minutes: int = 60
+
+    def validate(self, *, development: bool) -> None:
+        if not all(isinstance(v, str) and v and v == v.strip() for v in (
+            self.issuer, self.client_id, self.client_secret, self.redirect_uri,
+        )):
+            raise DeploymentConfigError("PNS_SSO_ISSUER / CLIENT_ID / CLIENT_SECRET / REDIRECT_URI 必须配齐")
+        for value in (self.issuer, self.redirect_uri):
+            sso_url_origin(value, development=development)
+            if urlsplit(value).query:
+                raise DeploymentConfigError("SSO issuer / redirect URI 不能带 query")
+        if type(self.session_minutes) is not int or not 1 <= self.session_minutes <= 720:
+            raise DeploymentConfigError("PNS_SSO_SESSION_MINUTES 必须是 1–720 的整数")
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> Optional["SsoSettings"]:
+        if not any(name in env for name in SSO_ENV_NAMES):
+            return None
+        try:
+            minutes = int(env.get("PNS_SSO_SESSION_MINUTES", "60"))
+        except (ValueError, TypeError):
+            raise DeploymentConfigError("PNS_SSO_SESSION_MINUTES 必须是 1–720 的整数") from None
+        return cls(*(env.get(name, "") for name in SSO_ENV_NAMES[:4]), session_minutes=minutes)
+
+
 @dataclass(frozen=True)
 class DeploymentSettings:
     """一台服务器的部署身份。构造即校验，构造成功即可用。"""
@@ -221,12 +276,15 @@ class DeploymentSettings:
     bootstrap_admin_username: Optional[str] = None
     bootstrap_admin_password_hash: Optional[str] = None
     trusted_origins: Tuple[str, ...] = ()
+    sso: Optional[SsoSettings] = None
 
     def __post_init__(self) -> None:
         if self.mode not in VALID_MODES:
             raise DeploymentConfigError(
                 f"{ENV_MODE} 必须是 {'/'.join(VALID_MODES)} 之一，实际是 {self.mode!r}"
             )
+        if self.sso is not None:
+            self.sso.validate(development=not self.production)
         token = self.admin_token
         if token is not None:
             if token != token.strip():
@@ -334,6 +392,7 @@ class DeploymentSettings:
             ).strip()
             or None,
             trusted_origins=origins,
+            sso=SsoSettings.from_env(env),
         )
 
     def to_public_dict(self) -> Dict[str, object]:
@@ -356,6 +415,9 @@ class SessionRecord:
     principal_id: str
     security_revision: int
     expires_at: float
+    login: str = "password"
+    id_token: Optional[str] = field(default=None, repr=False)
+    ttl: float = DEFAULT_SESSION_TTL_SECONDS
 
 
 class SessionStore:
@@ -390,8 +452,13 @@ class SessionStore:
         ]:
             del self._sessions[sid]
 
-    def issue(self, principal_id: str, security_revision: int) -> str:
+    def issue(
+        self, principal_id: str, security_revision: int, *,
+        login: str = "password", id_token: Optional[str] = None,
+        ttl: Optional[float] = None,
+    ) -> str:
         sid = secrets.token_urlsafe(32)
+        lifetime = self._ttl if ttl is None else float(ttl)
         with self._lock:
             self._sweep_locked()
             while len(self._sessions) >= self._max:
@@ -405,7 +472,8 @@ class SessionStore:
                 session_id=sid,
                 principal_id=str(principal_id),
                 security_revision=int(security_revision),
-                expires_at=self._clock() + self._ttl,
+                expires_at=self._clock() + lifetime,
+                login=login, id_token=id_token, ttl=lifetime,
             )
         return sid
 
@@ -562,6 +630,9 @@ PUBLIC_PATHS = frozenset(
         "/api/auth/session",
         "/api/auth/login",
         "/api/auth/logout",
+        "/api/auth/sso/login",
+        "/api/auth/sso/callback",
+        "/api/auth/sso/finish",
     }
 )
 
@@ -799,7 +870,7 @@ class AdminAuth:
             # 而不是等它自己过期。
             self.sessions.revoke(sid)
             return None
-        return session_principal(account, record.session_id)
+        return session_principal(account, record.session_id, login=record.login)
 
     def _resolve_service_token(self, token: str) -> Optional[RequestPrincipal]:
         """服务账户的 bearer。**每次请求都回库里看一眼**，没有进程内缓存。
@@ -1055,6 +1126,9 @@ __all__ = [
     "PUBLIC_STATIC_PATHS",
     "PUBLIC_STATIC_PREFIXES",
     "SESSION_COOKIE",
+    "SsoSettings",
+    "SSO_ENV_NAMES",
+    "sso_url_origin",
     "SessionRecord",
     "SessionStore",
     "is_public",

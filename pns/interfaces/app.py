@@ -148,6 +148,7 @@ def _open_account_store(settings: DeploymentSettings) -> Optional[AccountStore]:
     wanted = (
         settings.production
         or bool(settings.bootstrap_admin_username)
+        or settings.sso is not None
         or path.exists()
     )
     if not wanted:
@@ -289,6 +290,8 @@ def create_app(
         )
         if auth.settings is not deployment and auth.settings != deployment:
             raise DeploymentConfigError("admin_auth 与 settings 必须是同一份部署设定")
+        if deployment.sso is not None and not auth.required:
+            raise DeploymentConfigError("SSO 要求鉴权门开启；先配置 token 或本地账户")
         if auth.accounts is not store:
             raise DeploymentConfigError("admin_auth 与 account_store 必须是同一个账户库")
     except Exception:
@@ -346,7 +349,13 @@ def create_app(
     app.add_middleware(AdminAuthMiddleware, auth=auth)
 
     app.include_router(health.router)
+    app.state.sso = None
+    if deployment.sso is not None:
+        from .sso import SsoLogin
+        app.state.sso = SsoLogin(deployment.sso, development=not deployment.production)
     app.include_router(auth_routes.router)
+    from .sso import router as sso_router
+    app.include_router(sso_router)
     app.include_router(accounts_api.router)
     app.include_router(review.router)
     app.include_router(config.router)

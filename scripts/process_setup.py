@@ -31,6 +31,7 @@ def secret_env_names():
 
     names = [
         ENV_ADMIN_TOKEN,
+        "PNS_SSO_CLIENT_SECRET",
         # bootstrap 哈希不是明文密码，但它是一份可以拿去离线猜的凭据材料，
         # 没有理由让它出现在任何一条日志里。
         ENV_BOOTSTRAP_PASSWORD_HASH,

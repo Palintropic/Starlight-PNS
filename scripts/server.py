@@ -6,6 +6,7 @@
 #
 # 遮蔽为什么必须在 create_app() 之前：装配过程本身就可能失败并打印异常，而
 # 那条异常路径正是最容易把凭据带出去的地方。
+import logging
 import os
 import sys
 from pathlib import Path
@@ -17,6 +18,10 @@ if str(ROOT_DIR / "scripts") not in sys.path:
 from process_setup import prepare, secret_env_names  # noqa: E402,F401
 
 prepare()
+
+from pns.interfaces.redaction import SsoAccessLogFilter
+
+logging.getLogger("uvicorn.access").addFilter(SsoAccessLogFilter())
 
 from pns.interfaces import create_app
 from pns.interfaces.app import prepare_production_data
