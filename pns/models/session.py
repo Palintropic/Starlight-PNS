@@ -632,15 +632,22 @@ class SessionState:
     ) -> None:
         """Commit a persisted turn and all session-level consequences.
 
-        observations 给出的是这次发言真正被谁感知到了。给了就按它投影角色
-        历史；给 None 是**遗留兼容路径**（把这句话抄进每个角色的历史），
-        只保留给不经过世界模型的纯记录调用方。运行时不走那条路。
+        observations 给出的是这次发言真正被谁感知到了，角色历史按它投影。
+        只有不带运行时历史的纯记录状态（`histories` 为空）可以不给：那种状态
+        只追加 turn，不投影任何东西。带着运行时历史却不给观察会直接报错——
+        以前这里会退回"把这句话抄进每个角色的历史"的全知投影，那条路已经
+        没有生产调用方了，留着只会让漏传观察的新代码悄悄变成全知。
         """
         self.require_writable()
         if turn.character not in self.characters:
             raise ValueError(f"Turn character is not part of session: {turn.character}")
         if bool(self.histories) != bool(self.pending_corrections):
             raise RuntimeError("SessionState runtime state is only partially initialized")
+        if self.histories and observations is None:
+            raise ValueError(
+                "record_turn on a runtime session needs observations; "
+                "the omniscient fallback was removed"
+            )
         expected_turn = len(self.turns) + 1
         if turn.turn_number != expected_turn:
             raise ValueError(
@@ -659,16 +666,6 @@ class SessionState:
         else:
             self.pending_corrections[turn.character] = None
 
-        if observations is None:
-            # 遗留全知投影：没有曝光信息可依据时，退回旧行为。
-            line = f"{turn.char_name}：{turn.response}"
-            self.histories[turn.character].append(
-                {"role": "assistant", "content": line}
-            )
-            for other in self.characters:
-                if other != turn.character:
-                    self.histories[other].append({"role": "user", "content": line})
-            return
 
         # 新路径：角色历史是**观察的投影**，不是按会话名单复制文本。
         # 没有观察的角色，历史里就不会多出这一行。

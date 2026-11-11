@@ -455,7 +455,7 @@ class SessionCommitTests(unittest.TestCase):
         with self.assertRaises(RuntimeError), self.state.atomic_commit():
             self.world.advance_time(60)
             self.state.events._append(_dialogue("e1"))
-            self.state.record_turn(_turn())
+            self.state.record_turn(_turn(), [])
             raise RuntimeError("boom")
 
         self.assertEqual(self.world.to_dict(), before)
@@ -744,13 +744,25 @@ class CommitTimeExposureTests(unittest.TestCase):
 
 
 class LegacyRecordPathTests(unittest.TestCase):
-    """不经过世界模型的纯记录调用方仍然走旧的全知投影。"""
+    """全知投影已经删掉：带运行时历史的会话必须给观察。"""
 
-    def test_record_turn_without_observations_keeps_the_legacy_fan_out(self):
+    def test_a_runtime_session_refuses_a_turn_without_observations(self):
         state = SessionState(
             session_id="s1", scene="gate", characters=["mizuki", "ena"]
         )
         state.initialize_runtime("放学后的校门口")
-        state.record_turn(_turn())
-        self.assertEqual(len(state.histories["ena"]), 2)
+        before = {cid: list(h) for cid, h in state.histories.items()}
+        with self.assertRaises(ValueError):
+            state.record_turn(_turn())
+        # 拒绝发生在任何改动之前：没有半截 turn，也没有被抄进别人历史的台词
+        self.assertEqual(state.turns, [])
+        self.assertEqual(state.histories, before)
         self.assertEqual(len(state.observations), 0)
+
+    def test_a_plain_record_state_still_accepts_a_turn_without_observations(self):
+        state = SessionState(
+            session_id="s1", scene="gate", characters=["mizuki", "ena"]
+        )
+        state.record_turn(_turn())
+        self.assertEqual(len(state.turns), 1)
+        self.assertEqual(state.histories, {})

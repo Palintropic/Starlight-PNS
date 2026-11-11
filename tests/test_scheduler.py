@@ -1575,7 +1575,7 @@ class SessionArchiveTests(unittest.TestCase):
             turn_number=1, character="mizuki", prompt="开场", response="喵",
             timestamp="2026-08-21T23:50:00", char_name="Mizuki", score=2,
         )
-        state.record_turn(turn)
+        state.record_turn(turn, [])
         archive = state.to_dict()
         restored = SessionState.from_dict(archive)
         self.assertEqual(restored.to_dict(), archive)
@@ -1586,7 +1586,8 @@ class SessionArchiveTests(unittest.TestCase):
         PersistentScheduler(state)
         state.record_turn(
             Turn(turn_number=1, character="mizuki", prompt="p", response="r",
-                 timestamp="t")
+                 timestamp="t"),
+            [],
         )
         broken = state.to_dict()
         broken["turns"][0]["turn"] = 5
