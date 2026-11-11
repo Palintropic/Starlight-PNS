@@ -519,7 +519,13 @@ class RevocationTests(ApiTestCase):
             thread.start()
         for thread in threads:
             thread.join(30)
-        self.assertEqual(sorted(outcomes.values()), [200, 409], outcomes)
+        # The loser's outcome depends on timing, and both are safe: if the
+        # winner commits first, the loser's own admin role is already gone and
+        # the auth guard refuses it (401); otherwise it reaches the last-admin
+        # check and gets 409. What must never happen is two 200s.
+        self.assertEqual(len(outcomes), 2, outcomes)
+        self.assertEqual(sorted(outcomes.values())[0], 200, outcomes)
+        self.assertIn(sorted(outcomes.values())[1], (401, 409), outcomes)
         self.assertEqual(self.accounts.enabled_admin_count(), 1)
 
 
