@@ -199,11 +199,10 @@ def _verify_production_accounts(
     if store is not None and store.has_enabled_admin():
         return
     raise DeploymentConfigError(
-        f"生产模式需要至少一个启用着的管理员账户。两条修法："
-        f"(1) 在 .env 里设 {ENV_BOOTSTRAP_USERNAME} 和 "
-        f"{ENV_BOOTSTRAP_PASSWORD_HASH}（哈希用 "
-        f"`python scripts/accounts.py hash-password` 生成），重启即可创建；"
-        f"(2) 对着数据卷跑 `python scripts/accounts.py create-admin`。"
+        "生产模式需要至少一个可用的本地管理员（启用、有密码、不归 SSO 管）。"
+        f"空库可用 {ENV_BOOTSTRAP_USERNAME} 和 {ENV_BOOTSTRAP_PASSWORD_HASH} 创建"
+        "（哈希用 `python scripts/accounts.py hash-password` 生成）；非空库不会重新 bootstrap，"
+        "请对着数据卷跑 `python scripts/accounts.py create-admin`。"
         f"详见 docs/DEPLOY_UBUNTU_DOCKER.md"
     )
 

@@ -29,6 +29,7 @@ from .accounts import (
     MAX_PASSWORD_CHARS,
     AccountStore,
     InvalidPassword,
+    SsoManagedError,
     canonical_username,
 )
 from .authz import VIA_SESSION, RequestPrincipal, current_principal
@@ -219,6 +220,9 @@ def post_password(
                 ),
             },
         )
+    if store.sso_identity(principal.principal_id) is not None:
+        raise HTTPException(409, {"category": "sso_managed",
+                                  "message": "在 Palintropic 账户里管理密码"})
     if payload.new_password == payload.current_password:
         raise HTTPException(
             400,
@@ -228,6 +232,8 @@ def post_password(
         store.change_own_password(
             principal.principal_id, payload.current_password, payload.new_password
         )
+    except SsoManagedError as e:
+        raise HTTPException(409, {"category": e.category, "message": str(e)}) from e
     except InvalidPassword as e:
         raise HTTPException(400, {"category": e.category, "message": str(e)}) from e
     except KeyError as e:  # pragma: no cover - 会话刚刚才验过这个主体
