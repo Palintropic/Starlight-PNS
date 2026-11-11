@@ -1,6 +1,6 @@
 # pns/world/__init__.py
-from .facts import WORLD_FACTS
-from .scenes import SCENES, DEFAULT_SCENE
+# 场景与世界事实（scenes.py / facts.py）不在这里导出：它们是数据文件，由
+# ContentRegistry 经 data_module 求值读取，import 这个包时不该顺手把它们算一遍。
 from .channels import DEFAULT_CHANNELS, build_default_channel_registry
 from .context import render_clock, render_session_location, render_world_context
 from .locations import DEFAULT_LOCATIONS, build_default_location_graph
@@ -14,7 +14,6 @@ from .characters import get_character_prompt, get_character_prompt_compat, get_c
 from pns.models.world_state import WorldState
 
 __all__ = [
-    'WORLD_FACTS', 'SCENES', 'DEFAULT_SCENE',
     'DEFAULT_LOCATIONS', 'build_default_location_graph',
     'DEFAULT_CHANNELS', 'build_default_channel_registry',
     'SCENE_WORLD_MAP', 'SceneMappingError', 'build_initial_world_state', 'get_scene_mapping',
