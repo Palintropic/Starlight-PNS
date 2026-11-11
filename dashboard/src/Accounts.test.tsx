@@ -321,3 +321,21 @@ describe('用户管理', () => {
     expect(screen.getByText('accord-desktop 已被删除，这次换 token 的结果作废')).toBeTruthy();
   });
 });
+
+it('SSO accounts display identity metadata and local enable control, with managed role/password', async () => {
+  stubList([account({ sso: { email: 'display@example.com', display_name: 'Display Name', last_login_at: '2026-11-11' } })]);
+  vi.spyOn(api, 'fetchAuditRecords').mockResolvedValue({ records: [] });
+  const setEnabled = vi.spyOn(api, 'setAccountEnabled').mockResolvedValue(account({ enabled: false }));
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
+  render(<Accounts />);
+  await flush();
+  const row = screen.getByText('mizuki').closest('tr')!;
+  expect(within(row).getByText(/Display Name/)).toBeTruthy();
+  expect(within(row).getByText(/display@example.com/)).toBeTruthy();
+  expect(within(row).getByText('在 Palintropic 账户里管理')).toBeTruthy();
+  expect(within(row).queryByRole('combobox')).toBeNull();
+  expect(within(row).queryByRole('button', { name: '重置密码' })).toBeNull();
+  fireEvent.click(within(row).getByRole('button', { name: '停用' }));
+  await flush();
+  expect(setEnabled).toHaveBeenCalledWith('p-1', false);
+});

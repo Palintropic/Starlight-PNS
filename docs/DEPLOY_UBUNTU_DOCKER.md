@@ -443,7 +443,7 @@ docker compose run --rm --entrypoint "" app python scripts/accounts.py audit --l
 
 ### 8.4 最后一个管理员
 
-最后一个启用着的管理员**不能**被停用或降级，API 会返回 409 `last_admin`，并发的两次降级也
+最后一个可用的本地管理员（启用、有密码、不归 SSO 管）**不能**被停用或降级，API 会返回 409 `last_admin`，并发的两次降级也
 只有一个能成功（裁决发生在数据库写锁之下）。真把自己锁在门外时，还有两条路：`PNS_ADMIN_TOKEN`
 的 bearer 路径，以及需要文件系统访问的 `scripts/accounts.py`。
 
@@ -453,7 +453,7 @@ docker compose run --rm --entrypoint "" app python scripts/accounts.py audit --l
 那套备份覆盖。它不在镜像里，重建容器不会动它。位置可以用 `PNS_ACCOUNTS_DB` 改，改之前先确认
 新位置也在本地文件系统的持久卷上。
 
-里面有两张表：账户（只存 Argon2id 哈希）和安全审计。审计记录登录成功/失败类别、登出、改密码、
+账户库保存账户（密码为 Argon2id 哈希、服务 token 为摘要）、安全审计，以及 AUTH-2 的 `sso_identities` 映射表。审计记录登录成功/失败类别、登出、改密码、
 建号、改角色、停用启用和重置密码；**记录里没有密码、没有哈希、没有 bearer 值，连尝试过的用户名
 都不记**——把密码打进用户名框每天都在发生，记下来就等于把明文写进磁盘。
 
@@ -483,6 +483,67 @@ PNS_TRUSTED_ORIGINS=https://amia-nightcord-ubuntu.lan,https://192.168.3.115
 
 升级到 AUTH-1 之后，值得在浏览器里**真的点一次**写操作（比如按一下「重新加载配置」）：
 403 `cross_origin` 就是代理没透传 Host，按上面两条之一修。
+
+### 8.7 Palintropic SSO（AUTH-2）
+
+SSO 是可选的网页登录方式；本地密码、break-glass bearer、服务 token 都保留。
+生产启用前核验本地管理员的密码确实能登录。`.env.example` 的五项全部注释时关闭；
+issuer / client id / secret / redirect URI 必须配齐，会话分钟数可省略，默认 60，范围 1–720。
+只配置部分、空值、非 HTTPS URL、SSO 配齐而鉴权门关闭，都会拒绝启动。
+issuer 按 discovery 原文填写（`https://account.palintropic.cn/`，末尾 `/` 不可省略）。
+
+固定回调：`https://amia-nightcord-ubuntu.lan/api/auth/sso/callback`；登出回同一 origin 的 `/`。
+从 IP 等别名页面发起会先撤销请求携带的该地址会话，再跳规范地址。第三个地址上的会话、
+跨站直达别名而没带 Strict Cookie 的会话不在这次撤销范围内。
+反代需透传原始 Host（含非默认端口时使用 `$http_host`），生产设置 `PNS_SESSION_COOKIE_SECURE=true`。
+SSO 请求不依赖上游识别 HTTPS，地址只从配置拼出。
+
+身份只按 `(issuer, sub)` 绑定，不按邮箱关联本地账户；`pns:admin/operator/observer` 必须恰有一个。
+SSO 账户在 PNS 可停用/启用，角色和密码在 Palintropic 管理。PNS 停用立即阻止新请求；
+SSO ungrant/revoke 最晚在会话寿命后生效，长连接另有 5 秒缓存 + 2 秒复核超时。
+正在进行的模型调用不打断，返回后经复核才提交；连接关闭还需等待调用返回。
+世界自主运行不随操作者会话停止。无 refresh token、无 back-channel logout。
+SSO 故障不会阻止启动或本地登录；登录框不自动跳 SSO。登出先撤本地会话，
+拿不到 IdP 登出地址时提示“PNS 已退出，Palintropic 账户可能还登着”；已跳到 IdP 后的网络错误需在浏览器检查。
+
+**访问日志必须同时处理应用和反代。** `scripts/server.py` 过滤 Uvicorn 的 `/api/auth/sso/` query。
+nginx 默认 `$request` 含 code/state/ticket；在 `http {}` 中配置如下，并让 PNS 的 server 使用此格式，
+检查继承及 location 级日志，避免另有一份 combined/debug 日志留下原始 URL：
+
+```nginx
+map $uri $pns_log_target {
+    ~^/api/auth/sso/ $uri;
+    default $request_uri;
+}
+log_format pns_auth_safe '$remote_addr - $remote_user [$time_local] '
+                         '"$request_method $pns_log_target $server_protocol" '
+                         '$status $body_bytes_sent';
+# 放在 PNS 的 server {} 中；不要同时启用含 $request / $request_uri 的其他访问日志。
+access_log /var/log/nginx/pns.access.log pns_auth_safe;
+```
+
+此格式刻意省略 Referer；否则旧的自定义格式可能经 Referer 再记一次票。callback/finish 也返回
+`no-store` 和 `no-referrer`。反代配置及实际日志仍需部署验收，不能由应用测试替代。
+
+待部署者实测（本地假端点测试不代表以下通过）：
+
+- 在隔离的本机 Hydra/Kratos compose 注册 `.lan` HTTPS 回调，确认 Hydra 接受；不改真实 IdP。
+- Chrome、Safari 各从本地管理员切 SSO：中转页 meta refresh 的 finish 请求携带旧 Strict Cookie，
+  新 Cookie 存下且跳转后已登录；用保存的旧 sid 调 `/api/auth/session` 必须未登录。
+  若任一浏览器不成立，再按设计改为用户点击的 POST 领取表单。
+- 两浏览器从 IP 页面发起，核验发起地址与规范地址上旧 sid 均失效；第三地址不作此承诺。
+- 真浏览器 passkey 回来为 `via: session / login: sso`；ungrant 后会话到期重登得到 `no_role`。
+- 实际 nginx/Uvicorn 日志无 code、state、ticket，且确实点一次写操作（§8.6）。
+
+容量是 256 条十分钟 pending，满了拒绝新流程，不驱逐在途登录。
+这不防饥饿：能访问入口的客户端可持续占满，后续需可信入口来源控制；本地登录不受此表影响。
+每请求可见绑定 Cookie 达到 8 张时清理后重开，重叠请求可短暂超过阈值。
+
+回滚：只新增映射表，schema 版本仍为 1，旧镜像能开库。旧镜像不能用 SSO，但会把 SSO 行当无密码人类账户，
+且仍能给它设密码、改角色。新镜像拒绝这些行的密码登录，下一次 SSO 登录覆盖角色。
+回滚前验证本地管理员密码；回滚期间不要停用/降级本地管理员（旧镜像会误把 SSO 管理员算作保底）。
+换回新镜像时若本地保底已丢，启动会失败；非空库不会 bootstrap，使用数据卷上的
+`scripts/accounts.py create-admin` 修复。账户库照常随数据卷备份。
 
 ## 9. 日常操作
 
@@ -901,7 +962,7 @@ docker compose logs --tail 30
   反向代理之后的来源地址未必可信，按来源分桶只会给攻击者一个绕过维度。代价是任何能碰到这个
   端口的人都能让某个账户卡一分钟——所以默认只绑回环。用 `Authorization: Bearer` 的 curl 路径
   不受节流影响，运维脚本不会被这一条挡住。
-- **没有 OAuth/OIDC/SSO、没有 MFA/WebAuthn、没有邮箱验证或自助找回密码。** 忘了密码的正路是
+- **可选 OIDC/SSO 见 §8.7；本地密码入口没有 MFA/WebAuthn、邮箱验证或自助找回密码。** 忘了密码的正路是
   找管理员重置；管理员全丢了的正路是 `PNS_ADMIN_TOKEN` 或 `scripts/accounts.py`（都需要对这台
   机器的访问权）。
 - **账户是控制面主体，不是世界里的角色。** 用户名叫 mizuki 不会让谁变成那个 mizuki，也不会让

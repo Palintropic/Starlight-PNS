@@ -376,10 +376,14 @@ export default function Accounts() {
                 <tr key={account.principal_id} className={account.enabled ? '' : 'off'}>
                   <td>
                     {account.username}
+                    {account.sso ? <div className="accounts-hint">Palintropic · {account.sso.display_name} · {account.sso.email}</div> : null}
                     {isMe ? <span className="accounts-self">（你）</span> : null}
                   </td>
                   <td>
-                    <select
+                    {account.sso ? <>
+                      <span>{ROLE_LABEL[account.role] ?? account.role}</span>
+                      <div className="accounts-hint">在 Palintropic 账户里管理</div>
+                    </> : <select
                       value={account.role}
                       disabled={rowBusy}
                       onChange={(e) => onRole(account, e.target.value)}
@@ -387,7 +391,7 @@ export default function Accounts() {
                       {ROLES.map((role) => (
                         <option key={role} value={role}>{ROLE_LABEL[role]}</option>
                       ))}
-                    </select>
+                    </select>}
                   </td>
                   <td>
                     <span className={`accounts-badge ${account.enabled ? 'ok' : 'off'}`}>
@@ -403,13 +407,13 @@ export default function Accounts() {
                     >
                       {account.enabled ? '停用' : '启用'}
                     </button>
-                    <button
+                    {!account.sso && <button
                       className="btn"
                       disabled={rowBusy}
                       onClick={() => onReset(account)}
                     >
                       重置密码
-                    </button>
+                    </button>}
                   </td>
                 </tr>
               );
