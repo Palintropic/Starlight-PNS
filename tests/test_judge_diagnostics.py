@@ -168,6 +168,24 @@ class InnerQuoteRepairTests(unittest.TestCase):
         )
         self.assert_repair_refused(raw)
 
+    def test_double_quoted_scores_cannot_fall_back_to_zero(self):
+        # Second review finding on #97: `""8""` was repaired into the string
+        # `"8"` with quotes, which _bounded_score turned into 0 and accepted.
+        raw = judge_text_with_bare_quotes(score=0).replace(
+            '"drift_score": 0', '"drift_score": ""8""'
+        ).replace(
+            '"unsupported_invention": {"score": 0,',
+            '"unsupported_invention": {"score": ""8"",',
+        )
+        self.assertIn('""8""', raw)
+        self.assert_repair_refused(raw)
+
+    def test_a_quoted_boolean_cannot_clear_human_review(self):
+        raw = judge_text_with_bare_quotes().replace(
+            '"needs_human_review": false', '"needs_human_review": ""true""'
+        )
+        self.assert_repair_refused(raw)
+
     def test_prompt_asks_for_corner_brackets(self):
         self.assertIn("一律用「」", router.ROUTER_SYSTEM)
         self.assertNotIn("“", router.ROUTER_SYSTEM)

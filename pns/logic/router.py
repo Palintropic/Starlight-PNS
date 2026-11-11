@@ -337,23 +337,47 @@ def _pairs_without_duplicates(pairs):
     return result
 
 
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+_JUDGE_TOP_TYPES = {
+    "drift_score": _is_number,
+    "confidence": _is_number,
+    "needs_human_review": lambda v: isinstance(v, bool),
+    "character": lambda v: isinstance(v, str),
+    "drift_type": lambda v: isinstance(v, str),
+    "reason": lambda v: isinstance(v, str),
+    "correction": lambda v: v is None or isinstance(v, str),
+}
+
+
 def _matches_judge_shape(result) -> bool:
-    """修复后的结果只许有输出格式里列出的字段。
+    """修复后的结果只许有输出格式里列出的字段，而且每个值的类型要对。
 
     reason 里引用的原文如果长得像 JSON（`"score":1`），猜错的收尾引号会把它
     变成真字段。重复的键在解析时就拒绝；这里再挡住格式外冒出来的新字段。
+    类型也要查：`"score": ""8""` 修完是字符串 `"8"`（带引号），换算分数时会
+    落到默认的 0，本该拒绝的台词就被放行了。
     """
     if not isinstance(result, dict) or not set(result) <= _JUDGE_TOP_KEYS:
         return False
+    for key, check in _JUDGE_TOP_TYPES.items():
+        if key in result and not check(result[key]):
+            return False
     dimensions = result.get("dimensions")
     if dimensions is None:
         return True
     if not isinstance(dimensions, dict) or not set(dimensions) <= set(DIMENSION_KEYS):
         return False
-    return all(
-        isinstance(item, dict) and set(item) <= _JUDGE_DIMENSION_FIELDS
-        for item in dimensions.values()
-    )
+    for item in dimensions.values():
+        if not isinstance(item, dict) or not set(item) <= _JUDGE_DIMENSION_FIELDS:
+            return False
+        if "score" in item and not _is_number(item["score"]):
+            return False
+        if "reason" in item and not isinstance(item["reason"], str):
+            return False
+    return True
 
 
 def _loads_judge_json(raw: str):
