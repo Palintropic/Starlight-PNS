@@ -1043,34 +1043,27 @@ class WorldControlPlane:
                 for loc in ws.locations
             ]
             channels = [{"id": ch.channel_id, "name": ch.name} for ch in ws.channels]
-            # 从后往前取最近 limit 条非时间推进事件。时间推进会刷屏，而且"这段
-            # 时间没发生事"本来就能从相邻两条事件的间隔里看出来。
-            all_events = state.events.events()
-            recent = []
-            for seq in range(len(all_events) - 1, -1, -1):
-                event = all_events[seq]
-                if event.type is EventType.WORLD_TIME_ADVANCED:
-                    continue
-                recent.append(
-                    {
-                        "seq": seq,
-                        "event_id": event.event_id,
-                        "type": event.type.value,
-                        "at": event.occurred_at.isoformat(),
-                        "scope": event.scope.value,
-                        "actor": event.actor_id,
-                        "participants": list(event.participants),
-                        "location_id": event.location_id,
-                        "channel_id": event.channel_id,
-                        "payload": event.to_dict()["payload"],
-                    }
-                )
-                if len(recent) >= limit:
-                    break
-            recent.reverse()
+            # 最近 limit 条非时间推进事件。时间推进会刷屏，而且"这段时间没发生事"
+            # 本来就能从相邻两条事件的间隔里看出来。走 EventStore 的索引，不拷整份历史。
+            recent = [
+                {
+                    "seq": seq,
+                    "event_id": event.event_id,
+                    "type": event.type.value,
+                    "at": event.occurred_at.isoformat(),
+                    "scope": event.scope.value,
+                    "actor": event.actor_id,
+                    "participants": list(event.participants),
+                    "location_id": event.location_id,
+                    "channel_id": event.channel_id,
+                    "payload": event.to_dict()["payload"],
+                }
+                for seq, event in state.events.recent_non_clock(limit)
+            ]
             clock = ws.clock.isoformat()
-            total_events = len(all_events)
-            first_event_at = all_events[0].occurred_at.isoformat() if all_events else None
+            total_events = len(state.events)
+            first = state.events.first()
+            first_event_at = first.occurred_at.isoformat() if first is not None else None
             occupancy_checked_from = ws.metadata.get(SPEECH_OCCUPANCY_CHECKED_FROM)
 
         return {
