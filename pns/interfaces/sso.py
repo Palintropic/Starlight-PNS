@@ -12,6 +12,8 @@ import html
 from http.client import HTTPException as HttpTransportError
 import json
 import math
+import logging
+from functools import wraps
 import secrets
 import threading
 import time
@@ -37,6 +39,9 @@ CACHE_TTL = 3600
 PENDING_TTL = 600
 TICKET_TTL = 30
 HTTP_TIMEOUT = 5
+SSO_CONCURRENCY = 4
+FETCH_BACKOFF = 30
+logger = logging.getLogger(__name__)
 
 
 class SsoError(Exception):
@@ -96,6 +101,8 @@ class Provider:
         self._discovery_until = 0.0
         self._jwks = None
         self._jwks_until = 0.0
+        self._fetching = set()
+        self._retry_after = {"discovery": 0.0, "jwks": 0.0}
 
     def _json(self, url: str, *, data=None, headers=None) -> dict:
         request = UrlRequest(
@@ -115,11 +122,43 @@ class Provider:
         except (HTTPError, URLError, OSError, HttpTransportError, ValueError):
             raise SsoError("idp_unavailable") from None
 
-    def discovery(self) -> dict:
+    def _cached_fetch(self, kind, fetch, *, force=False):
+        # Reserve one fetch under the lock, then release it before any I/O.
         with self._lock:
-            if self._discovery is not None and self.clock() < self._discovery_until:
-                return self._discovery
+            cached = getattr(self, "_" + kind)
+            if (
+                not force
+                and cached is not None
+                and self.clock() < getattr(self, "_" + kind + "_until")
+            ):
+                return cached
+            if kind in self._fetching:
+                raise SsoError("sso_busy")
+            if self.clock() < self._retry_after[kind]:
+                raise SsoError("idp_unavailable")
+            self._fetching.add(kind)
             started = self.clock()
+        try:
+            value = fetch()
+            with self._lock:
+                setattr(self, "_" + kind, value)
+                until = started + CACHE_TTL
+                if kind == "jwks":
+                    until = min(until, self._discovery_until)
+                else:
+                    self._jwks, self._jwks_until = None, 0.0
+                setattr(self, "_" + kind + "_until", until)
+            return value
+        except SsoError:
+            with self._lock:
+                self._retry_after[kind] = self.clock() + FETCH_BACKOFF
+            raise
+        finally:
+            with self._lock:
+                self._fetching.remove(kind)
+
+    def discovery(self) -> dict:
+        def fetch():
             doc = self._json(
                 self.settings.issuer.rstrip("/") + "/.well-known/openid-configuration"
             )
@@ -144,48 +183,42 @@ class Provider:
                         raise SsoError("idp_unavailable")
             except DeploymentConfigError:
                 raise SsoError("idp_unavailable") from None
-            self._discovery, self._discovery_until = doc, started + CACHE_TTL
-            self._jwks, self._jwks_until = None, 0.0
             return doc
 
+        return self._cached_fetch("discovery", fetch)
+
     def _signing_key(self, kid: str):
-        with self._lock:
-            doc = self.discovery()
+        doc = self.discovery()
 
-            def fetch():
-                started = self.clock()
-                jwks = self._json(doc["jwks_uri"])
-                if not isinstance(jwks.get("keys"), list):
+        def fetch():
+            jwks = self._json(doc["jwks_uri"])
+            if not isinstance(jwks.get("keys"), list):
+                raise SsoError("token_invalid")
+            return jwks["keys"]
+
+        keys = self._cached_fetch("jwks", fetch)
+        for attempt in range(2):
+            matches = [
+                key for key in keys if isinstance(key, dict) and key.get("kid") == kid
+            ]
+            if matches:
+                if len(matches) != 1:
                     raise SsoError("token_invalid")
-                self._jwks = jwks["keys"]
-                self._jwks_until = min(started + CACHE_TTL, self._discovery_until)
-
-            if self._jwks is None or self.clock() >= self._jwks_until:
-                fetch()
-            for attempt in range(2):
-                matches = [
-                    key
-                    for key in self._jwks
-                    if isinstance(key, dict) and key.get("kid") == kid
-                ]
-                if matches:
-                    if len(matches) != 1:
-                        raise SsoError("token_invalid")
-                    key = matches[0]
-                    if (
-                        key.get("kty") != "RSA"
-                        or key.get("alg", "RS256") != "RS256"
-                        or key.get("use", "sig") != "sig"
-                        or ("key_ops" in key and "verify" not in key["key_ops"])
-                    ):
-                        raise SsoError("token_invalid")
-                    try:
-                        return jwt.PyJWK.from_dict(key, algorithm="RS256").key
-                    except (jwt.PyJWTError, ValueError, TypeError, KeyError):
-                        raise SsoError("token_invalid") from None
-                if attempt == 0:
-                    fetch()  # unknown kid: at most one additional refresh
-            raise SsoError("token_invalid")
+                key = matches[0]
+                if (
+                    key.get("kty") != "RSA"
+                    or key.get("alg", "RS256") != "RS256"
+                    or key.get("use", "sig") != "sig"
+                    or ("key_ops" in key and "verify" not in key["key_ops"])
+                ):
+                    raise SsoError("token_invalid")
+                try:
+                    return jwt.PyJWK.from_dict(key, algorithm="RS256").key
+                except (jwt.PyJWTError, ValueError, TypeError, KeyError):
+                    raise SsoError("token_invalid") from None
+            if attempt == 0:
+                keys = self._cached_fetch("jwks", fetch, force=True)
+        raise SsoError("token_invalid")
 
     def verify(self, token: str, nonce: str) -> dict:
         try:
@@ -301,6 +334,7 @@ class Ticket:
     issuer: str
     subject: str
     role: str
+    issued_at: float
     email: Optional[str]
     name: Optional[str]
     id_token: str
@@ -336,6 +370,17 @@ class SsoLogin:
         self.provider = Provider(settings, development=development)
         self.pending = OneTimeTable(limit=256)
         self.tickets = OneTimeTable()
+        self.slots = threading.BoundedSemaphore(SSO_CONCURRENCY)
+        self._counter_lock = threading.Lock()
+        self.unmatched_failures = {"callback": 0, "finish": 0}
+
+    def count_unmatched(self, stage):
+        # Fixed keys and saturating integers; logarithmic logs contain no input.
+        with self._counter_lock:
+            count = min(self.unmatched_failures[stage] + 1, 2**63 - 1)
+            self.unmatched_failures[stage] = count
+        if count & (count - 1) == 0:
+            logger.warning("SSO unmatched %s state_invalid count=%d", stage, count)
 
 
 def _service(request: Request) -> SsoLogin:
@@ -362,9 +407,11 @@ def _clear_binding(response, auth, cookie_name):
         )
 
 
-def _failure(request, category, stage=None, cookie_name=None):
+def _failure(request, category, stage=None, cookie_name=None, *, matched=True):
     auth = _auth(request)
-    if stage is not None and auth.accounts is not None:
+    if stage is not None and not matched:
+        _service(request).count_unmatched(stage)
+    if stage is not None and matched and auth.accounts is not None:
         auth.accounts.record_event(
             "sso.login_failed", "failure", detail={"stage": stage, "category": category}
         )
@@ -373,7 +420,22 @@ def _failure(request, category, stage=None, cookie_name=None):
     return response
 
 
+def _bounded_entry(func):
+    @wraps(func)
+    def bounded(request: Request):
+        service = _service(request)
+        if not service.slots.acquire(blocking=False):
+            return _failure(request, "sso_busy")
+        try:
+            return func(request)
+        finally:
+            service.slots.release()
+
+    return bounded
+
+
 @router.get("/login")
+@_bounded_entry
 def login(request: Request):
     service = _service(request)
     auth = _auth(request)
@@ -455,6 +517,7 @@ def login(request: Request):
 
 
 @router.get("/callback")
+@_bounded_entry
 def callback(request: Request):
     service = _service(request)
     state = request.query_params.get("state", "")
@@ -483,6 +546,7 @@ def callback(request: Request):
                 service.settings.issuer,
                 claims["sub"],
                 role,
+                claims["iat"],
                 claims.get("email") if isinstance(claims.get("email"), str) else None,
                 claims.get("name") if isinstance(claims.get("name"), str) else None,
                 token,
@@ -504,10 +568,13 @@ def callback(request: Request):
             )
         )
     except SsoError as exc:
-        return _failure(request, exc.category, "callback", cookie_name)
+        return _failure(
+            request, exc.category, "callback", cookie_name, matched=pending is not None
+        )
 
 
 @router.get("/finish")
+@_bounded_entry
 def finish(request: Request):
     service = _service(request)
     auth = _auth(request)
@@ -525,6 +592,7 @@ def finish(request: Request):
             ticket.issuer,
             ticket.subject,
             ticket.role,
+            issued_at=ticket.issued_at,
             email=ticket.email,
             display_name=ticket.name,
         )
@@ -550,5 +618,9 @@ def finish(request: Request):
         return response
     except (SsoError, AccountConflict, AccountDisabled) as exc:
         return _failure(
-            request, exc.category, "finish", ticket.cookie_name if ticket else None
+            request,
+            exc.category,
+            "finish",
+            ticket.cookie_name if ticket else None,
+            matched=ticket is not None,
         )

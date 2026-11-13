@@ -31,7 +31,9 @@ class SsoAccountTests(unittest.TestCase):
         self.admin = self.store.create_human("local-admin", ADMIN_PASSWORD, "admin")
 
     def link(self, role="admin", **kw):
-        return self.store.link_or_sync_sso(ISSUER, SUB, role, **kw)
+        return self.store.link_or_sync_sso(
+            ISSUER, SUB, role, issued_at=kw.pop("issued_at", 100), **kw
+        )
 
     def test_link_sync_metadata_and_revision(self):
         p, first = self.link(email="display@example.com", display_name="Display")
@@ -114,7 +116,7 @@ class SsoAccountTests(unittest.TestCase):
         self.addCleanup(second.close)
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
             futures = [
-                pool.submit(s.link_or_sync_sso, ISSUER, SUB, "observer")
+                pool.submit(s.link_or_sync_sso, ISSUER, SUB, "observer", issued_at=100)
                 for s in (self.store, second)
             ]
             outcomes = [f.result() for f in futures]
@@ -168,3 +170,37 @@ class SsoAccountTests(unittest.TestCase):
             self.assertEqual(
                 len(db.execute("PRAGMA table_info(principals)").fetchall()), 10
             )
+
+    def test_legacy_identity_migrates_and_first_timestamp_sets_floor(self):
+        p, _ = self.link()
+        self.store.close()
+        with sqlite3.connect(self.path) as db:
+            db.execute("ALTER TABLE sso_identities DROP COLUMN issued_at")
+        self.store = cheap_store(self.path)
+        self.addCleanup(self.store.close)
+        with sqlite3.connect(self.path) as db:
+            self.assertIsNone(
+                db.execute("SELECT issued_at FROM sso_identities").fetchone()[0]
+            )
+        synced, first = self.link("observer", issued_at=50)
+        self.assertFalse(first)
+        self.assertEqual(synced.role, "observer")
+        with self.assertRaises(AccountConflict) as caught:
+            self.link(issued_at=49)
+        self.assertEqual(caught.exception.category, "sso_stale")
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(
+                db.execute("SELECT issued_at FROM sso_identities").fetchone()[0], 50
+            )
+        # Reopening the migrated database is idempotent and retains the floor.
+        again = cheap_store(self.path)
+        self.addCleanup(again.close)
+        with self.assertRaises(AccountConflict):
+            again.link_or_sync_sso(ISSUER, SUB, "admin", issued_at=49)
+
+    def test_equal_authorization_timestamp_is_allowed(self):
+        p, _ = self.link(issued_at=100)
+        updated, first = self.link("observer", issued_at=100)
+        self.assertFalse(first)
+        self.assertEqual(updated.role, "observer")
+        self.assertEqual(updated.security_revision, p.security_revision + 1)

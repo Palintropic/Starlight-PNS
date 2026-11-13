@@ -123,6 +123,10 @@ class AccountConflict(AccountError):
     category = "account_conflict"
 
 
+class SsoStale(AccountConflict):
+    category = "sso_stale"
+
+
 class LastAdminError(AccountError):
     category = "last_admin"
 
@@ -307,6 +311,7 @@ CREATE TABLE IF NOT EXISTS sso_identities (
     display_name TEXT,
     linked_at TEXT NOT NULL,
     last_login_at TEXT NOT NULL,
+    issued_at REAL,
     PRIMARY KEY (issuer, subject)
 );
 """
@@ -365,6 +370,15 @@ class AccountStore:
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.execute("PRAGMA journal_mode=DELETE")
             self._db.executescript(_SCHEMA)
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {r["name"] for r in self._db.execute("PRAGMA table_info(sso_identities)")}
+                if "issued_at" not in columns:
+                    self._db.execute("ALTER TABLE sso_identities ADD COLUMN issued_at REAL")
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
             row = self._db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
@@ -592,7 +606,7 @@ class AccountStore:
 
     def link_or_sync_sso(
         self, issuer: str, subject: str, role: str,
-        *, email: Optional[str] = None, display_name: Optional[str] = None,
+        *, issued_at: float, email: Optional[str] = None, display_name: Optional[str] = None,
     ) -> Tuple[Principal, bool]:
         """Resolve and synchronize a verified identity in one write transaction.
 
@@ -605,7 +619,7 @@ class AccountStore:
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 row = self._db.execute(
-                    "SELECT p.* FROM sso_identities s JOIN principals p"
+                    "SELECT p.*,s.issued_at FROM sso_identities s JOIN principals p"
                     " ON p.principal_id=s.principal_id"
                     " WHERE s.issuer=? AND s.subject=?", (issuer, subject),
                 ).fetchone()
@@ -624,8 +638,10 @@ class AccountStore:
                         (pid, username, username, KIND_HUMAN, role, 1, None, 1, now, now),
                     )
                     self._db.execute(
-                        "INSERT INTO sso_identities VALUES(?,?,?,?,?,?,?)",
-                        (issuer, subject, pid, email, display_name, now, now),
+                        "INSERT INTO sso_identities "
+                        "(issuer,subject,principal_id,email,display_name,linked_at,last_login_at,issued_at) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (issuer, subject, pid, email, display_name, now, now, issued_at),
                     )
                     self._audit(pid, pid, "sso.link", "success")
                 else:
@@ -633,6 +649,8 @@ class AccountStore:
                     pid = old.principal_id
                     if not old.enabled:
                         raise AccountDisabled("这个账户已被 PNS 停用")
+                    if row["issued_at"] is not None and issued_at < row["issued_at"]:
+                        raise SsoStale("SSO 授权早于已接受的登录")
                     if old.role != role:
                         self._db.execute(
                             "UPDATE principals SET role=?,security_revision=security_revision+1,"
@@ -641,8 +659,8 @@ class AccountStore:
                         self._audit(pid, pid, "sso.role_sync", "success",
                                     {"from": old.role, "to": role})
                     self._db.execute(
-                        "UPDATE sso_identities SET email=?,display_name=?,last_login_at=?"
-                        " WHERE principal_id=?", (email, display_name, now, pid),
+                        "UPDATE sso_identities SET email=?,display_name=?,last_login_at=?,issued_at=?"
+                        " WHERE principal_id=?", (email, display_name, now, issued_at, pid),
                     )
                 result = self._principal(self._db.execute(
                     "SELECT * FROM principals WHERE principal_id=?", (pid,),

@@ -485,6 +485,171 @@ class SsoApiTests(ApiTestCase):
         self.assertFalse(res.json()["sso_signed_out"])
         self.assertFalse(self.session()["authenticated"])
 
+    def test_blocked_idp_does_not_starve_local_login(self):
+        import asyncio
+        import httpx
+        import anyio
+
+        entered, release = threading.Event(), threading.Event()
+        opener = self.service.provider.opener
+
+        def blocked(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise URLError("test timed out")
+            return opener.open(*args, **kwargs)
+
+        async def scenario():
+            # All 48 requests share the same real default 40-token AnyIO limiter.
+            self.assertEqual(
+                anyio.to_thread.current_default_thread_limiter().total_tokens, 40
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.app),
+                base_url=SITE,
+                follow_redirects=False,
+            ) as client:
+                tasks = [
+                    asyncio.create_task(client.get("/api/auth/sso/login"))
+                    for _ in range(48)
+                ]
+                try:
+
+                    async def wait_for_entry():
+                        while not entered.is_set():
+                            await asyncio.sleep(0.001)
+
+                    await asyncio.wait_for(wait_for_entry(), 1)
+                    response = await asyncio.wait_for(
+                        client.post(
+                            "/api/auth/login",
+                            json={
+                                "username": self.admin.username,
+                                "password": ADMIN_PASSWORD,
+                            },
+                        ),
+                        1,
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    # Every other miss must complete while the first fetch is blocked.
+                    done, pending = await asyncio.wait(tasks, timeout=1)
+                    self.assertEqual(len(done), 47)
+                    for task in done:
+                        self.assert_error(task.result(), "sso_busy")
+                finally:
+                    release.set()
+                    responses = await asyncio.gather(*tasks)
+                self.assertEqual(
+                    sum("code_challenge=" in r.headers["location"] for r in responses),
+                    1,
+                )
+                recovered = await client.get("/api/auth/sso/login")
+                self.assertIn("code_challenge=", recovered.headers["location"])
+
+        with patch.object(self.service.provider, "opener") as mock:
+            mock.open.side_effect = blocked
+            asyncio.run(scenario())
+
+    def test_shared_gate_rejects_all_entries_without_consuming_flow(self):
+        _, q = self.start()
+        ticket_response = self.callback(q)
+        url = self.claim_url(ticket_response)
+        for _ in range(sso.SSO_CONCURRENCY):
+            self.assertTrue(self.service.slots.acquire(blocking=False))
+        try:
+            for path in (
+                "/api/auth/sso/login",
+                "/api/auth/sso/callback?state=made-up",
+                url,
+            ):
+                with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                    response = pool.submit(
+                        self.client.get, path, follow_redirects=False
+                    ).result(timeout=1)
+                self.assert_error(response, "sso_busy")
+        finally:
+            for _ in range(sso.SSO_CONCURRENCY):
+                self.service.slots.release()
+        self.assertEqual(self.finish(ticket_response).headers["location"], "/")
+        self.assertTrue(self.session()["authenticated"])
+
+    def test_discovery_and_jwks_failure_backoff_expires(self):
+        provider = self.service.provider
+        for kind in ("discovery", "jwks"):
+            with self.subTest(kind=kind):
+                now = [100.0]
+                provider.clock = lambda: now[0]
+                provider._retry_after = {"discovery": 0, "jwks": 0}
+                provider._discovery_until = provider._jwks_until = 0
+                self.idp.down = False
+                if kind == "jwks":
+                    provider.discovery()
+                fetch = (
+                    provider.discovery
+                    if kind == "discovery"
+                    else lambda: provider._signing_key("k1")
+                )
+                self.idp.down = True
+                before = len(self.idp.requests)
+                for _ in range(3):
+                    with self.assertRaises(sso.SsoError):
+                        fetch()
+                self.assertEqual(len(self.idp.requests), before + 1)
+                self.idp.down = False
+                now[0] += sso.FETCH_BACKOFF
+                fetch()
+                self.assertEqual(len(self.idp.requests), before + 2)
+
+    def test_unmatched_requests_do_not_write_audit(self):
+        before = self.accounts.audit_records(limit=1000)
+        for _ in range(100):
+            for path in ("callback?state=made-up", "finish?ticket=made-up"):
+                self.assert_error(
+                    self.client.get("/api/auth/sso/" + path, follow_redirects=False),
+                    "state_invalid",
+                )
+        self.assertEqual(self.accounts.audit_records(limit=1000), before)
+        self.assertEqual(
+            self.service.unmatched_failures, {"callback": 100, "finish": 100}
+        )
+
+    def test_matched_wrong_binding_still_writes_failure_audit(self):
+        _, q = self.start()
+        other = TestClient(self.app, base_url=SITE)
+        self.assert_error(self.callback(q, other), "state_invalid")
+        failures = [
+            r
+            for r in self.accounts.audit_records()
+            if r["action"] == "sso.login_failed"
+        ]
+        self.assertEqual(len(failures), 1)
+
+    def test_new_ticket_then_old_ticket_preserves_role_and_new_session(self):
+        self._claim_role_tickets(new_first=True)
+
+    def test_old_ticket_then_new_ticket_downgrades_role(self):
+        self._claim_role_tickets(new_first=False)
+
+    def _claim_role_tickets(self, *, new_first):
+        now = int(time.time()) - 10
+        tickets = []
+        for i, role in enumerate(("admin", "observer")):
+            self.idp.overrides = {"iat": now + i, "roles": ["pns:" + role]}
+            _, q = self.start()
+            tickets.append(self.callback(q))
+        first, second = (1, 0) if new_first else (0, 1)
+        self.assertEqual(self.finish(tickets[first]).headers["location"], "/")
+        sid = self.client.cookies.get("pns_session")
+        response = self.finish(tickets[second])
+        if new_first:
+            self.assert_error(response, "sso_stale")
+            self.assertTrue(self.saved_session(sid)["authenticated"])
+            self.assertEqual(self.client.cookies.get("pns_session"), sid)
+        else:
+            self.assertEqual(response.headers["location"], "/")
+            self.assertFalse(self.saved_session(sid)["authenticated"])
+        self.assertEqual(self.session()["principal"]["role"], "observer")
+
     def test_capacity_refuses_new_flow_and_preserves_oldest(self):
         _, q = self.start()
         for _ in range(255):
@@ -642,12 +807,14 @@ class SsoApiTests(ApiTestCase):
         ]:
             with self.subTest(field=field):
                 self.service.provider._discovery_until = 0
+                self.service.provider._retry_after["discovery"] = 0
                 self.idp.doc = {**DOC, field: value}
                 self.assert_error(
                     self.client.get("/api/auth/sso/login", follow_redirects=False),
                     "idp_unavailable",
                 )
         self.idp.doc = dict(DOC)
+        self.service.provider._retry_after["discovery"] = 0
         _, q = self.start()
         self.assertIn("state", q)  # failed discovery never cached
 
@@ -660,6 +827,7 @@ class SsoApiTests(ApiTestCase):
             with self.subTest(endpoint=endpoint):
                 self.service.provider._discovery_until = 0
                 self.idp.redirect = None
+                self.service.provider._retry_after = {"discovery": 0, "jwks": 0}
                 _, q = self.start()
                 self.idp.redirect = endpoint
                 if endpoint.endswith("openid-configuration"):
@@ -808,7 +976,7 @@ class StartupCompatibilityTests(ApiTestCase):
             )
 
     def test_production_requires_local_password_admin_even_with_sso_admin(self):
-        self.accounts.link_or_sync_sso(ISSUER, SUB, "admin")
+        self.accounts.link_or_sync_sso(ISSUER, SUB, "admin", issued_at=100)
         settings = replace(self.settings, mode="production", sso=SSO)
         _verify_production_accounts(settings, self.accounts)
         # Rollback could disable it; the next new-image startup must fail.
