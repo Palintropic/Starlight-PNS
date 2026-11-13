@@ -85,6 +85,7 @@ class RequestPrincipal:
     scopes: FrozenSet[str]
     via: str
     session_id: Optional[str] = None
+    login: Optional[str] = None
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -97,6 +98,7 @@ class RequestPrincipal:
             "role": self.role,
             "scopes": sorted(self.scopes),
             "via": self.via,
+            "login": self.login,
         }
 
 
@@ -133,7 +135,7 @@ def service_principal(account: Principal) -> RequestPrincipal:
     )
 
 
-def session_principal(account: Principal, session_id: str) -> RequestPrincipal:
+def session_principal(account: Principal, session_id: str, *, login: str = "password") -> RequestPrincipal:
     return RequestPrincipal(
         principal_id=account.principal_id,
         username=account.username,
@@ -142,6 +144,7 @@ def session_principal(account: Principal, session_id: str) -> RequestPrincipal:
         scopes=account.scopes,
         via=VIA_SESSION,
         session_id=session_id,
+        login=login,
     )
 
 

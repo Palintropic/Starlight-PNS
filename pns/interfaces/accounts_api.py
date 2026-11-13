@@ -39,6 +39,7 @@ from .accounts import (
     IssuedToken,
     KIND_SERVICE,
     LastAdminError,
+    SsoManagedError,
     Principal,
     SCOPE_ACCOUNTS,
 )
@@ -104,7 +105,7 @@ def _fail(exc: Exception) -> HTTPException:
         )
     if isinstance(exc, AccountConflict):
         return HTTPException(409, {"category": exc.category, "message": str(exc)})
-    if isinstance(exc, LastAdminError):
+    if isinstance(exc, (LastAdminError, SsoManagedError)):
         return HTTPException(409, {"category": exc.category, "message": str(exc)})
     if isinstance(exc, AccountError):
         return HTTPException(400, {"category": exc.category, "message": str(exc)})
@@ -128,7 +129,8 @@ def _issued(issued: IssuedToken, response: Response) -> Dict[str, Any]:
 def list_accounts(request: Request) -> Dict[str, Any]:
     store = _store(request)
     return {
-        "users": [_view(p) for p in store.list_humans()],
+        "users": [{**_view(p), "sso": store.sso_identity(p.principal_id)}
+                  for p in store.list_humans()],
         "services": [_view(p) for p in store.list_services()],
     }
 

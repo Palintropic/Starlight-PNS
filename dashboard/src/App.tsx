@@ -116,7 +116,7 @@ function App() {
   }
 
   if (!authenticated) {
-    return <Login onDone={loadSession} />;
+    return <Login onDone={loadSession} ssoEnabled={session.sso_enabled} ssoLogoutIncomplete={session.sso_signed_out === false} />;
   }
 
   if (changingPassword) {
@@ -195,7 +195,7 @@ function App() {
           <span className="command-bar-account" title={principal ? `principal ${principal.principal_id}` : undefined}>{principal ? `${principal.username} · ${principal.role}` : null}</span>
           <div className="command-bar-commands">
             {canOperate ? <ConfigReload /> : null}
-            {principal?.via === 'session' ? <button className="command" onClick={() => setChangingPassword(true)}>修改密码</button> : null}
+            {principal?.via === 'session' && principal.login !== 'sso' ? <button className="command" onClick={() => setChangingPassword(true)}>修改密码</button> : null}
             {session.auth_required ? <button className="command" onClick={handleLogout} title="作废当前会话">登出</button> : null}
           </div>
         </footer>

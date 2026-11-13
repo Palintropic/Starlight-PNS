@@ -638,7 +638,7 @@ CSRF 有两把锁：`SameSite=Strict`（跨站请求带不上这张 Cookie），
 - 库里那一行就算被直接改成了别的角色，这条路也只认 `observer`，不认就是 401。
 - 跟 break-glass 共用 `Authorization` 头：先比 `PNS_ADMIN_TOKEN`，不对再按 `pns_svc_` 前缀
   查库。认不出来的 bearer 一律是同一个 401。
-- 短期、自动轮换的 token 不在这里做，等 SSO 的 client credentials。
+- 短期、自动轮换的服务 token 不在 AUTH-2 网页登录里做，另期接 client credentials。
 
 守卫认主体（会话、服务 token）要查账户库，这一步在工作线程里跑：同时在途最多 16 条，一次认证
 最多等 2 秒（含排队、锁和 SQLite 的等待）。账户库被锁住时，别的请求（含 `/healthz`）不受影响；
@@ -760,3 +760,32 @@ GET /readyz   →  {"status": "ready", "mode": "production", "auth_required": tr
 
 两条它做不到的事，写在这里而不是假装没有：短于 8 个字符的值不遮蔽（否则会把日志本身抹成噪音）；
 一个恰好被 flush 切成两半的密钥会漏（缓冲按行，正常日志行遇不到）。
+### 6.8 可选 Palintropic SSO（AUTH-2）
+
+`/api/auth/session` 增加 `sso_enabled`；会话主体保持 `via: "session"`，
+新增 `login: "password" | "sso"`，非会话主体 `login: null`。
+`POST /api/auth/login` 返回的手工 principal 同样带 `login: "password"`。
+SSO 未配置时以下三条公开路由均为 404；半配置拒绝启动。部署与回滚见部署文档 §8.7。
+
+| 路由 | 行为 |
+|---|---|
+| `GET /api/auth/sso/login?next=` | 规范 host:port 跳转后，设置每流程 Lax 绑定 Cookie，302 到 IdP；只发 S256 PKCE |
+| `GET /api/auth/sso/callback?code=&state=` | 一次性 state + 绑定校验，工作线程换 token / 验 RS256，200 无脚本中转页；不发会话、不改账户 |
+| `GET /api/auth/sso/finish?ticket=` | 30 秒一次性票 + 绑定校验；事务建号/同步，撤旧发新 Strict 会话，302 到站内 next |
+
+`next` 仅接受 `/` 开头、第二字符不是 `/` 或 `\`、≤512 字符且无控制字符的路径；否则 `/`。
+失败 302 到 `/?sso_error=<category>`：`state_invalid/idp_denied/idp_unavailable/token_invalid/sso_busy/`
+`no_role/unknown_role/ambiguous_role/account_disabled/account_conflict`。不回显 IdP 或数据库异常。
+成功 callback 保留绑定 Cookie 给 finish；已识别流程的终止失败与 finish 成功会清掉原 Path 的绑定。
+
+`POST /api/auth/logout` 先撤 PNS 会话。SSO 会话额外返回 `sso_logout_url`（不可用则 null）及
+`sso_signed_out: false`（PNS 无法确认浏览器是否在 IdP 完成登出）；前端跟随 URL，无法取得或启动跳转时显示部分退出提示。
+ID token 仅存服务端内存；access token 丢弃，无 refresh token。
+
+`GET /api/accounts` 的人类账户多一个 `sso: {email, display_name, last_login_at} | null`，
+不暴露 issuer/subject。SSO 账户角色修改、密码重置、自行改密均为 409 `sso_managed`，启用/停用保留。
+SSO 登录只接受一个 `pns:*` 档位，缺失角色不放行为 observer；本地停用优先。
+最后管理员保底只计算启用、有密码且未绑定 SSO 的本地人类管理员。
+审计新增 `sso.link`、`sso.role_sync`、仅在 finish 成功签发时的 `sso.login {role,first_login}`，
+以及 `sso.login_failed {stage,category}`；不记邮箱、subject、state、code、nonce、token。
+SSO client secret 加入进程值遮蔽；应用及反代必须省略 SSO 路由 query（部署文档 §8.7）。

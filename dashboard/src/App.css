@@ -559,3 +559,7 @@
     max-height: 50vh;
   }
 }
+
+.auth-local { margin-top: 24px; }
+.auth-local summary { cursor: pointer; margin-bottom: 16px; }
+a.auth-submit { display: block; text-align: center; text-decoration: none; }

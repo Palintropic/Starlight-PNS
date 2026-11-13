@@ -148,6 +148,7 @@ def _open_account_store(settings: DeploymentSettings) -> Optional[AccountStore]:
     wanted = (
         settings.production
         or bool(settings.bootstrap_admin_username)
+        or settings.sso is not None
         or path.exists()
     )
     if not wanted:
@@ -199,11 +200,10 @@ def _verify_production_accounts(
     if store is not None and store.has_enabled_admin():
         return
     raise DeploymentConfigError(
-        f"生产模式需要至少一个启用着的管理员账户。两条修法："
-        f"(1) 在 .env 里设 {ENV_BOOTSTRAP_USERNAME} 和 "
-        f"{ENV_BOOTSTRAP_PASSWORD_HASH}（哈希用 "
-        f"`python scripts/accounts.py hash-password` 生成），重启即可创建；"
-        f"(2) 对着数据卷跑 `python scripts/accounts.py create-admin`。"
+        "生产模式需要至少一个可用的本地管理员（启用、有密码、不归 SSO 管）。"
+        f"空库可用 {ENV_BOOTSTRAP_USERNAME} 和 {ENV_BOOTSTRAP_PASSWORD_HASH} 创建"
+        "（哈希用 `python scripts/accounts.py hash-password` 生成）；非空库不会重新 bootstrap，"
+        "请对着数据卷跑 `python scripts/accounts.py create-admin`。"
         f"详见 docs/DEPLOY_UBUNTU_DOCKER.md"
     )
 
@@ -290,6 +290,8 @@ def create_app(
         )
         if auth.settings is not deployment and auth.settings != deployment:
             raise DeploymentConfigError("admin_auth 与 settings 必须是同一份部署设定")
+        if deployment.sso is not None and not auth.required:
+            raise DeploymentConfigError("SSO 要求鉴权门开启；先配置 token 或本地账户")
         if auth.accounts is not store:
             raise DeploymentConfigError("admin_auth 与 account_store 必须是同一个账户库")
     except Exception:
@@ -347,7 +349,13 @@ def create_app(
     app.add_middleware(AdminAuthMiddleware, auth=auth)
 
     app.include_router(health.router)
+    app.state.sso = None
+    if deployment.sso is not None:
+        from .sso import SsoLogin
+        app.state.sso = SsoLogin(deployment.sso, development=not deployment.production)
     app.include_router(auth_routes.router)
+    from .sso import router as sso_router
+    app.include_router(sso_router)
     app.include_router(accounts_api.router)
     app.include_router(review.router)
     app.include_router(config.router)

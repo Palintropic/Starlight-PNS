@@ -24,3 +24,5 @@ uvicorn[standard]
 pydantic
 pyyaml
 argon2-cffi
+
+PyJWT[crypto]==2.15.1

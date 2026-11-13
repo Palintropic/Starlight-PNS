@@ -105,6 +105,7 @@ export interface AuthPrincipal {
   scopes: string[];
   /** 'session' | 'bearer' | 'open-development' */
   via: string;
+  login?: 'password' | 'sso' | null;
 }
 
 export interface AuthSession {
@@ -114,6 +115,9 @@ export interface AuthSession {
   auth_required: boolean;
   authenticated: boolean;
   principal: AuthPrincipal | null;
+  sso_enabled?: boolean;
+  sso_logout_url?: string | null;
+  sso_signed_out?: boolean;
 }
 
 export const fetchAuthSession = (): Promise<AuthSession> =>
@@ -126,8 +130,21 @@ export const login = (username: string, password: string): Promise<AuthSession> 
     body: JSON.stringify({ username, password }),
   }).then((res) => json(res, { authRoute: true }));
 
+export function followSsoLogout(
+  session: AuthSession,
+  navigate: (url: string) => void = (url) => window.location.assign(url),
+): AuthSession {
+  if (session.sso_logout_url) {
+    try { navigate(session.sso_logout_url); }
+    catch { return { ...session, sso_signed_out: false }; }
+  }
+  return session;
+}
+
 export const logout = (): Promise<AuthSession> =>
-  fetch('/api/auth/logout', { method: 'POST' }).then((res) => json(res, { authRoute: true }));
+  fetch('/api/auth/logout', { method: 'POST' })
+    .then((res) => json<AuthSession>(res, { authRoute: true }))
+    .then((session) => followSsoLogout(session));
 
 /** 改自己的密码。**成功之后当前会话也没了**，服务端不会补发新的。 */
 export const changePassword = (
@@ -153,6 +170,7 @@ export interface Account {
   updated_at: string;
   /** 这次操作踢掉了几张会话。只在改权威/重置密码的响应里出现。 */
   revoked_sessions?: number;
+  sso?: { email: string | null; display_name: string | null; last_login_at: string } | null;
 }
 
 export interface AuditRecord {

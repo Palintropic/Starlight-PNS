@@ -232,3 +232,19 @@ describe('角色可见性', () => {
     expect(screen.queryByText('新建世界')).toBeNull();
   });
 });
+
+it('SSO expiry returns to a manual login choice and hides local password changes', async () => {
+  vi.spyOn(api, 'fetchAuthSession').mockResolvedValue({
+    ...loggedIn, sso_enabled: true, principal: { ...loggedIn.principal!, login: 'sso' },
+  });
+  vi.spyOn(api, 'fetchConfig').mockResolvedValue(config);
+  stubWorldTab();
+  render(<App />);
+  await flush();
+  expect(screen.queryByText('修改密码')).toBeNull();
+  act(() => window.dispatchEvent(new Event(api.UNAUTHENTICATED_EVENT)));
+  await flush();
+  expect(screen.getByRole('link', { name: '用 Palintropic 账户登录' })).toBeTruthy();
+  expect(screen.queryByRole('tab', { name: '用户管理' })).toBeNull();
+  expect(screen.getByText('使用本地账户')).toBeTruthy();
+});

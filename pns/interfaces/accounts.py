@@ -123,8 +123,20 @@ class AccountConflict(AccountError):
     category = "account_conflict"
 
 
+class SsoStale(AccountConflict):
+    category = "sso_stale"
+
+
 class LastAdminError(AccountError):
     category = "last_admin"
+
+
+class SsoManagedError(AccountError):
+    category = "sso_managed"
+
+
+class AccountDisabled(AccountError):
+    category = "account_disabled"
 
 
 class InvalidUsername(AccountError):
@@ -291,6 +303,17 @@ CREATE TABLE IF NOT EXISTS auth_audit (
     detail_json        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_auth_audit_time ON auth_audit(occurred_at);
+CREATE TABLE IF NOT EXISTS sso_identities (
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    principal_id TEXT NOT NULL UNIQUE REFERENCES principals(principal_id),
+    email TEXT,
+    display_name TEXT,
+    linked_at TEXT NOT NULL,
+    last_login_at TEXT NOT NULL,
+    issued_at REAL,
+    PRIMARY KEY (issuer, subject)
+);
 """
 
 
@@ -347,6 +370,15 @@ class AccountStore:
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.execute("PRAGMA journal_mode=DELETE")
             self._db.executescript(_SCHEMA)
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {r["name"] for r in self._db.execute("PRAGMA table_info(sso_identities)")}
+                if "issued_at" not in columns:
+                    self._db.execute("ALTER TABLE sso_identities ADD COLUMN issued_at REAL")
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
             row = self._db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
@@ -554,8 +586,98 @@ class AccountStore:
             self._db.execute(
                 "SELECT count(*) FROM principals"
                 " WHERE kind='human' AND role='admin' AND enabled=1"
+                " AND password_hash IS NOT NULL"
+                " AND principal_id NOT IN (SELECT principal_id FROM sso_identities)"
             ).fetchone()[0]
         )
+
+    def sso_identity(self, principal_id: str) -> Optional[Dict[str, Any]]:
+        """Display metadata only; issuer/subject never enter API responses."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT email,display_name,last_login_at FROM sso_identities"
+                " WHERE principal_id=?", (principal_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def _require_local_password(self, principal_id: str) -> None:
+        if self.sso_identity(principal_id) is not None:
+            raise SsoManagedError("在 Palintropic 账户里管理角色和密码")
+
+    def link_or_sync_sso(
+        self, issuer: str, subject: str, role: str,
+        *, issued_at: float, email: Optional[str] = None, display_name: Optional[str] = None,
+    ) -> Tuple[Principal, bool]:
+        """Resolve and synchronize a verified identity in one write transaction.
+
+        Local disable wins; SSO role synchronization never uses the local-admin
+        floor. The returned revision belongs to this transaction, not a later read.
+        """
+        if role not in ROLES or not issuer or not subject:
+            raise AccountError("Invalid verified SSO identity")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute(
+                    "SELECT p.*,s.issued_at FROM sso_identities s JOIN principals p"
+                    " ON p.principal_id=s.principal_id"
+                    " WHERE s.issuer=? AND s.subject=?", (issuer, subject),
+                ).fetchone()
+                first = row is None
+                now = self._now()
+                if first:
+                    # Kratos subjects are UUIDs. Reject incompatible identifiers
+                    # rather than inventing another identity/name mapping.
+                    compact = subject.replace("-", "")[:12]
+                    if len(compact) != 12 or any(c not in "0123456789abcdefABCDEF" for c in compact):
+                        raise AccountConflict("SSO subject 不能生成本地用户名")
+                    username = "sso-" + compact.lower()
+                    pid = str(uuid.uuid4())
+                    self._db.execute(
+                        "INSERT INTO principals VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (pid, username, username, KIND_HUMAN, role, 1, None, 1, now, now),
+                    )
+                    self._db.execute(
+                        "INSERT INTO sso_identities "
+                        "(issuer,subject,principal_id,email,display_name,linked_at,last_login_at,issued_at) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (issuer, subject, pid, email, display_name, now, now, issued_at),
+                    )
+                    self._audit(pid, pid, "sso.link", "success")
+                else:
+                    old = self._principal(row)
+                    pid = old.principal_id
+                    if not old.enabled:
+                        raise AccountDisabled("这个账户已被 PNS 停用")
+                    # The floor is the raw high-water iat. Only a role change
+                    # must be strictly newer than it: a same-role login changes
+                    # no privilege, so an older or fast-clock token may proceed.
+                    floor = row["issued_at"]
+                    if floor is not None and role != old.role and issued_at <= floor:
+                        raise SsoStale("SSO 授权早于已接受的登录")
+                    high_water = issued_at if floor is None else max(floor, issued_at)
+                    if old.role != role:
+                        self._db.execute(
+                            "UPDATE principals SET role=?,security_revision=security_revision+1,"
+                            "updated_at=? WHERE principal_id=?", (role, now, pid),
+                        )
+                        self._audit(pid, pid, "sso.role_sync", "success",
+                                    {"from": old.role, "to": role})
+                    self._db.execute(
+                        "UPDATE sso_identities SET email=?,display_name=?,last_login_at=?,issued_at=?"
+                        " WHERE principal_id=?", (email, display_name, now, high_water, pid),
+                    )
+                result = self._principal(self._db.execute(
+                    "SELECT * FROM principals WHERE principal_id=?", (pid,),
+                ).fetchone())
+                self._db.execute("COMMIT")
+                return result, first
+            except sqlite3.IntegrityError as exc:
+                self._db.execute("ROLLBACK")
+                raise AccountConflict("SSO 账户映射冲突") from exc
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
 
     # ── 写 ──────────────────────────────────────────────────────────────
     def create_human(
@@ -753,14 +875,20 @@ class AccountStore:
                         raise AccountError("服务账户只能是观察者")
                 elif old.kind != KIND_HUMAN:
                     raise AccountError("这个主体不是人类账户")
+                if role is not None:
+                    self._require_local_password(target)
                 new_role = old.role if role is None else role
                 new_enabled = old.enabled if enabled is None else bool(enabled)
                 losing_admin = old.role == ROLE_ADMIN and old.enabled and (
                     new_role != ROLE_ADMIN or not new_enabled
                 )
-                if losing_admin and self._enabled_admins() <= 1:
+                local_admin = (
+                    old.kind == KIND_HUMAN and row["password_hash"] is not None
+                    and self.sso_identity(target) is None
+                )
+                if losing_admin and local_admin and self._enabled_admins() <= 1:
                     raise LastAdminError(
-                        "这是最后一个可用的管理员，不能停用或降级"
+                        "这是最后一个可用的本地管理员，不能停用或降级"
                         "——那会让这台服务器再也没人能管账户"
                     )
                 self._db.execute(
@@ -805,6 +933,7 @@ class AccountStore:
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                self._require_local_password(target)
                 changed = self._db.execute(
                     "UPDATE principals SET password_hash=?,"
                     "security_revision=security_revision+1,updated_at=?"
@@ -828,6 +957,7 @@ class AccountStore:
         旧密码不对时**也**要写一条审计：一串失败的改密尝试是这台服务器上最像
         "有人拿着一张偷来的 Cookie"的信号。
         """
+        self._require_local_password(target)
         principal = self.find(target)
         if principal is None or principal.kind != KIND_HUMAN:
             raise KeyError(target)
@@ -862,7 +992,8 @@ class AccountStore:
                 None
                 if malformed
                 else self._db.execute(
-                    "SELECT * FROM principals WHERE canonical_username=? AND kind='human'",
+                    "SELECT * FROM principals WHERE canonical_username=? AND kind='human'"
+                    " AND principal_id NOT IN (SELECT principal_id FROM sso_identities)",
                     (canonical,),
                 ).fetchone()
             )
@@ -897,6 +1028,8 @@ class AccountStore:
 __all__ = [
     "ALL_SCOPES",
     "AccountConflict",
+    "AccountDisabled",
+    "SsoManagedError",
     "AccountError",
     "AccountStore",
     "AccountStoreError",

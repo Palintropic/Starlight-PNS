@@ -16,6 +16,8 @@
 #   * 一个恰好被 flush 切成两半的密钥，两半都不构成完整匹配，会漏。缓冲是
 #     按行的，所以正常的日志行不会遇到这件事。
 import io
+import logging
+from urllib.parse import unquote
 import os
 import sys
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -148,6 +150,20 @@ __all__ = [
     "MIN_REDACTABLE_CHARS",
     "RedactingStream",
     "SecretRedactor",
+    "SsoAccessLogFilter",
     "install",
     "uninstall",
 ]
+
+
+class SsoAccessLogFilter(logging.Filter):
+    """Uvicorn's access tuple: client, method, raw target, version, status."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            target = record.args[2]
+            if isinstance(target, str):
+                path = target.split("?", 1)[0]
+                if unquote(path).startswith("/api/auth/sso/"):
+                    record.args = (*record.args[:2], path, *record.args[3:])
+        return True

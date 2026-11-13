@@ -29,6 +29,7 @@ from .accounts import (
     MAX_PASSWORD_CHARS,
     AccountStore,
     InvalidPassword,
+    SsoManagedError,
     canonical_username,
 )
 from .authz import VIA_SESSION, RequestPrincipal, current_principal
@@ -80,6 +81,7 @@ def _session_view(auth: AdminAuth, request: Request) -> dict:
     principal = auth.resolve(request.scope)
     return {
         **auth.public_dict(),
+        "sso_enabled": auth.settings.sso is not None,
         "authenticated": principal is not None,
         "principal": principal.public_dict() if principal is not None else None,
     }
@@ -93,11 +95,11 @@ def _throttle_key(username: object) -> str:
         return ""
 
 
-def _set_session_cookie(response: Response, auth: AdminAuth, session_id: str) -> None:
+def _set_session_cookie(response: Response, auth: AdminAuth, session_id: str, *, ttl: Optional[float] = None) -> None:
     response.set_cookie(
         SESSION_COOKIE,
         session_id,
-        max_age=int(auth.settings.session_ttl_seconds),
+        max_age=int(auth.settings.session_ttl_seconds if ttl is None else ttl),
         httponly=True,
         samesite="strict",
         secure=auth.settings.cookie_secure,
@@ -163,6 +165,7 @@ def post_login(payload: LoginRequest, response: Response, request: Request):
         "principal": {
             **account.public_dict(),
             "via": VIA_SESSION,
+            "login": "password",
         },
     }
 
@@ -173,6 +176,7 @@ def post_logout(response: Response, request: Request):
     auth = _auth(request)
     principal: Optional[RequestPrincipal] = auth.resolve(request.scope)
     session_id: Optional[str] = auth.session_id(request.scope)
+    record = auth.sessions.get(session_id)
     auth.sessions.revoke(session_id)
     if (
         auth.accounts is not None
@@ -186,11 +190,21 @@ def post_logout(response: Response, request: Request):
             target=principal.principal_id,
         )
     _clear_session_cookie(response, auth)
-    return {
+    result = {
         **auth.public_dict(),
+        "sso_enabled": auth.settings.sso is not None,
         "authenticated": False,
         "principal": None,
     }
+    if record is not None and record.login == "sso":
+        service = getattr(request.app.state, "sso", None)
+        from .sso import SsoError
+        try:
+            result["sso_logout_url"] = service.provider.logout_url(record.id_token) if service and record.id_token else None
+        except SsoError:
+            result["sso_logout_url"] = None
+        result["sso_signed_out"] = False
+    return result
 
 
 @router.post("/password")
@@ -219,6 +233,9 @@ def post_password(
                 ),
             },
         )
+    if store.sso_identity(principal.principal_id) is not None:
+        raise HTTPException(409, {"category": "sso_managed",
+                                  "message": "在 Palintropic 账户里管理密码"})
     if payload.new_password == payload.current_password:
         raise HTTPException(
             400,
@@ -228,6 +245,8 @@ def post_password(
         store.change_own_password(
             principal.principal_id, payload.current_password, payload.new_password
         )
+    except SsoManagedError as e:
+        raise HTTPException(409, {"category": e.category, "message": str(e)}) from e
     except InvalidPassword as e:
         raise HTTPException(400, {"category": e.category, "message": str(e)}) from e
     except KeyError as e:  # pragma: no cover - 会话刚刚才验过这个主体
@@ -240,6 +259,7 @@ def post_password(
     _clear_session_cookie(response, auth)
     return {
         **auth.public_dict(),
+        "sso_enabled": auth.settings.sso is not None,
         "authenticated": False,
         "principal": None,
         "password_changed": True,
