@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -208,12 +209,30 @@ class SsoAccountTests(unittest.TestCase):
             self.link("observer", issued_at=100)
         self.assertEqual(caught.exception.category, "sso_stale")
 
-    def test_fast_clock_floor_is_whole_seconds(self):
-        # A future iat is clamped to the local clock; a fractional local clock
-        # must not push the floor past a normal token issued in the same second.
-        from unittest import mock
-        import pns.interfaces.accounts as accounts_module
-        with mock.patch.object(accounts_module.time, "time", return_value=200.5):
-            self.link(issued_at=259)
-            updated, _ = self.link(issued_at=200)
+    def test_role_change_needs_strictly_newer_raw_iat(self):
+        # Re-review counterexamples: after the observer ticket at X is
+        # accepted, an admin ticket at X, at an older X, or at the same
+        # fractional second must not restore admin.
+        # Use iat values ahead of the local clock: that is where the old
+        # min(iat, floor(now)) floor lost precision and let these through.
+        base = float(int(time.time()) + 1000)
+        for floor, stale in ((base + 59, base + 59), (base + 59, base + 58),
+                             (base + 0.25, base + 0.25), (base, base - 1)):
+            with self.subTest(floor=floor, stale=stale):
+                self.setUp()
+                self.link("admin", issued_at=floor - 10)
+                self.link("observer", issued_at=floor)
+                with self.assertRaises(AccountConflict) as caught:
+                    self.link("admin", issued_at=stale)
+                self.assertEqual(caught.exception.category, "sso_stale")
+                current, _ = self.link("observer", issued_at=floor)
+                self.assertEqual(current.role, "observer")
+
+    def test_same_role_login_ignores_older_iat_but_keeps_high_water(self):
+        self.link("admin", issued_at=259)          # fast clock
+        updated, _ = self.link("admin", issued_at=200)
         self.assertEqual(updated.role, "admin")
+        with self.assertRaises(AccountConflict):
+            self.link("observer", issued_at=258)   # still older than 259
+        updated, _ = self.link("observer", issued_at=260)
+        self.assertEqual(updated.role, "observer")

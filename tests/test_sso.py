@@ -680,11 +680,10 @@ class SsoApiTests(ApiTestCase):
 
     def test_future_iat_does_not_poison_next_normal_login(self):
         now = int(time.time())
-        with patch("pns.interfaces.accounts.time.time", return_value=now):
-            for iat in (now + 59, now, now + 59, now):
-                self.idp.overrides = {"iat": iat}
-                self.assertEqual(self.sign_in().headers["location"], "/")
-                self.assertTrue(self.session()["authenticated"])
+        for iat in (now + 59, now, now + 59, now):
+            self.idp.overrides = {"iat": iat}
+            self.assertEqual(self.sign_in().headers["location"], "/")
+            self.assertTrue(self.session()["authenticated"])
 
     def test_matched_wrong_binding_still_writes_failure_audit(self):
         _, q = self.start()
