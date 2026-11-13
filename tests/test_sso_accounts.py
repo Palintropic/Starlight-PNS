@@ -42,11 +42,11 @@ class SsoAccountTests(unittest.TestCase):
         self.assertEqual(
             self.store.sso_identity(p.principal_id)["email"], "display@example.com"
         )
-        p2, first = self.link("observer")
+        p2, first = self.link("observer", issued_at=101)
         self.assertFalse(first)
         self.assertEqual(p2.principal_id, p.principal_id)
         self.assertEqual(p2.security_revision, p.security_revision + 1)
-        p3, _ = self.link("observer")
+        p3, _ = self.link("observer", issued_at=101)
         self.assertEqual(p3.security_revision, p2.security_revision)
         actions = [r["action"] for r in self.store.audit_records()]
         self.assertEqual(actions.count("sso.link"), 1)
@@ -74,7 +74,7 @@ class SsoAccountTests(unittest.TestCase):
             "UPDATE principals SET enabled=0 WHERE principal_id=?",
             (self.admin.principal_id,),
         )
-        p, _ = self.link("observer")
+        p, _ = self.link("observer", issued_at=101)
         self.assertEqual(p.role, "observer")
         self.assertEqual(self.store.enabled_admin_count(), 0)
 
@@ -198,9 +198,22 @@ class SsoAccountTests(unittest.TestCase):
         with self.assertRaises(AccountConflict):
             again.link_or_sync_sso(ISSUER, SUB, "admin", issued_at=49)
 
-    def test_equal_authorization_timestamp_is_allowed(self):
+    def test_equal_authorization_timestamp_only_allows_same_role(self):
         p, _ = self.link(issued_at=100)
-        updated, first = self.link("observer", issued_at=100)
+        updated, first = self.link("admin", issued_at=100)
         self.assertFalse(first)
-        self.assertEqual(updated.role, "observer")
-        self.assertEqual(updated.security_revision, p.security_revision + 1)
+        self.assertEqual(updated.role, "admin")
+        self.assertEqual(updated.security_revision, p.security_revision)
+        with self.assertRaises(AccountConflict) as caught:
+            self.link("observer", issued_at=100)
+        self.assertEqual(caught.exception.category, "sso_stale")
+
+    def test_fast_clock_floor_is_whole_seconds(self):
+        # A future iat is clamped to the local clock; a fractional local clock
+        # must not push the floor past a normal token issued in the same second.
+        from unittest import mock
+        import pns.interfaces.accounts as accounts_module
+        with mock.patch.object(accounts_module.time, "time", return_value=200.5):
+            self.link(issued_at=259)
+            updated, _ = self.link(issued_at=200)
+        self.assertEqual(updated.role, "admin")

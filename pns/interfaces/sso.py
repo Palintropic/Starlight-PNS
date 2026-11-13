@@ -41,6 +41,14 @@ TICKET_TTL = 30
 HTTP_TIMEOUT = 5
 SSO_CONCURRENCY = 4
 FETCH_BACKOFF = 30
+FAILURE_AUDIT_CAPACITY = 20
+FAILURE_AUDIT_REFILL_PER_MINUTE = 20
+FAILURE_CATEGORIES = (
+    "state_invalid", "idp_denied", "idp_unavailable", "token_invalid",
+    "sso_busy", "no_role", "unknown_role", "ambiguous_role",
+    "account_disabled", "account_conflict", "sso_stale",
+)
+COUNTER_MAX = 2**63 - 1
 logger = logging.getLogger(__name__)
 
 
@@ -373,6 +381,43 @@ class SsoLogin:
         self.slots = threading.BoundedSemaphore(SSO_CONCURRENCY)
         self._counter_lock = threading.Lock()
         self.unmatched_failures = {"callback": 0, "finish": 0}
+        self.suppressed_failures = {
+            (stage, category): 0
+            for stage in ("callback", "finish") for category in FAILURE_CATEGORIES
+        }
+        self.audit_clock = time.monotonic
+        self._audit_updated = self.audit_clock()
+        self._audit_tokens = float(FAILURE_AUDIT_CAPACITY)
+        self._suppressed_pending = 0
+
+    def audit_failure(self, accounts, stage, category):
+        # Serialize budget decisions and summary emission across both endpoints.
+        with self._counter_lock:
+            now = self.audit_clock()
+            self._audit_tokens = min(
+                FAILURE_AUDIT_CAPACITY,
+                self._audit_tokens + max(0, now - self._audit_updated)
+                * FAILURE_AUDIT_REFILL_PER_MINUTE / 60,
+            )
+            self._audit_updated = now
+            if self._audit_tokens < 1:
+                key = (stage, category)
+                count = min(self.suppressed_failures[key] + 1, COUNTER_MAX)
+                self.suppressed_failures[key] = count
+                self._suppressed_pending = min(self._suppressed_pending + 1, COUNTER_MAX)
+                if count & (count - 1) == 0:
+                    logger.warning("SSO suppressed %s %s count=%d", stage, category, count)
+                return
+            self._audit_tokens -= 1
+            if self._suppressed_pending:
+                accounts.record_event(
+                    "sso.login_failed_suppressed", "failure",
+                    detail={"count": self._suppressed_pending},
+                )
+                self._suppressed_pending = 0
+            accounts.record_event(
+                "sso.login_failed", "failure", detail={"stage": stage, "category": category}
+            )
 
     def count_unmatched(self, stage):
         # Fixed keys and saturating integers; logarithmic logs contain no input.
@@ -412,9 +457,7 @@ def _failure(request, category, stage=None, cookie_name=None, *, matched=True):
     if stage is not None and not matched:
         _service(request).count_unmatched(stage)
     if stage is not None and matched and auth.accounts is not None:
-        auth.accounts.record_event(
-            "sso.login_failed", "failure", detail={"stage": stage, "category": category}
-        )
+        _service(request).audit_failure(auth.accounts, stage, category)
     response = _private(RedirectResponse("/?sso_error=" + category, status_code=302))
     _clear_binding(response, auth, cookie_name)
     return response

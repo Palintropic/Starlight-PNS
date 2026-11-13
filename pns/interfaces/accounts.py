@@ -30,6 +30,8 @@ import os
 import secrets
 import sqlite3
 import threading
+import math
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
@@ -625,6 +627,7 @@ class AccountStore:
                 ).fetchone()
                 first = row is None
                 now = self._now()
+                accepted_iat = min(issued_at, math.floor(time.time()))
                 if first:
                     # Kratos subjects are UUIDs. Reject incompatible identifiers
                     # rather than inventing another identity/name mapping.
@@ -641,7 +644,7 @@ class AccountStore:
                         "INSERT INTO sso_identities "
                         "(issuer,subject,principal_id,email,display_name,linked_at,last_login_at,issued_at) "
                         "VALUES(?,?,?,?,?,?,?,?)",
-                        (issuer, subject, pid, email, display_name, now, now, issued_at),
+                        (issuer, subject, pid, email, display_name, now, now, accepted_iat),
                     )
                     self._audit(pid, pid, "sso.link", "success")
                 else:
@@ -649,7 +652,10 @@ class AccountStore:
                     pid = old.principal_id
                     if not old.enabled:
                         raise AccountDisabled("这个账户已被 PNS 停用")
-                    if row["issued_at"] is not None and issued_at < row["issued_at"]:
+                    if row["issued_at"] is not None and (
+                        issued_at < row["issued_at"]
+                        or (issued_at == row["issued_at"] and role != old.role)
+                    ):
                         raise SsoStale("SSO 授权早于已接受的登录")
                     if old.role != role:
                         self._db.execute(
@@ -660,7 +666,7 @@ class AccountStore:
                                     {"from": old.role, "to": role})
                     self._db.execute(
                         "UPDATE sso_identities SET email=?,display_name=?,last_login_at=?,issued_at=?"
-                        " WHERE principal_id=?", (email, display_name, now, issued_at, pid),
+                        " WHERE principal_id=?", (email, display_name, now, accepted_iat, pid),
                     )
                 result = self._principal(self._db.execute(
                     "SELECT * FROM principals WHERE principal_id=?", (pid,),

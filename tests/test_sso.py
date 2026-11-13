@@ -303,7 +303,7 @@ class SsoApiTests(ApiTestCase):
         self.assertEqual(len(self.accounts.list_humans()), 3)
 
     def test_role_sync_revokes_other_devices_by_revision(self):
-        self.idp.overrides = {"roles": ["pns:admin"]}
+        self.idp.overrides = {"roles": ["pns:admin"], "iat": int(time.time()) - 2}
         self.sign_in()
         old = self.client.cookies.get("pns_session")
         self.idp.overrides = {"roles": ["pns:observer"]}
@@ -613,6 +613,79 @@ class SsoApiTests(ApiTestCase):
             self.service.unmatched_failures, {"callback": 100, "finish": 100}
         )
 
+    def test_failure_audit_budget_bounds_churn_and_recovers_with_one_summary(self):
+        clock = [self.service._audit_updated]
+        self.service.audit_clock = lambda: clock[0]
+        before = len(self.accounts.audit_records(limit=2000))
+        for _ in range(1000):
+            _, q = self.start()
+            self.assert_error(self.client.get(
+                "/api/auth/sso/callback",
+                params={"state": q["state"], "error": "access_denied"},
+                follow_redirects=False,
+            ), "idp_denied")
+        self.assertEqual(len(self.accounts.audit_records(limit=2000)) - before,
+                         sso.FAILURE_AUDIT_CAPACITY)
+        self.assertEqual(self.service.suppressed_failures[("callback", "idp_denied")], 980)
+        # Success is independent of the exhausted failure budget.
+        self.idp.overrides = {"iat": int(time.time()) - 2}
+        self.sign_in()
+        self.idp.overrides = {"roles": ["pns:admin"]}
+        self.sign_in()
+        actions = [r["action"] for r in self.accounts.audit_records(limit=2000)]
+        self.assertIn("sso.login", actions)
+        self.assertIn("sso.link", actions)
+        self.assertIn("sso.role_sync", actions)
+        clock[0] += 60
+        for _ in range(2):
+            _, q = self.start()
+            other = TestClient(self.app, base_url=SITE)
+            self.assert_error(self.callback(q, other), "state_invalid")
+        rows = self.accounts.audit_records(limit=2000)
+        summaries = [r for r in rows if r["action"] == "sso.login_failed_suppressed"]
+        self.assertEqual([r["detail"] for r in summaries], [{"count": 980}])
+        self.assertEqual(sum(r["action"] == "sso.login_failed" for r in rows), 22)
+
+    def test_failure_budget_is_shared_by_concurrent_callback_and_finish(self):
+        self.service.audit_clock = lambda: self.service._audit_updated
+        requests = []
+        for i in range(32):
+            client = TestClient(self.app, base_url=SITE)
+            _, q = self.start(client)
+            if i % 2:
+                cb = self.callback(q, client)
+                url = re.search(r'href="([^"]+)"', cb.text).group(1)
+            else:
+                url = "/api/auth/sso/callback?state=" + q["state"]
+            client.cookies.clear()
+            requests.append((client, url))
+        def fail(item):
+            client, url = item
+            return client.get(url, follow_redirects=False)
+        with concurrent.futures.ThreadPoolExecutor(4) as pool:
+            responses = list(pool.map(fail, requests))
+        for response in responses:
+            self.assert_error(response, "state_invalid")
+        rows = self.accounts.audit_records(limit=1000)
+        self.assertEqual(sum(r["action"] == "sso.login_failed" for r in rows), 20)
+        self.assertEqual(sum(self.service.suppressed_failures.values()), 12)
+
+    def test_equal_iat_same_role_can_login_twice(self):
+        self.idp.overrides = {"iat": int(time.time()) - 1}
+        self.sign_in()
+        old = self.client.cookies.get("pns_session")
+        self.sign_in()
+        self.assertTrue(self.session()["authenticated"])
+        self.assertNotEqual(self.client.cookies.get("pns_session"), old)
+
+    def test_future_iat_does_not_poison_next_normal_login(self):
+        now = int(time.time())
+        with patch("pns.interfaces.accounts.time.time", return_value=now):
+            for iat in (now + 59, now, now + 59, now):
+                self.idp.overrides = {"iat": iat}
+                self.assertEqual(self.sign_in().headers["location"], "/")
+                self.assertTrue(self.session()["authenticated"])
+
     def test_matched_wrong_binding_still_writes_failure_audit(self):
         _, q = self.start()
         other = TestClient(self.app, base_url=SITE)
@@ -630,11 +703,14 @@ class SsoApiTests(ApiTestCase):
     def test_old_ticket_then_new_ticket_downgrades_role(self):
         self._claim_role_tickets(new_first=False)
 
-    def _claim_role_tickets(self, *, new_first):
+    def test_equal_iat_old_role_is_rejected_and_session_preserved(self):
+        self._claim_role_tickets(new_first=True, same_iat=True)
+
+    def _claim_role_tickets(self, *, new_first, same_iat=False):
         now = int(time.time()) - 10
         tickets = []
         for i, role in enumerate(("admin", "observer")):
-            self.idp.overrides = {"iat": now + i, "roles": ["pns:" + role]}
+            self.idp.overrides = {"iat": now + (0 if same_iat else i), "roles": ["pns:" + role]}
             _, q = self.start()
             tickets.append(self.callback(q))
         first, second = (1, 0) if new_first else (0, 1)
@@ -765,8 +841,8 @@ class SsoApiTests(ApiTestCase):
         _, q = self.start()
         self.assert_error(self.callback(q), "no_role")
         self.idp.drop = []
-        for role in ("admin", "operator", "observer"):
-            self.idp.overrides = {"roles": ["other:admin", "pns:" + role]}
+        for i, role in enumerate(("admin", "operator", "observer")):
+            self.idp.overrides = {"roles": ["other:admin", "pns:" + role], "iat": int(time.time()) - 3 + i}
             self.sign_in()
             self.assertEqual(self.session()["principal"]["role"], role)
 
