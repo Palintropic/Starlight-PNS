@@ -33,7 +33,7 @@ RUN npm run build
 
 
 # ── 阶段 2：运行时 ──────────────────────────────────────────────────────
-FROM python:3.12.14-slim-bookworm@sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134 AS runtime
+FROM python:3.12.16-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS runtime
 
 # PNS_ENV 固化在镜像里，而不是只写在 compose.yaml 上：这是**生产**镜像。
 # 就算有人拿 `docker run` 直接跑它、忘了传 PNS_ENV，它也不会退回到那条

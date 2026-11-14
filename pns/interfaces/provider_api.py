@@ -37,6 +37,7 @@ from pns.runtime.provider_settings import (
     EMPTY_DOCUMENT,
     accounts_in_use,
     candidate_payload,
+    validate_document_urls,
     clear_cards,
     create_account,
     delete_card,
@@ -136,6 +137,7 @@ def _check(before: ProviderDocument, after: ProviderDocument, catalog: AccountCa
     except ProviderSettingsError:
         old = None
     try:
+        validate_document_urls(after)
         new = settings_from_document(
             None if after.is_default else after, catalog, env, ooc_threshold=threshold
         )

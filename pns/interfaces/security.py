@@ -550,8 +550,9 @@ class LoginThrottle:
         self._clock = clock
         self._buckets: Dict[str, List[float]] = {}
         self._global: List[float] = []
+        self._inflight: Dict[str, int] = {}
         # 同一个理由：登录路由跑在线程池里，多个并发登录会同时改这两张表。
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def _prune(self) -> None:
         cutoff = self._clock() - self._window
@@ -566,6 +567,38 @@ class LoginThrottle:
     @staticmethod
     def _key(key: object) -> str:
         return key if isinstance(key, str) else ""
+
+    def reserve(self, key: object = "") -> bool:
+        """Atomically reserve both budgets before expensive password verification."""
+        with self._lock:
+            self._prune()
+            name = self._key(key)
+            if len(self._global) + sum(self._inflight.values()) >= self._global_max:
+                return False
+            if len(self._buckets.get(name, ())) + self._inflight.get(name, 0) >= self._max:
+                return False
+            if name not in self._inflight and len(self._inflight) >= self._max_keys:
+                return False
+            self._inflight[name] = self._inflight.get(name, 0) + 1
+            return True
+
+    def release(self, key: object = "") -> None:
+        with self._lock:
+            name = self._key(key)
+            count = self._inflight.get(name, 0)
+            if count <= 1:
+                self._inflight.pop(name, None)
+            else:
+                self._inflight[name] = count - 1
+
+    def finish(self, key: object = "", *, success: Optional[bool]) -> None:
+        """Release and settle a reservation atomically; exceptions add no failure."""
+        with self._lock:
+            self.release(key)
+            if success is True:
+                self.record_success(key)
+            elif success is False:
+                self.record_failure(key)
 
     def blocked(self, key: object = "") -> bool:
         with self._lock:
@@ -612,7 +645,7 @@ class LoginThrottle:
             if len(bucket) >= self._max:
                 oldest.append(bucket[0])
             if not oldest:
-                return 0
+                return 1 if self._inflight else 0
             return max(1, int(self._window - (self._clock() - min(oldest))) + 1)
 
 

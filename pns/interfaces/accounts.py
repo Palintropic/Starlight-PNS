@@ -143,6 +143,10 @@ class InvalidUsername(AccountError):
     category = "invalid_username"
 
 
+class StaleCredential(AccountConflict):
+    category = "stale_credential"
+
+
 class InvalidPassword(AccountError):
     category = "invalid_password"
 
@@ -971,9 +975,33 @@ class AccountStore:
                 actor=target, target=target, detail={"reason": LOGIN_BAD_PASSWORD},
             )
             raise InvalidPassword("当前密码不正确")
-        return self.set_password(
-            target, new_password, actor=target, action="auth.password_change"
-        )
+        # Argon2 verification and hashing stay outside the database lock.
+        verified_hash = row["password_hash"]
+        password_hash = self.hash_password(new_password)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_local_password(target)
+                changed = self._db.execute(
+                    "UPDATE principals SET password_hash=?,"
+                    "security_revision=security_revision+1,updated_at=?"
+                    " WHERE principal_id=? AND password_hash=?"
+                    " AND kind='human' AND enabled=1",
+                    (password_hash, self._now(), target, verified_hash),
+                ).rowcount
+                if not changed:
+                    raise StaleCredential("账户凭据或状态已变化，请重新登录后再试")
+                self._audit(target, target, "auth.password_change", "success")
+                self._db.execute("COMMIT")
+            except (StaleCredential, SsoManagedError) as error:
+                self._db.execute("ROLLBACK")
+                self._audit(target, target, "auth.password_change", "failure",
+                            {"reason": error.category})
+                raise
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return self.get(target)
 
     # ── 登录 ────────────────────────────────────────────────────────────
     def authenticate(self, username: object, password: object) -> LoginOutcome:

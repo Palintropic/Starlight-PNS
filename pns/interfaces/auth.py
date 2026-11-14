@@ -30,6 +30,7 @@ from .accounts import (
     AccountStore,
     InvalidPassword,
     SsoManagedError,
+    StaleCredential,
     canonical_username,
 )
 from .authz import VIA_SESSION, RequestPrincipal, current_principal
@@ -137,7 +138,7 @@ def post_login(payload: LoginRequest, response: Response, request: Request):
         )
     store = _accounts(auth)
     key = _throttle_key(payload.username)
-    if auth.throttle.blocked(key):
+    if not auth.throttle.reserve(key):
         retry = auth.throttle.retry_after(key)
         raise HTTPException(
             429,
@@ -147,16 +148,18 @@ def post_login(payload: LoginRequest, response: Response, request: Request):
             },
             headers={"Retry-After": str(retry)},
         )
-    outcome = store.authenticate(payload.username, payload.password)
-    if not outcome.ok:
-        auth.throttle.record_failure(key)
-        # 只说"不对"。不说是用户名不存在、密码不对还是账户被停用——那种区分
-        # 是白送的枚举线索。失败的**类别**写进了审计，管理员看得到。
-        raise HTTPException(
-            401, {"category": "invalid_credential", "message": "用户名或密码不正确"}
-        )
-    # 只清掉这个账户的失败史，全局桶不清（见 LoginThrottle.record_success）。
-    auth.throttle.record_success(key)
+    outcome = None
+    try:
+        outcome = store.authenticate(payload.username, payload.password)
+        if not outcome.ok:
+            # 只说"不对"。不说是用户名不存在、密码不对还是账户被停用——那种区分
+            # 是白送的枚举线索。失败的**类别**写进了审计，管理员看得到。
+            raise HTTPException(
+                401, {"category": "invalid_credential", "message": "用户名或密码不正确"}
+            )
+    finally:
+        # 成功只清这个账户的失败史，全局桶不清（见 LoginThrottle.record_success）。
+        auth.throttle.finish(key, success=None if outcome is None else outcome.ok)
     account = outcome.principal
     session_id = auth.sessions.issue(account.principal_id, account.security_revision)
     _set_session_cookie(response, auth, session_id)
@@ -245,7 +248,7 @@ def post_password(
         store.change_own_password(
             principal.principal_id, payload.current_password, payload.new_password
         )
-    except SsoManagedError as e:
+    except (SsoManagedError, StaleCredential) as e:
         raise HTTPException(409, {"category": e.category, "message": str(e)}) from e
     except InvalidPassword as e:
         raise HTTPException(400, {"category": e.category, "message": str(e)}) from e

@@ -119,7 +119,8 @@ def _verify_production_config(
     try:
         # 两条线路都要有效（§6）：env 派生时就是那一套 env 凭据，面板存过时是
         # 面板里的 —— 面板两条线路的 token 齐全时不再要求 env 的旧 key。
-        validate_settings(models, registry.accounts)
+        # Existing panel URLs remain readable; publication enforces the new URL rule.
+        validate_settings(models, registry.accounts, allow_legacy_url=True)
     except ProviderSettingsError as e:
         where = (
             f"（线路来自 .env，key 变量 {models.env_key_name}）"
