@@ -19,8 +19,8 @@
 #
 # 密钥边界：provider.json 是卡片凭据的唯一权威主文件（它的 .prev、写盘临时文件
 # 和备份同样装着 token）。token 一律包在 `Secret` 里，`repr` / `str` 输出
-# "<redacted>"、不能被 pickle；只有建 client 的地方 `.reveal()`、只有落盘时
-# `Card.to_file()` 写出明文。对外的一切（API、reload 状态、审计）只走各对象的
+# "<redacted>"、不能被 pickle；建 client 和登记日志遮蔽时才 `.reveal()`，落盘时
+# 由 `Card.to_file()` 写出明文。对外的一切（API、reload 状态、审计）只走各对象的
 # `public_dict()`，token 只给"有没有"和够长时的末 4 位。
 import json
 import os
@@ -34,6 +34,7 @@ from urllib.parse import SplitResult, urlsplit
 
 from pns.runtime import settings_files
 from pns.runtime.settings_files import durable_write
+from pns.runtime.secret_values import register_values
 
 PROVIDER_FILE = "provider.json"
 ACCOUNTS_FILE = "accounts.json"
@@ -94,8 +95,8 @@ class Secret:
     """一个不肯被打印的字符串。
 
     `repr` / `str` / `format` 都是 "<redacted>"；没有 `__dict__`（`vars()` 拿不到
-    值），也不能被 pickle 或 deepcopy 出去。要明文只有 `reveal()` 一条路，全仓库
-    只有建 client 的地方调它。
+    值），也不能被 pickle 或 deepcopy 出去。要明文只有 `reveal()` 一条路，
+    供 client 装配、持久化和日志遮蔽登记使用。
     """
 
     __slots__ = ("_value",)
@@ -708,7 +709,13 @@ def read_document(settings_dir: Path, catalog: AccountCatalog) -> Optional[Provi
     明确的恢复流程。
     """
     raw = _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
-    return None if raw is None else parse_document(raw, catalog, allow_legacy_url=True)
+    if raw is None:
+        return None
+    document = parse_document(raw, catalog, allow_legacy_url=True)
+    # 启动、重载、保存后的构建和隔离恢复共用这里；备用卡片也会进 SDK。
+    # 不注销旧值：替换 / 删除前构造的异常可能还没输出。
+    register_values(card.token.reveal() for card in document.cards.values())
+    return document
 
 
 def env_settings(env: Mapping[str, str]) -> Tuple[str, str, str, str]:
