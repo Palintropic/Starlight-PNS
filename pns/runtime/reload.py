@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from pns.runtime import secret_values
 from pns.runtime.content_registry import (
     ConfigValidationError,
     ContentRegistry,
@@ -384,7 +385,7 @@ class ConfigBoundary:
                 if isinstance(e, ConfigValidationError)
                 else f"{type(e).__name__}: {e}"
             )
-            return self._fail(detail, stopped=stopped)
+            return self._fail(secret_values.process_redactor.apply(detail), stopped=stopped)
 
         # 原子替换：只有这一行会改全局引用，且在锁内一次赋值完成。
         with self._swap_lock:

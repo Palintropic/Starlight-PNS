@@ -6,8 +6,8 @@
 # logger，但它们全都要从 stdout / stderr 出去。所以闸设在流上。
 #
 # 遮蔽的判据是**值**，不是变量名：从环境变量里现取当前值，在每一行输出里做
-# 字面替换。取值放在写的时候而不是安装的时候，是为了让一次配置重载换掉的
-# API Key 也照样被盖住。
+# 字面替换，并合并设置文件登记的卡片 token（含旧值）。取值放在写的时候
+# 而不是安装的时候，是为了让配置重载换掉的 API Key 也照样被盖住。
 #
 # 两条它做不到的事，写在这里而不是假装没有：
 #
@@ -18,51 +18,11 @@
 import io
 import logging
 from urllib.parse import unquote
-import os
 import sys
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Sequence
 
-# 比这短的值不参与遮蔽：见上面的说明。
-MIN_REDACTABLE_CHARS = 8
-
-MASK = "***REDACTED***"
-
-
-class SecretRedactor:
-    """按环境变量名持有一组"当前值应当被遮蔽"的凭据。"""
-
-    def __init__(self, env_names: Sequence[str], *, env=None) -> None:
-        # 去重但保序：报错信息与测试都更好读。
-        seen = []
-        for name in env_names:
-            if name and name not in seen:
-                seen.append(name)
-        self._names: Tuple[str, ...] = tuple(seen)
-        self._env = env
-
-    @property
-    def names(self) -> Tuple[str, ...]:
-        return self._names
-
-    def secrets(self) -> List[str]:
-        env = os.environ if self._env is None else self._env
-        values = []
-        for name in self._names:
-            value = env.get(name) or ""
-            value = value.strip()
-            if len(value) >= MIN_REDACTABLE_CHARS and value not in values:
-                values.append(value)
-        # 长的先替换：一个短密钥恰好是长密钥的前缀时，先换短的会留下尾巴。
-        values.sort(key=len, reverse=True)
-        return values
-
-    def apply(self, text: str) -> str:
-        if not text:
-            return text
-        for secret in self.secrets():
-            if secret in text:
-                text = text.replace(secret, MASK)
-        return text
+from pns.runtime import secret_values
+from pns.runtime.secret_values import MASK, MIN_REDACTABLE_CHARS, SecretRedactor
 
 
 class RedactingStream(io.TextIOBase):
@@ -128,6 +88,7 @@ def install(
     幂等：已经装过的流不会被再包一层（否则每装一次就多一层缓冲）。
     """
     redactor = SecretRedactor(list(env_names))
+    secret_values.process_redactor = redactor
     for name in streams if streams is not None else ("stdout", "stderr"):
         current = getattr(sys, name, None)
         if current is None or isinstance(current, RedactingStream):
