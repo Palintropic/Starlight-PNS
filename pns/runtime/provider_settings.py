@@ -571,7 +571,7 @@ URL_PLACEHOLDER = "（地址无法显示）"
 
 def display_url(url: str) -> str:
     parts = _split_url(url)
-    if parts is None or parts.username or parts.password:
+    if parts is None or parts.username or parts.password or "?" in url or "#" in url:
         return URL_PLACEHOLDER
     return url
 
@@ -602,7 +602,7 @@ def _card_label(card_id: str) -> str:
     return f"卡片 {card_id}"
 
 
-def _parse_card(card_id: str, raw: Any, catalog: AccountCatalog) -> Card:
+def _parse_card(card_id: str, raw: Any, catalog: AccountCatalog, *, allow_legacy_url: bool = False) -> Card:
     """一张卡片的形状校验（不看它生效没生效）。"""
     validate_card_id(card_id)
     label = _card_label(card_id)
@@ -620,7 +620,7 @@ def _parse_card(card_id: str, raw: Any, catalog: AccountCatalog) -> Card:
         raise ProviderSettingsError(f"{label} 的模型名不能为空")
     if fields["api_format"] not in API_FORMATS:
         raise ProviderSettingsError(f"{label} 的协议必须是 {'/'.join(API_FORMATS)} 之一")
-    _check_url_shape(fields["base_url"], label)
+    _check_url_shape(fields["base_url"], label, allow_legacy_url=allow_legacy_url)
     if catalog.get(fields["account"]) is None:
         raise ProviderSettingsError(f"{label} 引用的账户不存在")
     created_at = raw.get("created_at", "")
@@ -639,7 +639,14 @@ def _parse_card(card_id: str, raw: Any, catalog: AccountCatalog) -> Card:
     )
 
 
-def _check_url_shape(url: str, label: str) -> None:
+def _check_url_extras(url: str, label: str) -> None:
+    if "?" in url or "#" in url:
+        raise ProviderSettingsError(f"{label} 的 Base URL 不能带 query 或 fragment；密钥请放到 token 字段")
+
+
+def _check_url_shape(url: str, label: str, *, allow_legacy_url: bool = False) -> None:
+    if not allow_legacy_url:
+        _check_url_extras(url, label)
     parts = _split_url(url)
     if parts is None or not parts.hostname or parts.scheme not in ("http", "https"):
         raise ProviderSettingsError(f"{label} 的 Base URL 不合法")
@@ -673,14 +680,14 @@ def _parse_active(raw: Any, cards: Mapping[str, Card]) -> Active:
     return Active(generation=generation, judge=JudgeChoice(follow=False, card=card, model=model))
 
 
-def parse_document(raw: Mapping[str, Any], catalog: AccountCatalog) -> ProviderDocument:
+def parse_document(raw: Mapping[str, Any], catalog: AccountCatalog, *, allow_legacy_url: bool = False) -> ProviderDocument:
     """provider.json 的内容 → 卡片和 active（形状校验）。版本不认识一律拒绝。"""
     if raw.get("version") != PROVIDER_VERSION:
         raise ProviderSettingsError("线路配置的版本不认识")
     entries = raw.get("cards")
     if not isinstance(entries, dict):
         raise ProviderSettingsError("线路配置缺少 cards")
-    cards = {card_id: _parse_card(card_id, entry, catalog) for card_id, entry in entries.items()}
+    cards = {card_id: _parse_card(card_id, entry, catalog, allow_legacy_url=allow_legacy_url) for card_id, entry in entries.items()}
     retired = raw.get("retired_card_ids", [])
     if not isinstance(retired, list):
         raise ProviderSettingsError("retired_card_ids 必须是列表")
@@ -701,7 +708,7 @@ def read_document(settings_dir: Path, catalog: AccountCatalog) -> Optional[Provi
     明确的恢复流程。
     """
     raw = _read_json(Path(settings_dir) / PROVIDER_FILE, label="线路配置")
-    return None if raw is None else parse_document(raw, catalog)
+    return None if raw is None else parse_document(raw, catalog, allow_legacy_url=True)
 
 
 def env_settings(env: Mapping[str, str]) -> Tuple[str, str, str, str]:
@@ -714,6 +721,7 @@ def env_settings(env: Mapping[str, str]) -> Tuple[str, str, str, str]:
     base_url = env.get("BASE_URL", "https://api.xiaomimimo.com/anthropic")
     if not base_url:
         raise ProviderSettingsError("BASE_URL 不能为空")
+    _check_url_extras(base_url, "env")
     key_name = env.get("PNS_API_KEY_NAME", "MIMO_API_KEY")
     if not key_name:
         raise ProviderSettingsError("PNS_API_KEY_NAME 不能为空")
@@ -825,11 +833,13 @@ def _judge_thinking(raw: Any, label: str) -> str:
     return raw
 
 
-def validate_line(line: Line, catalog: AccountCatalog, *, require_token: bool = True) -> None:
+def validate_line(line: Line, catalog: AccountCatalog, *, require_token: bool = True, allow_legacy_url: bool = False) -> None:
     """§6 有效线路校验（只对生效的线路）。启动、保存、恢复共用。"""
     label = "生成线路" if line.name == LINE_GENERATION else "判分线路"
     if line.api_format not in API_FORMATS:
         raise ProviderSettingsError(f"{label} 的协议必须是 {'/'.join(API_FORMATS)} 之一")
+    if not allow_legacy_url:
+        _check_url_extras(line.base_url, label)
     parts = _split_url(line.base_url)
     if parts is None or not parts.hostname:
         raise ProviderSettingsError(f"{label} 的 Base URL 不合法")
@@ -850,9 +860,17 @@ def validate_line(line: Line, catalog: AccountCatalog, *, require_token: bool = 
         raise ProviderSettingsError(f"{label} 引用的账户已经退役")
 
 
-def validate_settings(settings: "ModelSettings", catalog: AccountCatalog) -> None:
-    validate_line(settings.generation, catalog)
-    validate_line(settings.judge, catalog)
+def validate_settings(
+    settings: "ModelSettings", catalog: AccountCatalog, *, allow_legacy_url: bool = False,
+) -> None:
+    for line in (settings.generation, settings.judge):
+        validate_line(line, catalog, allow_legacy_url=allow_legacy_url and line.card != ENV_CARD)
+
+
+def validate_document_urls(document: ProviderDocument) -> None:
+    """Every saved card, including inactive ones, must use a credential-free URL."""
+    for card in document.cards.values():
+        _check_url_extras(card.base_url, _card_label(card.card_id))
 
 
 def validate_for_publish(settings: "ModelSettings", catalog: AccountCatalog, env: Mapping[str, str]) -> None:
@@ -861,6 +879,7 @@ def validate_for_publish(settings: "ModelSettings", catalog: AccountCatalog, env
     env 卡片的 key 按这份环境判断，不靠 EnvSecret 懒读进程环境 —— 构建时 .env
     还没落进进程环境，懒读看到的是旧值，会替一份新的、缺 key 的候选作证明。
     """
+    validate_document_urls(settings.document)
     for line in (settings.generation, settings.judge):
         if isinstance(line.token, EnvSecret):
             validate_line(line, catalog, require_token=False)
@@ -974,7 +993,7 @@ def settings_from_document(
         # 出自 env 卡片的线路跟文件不存在时一样，只做 env_settings 那几项检查；
         # 卡片线路的 token 只可能来自这个文件，在这里就拦。
         if line.card != ENV_CARD:
-            validate_line(line, catalog)
+            validate_line(line, catalog, allow_legacy_url=True)
     return settings
 
 
