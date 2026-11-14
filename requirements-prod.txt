@@ -16,6 +16,9 @@
 #
 # 升级步骤：改这一行 → 跑全量测试 → 重建镜像 → 用真 provider 打一次真实生成
 # 与判分（`pns/logic/router.py` 的 anthropic_sampling 那条通道只有联网才验得到）。
+#
+# 其余直接依赖和全部传递依赖的版本由 constraints-prod.txt 锁定（Dockerfile 用
+# `-c` 装）。这里只写"要什么"；改了这里，记得按那份文件头的步骤重新生成锁。
 anthropic==1.5.0
 openai
 python-dotenv

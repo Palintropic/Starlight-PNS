@@ -44,6 +44,7 @@ DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 REQUIREMENTS = REPO_ROOT / "requirements.txt"
 REQUIREMENTS_PROD = REPO_ROOT / "requirements-prod.txt"
+CONSTRAINTS_PROD = REPO_ROOT / "constraints-prod.txt"
 DEPLOY_DOC = REPO_ROOT / "docs" / "DEPLOY_UBUNTU_DOCKER.md"
 
 # .dockerignore 放行的顶层条目。改这份清单就是在改"什么进得了镜像"，
@@ -55,6 +56,7 @@ ALLOWED_CONTEXT_ENTRIES = {
     "dashboard",
     "config.yaml",
     "requirements-prod.txt",
+    "constraints-prod.txt",
 }
 
 
@@ -235,6 +237,10 @@ class DockerfileTests(unittest.TestCase):
         self.assertIn("requirements-prod.txt", self.text)
         self.assertNotIn("-r requirements.txt", self.text)
 
+    def test_installs_under_the_full_constraint_lock(self):
+        self.assertIn("-c constraints-prod.txt", self.text)
+        self.assertIn("COPY requirements-prod.txt constraints-prod.txt ./", self.text)
+
     def test_does_not_copy_the_whole_context(self):
         for line in self.lines:
             if line.startswith("COPY ") and "--from=" not in line:
@@ -392,6 +398,24 @@ class RequirementsTests(unittest.TestCase):
     def test_development_only_packages_are_excluded(self):
         excluded = self.packages(REQUIREMENTS) - self.packages(REQUIREMENTS_PROD)
         self.assertEqual(excluded, {"black", "httpx", "aiohttp"})
+
+    def test_every_production_dependency_is_pinned_in_the_lock(self):
+        # 名字按 PEP 503 归一：PyYAML / pyyaml、python_dotenv / python-dotenv 是同一个包。
+        def norm(name):
+            return re.sub(r"[-_.]+", "-", name).lower()
+
+        locked = {}
+        for line in read(CONSTRAINTS_PROD).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            self.assertIn("==", line, f"锁文件里每一行都要精确版本: {line}")
+            name, _, version = line.partition("==")
+            self.assertNotIn(norm(name), locked, f"锁文件里重复出现: {name}")
+            locked[norm(name)] = version
+        for package in self.packages(REQUIREMENTS_PROD):
+            with self.subTest(package=package):
+                self.assertIn(norm(package), locked, "直接依赖没有被锁定")
 
     def test_the_runtime_imports_are_all_covered(self):
         prod = self.packages(REQUIREMENTS_PROD)

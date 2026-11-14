@@ -11,6 +11,7 @@
 !dashboard
 !config.yaml
 !requirements-prod.txt
+!constraints-prod.txt
 
 # 放行的目录里仍然不要的东西。规则从上往下生效，所以这些排除写在放行之后。
 **/__pycache__
