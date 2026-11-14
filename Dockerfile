@@ -20,7 +20,7 @@
 # 一个不同的镜像，而回滚要靠的正是"同一份输入构建出同一个东西"。
 
 # ── 阶段 1：构建 Dashboard ──────────────────────────────────────────────
-FROM node:22.23.2-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS dashboard
+FROM node:22.23.5-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS dashboard
 
 WORKDIR /build
 
@@ -49,9 +49,9 @@ RUN groupadd --gid 10001 pns \
 
 WORKDIR /app
 
-COPY requirements-prod.txt ./
+COPY requirements-prod.txt constraints-prod.txt ./
 # --timeout/--retries：慢链路上的构建不该因为一次读超时就整个失败重来。
-RUN python -m pip install --no-cache-dir --timeout 60 --retries 10 -r requirements-prod.txt
+RUN python -m pip install --no-cache-dir --timeout 60 --retries 10 -r requirements-prod.txt -c constraints-prod.txt
 
 COPY --chown=10001:10001 pns/ ./pns/
 COPY --chown=10001:10001 scripts/ ./scripts/
