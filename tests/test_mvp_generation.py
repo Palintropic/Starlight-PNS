@@ -474,9 +474,9 @@ class LeoNeedProfileTests(MvpTestCase):
                         self.assertIn("地点：练习室", system)
                         self.assertNotIn("## 内容判据", system)
                         if character_id == "honami":
-                            self.assertIn("面对记忆中的一歌", system)
+                            self.assertIn("景象已经消失", system)
                         else:
-                            self.assertNotIn("记忆中的一歌", system)
+                            self.assertNotIn("景象已经消失", system)
 
                 result = router_mod.judge(
                     self.provider, character_id, candidate, turn=1,
@@ -485,7 +485,11 @@ class LeoNeedProfileTests(MvpTestCase):
                 self.assertEqual(result["router_reference_status"], "loaded")
                 request = self.provider.judgements[-1]
                 self.assertIn(content.router_reference, request["system"])
-                self.assertIn("E137 P05", request["system"])
+                if character_id == "honami":
+                    self.assertIn("E137 P05", request["system"])
+                else:
+                    self.assertNotIn("E137 P05", request["system"])
+                    self.assertNotIn("真堂考虑转籍", request["system"])
                 self.assertIn(candidate, request["messages"][0]["content"])
 
 

@@ -89,6 +89,17 @@ def _old_graph() -> LocationGraph:
     return _graph_without(NEW | LN_NODES)
 
 
+class LeoNeedGraphBaselineTests(unittest.TestCase):
+    def test_pre_leoneed_graph_matches_main_before_admission(self):
+        from pns.world.extension import graph_fingerprint
+
+        # Captured from the cold graph of main at b9fda66.
+        self.assertEqual(
+            graph_fingerprint(_pre_leoneed_graph()),
+            "e428c4d19b7f6ab6b7b014d65a2146e68bb4a338d57f1e10de30c3464e16458c",
+        )
+
+
 class ColdGraphTests(unittest.TestCase):
     def setUp(self):
         self.new = _pre_leoneed_graph()
