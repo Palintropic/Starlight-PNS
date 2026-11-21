@@ -73,6 +73,7 @@ from pns.runtime.autonomy.seeding import (  # noqa: E402
 from pns.runtime.persistence.lifecycle import LifecycleError  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.logic import router as router_mod  # noqa: E402
+from pns.logic.simulation import call_character  # noqa: E402
 
 SCENE = "nightcord"
 CHARACTERS = ["mizuki", "ena"]
@@ -443,6 +444,51 @@ class ProductionPathTests(MvpTestCase):
 
 
 # ── AC2 提示词是角色作用域的 ─────────────────────────────────────────────
+class LeoNeedProfileTests(MvpTestCase):
+    def test_generation_and_judge_keep_e137_in_the_correct_perspectives(self):
+        candidate = "穗波已经当面向一歌道过歉，两人把初中的事说开了。"
+        scene = {"time": "放学后", "location": "练习室", "weather": "晴"}
+        for character_id in ("ichika", "saki", "honami", "shiho"):
+            with self.subTest(character=character_id):
+                content = self.registry.character(character_id)
+                self.assertEqual(content.metadata["status"], "ready")
+                for model, expected_prompt in (
+                    ("stub-model", content.system_prompt),
+                    ("stub-flash-lite", content.compat_prompt),
+                ):
+                    with self.subTest(model=model):
+                        self.assertIsNotNone(expected_prompt)
+                        call_character(
+                            self.provider,
+                            character_id,
+                            [{"role": "user", "content": "说说重聚之后的事。"}],
+                            scene,
+                            model,
+                            max_tokens=100,
+                            temperature=0.5,
+                            registry=self.registry,
+                        )
+                        system = self.provider.generations[-1]["system"]
+                        self.assertIn(expected_prompt.splitlines()[0], system)
+                        self.assertIn(content.constitution, system)
+                        self.assertIn("地点：练习室", system)
+                        self.assertNotIn("## 内容判据", system)
+                        if character_id == "honami":
+                            self.assertIn("面对记忆中的一歌", system)
+                        else:
+                            self.assertNotIn("记忆中的一歌", system)
+
+                result = router_mod.judge(
+                    self.provider, character_id, candidate, turn=1,
+                    registry=self.registry,
+                )
+                self.assertEqual(result["router_reference_status"], "loaded")
+                request = self.provider.judgements[-1]
+                self.assertIn(content.router_reference, request["system"])
+                self.assertIn("E137 P05", request["system"])
+                self.assertIn(candidate, request["messages"][0]["content"])
+
+
 class PromptScopeTests(MvpTestCase):
     def plant_memories(self, state):
         """给两个角色各种一条只属于自己的记忆。
