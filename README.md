@@ -347,9 +347,9 @@ Idol and MMJ member, a veteran idol who debuted early. Her current character she
 
 ### Leo/need
 
-**ichika (星乃一歌)** ⚪ · **saki (天馬咲希)** ⚪ · **honami (望月穗波)** ⚪ · **shiho (日野森志步)** ⚪
+**ichika (星乃一歌)** ✅ · **saki (天馬咲希)** ✅ · **honami (望月穗波)** ✅ · **shiho (日野森志步)** ✅
 
-Registered in the pack with basic metadata; runnable prompts have not yet been created.
+All four have runnable prompts, compatibility prompts, constitutions, and Router references. The profiles distinguish each member’s perspective on the reunion, their musical choices, and the events shared by the band.
 
 ---
 

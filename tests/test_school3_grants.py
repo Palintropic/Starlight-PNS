@@ -36,6 +36,7 @@ from pns.world.grants import CharacterGrants, grants_in_world  # noqa: E402
 from pns.world.locations import DEFAULT_LOCATIONS  # noqa: E402
 
 from tests.test_world2_admission import CADENCE, MMJ, _adapters  # noqa: E402
+from tests.test_world2_content import LN_NODES, _pre_leoneed_graph  # noqa: E402
 from tests.test_world2_content import NEW as MMJ_NODES  # noqa: E402
 
 WALL = datetime(2026, 9, 27, 10, 0, tzinfo=timezone.utc)  # 东京 9/27（周日）19:00
@@ -79,11 +80,11 @@ def _graph_without(*node_sets):
 
 
 def _before_world2():
-    return _graph_without(MMJ_NODES, SCHOOL3)
+    return _graph_without(MMJ_NODES, SCHOOL3, LN_NODES)
 
 
 def _before_school3():
-    return _graph_without(SCHOOL3)
+    return _graph_without(SCHOOL3, LN_NODES)
 
 
 def _content_before_school3(registry):
@@ -143,6 +144,12 @@ class School3TestCase(unittest.TestCase):
         # 阶段 A 的内容上线：同一个世界换上现行内容恢复。作息没变，作息门照旧齐。
         self.world = self.service.restore("yoake-mae", adapters=_adapters(self.registry))
         self.assertIsNone(self.world.held)
+        # 阶段 A 扩展以当时冷图为目标，后续入住节点不参与这批历史测试。
+        cold_graph = patch(
+            "pns.runtime.content_registry.build_default_location_graph", _pre_leoneed_graph
+        )
+        cold_graph.start()
+        self.addCleanup(cold_graph.stop)
         self.admission = WorldAdmission(self.world, cadence=CADENCE, operator="ops")
 
     @property
