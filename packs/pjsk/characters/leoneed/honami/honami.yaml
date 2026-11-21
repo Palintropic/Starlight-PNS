@@ -30,3 +30,63 @@ family:
   - relation: 备注
     name: null
     note: "去奏家做家政是母亲朋友介绍的兼职机会，不是已确认的'家境困难所以打工'；剧情没有把这份工作与家庭经济压力相连"
+
+# 模拟试运行作息。钟点、饭点和通勤时长均为推断。
+daily_rhythm:
+  weekday:
+    - at: "00:00"
+      activity: resting
+      location_id: mochizuki_home_honami_room
+      source: inferred
+    - at: "06:40"
+      activity: idle
+      location_id: mochizuki_home_honami_room
+      source: inferred
+    - at: "08:30"
+      activity: studying
+      location_id: miyamasuzaka_2a
+      source: inferred
+    - at: "12:30"
+      activity: eating
+      location_id: miyamasuzaka_2a
+      source: inferred
+    - at: "13:15"
+      activity: studying
+      location_id: miyamasuzaka_2a
+      source: inferred
+    - at: "16:02"
+      activity: idle
+      location_id: mochizuki_home_honami_room
+      source: inferred
+    - at: "23:00"
+      activity: resting
+      location_id: mochizuki_home_honami_room
+      source: inferred
+  rest_day:
+    - at: "00:00"
+      activity: resting
+      location_id: mochizuki_home_honami_room
+      source: inferred
+    - at: "07:30"
+      activity: idle
+      location_id: mochizuki_home_honami_room
+      source: inferred
+    - at: "23:00"
+      activity: resting
+      location_id: mochizuki_home_honami_room
+      source: inferred
+access_grants:
+  locations:
+    - location_id: mochizuki_home
+      role: resident
+    - location_id: mochizuki_home_honami_room
+      role: resident
+    - location_id: miyamasuzaka_girls
+      role: student
+    - location_id: miyamasuzaka_2a
+      role: student
+    - location_id: miyamasuzaka_courtyard
+      role: student
+    - location_id: leoneed_rehearsal_studio
+      role: participant
+  channels: []

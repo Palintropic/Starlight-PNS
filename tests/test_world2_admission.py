@@ -57,7 +57,14 @@ from pns.runtime.persistence.store import FileWorldStore  # noqa: E402
 from pns.runtime.reload import BOUNDARY  # noqa: E402
 from pns.runtime.rhythm import RhythmDirector  # noqa: E402
 
-from tests.test_world2_content import FOUR, _old_graph  # noqa: E402
+from tests.test_world2_content import (  # noqa: E402
+    FOUR,
+    LN_NODES,
+    LN_ROOMS,
+    LN_STUDIO,
+    _old_graph,
+    _pre_leoneed_graph,
+)
 from tests.test_world2_events import MMJ  # noqa: E402
 
 WALL = datetime(2026, 9, 27, 10, 0, tzinfo=timezone.utc)  # 东京 9/27（周日）19:00
@@ -235,6 +242,56 @@ class EndToEndTests(AdmissionTestCase):
         world.close("e2e")
         # 跑过一天之后再恢复一次：重放互验仍然成立（种子已经按周期推了好几轮）。
         self.service.restore("yoake-mae", adapters=_adapters(self.registry)).close("e2e")
+
+
+class LeoNeedAdmissionTests(AdmissionTestCase):
+    def test_four_separate_admissions_restore_and_reach_their_classrooms(self):
+        with patch("pns.runtime.content_registry.build_default_location_graph", _pre_leoneed_graph):
+            self.assertEqual(self.extend("ext-mmj")["outcome"], DURABLE)
+        for cid in MMJ:
+            self.assertEqual(self.admit(cid)["outcome"], DURABLE)
+
+        world_before = self.state.world_state
+        old_locations = set(world_before.locations.ids())
+        previous_residents = list(self.state.characters)
+        self.assertEqual(self.extend("ext-leoneed")["outcome"], DURABLE)
+        self.assertEqual(set(self.state.world_state.locations.ids()) - old_locations, LN_NODES)
+        classrooms = {
+            "ichika": "miyamasuzaka_2a",
+            "saki": "miyamasuzaka_2b",
+            "honami": "miyamasuzaka_2a",
+            "shiho": "miyamasuzaka_2b",
+        }
+        for ordinal, (cid, room) in enumerate(LN_ROOMS.items()):
+            with self.subTest(character=cid):
+                preflight, body = self.admission_body(cid, ordinal=ordinal, roommates=[])
+                self.assertTrue(preflight["feasible"], preflight)
+                self.assertEqual(preflight["proposal"]["location_id"], room)
+                result = self.admission.execute(body)
+                self.assertEqual(result["outcome"], DURABLE)
+                self.assertEqual(self.admission.query(body["operation_id"])["outcome"], DURABLE)
+                self.assertTrue(self.admission.execute(body)["retry"])
+
+        self.assertEqual(self.state.characters, previous_residents + list(LN_ROOMS))
+        self.world.close("leoneed-test")
+        world = self.service.restore("yoake-mae", adapters=_adapters(self.registry))
+        self.assertIsNone(world.held)
+        for cid, room in LN_ROOMS.items():
+            with self.subTest(permissions=cid):
+                self.assertEqual(world.state.world_state.location_of(cid), room)
+                self.assertTrue(world.state.world_state.may_enter(cid, LN_STUDIO))
+                for other in LN_ROOMS.values():
+                    if other != room:
+                        self.assertFalse(world.state.world_state.may_enter(cid, other))
+                for resident in previous_residents:
+                    self.assertFalse(world.state.world_state.may_enter(resident, room))
+                    self.assertFalse(world.state.world_state.may_enter(resident, LN_STUDIO))
+
+        world.runtime.advance(9 * 60)
+        for cid, classroom in classrooms.items():
+            with self.subTest(arrival=cid):
+                self.assertEqual(world.state.world_state.location_of(cid), classroom)
+                self.assertEqual(world.state.world_state.activity_of(cid).kind, ActivityKind.STUDYING)
 
 
 # ── 2. 重试 ──────────────────────────────────────────────────────────

@@ -27,3 +27,63 @@ family:
   - relation: 疾病
     name: null
     note: "官方未公开病名，不能诊断为白血病/心脏病等具体疾病。小学到初中反复住院，初中因转远院与朋友难以见面；高中入学时好转到可返校，但仍可能过劳后病倒"
+
+# 模拟试运行作息。钟点、饭点和通勤时长均为推断。
+daily_rhythm:
+  weekday:
+    - at: "00:00"
+      activity: resting
+      location_id: tenma_home_saki_room
+      source: inferred
+    - at: "06:40"
+      activity: idle
+      location_id: tenma_home_saki_room
+      source: inferred
+    - at: "08:30"
+      activity: studying
+      location_id: miyamasuzaka_2b
+      source: inferred
+    - at: "12:30"
+      activity: eating
+      location_id: miyamasuzaka_2b
+      source: inferred
+    - at: "13:15"
+      activity: studying
+      location_id: miyamasuzaka_2b
+      source: inferred
+    - at: "16:02"
+      activity: idle
+      location_id: tenma_home_saki_room
+      source: inferred
+    - at: "23:00"
+      activity: resting
+      location_id: tenma_home_saki_room
+      source: inferred
+  rest_day:
+    - at: "00:00"
+      activity: resting
+      location_id: tenma_home_saki_room
+      source: inferred
+    - at: "07:30"
+      activity: idle
+      location_id: tenma_home_saki_room
+      source: inferred
+    - at: "23:00"
+      activity: resting
+      location_id: tenma_home_saki_room
+      source: inferred
+access_grants:
+  locations:
+    - location_id: tenma_home
+      role: resident
+    - location_id: tenma_home_saki_room
+      role: resident
+    - location_id: miyamasuzaka_girls
+      role: student
+    - location_id: miyamasuzaka_2b
+      role: student
+    - location_id: miyamasuzaka_courtyard
+      role: student
+    - location_id: leoneed_rehearsal_studio
+      role: participant
+  channels: []

@@ -52,22 +52,46 @@ NEW = frozenset(
 )
 
 
-def _old_graph() -> LocationGraph:
-    """WORLD-2 之前的冷图：去掉新节点和街道上追加的连接。"""
-    import dataclasses
+LN_ROOMS = {
+    "ichika": "hoshino_home_ichika_room",
+    "saki": "tenma_home_saki_room",
+    "honami": "mochizuki_home_honami_room",
+    "shiho": "hinomori_home_shiho_room",
+}
+LN_STUDIO = "leoneed_rehearsal_studio"
+LN_NODES = frozenset({
+    *LN_ROOMS.values(),
+    "hoshino_home", "tenma_home", "mochizuki_home", "hinomori_home", LN_STUDIO,
+})
 
-    old = []
-    for location in DEFAULT_LOCATIONS:
-        if location.location_id in NEW:
-            continue
-        kept = tuple(c for c in location.connections if c.to_id not in NEW)
-        old.append(dataclasses.replace(location, connections=kept))
-    return LocationGraph(old)
+
+def _graph_without(excluded) -> LocationGraph:
+    from dataclasses import replace
+
+    return LocationGraph(
+        [
+            replace(
+                location,
+                connections=tuple(c for c in location.connections if c.to_id not in excluded),
+            )
+            for location in DEFAULT_LOCATIONS
+            if location.location_id not in excluded
+        ]
+    )
+
+
+def _pre_leoneed_graph() -> LocationGraph:
+    return _graph_without(LN_NODES)
+
+
+def _old_graph() -> LocationGraph:
+    """历史冷图：保留 SCHOOL-3 节点，排除两批入住地点。"""
+    return _graph_without(NEW | LN_NODES)
 
 
 class ColdGraphTests(unittest.TestCase):
     def setUp(self):
-        self.new = build_default_location_graph()
+        self.new = _pre_leoneed_graph()
         self.old = _old_graph()
         self.new_dict = self.new.to_dict()
         self.old_dict = self.old.to_dict()
