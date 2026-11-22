@@ -91,6 +91,7 @@ function stubWorldTab() {
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState(null, '', '/');
   vi.restoreAllMocks();
   localStorage.clear();
 });
@@ -115,6 +116,7 @@ describe('登录门', () => {
   });
 
   it('用用户名和密码登录，登录成功之后才去取配置', async () => {
+    window.history.replaceState(null, '', '/?sso_error=idp_unavailable');
     const fetchSession = vi
       .spyOn(api, 'fetchAuthSession')
       .mockResolvedValueOnce(production)
@@ -124,6 +126,7 @@ describe('登录门', () => {
 
     render(<App />);
     await flush();
+    expect(screen.getByRole('alert').textContent).toContain('账户服务暂时连不上');
 
     const username = screen.getByPlaceholderText('用户名') as HTMLInputElement;
     const password = screen.getByPlaceholderText('密码') as HTMLInputElement;
@@ -143,6 +146,7 @@ describe('登录门', () => {
     expect(login).toHaveBeenCalledWith('mizuki', 'a-very-long-password-000');
     expect(fetchSession).toHaveBeenCalledTimes(2);
     expect(fetchConfig).toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
     // 凭据不许留在浏览器里——会话是一张 HttpOnly Cookie，不是 localStorage。
     expect(localStorage.length).toBe(0);
   });
@@ -247,4 +251,28 @@ it('SSO expiry returns to a manual login choice and hides local password changes
   expect(screen.getByRole('link', { name: '用 Palintropic 账户登录' })).toBeTruthy();
   expect(screen.queryByRole('tab', { name: '用户管理' })).toBeNull();
   expect(screen.getByText('使用本地账户')).toBeTruthy();
+});
+
+it.each(['logout', 'expiry'])('shows an SSO failure on the existing session and clears it on %s', async (endSession) => {
+  const historyState = { dashboard: true };
+  window.history.replaceState(historyState, '', '/?view=world&sso_error=idp_denied#overview');
+  vi.spyOn(api, 'fetchAuthSession').mockResolvedValue({
+    ...loggedIn, sso_enabled: true, principal: { ...loggedIn.principal!, login: 'password' },
+  });
+  vi.spyOn(api, 'fetchConfig').mockResolvedValue(config);
+  vi.spyOn(api, 'logout').mockResolvedValue({ ...production, sso_enabled: true });
+
+  render(<App />);
+  expect(await screen.findByText('mizuki · admin')).toBeTruthy();
+  expect(screen.getByRole('alert').textContent).toBe('登录没有完成，请重试');
+  expect(window.location.search + window.location.hash).toBe('?view=world#overview');
+  expect(window.history.state).toEqual(historyState);
+
+  if (endSession === 'logout') {
+    fireEvent.click(screen.getByRole('button', { name: '登出' }));
+  } else {
+    act(() => window.dispatchEvent(new Event(api.UNAUTHENTICATED_EVENT)));
+  }
+  expect(await screen.findByText('需要登录')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
 });

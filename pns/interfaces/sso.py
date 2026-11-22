@@ -15,6 +15,7 @@ import math
 import logging
 from functools import wraps
 import secrets
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -631,13 +632,14 @@ def finish(request: Request):
             raise SsoError("state_invalid")
         if auth.accounts is None:  # create_app ensures the store exists
             raise SsoError("idp_unavailable")
-        account, first = auth.accounts.link_or_sync_sso(
+        account, _ = auth.accounts.link_or_sync_sso(
             ticket.issuer,
             ticket.subject,
             ticket.role,
             issued_at=ticket.issued_at,
             email=ticket.email,
             display_name=ticket.name,
+            audit_login=True,
         )
         ttl = service.settings.session_minutes * 60
         sid = auth.sessions.issue(
@@ -648,13 +650,6 @@ def finish(request: Request):
             ttl=ttl,
         )
         auth.sessions.revoke(auth.session_id(request.scope))
-        auth.accounts.record_event(
-            "sso.login",
-            "success",
-            actor=account.principal_id,
-            target=account.principal_id,
-            detail={"role": account.role, "first_login": first},
-        )
         response = _private(RedirectResponse(ticket.next, status_code=302))
         _set_session_cookie(response, auth, sid, ttl=ttl)
         _clear_binding(response, auth, ticket.cookie_name)
@@ -666,4 +661,11 @@ def finish(request: Request):
             "finish",
             ticket.cookie_name if ticket else None,
             matched=ticket is not None,
+        )
+    except sqlite3.Error:
+        logger.error("SSO finish could not commit account changes and login audit")
+        return _failure(
+            request,
+            "sso_storage_unavailable",
+            cookie_name=ticket.cookie_name if ticket else None,
         )

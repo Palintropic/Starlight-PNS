@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { fetchConfigProviders, submitConfig, type ProviderOption } from './api';
 import './App.css';
 
 interface SetupWizardProps {
   onDone: () => void;
+  ssoNotice?: ReactNode;
 }
 
-function SetupWizard({ onDone }: SetupWizardProps) {
+function SetupWizard({ onDone, ssoNotice }: SetupWizardProps) {
   const [providers, setProviders] = useState<Record<string, ProviderOption>>({});
   const [providerKey, setProviderKey] = useState('');
   const [generatorModel, setGeneratorModel] = useState('');
@@ -44,6 +45,7 @@ function SetupWizard({ onDone }: SetupWizardProps) {
         <p className="pivot-title">Nightcord Sanctuary</p>
         <h2>首次运行配置</h2>
         <p className="subtitle">选择模型提供商并填入 API Key，配置会保存到本地 .env 文件。</p>
+        {ssoNotice}
 
         <label className="setup-field">
           模型提供商

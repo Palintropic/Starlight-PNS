@@ -611,11 +611,13 @@ class AccountStore:
     def link_or_sync_sso(
         self, issuer: str, subject: str, role: str,
         *, issued_at: float, email: Optional[str] = None, display_name: Optional[str] = None,
+        audit_login: bool = False,
     ) -> Tuple[Principal, bool]:
         """Resolve and synchronize a verified identity in one write transaction.
 
         Local disable wins; SSO role synchronization never uses the local-admin
         floor. The returned revision belongs to this transaction, not a later read.
+        When claiming a login, commit its audit with the account changes.
         """
         if role not in ROLES or not issuer or not subject:
             raise AccountError("Invalid verified SSO identity")
@@ -674,6 +676,9 @@ class AccountStore:
                 result = self._principal(self._db.execute(
                     "SELECT * FROM principals WHERE principal_id=?", (pid,),
                 ).fetchone())
+                if audit_login:
+                    self._audit(pid, pid, "sso.login", "success",
+                                {"role": result.role, "first_login": first})
                 self._db.execute("COMMIT")
                 return result, first
             except sqlite3.IntegrityError as exc:
