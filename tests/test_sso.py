@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -242,6 +243,16 @@ class SsoApiTests(ApiTestCase):
             "/api/auth/session", headers={"cookie": "pns_session=" + sid}
         ).json()
 
+    def fail_login_audit(self):
+        audit = self.accounts._audit
+
+        def fail(actor, target, action, result, detail=None):
+            if action == "sso.login":
+                raise sqlite3.OperationalError("fixture audit write failure")
+            return audit(actor, target, action, result, detail)
+
+        return patch.object(self.accounts, "_audit", side_effect=fail)
+
     def test_complete_cookie_jar_retains_binding_until_finish(self):
         response, q = self.start(next="/#world")
         self.assertIn("SameSite=lax", response.headers["set-cookie"])
@@ -301,6 +312,47 @@ class SsoApiTests(ApiTestCase):
         self.assert_error(self.finish(cb), "state_invalid")
         self.assertTrue(self.saved_session(sid)["authenticated"])
         self.assertEqual(len(self.accounts.list_humans()), 3)
+
+    def test_login_audit_failure_rolls_back_new_account_and_preserves_local_session(self):
+        sid = self.local_login()
+        _, q = self.start()
+        callback = self.callback(q)
+        with self.fail_login_audit(), self.assertLogs("pns.interfaces.sso", level="ERROR") as logs:
+            failed = self.finish(callback)
+        self.assert_error(failed, "sso_storage_unavailable")
+        self.assertNotIn("fixture audit write failure", "\n".join(logs.output))
+        self.assertIsNone(self.client.cookies.get(sso.binding_name(q["state"])))
+        old = self.client.get("/api/auth/session", headers={"cookie": "pns_session=" + sid})
+        self.assertEqual(old.status_code, 200)
+        self.assertTrue(old.json()["authenticated"])
+        self.assertEqual(self.app.state.admin_auth.sessions.live, 1)
+        self.assertEqual(len(self.accounts.list_humans()), 3)
+        self.assertFalse(any(
+            row["action"] in {"sso.link", "sso.login"} for row in self.accounts.audit_records()
+        ))
+
+        self.assert_error(self.finish(callback), "state_invalid")
+        self.assertEqual(self.sign_in().status_code, 302)
+        self.assertFalse(self.saved_session(sid)["authenticated"])
+
+    def test_login_audit_failure_rolls_back_role_change_and_preserves_sso_session(self):
+        now = int(time.time())
+        self.idp.overrides = {"roles": ["pns:operator"], "iat": now - 2}
+        self.assertEqual(self.sign_in().status_code, 302)
+        sid = self.client.cookies.get("pns_session")
+        before = self.session()["principal"]
+        self.idp.overrides = {"roles": ["pns:observer"], "iat": now}
+        _, q = self.start()
+        callback = self.callback(q)
+        with self.fail_login_audit(), self.assertLogs("pns.interfaces.sso", level="ERROR"):
+            self.assert_error(self.finish(callback), "sso_storage_unavailable")
+        after = self.saved_session(sid)
+        self.assertTrue(after["authenticated"])
+        self.assertEqual(after["principal"], before)
+        self.assertEqual(self.app.state.admin_auth.sessions.live, 1)
+        self.assertFalse(any(
+            row["action"] == "sso.role_sync" for row in self.accounts.audit_records()
+        ))
 
     def test_role_sync_revokes_other_devices_by_revision(self):
         self.idp.overrides = {"roles": ["pns:admin"], "iat": int(time.time()) - 2}

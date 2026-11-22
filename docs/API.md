@@ -771,12 +771,13 @@ SSO 未配置时以下三条公开路由均为 404；半配置拒绝启动。部
 |---|---|
 | `GET /api/auth/sso/login?next=` | 规范 host:port 跳转后，设置每流程 Lax 绑定 Cookie，302 到 IdP；只发 S256 PKCE |
 | `GET /api/auth/sso/callback?code=&state=` | 一次性 state + 绑定校验，工作线程换 token / 验 RS256，200 无脚本中转页；不发会话、不改账户 |
-| `GET /api/auth/sso/finish?ticket=` | 30 秒一次性票 + 绑定校验；事务建号/同步，撤旧发新 Strict 会话，302 到站内 next |
+| `GET /api/auth/sso/finish?ticket=` | 30 秒一次性票 + 绑定校验；同一事务提交建号/同步和成功审计，再签发新 Strict 会话并撤销旧会话，302 到站内 next |
 
 `next` 仅接受 `/` 开头、第二字符不是 `/` 或 `\`、≤512 字符且无控制字符的路径；否则 `/`。
 失败 302 到 `/?sso_error=<category>`：`state_invalid/idp_denied/idp_unavailable/token_invalid/sso_busy/`
-`no_role/unknown_role/ambiguous_role/account_disabled/account_conflict`。不回显 IdP 或数据库异常。
+`no_role/unknown_role/ambiguous_role/account_disabled/account_conflict/sso_stale/sso_storage_unavailable`。不回显 IdP 或数据库异常。
 成功 callback 保留绑定 Cookie 给 finish；已识别流程的终止失败与 finish 成功会清掉原 Path 的绑定。
+finish 的账户事务或成功审计写入失败会返回 `sso_storage_unavailable`，保留已有会话。用户需重新发起登录。
 
 `POST /api/auth/logout` 先撤 PNS 会话。SSO 会话额外返回 `sso_logout_url`（不可用则 null）及
 `sso_signed_out: false`（PNS 无法确认浏览器是否在 IdP 完成登出）；前端跟随 URL，无法取得或启动跳转时显示部分退出提示。
@@ -786,6 +787,6 @@ ID token 仅存服务端内存；access token 丢弃，无 refresh token。
 不暴露 issuer/subject。SSO 账户角色修改、密码重置、自行改密均为 409 `sso_managed`，启用/停用保留。
 SSO 登录只接受一个 `pns:*` 档位，缺失角色不放行为 observer；本地停用优先。
 最后管理员保底只计算启用、有密码且未绑定 SSO 的本地人类管理员。
-审计新增 `sso.link`、`sso.role_sync`、仅在 finish 成功签发时的 `sso.login {role,first_login}`，
+审计新增 `sso.link`、`sso.role_sync`、finish 账户事务内的 `sso.login {role,first_login}`，
 以及 `sso.login_failed {stage,category}`；不记邮箱、subject、state、code、nonce、token。
 SSO client secret 加入进程值遮蔽；应用及反代必须省略 SSO 路由 query（部署文档 §8.7）。

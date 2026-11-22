@@ -212,6 +212,9 @@
   font: var(--type-body);
   color: var(--warn);
 }
+.shell > .auth-error {
+  margin: var(--gutter) var(--page-margin);
+}
 .auth-submit,
 .setup-wizard > .btn {
   align-self: flex-start;

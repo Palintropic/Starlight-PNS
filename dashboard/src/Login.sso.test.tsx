@@ -1,7 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import App from './App';
 import Login from './Login';
-import { followSsoLogout, type AuthSession } from './api';
+import * as api from './api';
 
 afterEach(() => {
   cleanup();
@@ -31,6 +32,7 @@ it('keeps the existing local form when SSO is not configured', () => {
 it.each([
   ['idp_unavailable', '账户服务暂时连不上，可以先用本地账户登录'],
   ['sso_busy', '现在发起不了 Palintropic 登录，稍后再试，或者先用本地账户登录'],
+  ['sso_storage_unavailable', 'PNS 暂时无法完成 Palintropic 登录，请稍后重试'],
   ['no_role', '这个 Palintropic 账户没有 PNS 的权限'],
   ['account_disabled', '这个账户已被 PNS 停用，请联系管理员'],
   ['unknown_role', '这个账户的登录配置需要管理员处理'],
@@ -39,11 +41,19 @@ it.each([
   ['state_invalid', '登录没有完成，请重试'],
   ['idp_denied', '登录没有完成，请重试'],
   ['token_invalid', '登录没有完成，请重试'],
+  ['sso_stale', '登录没有完成，请重试'],
   ['private-raw-exception', '登录没有完成，请重试'],
-])('shows actionable SSO error %s without echoing arbitrary query text', (category, message) => {
-  window.history.replaceState(null, '', '/?sso_error='+category);
-  render(<Login onDone={() => undefined} ssoEnabled />);
-  expect(screen.getByRole('alert').textContent).toBe(message);
+  ['constructor', '登录没有完成，请重试'],
+  ['__proto__', '登录没有完成，请重试'],
+  ['toString', '登录没有完成，请重试'],
+])('shows actionable SSO error %s without echoing arbitrary query text', async (category, message) => {
+  vi.spyOn(api, 'fetchAuthSession').mockResolvedValue({
+    mode: 'production', auth_required: true, authenticated: false, principal: null,
+    sso_enabled: true,
+  });
+  window.history.replaceState(null, '', '/?sso_error=' + category);
+  render(<App />);
+  expect((await screen.findByRole('alert')).textContent).toBe(message);
   expect(window.location.search).toBe('');
 });
 
@@ -53,15 +63,15 @@ it('reports partial logout when PNS has already revoked its session', () => {
 });
 
 it('follows the server logout URL and tolerates failed navigation', () => {
-  const session: AuthSession = { mode: 'production', auth_required: true,
+  const session: api.AuthSession = { mode: 'production', auth_required: true,
     authenticated: false, principal: null, sso_logout_url: 'https://id.example/logout', sso_signed_out: false };
   const navigate = vi.fn();
-  expect(followSsoLogout(session, navigate).authenticated).toBe(false);
+  expect(api.followSsoLogout(session, navigate).authenticated).toBe(false);
   expect(navigate).toHaveBeenCalledWith(session.sso_logout_url);
-  const failed = followSsoLogout(session, () => { throw new Error('offline'); });
+  const failed = api.followSsoLogout(session, () => { throw new Error('offline'); });
   expect(failed.sso_signed_out).toBe(false);
   expect(failed.authenticated).toBe(false);
   navigate.mockClear();
-  followSsoLogout({ ...session, sso_logout_url: null }, navigate);
+  api.followSsoLogout({ ...session, sso_logout_url: null }, navigate);
   expect(navigate).not.toHaveBeenCalled();
 });

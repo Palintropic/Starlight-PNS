@@ -36,6 +36,17 @@ const TAB_LABEL: Record<Tab, string> = {
   accounts: '用户管理',
 };
 
+const SSO_ERROR_MESSAGES: Record<string, string> = {
+  idp_unavailable: '账户服务暂时连不上，可以先用本地账户登录',
+  sso_busy: '现在发起不了 Palintropic 登录，稍后再试，或者先用本地账户登录',
+  sso_storage_unavailable: 'PNS 暂时无法完成 Palintropic 登录，请稍后重试',
+  no_role: '这个 Palintropic 账户没有 PNS 的权限',
+  account_disabled: '这个账户已被 PNS 停用，请联系管理员',
+  unknown_role: '这个账户的登录配置需要管理员处理',
+  ambiguous_role: '这个账户的登录配置需要管理员处理',
+  account_conflict: '这个账户的登录配置需要管理员处理',
+};
+
 function App() {
   const [tab, setTab] = useState<Tab>('overview');
   const [session, setSession] = useState<AuthSession | null>(null);
@@ -43,6 +54,21 @@ function App() {
   const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [changingPassword, setChangingPassword] = useState(false);
+  const [ssoError, setSsoError] = useState(() => {
+    const category = new URLSearchParams(window.location.search).get('sso_error');
+    if (!category) return null;
+    return Object.hasOwn(SSO_ERROR_MESSAGES, category)
+      ? SSO_ERROR_MESSAGES[category]
+      : '登录没有完成，请重试';
+  });
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('sso_error')) {
+      url.searchParams.delete('sso_error');
+      window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+    }
+  }, []);
 
   const loadSession = useCallback(() => {
     setSessionError(null);
@@ -64,6 +90,7 @@ function App() {
         current ? { ...current, authenticated: false, principal: null } : current,
       );
       setConfig(null);
+      setSsoError(null);
     };
     window.addEventListener(UNAUTHENTICATED_EVENT, handler);
     return () => window.removeEventListener(UNAUTHENTICATED_EVENT, handler);
@@ -97,14 +124,18 @@ function App() {
   }, [authenticated, loadConfig]);
 
   const handleLogout = () => {
+    setSsoError(null);
     logout()
       .then(setSession)
       .catch(() => loadSession());
   };
 
+  const ssoNotice = ssoError && <p className="auth-error" role="alert">{ssoError}</p>;
+
   if (sessionError) {
     return (
       <div className="state-msg error">
+        {ssoNotice}
         {sessionError}
         <button className="btn btn-accent" onClick={loadSession}>重试</button>
       </div>
@@ -116,7 +147,17 @@ function App() {
   }
 
   if (!authenticated) {
-    return <Login onDone={loadSession} ssoEnabled={session.sso_enabled} ssoLogoutIncomplete={session.sso_signed_out === false} />;
+    return (
+      <Login
+        onDone={() => {
+          setSsoError(null);
+          loadSession();
+        }}
+        ssoNotice={ssoNotice}
+        ssoEnabled={session.sso_enabled}
+        ssoLogoutIncomplete={session.sso_signed_out === false}
+      />
+    );
   }
 
   if (changingPassword) {
@@ -125,6 +166,7 @@ function App() {
         username={principal?.username ?? ''}
         onDone={() => {
           setChangingPassword(false);
+          setSsoError(null);
           loadSession();
         }}
         onCancel={() => setChangingPassword(false)}
@@ -135,6 +177,7 @@ function App() {
   if (configError) {
     return (
       <div className="state-msg error">
+        {ssoNotice}
         {configError}
         <button className="btn btn-accent" onClick={loadConfig}>重试</button>
       </div>
@@ -146,7 +189,7 @@ function App() {
   }
 
   if (!config.has_key) {
-    return <SetupWizard onDone={loadConfig} />;
+    return <SetupWizard onDone={loadConfig} ssoNotice={ssoNotice} />;
   }
 
   const tabs: Tab[] = [
@@ -188,6 +231,7 @@ function App() {
             ))}
           </nav>
         </header>
+        {ssoNotice}
         <main className="pivot-item" role="tabpanel" aria-labelledby={`pivot-${tab}`} key={tab}>
           {tab === 'overview' ? <WorldOverview /> : tab === 'simulate' && canOperate ? <Simulate /> : tab === 'review' ? <ReviewDashboard /> : tab === 'world' ? <WorldEditor /> : tab === 'accounts' && canManageAccounts ? <Accounts /> : tab === 'models' && canManageAccounts ? <ModelSettings /> : <PersistentWorlds />}
         </main>

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { login } from './api';
 import './App.css';
 
 interface LoginProps {
   onDone: () => void;
+  ssoNotice?: ReactNode;
   ssoEnabled?: boolean;
   ssoLogoutIncomplete?: boolean;
 }
@@ -18,33 +19,11 @@ interface LoginProps {
  * 自动化用的 bearer，只走 `Authorization` 头。让它同时当网页口令，等于把一把
  * 不属于任何人、撤销要重启进程的钥匙发给每一个用浏览器的人。
  */
-function Login({ onDone, ssoEnabled = false, ssoLogoutIncomplete = false }: LoginProps) {
+function Login({ onDone, ssoNotice, ssoEnabled = false, ssoLogoutIncomplete = false }: LoginProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const [ssoError] = useState(() => {
-    const category = new URLSearchParams(window.location.search).get('sso_error');
-    if (!category) return null;
-    const messages: Record<string, string> = {
-      idp_unavailable: '账户服务暂时连不上，可以先用本地账户登录',
-      sso_busy: '现在发起不了 Palintropic 登录，稍后再试，或者先用本地账户登录',
-      no_role: '这个 Palintropic 账户没有 PNS 的权限',
-      account_disabled: '这个账户已被 PNS 停用，请联系管理员',
-      unknown_role: '这个账户的登录配置需要管理员处理',
-      ambiguous_role: '这个账户的登录配置需要管理员处理',
-      account_conflict: '这个账户的登录配置需要管理员处理',
-    };
-    return messages[category] ?? '登录没有完成，请重试';
-  });
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    if (url.searchParams.has('sso_error')) {
-      url.searchParams.delete('sso_error');
-      window.history.replaceState(null, '', url.pathname + url.search + url.hash);
-    }
-  }, []);
 
   const ready = username.trim().length > 0 && password.length > 0;
 
@@ -107,7 +86,7 @@ function Login({ onDone, ssoEnabled = false, ssoLogoutIncomplete = false }: Logi
             使用你的操作者账户继续。浏览器只保留 HttpOnly 会话 Cookie；密码不会写入本地。
           </p>
 
-          {ssoError && <p className="auth-error" role="alert">{ssoError}</p>}
+          {ssoNotice}
           {ssoLogoutIncomplete && <p role="status">PNS 已退出，Palintropic 账户可能还登着</p>}
           {error && <p className="auth-error" role="alert">{error}</p>}
           {ssoEnabled && (
