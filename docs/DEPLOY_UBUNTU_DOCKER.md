@@ -246,7 +246,7 @@ docker compose ps   # STATUS 应当从 starting 变成 healthy
 这个错的麻烦之处在于**它不在构建阶段出现**：构建会成功，`docker save` / `docker load` 会成功，
 一直到虚拟机上第一次 `up` 才炸。所以要在投送之前就把架构验出来，别等到生产上。
 
-从目标提交的 `main` Actions 运行下载并解压 `starlight-pns-linux-amd64-<commit>-attempt-<n>`。
+优先使用下文的本机构建步骤。需要 Actions 备用构建时，在 `main` 上手动运行 Python tests 工作流，确认提交后下载并解压 `starlight-pns-linux-amd64-<commit>-attempt-<n>`。
 这个产物由 Docker 容器冒烟通过后上传。用同目录的校验文件验证压缩包，再加载镜像。
 
 ```bash
