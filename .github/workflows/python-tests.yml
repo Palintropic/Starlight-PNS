@@ -57,3 +57,60 @@ jobs:
 
       - name: Compile Python sources
         run: python -m compileall -q pns tests bench
+
+  amd64-image:
+    name: Build and verify amd64 image
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      SMOKE_IMAGE: starlight-pns:git-${{ github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install smoke test dependency
+        run: python -m pip install -c constraints-prod.txt argon2-cffi
+
+      - name: Build and run Docker smoke tests
+        env:
+          SMOKE_PLATFORM: linux/amd64
+        run: bash scripts/docker_smoke.sh
+
+      - name: Package the tested image
+        run: |
+          platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$SMOKE_IMAGE")"
+          if [[ "$platform" != linux/amd64 ]]; then
+            echo "Unexpected image platform: $platform" >&2
+            exit 1
+          fi
+          image_id="$(docker image inspect --format '{{.Id}}' "$SMOKE_IMAGE")"
+          mkdir -p "$RUNNER_TEMP/pns-image"
+          cd "$RUNNER_TEMP/pns-image"
+          docker image save "$SMOKE_IMAGE" | gzip -n > starlight-pns-linux-amd64.tar.gz
+          sha256sum starlight-pns-linux-amd64.tar.gz > SHA256SUMS
+          printf 'commit=%s\nimage=%s\nimage_id=%s\nplatform=%s\n' \
+            "$GITHUB_SHA" "$SMOKE_IMAGE" "$image_id" "$platform" > image.txt
+
+      - name: Upload tested image archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starlight-pns-linux-amd64-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/pns-image/starlight-pns-linux-amd64.tar.gz
+            ${{ runner.temp }}/pns-image/SHA256SUMS
+            ${{ runner.temp }}/pns-image/image.txt
+          if-no-files-found: error
+          compression-level: 0

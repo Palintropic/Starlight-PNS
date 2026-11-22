@@ -13,11 +13,12 @@
 # 用法： scripts/docker_smoke.sh          （跑完自动清理）
 #        KEEP=1 scripts/docker_smoke.sh   （留下容器和卷供人工查看）
 #        SMOKE_PLATFORM=linux/amd64 scripts/docker_smoke.sh   （按目标架构构建）
+#        SMOKE_IMAGE=starlight-pns:git-<sha> scripts/docker_smoke.sh   （指定构建和验收的镜像标签）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="pns-smoke"
-IMAGE="starlight-pns:smoke"
+IMAGE="${SMOKE_IMAGE:-starlight-pns:smoke}"
 PORT="${SMOKE_PORT:-17860}"
 BASE="http://127.0.0.1:${PORT}"
 
@@ -64,7 +65,8 @@ step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
 compose() {
-  docker compose -p "$PROJECT" -f "${REPO_ROOT}/compose.yaml" -f "${WORK}/override.yaml" "$@"
+  docker compose --env-file "${WORK}/.env" -p "$PROJECT" \
+    -f "${WORK}/compose.yaml" -f "${WORK}/override.yaml" "$@"
 }
 
 cleanup() {
@@ -78,7 +80,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat > "${WORK}/smoke.env" <<ENV
+# Compose 的 env_file 相对于第一份配置解析。把基准文件和合成 .env 放在一起。
+cp "${REPO_ROOT}/compose.yaml" "${WORK}/compose.yaml"
+cat > "${WORK}/.env" <<ENV
 PNS_ADMIN_TOKEN=${ADMIN_TOKEN}
 PNS_BOOTSTRAP_ADMIN_USERNAME=${SMOKE_USER}
 PNS_BOOTSTRAP_ADMIN_PASSWORD_HASH='${SMOKE_PASSWORD_HASH}'
@@ -95,8 +99,6 @@ services:
   app:
     image: ${IMAGE}
     container_name: ${PROJECT}
-    env_file:
-      - ${WORK}/smoke.env
 OVERRIDE
 
 # 端口走 compose.yaml 自己的 PNS_BIND/PNS_PORT 变量，而**不是**在 override 里
@@ -144,7 +146,7 @@ check "镜像里没有 tests/" \
 check "docker history 里没有凭据" \
   '! docker history --no-trunc "$IMAGE" | grep -q "$ADMIN_TOKEN"'
 
-compose up -d >/dev/null 2>&1 || { bad "compose up 失败"; compose logs | tail -30; exit 1; }
+compose up -d --no-build --pull never || { bad "compose up 失败"; compose logs | tail -30; exit 1; }
 
 printf '  等待健康检查'
 healthy=0
@@ -204,8 +206,7 @@ check "活数据不在镜像层上（无卷启动时 /app/data 是空的）" \
   '[ -z "$(docker run --rm --entrypoint sh "$IMAGE" -c "ls -A /app/data")" ]'
 
 compose down >/dev/null 2>&1
-docker build $PLATFORM_ARG -t "$IMAGE" "$REPO_ROOT" >/dev/null 2>&1
-compose up -d >/dev/null 2>&1
+compose up -d --no-build --pull never
 for _ in $(seq 1 60); do
   [ "$(docker inspect --format '{{.State.Health.Status}}' "$PROJECT" 2>/dev/null || echo none)" = "healthy" ] && break
   sleep 2
@@ -228,7 +229,7 @@ check "日志里没有出现过模型调用错误（provider 指向不可路由�
 
 # ── A8：两个写者 ───────────────────────────────────────────────────────
 step "A8  第二个应用容器不能静默共写"
-if docker run -d --name "$PROJECT" --env-file "${WORK}/smoke.env" "$IMAGE" >/dev/null 2>"${WORK}/dup.log"; then
+if docker run -d --name "$PROJECT" --env-file "${WORK}/.env" "$IMAGE" >/dev/null 2>"${WORK}/dup.log"; then
   bad "同名容器竟然起来了"
   docker rm -f "$PROJECT" >/dev/null 2>&1 || true
 else
