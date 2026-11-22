@@ -246,7 +246,18 @@ docker compose ps   # STATUS 应当从 starting 变成 healthy
 这个错的麻烦之处在于**它不在构建阶段出现**：构建会成功，`docker save` / `docker load` 会成功，
 一直到虚拟机上第一次 `up` 才炸。所以要在投送之前就把架构验出来，别等到生产上。
 
-在构建机上：
+优先使用下文的本机构建步骤。需要 Actions 备用构建时，在 `main` 上手动运行 Python tests 工作流，确认提交后下载并解压 `starlight-pns-linux-amd64-<commit>-attempt-<n>`。
+这个产物由 Docker 容器冒烟通过后上传。用同目录的校验文件验证压缩包，再加载镜像。
+
+```bash
+sha256sum -c SHA256SUMS && docker load -i starlight-pns-linux-amd64.tar.gz
+```
+
+`image.txt` 记录源提交、镜像 ID、架构和加载后的标签 `starlight-pns:git-<commit>`。
+在部署机上将仓库切到对应提交，升级前按第 12 节备份。将加载的镜像标记为
+`starlight-pns:local`，再按下文的部署机启动步骤操作。
+
+需要手动构建时，在构建机上执行以下命令。
 
 ```bash
 # --platform 不是可选项：要的是虚拟机的架构，不是构建机的架构
