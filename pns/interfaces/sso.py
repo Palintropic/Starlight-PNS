@@ -707,15 +707,28 @@ def _review_link(request: Request, ticket: Ticket):
     source_name = html.escape(source.username) if source else "首次登录"
     target = html.escape(link.account.username)
     role = max((link.account.role, ticket.role), key=ROLES.index)
-    page = HTMLResponse(
-        f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>确认账户绑定</title>'
-        f'<h1>绑定到 {target}</h1><p>Palintropic 账户：{html.escape(name)}（{source_name}）</p>'
-        f'<p>统一登录后的权限：{role}。原密码继续可用，绑定后需重新登录。</p>'
+    role_label = {"admin": "管理员", "operator": "操作员", "observer": "只读"}[role]
+    page = _private(HTMLResponse(
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>确认账户绑定 · Nightcord Sanctuary</title>'
+        '<link rel="stylesheet" href="/assets/account-confirm.css"></head><body><main>'
+        '<p class="brand">Nightcord Sanctuary</p><h1>确认账户绑定</h1>'
+        '<dl><div><dt>Palintropic 账户</dt>'
+        f'<dd>{html.escape(name)}</dd></div><div><dt>原 SSO 账户</dt><dd>{source_name}</dd></div>'
+        f'<div><dt>绑定到</dt><dd>{target}</dd></div>'
+        f'<div><dt>登录权限</dt><dd>{role_label}</dd></div></dl>'
+        f'<p class="note">确认后请重新登录。以后用 Palintropic 或原密码都能进入 {target}。</p>'
         f'<form method="post" action="{FLOW_PATH}finish?ticket={key}">'
-        '<button>确认绑定</button></form><a href="/">取消</a></html>'
+        '<button type="submit">确认绑定</button><a href="/">取消</a></form></main></body></html>'
+    ))
+    # A form navigation with no-referrer can send Origin: null. Disclose only
+    # the origin so the same-origin check works and the ticket stays private.
+    page.headers["Referrer-Policy"] = "strict-origin"
+    page.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'"
     )
-    page.headers["Content-Security-Policy"] = "default-src 'none'; form-action 'self'; frame-ancestors 'none'"
-    return _private(page)
+    return page
 
 
 @router.post("/finish")
