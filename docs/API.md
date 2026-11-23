@@ -773,6 +773,15 @@ SSO 未配置时以下三条公开路由均为 404；半配置拒绝启动。部
 | `GET /api/auth/sso/callback?code=&state=` | 一次性 state + 绑定校验，工作线程换 token / 验 RS256，200 无脚本中转页；不发会话、不改账户 |
 | `GET /api/auth/sso/finish?ticket=` | 30 秒一次性票 + 绑定校验；同一事务提交建号/同步和成功审计，再签发新 Strict 会话并撤销旧会话，302 到站内 next |
 
+从密码会话绑定 Palintropic 身份时，先调用 `POST /api/auth/sso/link`，JSON 正文为
+`{"password":"…"}`。成功响应的 `url` 是本次 OIDC 导航地址。回调沿用上述路由，
+领取绑定票时显示双方账户与实际 SSO 角色。用户在原密码会话内确认表单后才提交绑定。
+成功后重新登录，两种入口返回同一 `principal_id`，SSO 权限取本地角色和 IdP 角色的较低者。
+原独立 SSO 主体停用并保留历史审计。本地账户仍按原角色使用密码。
+密码会话可从 `GET /api/auth/session` 的 `linked_sso_username` 查看绑定。
+`POST /api/auth/sso/unlink` 以同样的密码正文解除绑定，原 SSO 主体恢复独立登录。
+绑定、解绑均撤销双方原有会话。
+
 `next` 仅接受 `/` 开头、第二字符不是 `/` 或 `\`、≤512 字符且无控制字符的路径；否则 `/`。
 失败 302 到 `/?sso_error=<category>`：`state_invalid/idp_denied/idp_unavailable/token_invalid/sso_busy/`
 `no_role/unknown_role/ambiguous_role/account_disabled/account_conflict/sso_stale/sso_storage_unavailable`。不回显 IdP 或数据库异常。

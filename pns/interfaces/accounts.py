@@ -32,7 +32,7 @@ import sqlite3
 import threading
 import unicodedata
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -318,6 +318,10 @@ CREATE TABLE IF NOT EXISTS sso_identities (
     issued_at REAL,
     PRIMARY KEY (issuer, subject)
 );
+CREATE TABLE IF NOT EXISTS linked_logins (
+    sso_id TEXT PRIMARY KEY REFERENCES principals(principal_id),
+    local_id TEXT NOT NULL UNIQUE REFERENCES principals(principal_id)
+);
 """
 
 
@@ -599,8 +603,9 @@ class AccountStore:
         """Display metadata only; issuer/subject never enter API responses."""
         with self._lock:
             row = self._db.execute(
-                "SELECT email,display_name,last_login_at FROM sso_identities"
-                " WHERE principal_id=?", (principal_id,),
+                "SELECT s.email,s.display_name,s.last_login_at,p.username AS linked_to"
+                " FROM sso_identities s LEFT JOIN linked_logins l ON l.sso_id=s.principal_id"
+                " LEFT JOIN principals p ON p.principal_id=l.local_id WHERE s.principal_id=?", (principal_id,),
             ).fetchone()
             return dict(row) if row is not None else None
 
@@ -608,10 +613,51 @@ class AccountStore:
         if self.sso_identity(principal_id) is not None:
             raise SsoManagedError("在 Palintropic 账户里管理角色和密码")
 
+    def linked_username(self, local_id: str) -> Optional[str]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT p.username FROM linked_logins l JOIN principals p"
+                " ON p.principal_id=l.sso_id WHERE l.local_id=?", (local_id,),
+            ).fetchone()
+            return row["username"] if row else None
+
+    def sso_owner(self, issuer: str, subject: str) -> Optional[Principal]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT p.* FROM sso_identities s JOIN principals p"
+                " ON s.principal_id=p.principal_id WHERE issuer=? AND subject=?",
+                (issuer, subject),
+            ).fetchone()
+            return self._principal(row) if row else None
+
+    def unlink_login(self, local: Principal) -> None:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute(
+                    "SELECT sso_id FROM linked_logins WHERE local_id=?", (local.principal_id,),
+                ).fetchone()
+                if not row or self.get(local.principal_id) != local or not local.enabled:
+                    raise AccountConflict("账户绑定已变化")
+                source = row["sso_id"]
+                self._db.execute("DELETE FROM linked_logins WHERE local_id=?", (local.principal_id,))
+                self._db.execute(
+                    "UPDATE principals SET security_revision=security_revision+1, updated_at=?"
+                    " WHERE principal_id IN (?,?)", (self._now(), source, local.principal_id),
+                )
+                # Restore the independent SSO account that was enabled before linking.
+                self._db.execute("UPDATE principals SET enabled=1 WHERE principal_id=?", (source,))
+                self._audit(local.principal_id, source, "sso.account_unlink", "success")
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+
     def link_or_sync_sso(
         self, issuer: str, subject: str, role: str,
         *, issued_at: float, email: Optional[str] = None, display_name: Optional[str] = None,
-        audit_login: bool = False,
+        audit_login: bool = False, link_to: Optional[Principal] = None,
+        expected_source: Optional[Principal] = None,
     ) -> Tuple[Principal, bool]:
         """Resolve and synchronize a verified identity in one write transaction.
 
@@ -625,12 +671,22 @@ class AccountStore:
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 row = self._db.execute(
-                    "SELECT p.*,s.issued_at FROM sso_identities s JOIN principals p"
-                    " ON p.principal_id=s.principal_id"
+                    "SELECT p.*,s.issued_at,l.local_id FROM sso_identities s JOIN principals p"
+                    " ON p.principal_id=s.principal_id LEFT JOIN linked_logins l ON l.sso_id=p.principal_id"
                     " WHERE s.issuer=? AND s.subject=?", (issuer, subject),
                 ).fetchone()
                 first = row is None
                 now = self._now()
+                local_id = None if first else row["local_id"]
+                existing = None if first else self._principal(row)
+                if link_to is not None:
+                    local = self.get(link_to.principal_id)
+                    if (local != link_to or not local.enabled or local.kind != KIND_HUMAN
+                            or self.sso_identity(local.principal_id) or local_id is not None
+                            or self.linked_username(local.principal_id)
+                            or expected_source != existing
+                            or (row is not None and row["password_hash"] is not None)):
+                        raise AccountConflict("账户或绑定已变化，请重新验证")
                 if first:
                     # Kratos subjects are UUIDs. Reject incompatible identifiers
                     # rather than inventing another identity/name mapping.
@@ -651,9 +707,9 @@ class AccountStore:
                     )
                     self._audit(pid, pid, "sso.link", "success")
                 else:
-                    old = self._principal(row)
+                    old = existing
                     pid = old.principal_id
-                    if not old.enabled:
+                    if not old.enabled and local_id is None:
                         raise AccountDisabled("这个账户已被 PNS 停用")
                     # The floor is the raw high-water iat. Only a role change
                     # must be strictly newer than it: a same-role login changes
@@ -673,11 +729,32 @@ class AccountStore:
                         "UPDATE sso_identities SET email=?,display_name=?,last_login_at=?,issued_at=?"
                         " WHERE principal_id=?", (email, display_name, now, high_water, pid),
                     )
-                result = self._principal(self._db.execute(
-                    "SELECT * FROM principals WHERE principal_id=?", (pid,),
-                ).fetchone())
+                if link_to is not None:
+                    self._db.execute(
+                        "INSERT INTO linked_logins(sso_id,local_id) VALUES(?,?)",
+                        (pid, link_to.principal_id),
+                    )
+                    self._db.execute(
+                        "UPDATE principals SET enabled=0, security_revision=security_revision+1,"
+                        " updated_at=? WHERE principal_id=?", (now, pid),
+                    )
+                    self._audit(link_to.principal_id, pid, "sso.account_link", "success")
+                    local_id = link_to.principal_id
+                if local_id is not None:
+                    local = self.get(local_id)
+                    if not local.enabled:
+                        raise AccountDisabled("本地账户已停用")
+                    if link_to is not None or existing.role != role:
+                        self._db.execute(
+                            "UPDATE principals SET security_revision=security_revision+1,"
+                            " updated_at=? WHERE principal_id=?", (now, local_id),
+                        )
+                        local = self.get(local_id)
+                    result = replace(local, role=max((local.role, role), key=ROLES.index))
+                else:
+                    result = self.get(pid)
                 if audit_login:
-                    self._audit(pid, pid, "sso.login", "success",
+                    self._audit(result.principal_id, result.principal_id, "sso.login", "success",
                                 {"role": result.role, "first_login": first})
                 self._db.execute("COMMIT")
                 return result, first
@@ -876,6 +953,8 @@ class AccountStore:
                 ).fetchone()
                 if row is None:
                     raise KeyError(target)
+                if self._db.execute("SELECT 1 FROM linked_logins WHERE sso_id=?", (target,)).fetchone():
+                    raise AccountConflict("这个身份已绑定，请在本地主账户上管理权限")
                 old = self._principal(row)
                 if old.kind == KIND_SERVICE:
                     # 服务账户只能停用 / 启用。它的角色是建号时就定死的 observer

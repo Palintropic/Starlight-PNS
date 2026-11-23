@@ -83,6 +83,8 @@ def _session_view(auth: AdminAuth, request: Request) -> dict:
     return {
         **auth.public_dict(),
         "sso_enabled": auth.settings.sso is not None,
+        "linked_sso_username": (auth.accounts.linked_username(principal.principal_id)
+                                if principal and principal.login == "password" and auth.accounts else None),
         "authenticated": principal is not None,
         "principal": principal.public_dict() if principal is not None else None,
     }
@@ -124,6 +126,33 @@ def get_session(request: Request):
     return _session_view(_auth(request), request)
 
 
+def verify_password(auth, store, username, password):
+    key = _throttle_key(username)
+    if not auth.throttle.reserve(key):
+        retry = auth.throttle.retry_after(key)
+        raise HTTPException(
+            429,
+            {
+                "category": "too_many_attempts",
+                "message": f"登录失败次数过多，请 {retry} 秒后再试",
+            },
+            headers={"Retry-After": str(retry)},
+        )
+    outcome = None
+    try:
+        outcome = store.authenticate(username, password)
+        if not outcome.ok:
+            # 只说"不对"。不说是用户名不存在、密码不对还是账户被停用——那种区分
+            # 是白送的枚举线索。失败的**类别**写进了审计，管理员看得到。
+            raise HTTPException(
+                401, {"category": "invalid_credential", "message": "用户名或密码不正确"}
+            )
+    finally:
+        # 成功只清这个账户的失败史，全局桶不清（见 LoginThrottle.record_success）。
+        auth.throttle.finish(key, success=None if outcome is None else outcome.ok)
+    return outcome.principal
+
+
 @router.post("/login")
 def post_login(payload: LoginRequest, response: Response, request: Request):
     """用户名 + 密码换一张会话 Cookie。"""
@@ -137,30 +166,7 @@ def post_login(payload: LoginRequest, response: Response, request: Request):
             },
         )
     store = _accounts(auth)
-    key = _throttle_key(payload.username)
-    if not auth.throttle.reserve(key):
-        retry = auth.throttle.retry_after(key)
-        raise HTTPException(
-            429,
-            {
-                "category": "too_many_attempts",
-                "message": f"登录失败次数过多，请 {retry} 秒后再试",
-            },
-            headers={"Retry-After": str(retry)},
-        )
-    outcome = None
-    try:
-        outcome = store.authenticate(payload.username, payload.password)
-        if not outcome.ok:
-            # 只说"不对"。不说是用户名不存在、密码不对还是账户被停用——那种区分
-            # 是白送的枚举线索。失败的**类别**写进了审计，管理员看得到。
-            raise HTTPException(
-                401, {"category": "invalid_credential", "message": "用户名或密码不正确"}
-            )
-    finally:
-        # 成功只清这个账户的失败史，全局桶不清（见 LoginThrottle.record_success）。
-        auth.throttle.finish(key, success=None if outcome is None else outcome.ok)
-    account = outcome.principal
+    account = verify_password(auth, store, payload.username, payload.password)
     session_id = auth.sessions.issue(account.principal_id, account.security_revision)
     _set_session_cookie(response, auth, session_id)
     return _session_view(auth, request) | {

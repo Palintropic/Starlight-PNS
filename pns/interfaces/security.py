@@ -32,7 +32,7 @@ import os
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hmac import compare_digest
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
@@ -416,6 +416,7 @@ class SessionRecord:
     security_revision: int
     expires_at: float
     login: str = "password"
+    sso_role: Optional[str] = None
     id_token: Optional[str] = field(default=None, repr=False)
     ttl: float = DEFAULT_SESSION_TTL_SECONDS
 
@@ -455,7 +456,7 @@ class SessionStore:
     def issue(
         self, principal_id: str, security_revision: int, *,
         login: str = "password", id_token: Optional[str] = None,
-        ttl: Optional[float] = None,
+        ttl: Optional[float] = None, sso_role: Optional[str] = None,
     ) -> str:
         sid = secrets.token_urlsafe(32)
         lifetime = self._ttl if ttl is None else float(ttl)
@@ -473,7 +474,7 @@ class SessionStore:
                 principal_id=str(principal_id),
                 security_revision=int(security_revision),
                 expires_at=self._clock() + lifetime,
-                login=login, id_token=id_token, ttl=lifetime,
+                login=login, id_token=id_token, ttl=lifetime, sso_role=sso_role,
             )
         return sid
 
@@ -903,6 +904,8 @@ class AdminAuth:
             # 而不是等它自己过期。
             self.sessions.revoke(sid)
             return None
+        if record.sso_role is not None:
+            account = replace(account, role=record.sso_role)
         return session_principal(account, record.session_id, login=record.login)
 
     def _resolve_service_token(self, token: str) -> Optional[RequestPrincipal]:

@@ -563,6 +563,6 @@
   }
 }
 
-.auth-local { margin-top: 24px; }
-.auth-local summary { cursor: pointer; margin-bottom: 16px; }
+.auth-divider { display: flex; align-items: center; gap: var(--gutter); color: var(--SystemBaseMediumHigh); }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; border-top: 1px solid currentColor; opacity: .3; }
 a.auth-submit { display: block; text-align: center; text-decoration: none; }

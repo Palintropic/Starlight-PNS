@@ -3,6 +3,7 @@ import ReviewDashboard from './ReviewDashboard';
 import WorldEditor from './world/WorldEditor';
 import SetupWizard from './SetupWizard';
 import Login from './Login';
+import AccountLink from './AccountLink';
 import ChangePassword from './ChangePassword';
 import Accounts from './Accounts';
 import ModelSettings from './ModelSettings';
@@ -53,6 +54,8 @@ function App() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
+  const [managingLink, setManagingLink] = useState(false);
+  const [linkComplete, setLinkComplete] = useState(() => new URLSearchParams(window.location.search).get('account_linked') === '1');
   const [changingPassword, setChangingPassword] = useState(false);
   const [ssoError, setSsoError] = useState(() => {
     const category = new URLSearchParams(window.location.search).get('sso_error');
@@ -64,7 +67,8 @@ function App() {
 
   useEffect(() => {
     const url = new URL(window.location.href);
-    if (url.searchParams.has('sso_error')) {
+    if (url.searchParams.has('sso_error') || url.searchParams.has('account_linked')) {
+      url.searchParams.delete('account_linked');
       url.searchParams.delete('sso_error');
       window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
     }
@@ -150,14 +154,21 @@ function App() {
     return (
       <Login
         onDone={() => {
+          setManagingLink(false);
+          setLinkComplete(false);
           setSsoError(null);
           loadSession();
         }}
-        ssoNotice={ssoNotice}
+        ssoNotice={ssoNotice || (linkComplete && <p role="status">账户已绑定。现在可以用任一方式登录同一个账户。</p>)}
         ssoEnabled={session.sso_enabled}
         ssoLogoutIncomplete={session.sso_signed_out === false}
       />
     );
+  }
+
+  if (managingLink && principal?.login === 'password' && session.sso_enabled) {
+    return <AccountLink username={principal.username} linked={session.linked_sso_username}
+      onCancel={() => setManagingLink(false)} onUnlinked={() => { setManagingLink(false); loadSession(); }} />;
   }
 
   if (changingPassword) {
@@ -239,6 +250,10 @@ function App() {
           <span className="command-bar-account" title={principal ? `principal ${principal.principal_id}` : undefined}>{principal ? `${principal.username} · ${principal.role}` : null}</span>
           <div className="command-bar-commands">
             {canOperate ? <ConfigReload /> : null}
+            {session.sso_enabled && principal?.login === 'password' &&
+              <button className="command" onClick={() => setManagingLink(true)}>
+                {session.linked_sso_username ? '管理 Palintropic 绑定' : '绑定 Palintropic 账户'}
+              </button>}
             {principal?.via === 'session' && principal.login !== 'sso' ? <button className="command" onClick={() => setChangingPassword(true)}>修改密码</button> : null}
             {session.auth_required ? <button className="command" onClick={handleLogout} title="作废当前会话">登出</button> : null}
           </div>
