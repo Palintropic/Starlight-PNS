@@ -262,6 +262,7 @@ class SsoApiTests(ApiTestCase):
         self.idp.nonces[query["code_challenge"]] = query["nonce"]
         review = self.finish(self.callback(query, client), client)
         self.assertEqual(review.status_code, 200, review.text)
+        self.assertEqual(review.headers["referrer-policy"], "strict-origin")
         self.assertIn("确认绑定", review.text)
         return re.search(r'action="([^"]+)"', review.text)[1]
 
