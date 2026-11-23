@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import App from './App';
 import Login from './Login';
 import * as api from './api';
@@ -10,22 +10,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it('offers SSO first and keeps local login collapsed, with no automatic redirect', () => {
+it('offers SSO first and shows local login on the same screen, with no automatic redirect', () => {
   render(<Login onDone={() => undefined} ssoEnabled />);
   const link = screen.getByRole('link', { name: '用 Palintropic 账户登录' });
   expect(link.getAttribute('href')).toBe('/api/auth/sso/login');
-  const local = screen.getByText('使用本地账户').closest('details')!;
-  expect(local.open).toBe(false);
-  fireEvent.click(screen.getByText('使用本地账户'));
-  expect(local.open).toBe(true);
-  expect(screen.getByLabelText('用户名')).toBeTruthy();
+  const username = screen.getByRole('textbox', { name: '用户名' });
+  expect(link.compareDocumentPosition(username) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByRole('button', { name: '登录' })).toBeTruthy();
   expect(window.location.pathname).toBe('/');
 });
 
 it('keeps the existing local form when SSO is not configured', () => {
   render(<Login onDone={() => undefined} />);
   expect(screen.queryByRole('link', { name: '用 Palintropic 账户登录' })).toBeNull();
-  expect(screen.queryByText('使用本地账户')).toBeNull();
+  expect(screen.queryByText('本地账户登录')).toBeNull();
   expect(screen.getByLabelText('密码')).toBeTruthy();
 });
 

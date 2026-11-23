@@ -27,10 +27,11 @@ from urllib.request import HTTPRedirectHandler, Request as UrlRequest, build_ope
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel, SecretStr
 
-from .accounts import AccountConflict, AccountDisabled, ROLES
-from .auth import _auth, _clear_session_cookie, _set_session_cookie
+from .accounts import AccountConflict, AccountDisabled, Principal, ROLES, MAX_PASSWORD_CHARS
+from .auth import _auth, _clear_session_cookie, _set_session_cookie, verify_password
 from .security import DeploymentConfigError, SsoSettings, sso_url_origin
 
 router = APIRouter(prefix="/api/auth/sso", tags=["auth"])
@@ -329,6 +330,13 @@ def role_from(claims: dict) -> str:
 
 
 @dataclass(frozen=True, repr=False)
+class LinkRequest:
+    account: Principal
+    sid: str
+    expires_at: float
+
+
+@dataclass(frozen=True, repr=False)
 class Pending:
     nonce: str
     verifier: str
@@ -336,6 +344,7 @@ class Pending:
     binding: str
     cookie_name: str
     expires_at: float
+    link: Optional[LinkRequest] = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -347,9 +356,18 @@ class Ticket:
     email: Optional[str]
     name: Optional[str]
     id_token: str
+    token_expiry: float
     next: str
     binding: str
     cookie_name: str
+    expires_at: float
+    link: Optional[LinkRequest] = None
+
+
+@dataclass(frozen=True, repr=False)
+class Confirmation:
+    ticket: Ticket
+    source: Optional[Principal]
     expires_at: float
 
 
@@ -379,6 +397,7 @@ class SsoLogin:
         self.provider = Provider(settings, development=development)
         self.pending = OneTimeTable(limit=256)
         self.tickets = OneTimeTable()
+        self.confirmations = OneTimeTable(limit=256)
         self.slots = threading.BoundedSemaphore(SSO_CONCURRENCY)
         self._counter_lock = threading.Lock()
         self.unmatched_failures = {"callback": 0, "finish": 0}
@@ -478,9 +497,60 @@ def _bounded_entry(func):
     return bounded
 
 
+class PasswordProof(BaseModel):
+    password: SecretStr
+
+
+def _local_proof(request: Request, proof: PasswordProof):
+    auth = _auth(request)
+    session = auth.resolve(request.scope)
+    if not session or session.login != "password" or not session.session_id:
+        raise HTTPException(403, "请先用本地密码登录")
+    password = proof.password.get_secret_value()
+    if not 0 < len(password) <= MAX_PASSWORD_CHARS:
+        raise HTTPException(400, "密码长度无效")
+    account = verify_password(auth, auth.accounts, session.username, password)
+    record = auth.sessions.get(session.session_id)
+    if not record or record.security_revision != account.security_revision:
+        raise HTTPException(409, "会话已变化，请重新登录")
+    return account, session.session_id
+
+
+@router.post("/link")
+def start_link(request: Request, proof: PasswordProof):
+    service = _service(request)
+    account, sid = _local_proof(request, proof)
+    if _auth(request).accounts.linked_username(account.principal_id):
+        raise HTTPException(409, "此账户已有绑定")
+    if not service.slots.acquire(blocking=False):
+        raise HTTPException(503, "账户服务繁忙")
+    try:
+        return _start(request, LinkRequest(account, sid, service.pending.clock() + PENDING_TTL))
+    finally:
+        service.slots.release()
+
+
+@router.post("/unlink")
+def unlink(request: Request, proof: PasswordProof):
+    _service(request)
+    account, _ = _local_proof(request, proof)
+    auth = _auth(request)
+    try:
+        auth.accounts.unlink_login(account)
+    except AccountConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    response = _private(JSONResponse({"unlinked": True}))
+    _clear_session_cookie(response, auth)
+    return response
+
+
 @router.get("/login")
 @_bounded_entry
 def login(request: Request):
+    return _start(request)
+
+
+def _start(request: Request, link: Optional[LinkRequest] = None):
     service = _service(request)
     auth = _auth(request)
     next_path = safe_next(request.query_params.get("next"))
@@ -497,6 +567,8 @@ def login(request: Request):
         actual = None
     # Compare host:port; reverse proxies need not report the public scheme.
     if actual is None or actual[1:] != expected[1:]:
+        if link:
+            raise HTTPException(409, "请从 PNS 的正式地址绑定账户")
         response = _private(
             RedirectResponse(
                 f"{canonical.scheme}://{canonical.netloc}{FLOW_PATH}login?"
@@ -516,7 +588,7 @@ def login(request: Request):
             next_path,
             secrets.token_urlsafe(32),
             binding_name(state),
-            service.pending.clock() + PENDING_TTL,
+            service.pending.clock() + PENDING_TTL, link,
         )
         service.pending.put(state, pending)
         challenge = (
@@ -524,24 +596,16 @@ def login(request: Request):
             .rstrip(b"=")
             .decode()
         )
-        response = _private(
-            RedirectResponse(
-                _query_url(
-                    doc["authorization_endpoint"],
-                    {
-                        "response_type": "code",
-                        "client_id": service.settings.client_id,
-                        "redirect_uri": service.settings.redirect_uri,
-                        "scope": "openid email profile",
-                        "state": state,
-                        "nonce": pending.nonce,
-                        "code_challenge": challenge,
-                        "code_challenge_method": "S256",
-                    },
-                ),
-                status_code=302,
-            )
-        )
+        params = {
+            "response_type": "code", "client_id": service.settings.client_id,
+            "redirect_uri": service.settings.redirect_uri, "scope": "openid email profile",
+            "state": state, "nonce": pending.nonce, "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        if link:
+            params["prompt"] = "login"
+        url = _query_url(doc["authorization_endpoint"], params)
+        response = _private(JSONResponse({"url": url}) if link else RedirectResponse(url, status_code=302))
         visible = [name for name in request.cookies if name.startswith(BINDING_PREFIX)]
         if len(visible) >= 8:
             for name in visible:
@@ -557,6 +621,8 @@ def login(request: Request):
         )
         return response
     except SsoError as exc:
+        if link:
+            raise HTTPException(503, "暂时无法连接账户服务") from exc
         return _failure(request, exc.category)
 
 
@@ -593,11 +659,11 @@ def callback(request: Request):
                 claims["iat"],
                 claims.get("email") if isinstance(claims.get("email"), str) else None,
                 claims.get("name") if isinstance(claims.get("name"), str) else None,
-                token,
+                token, claims["exp"],
                 pending.next,
                 pending.binding,
                 pending.cookie_name,
-                service.tickets.clock() + TICKET_TTL,
+                service.tickets.clock() + TICKET_TTL, pending.link,
             ),
         )
         url = html.escape(
@@ -617,6 +683,68 @@ def callback(request: Request):
         )
 
 
+def _check_link(request: Request, ticket: Ticket):
+    link = ticket.link
+    auth = _auth(request)
+    session = auth.resolve(request.scope)
+    if (link is None or ticket.token_expiry <= time.time() or link.expires_at <= _service(request).pending.clock()
+            or not session or session.login != "password" or session.session_id != link.sid
+            or session.principal_id != link.account.principal_id):
+        raise SsoError("state_invalid")
+    return link
+
+
+def _review_link(request: Request, ticket: Ticket):
+    link = _check_link(request, ticket)
+    service = _service(request)
+    store = _auth(request).accounts
+    source = store.sso_owner(ticket.issuer, ticket.subject)
+    if source and not source.enabled:
+        raise AccountConflict("这个身份已绑定或已停用")
+    key = secrets.token_urlsafe(32)
+    service.confirmations.put(key, Confirmation(ticket, source, service.confirmations.clock() + 120))
+    name = ticket.email or ticket.name or ticket.subject
+    source_name = html.escape(source.username) if source else "首次登录"
+    target = html.escape(link.account.username)
+    role = max((link.account.role, ticket.role), key=ROLES.index)
+    page = HTMLResponse(
+        f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>确认账户绑定</title>'
+        f'<h1>绑定到 {target}</h1><p>Palintropic 账户：{html.escape(name)}（{source_name}）</p>'
+        f'<p>统一登录后的权限：{role}。原密码继续可用，绑定后需重新登录。</p>'
+        f'<form method="post" action="{FLOW_PATH}finish?ticket={key}">'
+        '<button>确认绑定</button></form><a href="/">取消</a></html>'
+    )
+    page.headers["Content-Security-Policy"] = "default-src 'none'; form-action 'self'; frame-ancestors 'none'"
+    return _private(page)
+
+
+@router.post("/finish")
+def confirm_link(request: Request):
+    service = _service(request)
+    auth = _auth(request)
+    confirmation = service.confirmations.take(request.query_params.get("ticket", ""))
+    if not confirmation or confirmation.expires_at <= service.confirmations.clock():
+        return _failure(request, "state_invalid")
+    ticket = confirmation.ticket
+    try:
+        link = _check_link(request, ticket)
+        if not _same_secret(request.cookies.get(ticket.cookie_name), ticket.binding):
+            raise SsoError("state_invalid")
+        auth.accounts.link_or_sync_sso(
+            ticket.issuer, ticket.subject, ticket.role, issued_at=ticket.issued_at,
+            email=ticket.email, display_name=ticket.name, link_to=link.account,
+            expected_source=confirmation.source,
+        )
+    except (SsoError, AccountConflict, AccountDisabled) as exc:
+        return _failure(request, exc.category, cookie_name=ticket.cookie_name)
+    except sqlite3.Error:
+        return _failure(request, "sso_storage_unavailable", cookie_name=ticket.cookie_name)
+    response = _private(RedirectResponse("/?account_linked=1", status_code=303))
+    _clear_binding(response, auth, ticket.cookie_name)
+    _clear_session_cookie(response, auth)
+    return response
+
+
 @router.get("/finish")
 @_bounded_entry
 def finish(request: Request):
@@ -632,6 +760,8 @@ def finish(request: Request):
             raise SsoError("state_invalid")
         if auth.accounts is None:  # create_app ensures the store exists
             raise SsoError("idp_unavailable")
+        if ticket.link:
+            return _review_link(request, ticket)
         account, _ = auth.accounts.link_or_sync_sso(
             ticket.issuer,
             ticket.subject,
@@ -645,7 +775,7 @@ def finish(request: Request):
         sid = auth.sessions.issue(
             account.principal_id,
             account.security_revision,
-            login="sso",
+            login="sso", sso_role=account.role,
             id_token=ticket.id_token,
             ttl=ttl,
         )

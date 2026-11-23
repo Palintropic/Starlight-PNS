@@ -250,7 +250,7 @@ it('SSO expiry returns to a manual login choice and hides local password changes
   await flush();
   expect(screen.getByRole('link', { name: '用 Palintropic 账户登录' })).toBeTruthy();
   expect(screen.queryByRole('tab', { name: '用户管理' })).toBeNull();
-  expect(screen.getByText('使用本地账户')).toBeTruthy();
+  expect(screen.getByRole('textbox', { name: '用户名' })).toBeTruthy();
 });
 
 it.each(['logout', 'expiry'])('shows an SSO failure on the existing session and clears it on %s', async (endSession) => {
@@ -275,4 +275,21 @@ it.each(['logout', 'expiry'])('shows an SSO failure on the existing session and 
   }
   expect(await screen.findByText('需要登录')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('lets a password user review account linking and retry a rejected password', async () => {
+  vi.spyOn(api, 'fetchAuthSession').mockResolvedValue({
+    ...asObserver, principal: { ...asObserver.principal!, login: 'password' }, sso_enabled: true,
+  });
+  vi.spyOn(api, 'fetchConfig').mockResolvedValue(config);
+  stubWorldTab();
+  const update = vi.spyOn(api, 'updateSsoLink').mockRejectedValue(new Error('密码不正确'));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: '绑定 Palintropic 账户' }));
+  fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'test-password' } });
+  fireEvent.click(screen.getByRole('button', { name: '验证并继续' }));
+  expect((await screen.findByRole('alert')).textContent).toBe('密码不正确');
+  expect(update).toHaveBeenCalledWith('test-password', 'link');
+  fireEvent.click(screen.getByRole('button', { name: '取消' }));
+  expect(await screen.findByRole('button', { name: '绑定 Palintropic 账户' })).toBeTruthy();
 });

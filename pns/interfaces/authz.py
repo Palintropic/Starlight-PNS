@@ -64,7 +64,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # 自服务路径：任何**已认证**主体都能调，不论角色。清单里只该有"改自己的
 # 东西"那一类——observer 也必须能改自己的密码，否则一个被重置了密码的只读
 # 账户就再也换不掉那个由别人设定的密码。
-SELF_SERVICE_PATHS = frozenset({"/api/auth/password"})
+SELF_SERVICE_PATHS = frozenset({"/api/auth/password", "/api/auth/sso/link", "/api/auth/sso/unlink", "/api/auth/sso/finish"})
 
 # 服务账户 token 能碰的路径。它在 observer 的 `read` 之上**再收窄**一层：这把
 # token 要明文存在桌面上，泄露了的话，能被看到的应该只是桌面端本来就在看的那份

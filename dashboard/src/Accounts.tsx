@@ -395,14 +395,14 @@ export default function Accounts() {
                   </td>
                   <td>
                     <span className={`accounts-badge ${account.enabled ? 'ok' : 'off'}`}>
-                      {account.enabled ? '启用' : '已停用'}
+                      {account.sso?.linked_to ? `已绑定到 ${account.sso.linked_to}` : account.enabled ? '启用' : '已停用'}
                     </span>
                   </td>
                   <td className="accounts-time">{account.created_at.slice(0, 19).replace('T', ' ')}</td>
                   <td className="accounts-row-actions">
                     <button
                       className="btn"
-                      disabled={rowBusy}
+                      disabled={rowBusy || Boolean(account.sso?.linked_to)}
                       onClick={() => onToggle(account)}
                     >
                       {account.enabled ? '停用' : '启用'}

@@ -70,7 +70,7 @@ function Login({ onDone, ssoNotice, ssoEnabled = false, ssoLogoutIncomplete = fa
         />
       </label>
 
-      <button className="btn btn-accent auth-submit" onClick={handleSubmit} disabled={!ready || submitting}>
+      <button className={ssoEnabled ? 'btn auth-submit' : 'btn btn-accent auth-submit'} onClick={handleSubmit} disabled={!ready || submitting}>
         {submitting ? '登录中…' : '登录'}
       </button>
     </>
@@ -82,9 +82,6 @@ function Login({ onDone, ssoNotice, ssoEnabled = false, ssoLogoutIncomplete = fa
         <section className="auth-panel">
           <p className="pivot-title">Nightcord Sanctuary</p>
           <h1>需要登录</h1>
-          <p className="auth-note">
-            使用你的操作者账户继续。浏览器只保留 HttpOnly 会话 Cookie；密码不会写入本地。
-          </p>
 
           {ssoNotice}
           {ssoLogoutIncomplete && <p role="status">PNS 已退出，Palintropic 账户可能还登着</p>}
@@ -94,12 +91,8 @@ function Login({ onDone, ssoNotice, ssoEnabled = false, ssoLogoutIncomplete = fa
               用 Palintropic 账户登录
             </a>
           )}
-          {ssoEnabled ? (
-            <details className="auth-local">
-              <summary>使用本地账户</summary>
-              {localForm}
-            </details>
-          ) : localForm}
+          {ssoEnabled && <p className="auth-divider">本地账户登录</p>}
+          {localForm}
         </section>
       </main>
     </div>

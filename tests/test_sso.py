@@ -253,6 +253,109 @@ class SsoApiTests(ApiTestCase):
 
         return patch.object(self.accounts, "_audit", side_effect=fail)
 
+    def prepare_link(self, client=None, password=ADMIN_PASSWORD):
+        client = client or self.client
+        start = client.post("/api/auth/sso/link", json={"password": password})
+        self.assertEqual(start.status_code, 200, start.text)
+        query = {k: v[0] for k, v in parse_qs(urlsplit(start.json()["url"]).query).items()}
+        self.assertEqual(query["prompt"], "login")
+        self.idp.nonces[query["code_challenge"]] = query["nonce"]
+        review = self.finish(self.callback(query, client), client)
+        self.assertEqual(review.status_code, 200, review.text)
+        self.assertIn("确认绑定", review.text)
+        return re.search(r'action="([^"]+)"', review.text)[1]
+
+    def test_link_existing_identity_keeps_password_and_caps_sso_authority(self):
+        self.idp.overrides = {"roles": ["pns:observer"]}
+        self.sign_in()
+        old_sso = self.client.cookies.get("pns_session")
+        source = self.session()["principal"]
+        old_local = self.local_login()
+        action = self.prepare_link()
+        done = self.client.post(action, follow_redirects=False)
+        self.assertEqual(done.status_code, 303, done.text)
+        self.assertFalse(self.saved_session(old_sso)["authenticated"])
+        self.assertFalse(self.saved_session(old_local)["authenticated"])
+        self.assertFalse(self.accounts.get(source["principal_id"]).enabled)
+        self.assertEqual(self.accounts.enabled_admin_count(), 1)
+        self.sign_in()
+        identity = self.session()["principal"]
+        self.assertEqual((identity["principal_id"], identity["role"]),
+                         (self.admin.principal_id, "observer"))
+        self.assertEqual(self.client.get("/api/accounts").status_code, 403)
+        linked_sid = self.client.cookies.get("pns_session")
+        self.local_login()
+        self.assertEqual(self.session()["principal"]["principal_id"], self.admin.principal_id)
+        self.assertEqual(self.session()["linked_sso_username"], source["username"])
+        self.assertEqual(self.client.get("/api/accounts").status_code, 200)
+        self.assert_error(self.client.post(action, follow_redirects=False), "state_invalid")
+        unlink = self.client.post("/api/auth/sso/unlink", json={"password": ADMIN_PASSWORD})
+        self.assertEqual(unlink.status_code, 200, unlink.text)
+        self.assertFalse(self.saved_session(linked_sid)["authenticated"])
+        self.sign_in()
+        self.assertEqual(self.session()["principal"]["principal_id"], source["principal_id"])
+
+    def test_link_proof_expires_and_logout_cancels_confirmation(self):
+        self.local_login()
+        self.assertEqual(self.client.post("/api/auth/sso/link", json={"password": "wrong"}).status_code, 401)
+        action = self.prepare_link()
+        with patch.object(self.service.confirmations, "clock", return_value=float("inf")):
+            self.assert_error(self.client.post(action, follow_redirects=False), "state_invalid")
+        action = self.prepare_link()
+        self.client.post("/api/auth/logout")
+        self.local_login()
+        self.assert_error(self.client.post(action, follow_redirects=False), "state_invalid")
+        self.assertIsNone(self.accounts.sso_owner(ISSUER, SUB))
+
+    def test_competing_claims_for_new_identity_bind_once(self):
+        self.local_login()
+        second = TestClient(self.app, base_url=SITE)
+        second.post("/api/auth/login", json={"username": self.operator.username,
+                                              "password": "operator-password-01"})
+        first = self.prepare_link()
+        other = self.prepare_link(second, "operator-password-01")
+        self.assertEqual(self.client.post(first, follow_redirects=False).status_code, 303)
+        self.assert_error(second.post(other, follow_redirects=False), "account_conflict")
+        self.sign_in()
+        self.assertEqual(self.session()["principal"]["principal_id"], self.admin.principal_id)
+
+    def test_linked_role_changes_and_local_disable_are_enforced(self):
+        now = int(time.time())
+        self.idp.overrides = {"roles": ["pns:admin"], "iat": now - 3}
+        self.local_login()
+        self.client.post(self.prepare_link(), follow_redirects=False)
+        self.sign_in()
+        previous = self.client.cookies.get("pns_session")
+        self.assertEqual(self.session()["principal"]["role"], "admin")
+        self.idp.overrides = {"roles": ["pns:observer"], "iat": now}
+        self.sign_in()
+        self.assertFalse(self.saved_session(previous)["authenticated"])
+        self.assertEqual(self.session()["principal"]["role"], "observer")
+        self.assertEqual(self.accounts.get(self.admin.principal_id).role, "admin")
+        self.idp.overrides = {"roles": []}
+        _, query = self.start()
+        self.assert_error(self.callback(query), "no_role")
+        self.accounts.create_human("second-admin", ADMIN_PASSWORD, "admin")
+        self.accounts.set_authority(self.admin.principal_id, enabled=False)
+        self.idp.overrides = {"roles": ["pns:observer"]}
+        self.assert_error(self.sign_in(), "account_disabled")
+        self.assertFalse(self.session()["authenticated"])
+
+    def test_link_audit_failure_rolls_back_and_retry_starts_fresh(self):
+        self.local_login()
+        action = self.prepare_link()
+        original = self.accounts._audit
+        def fail(actor, target, event, result, detail=None):
+            if event == "sso.account_link":
+                raise sqlite3.OperationalError("audit unavailable")
+            return original(actor, target, event, result, detail)
+        with patch.object(self.accounts, "_audit", side_effect=fail):
+            self.assert_error(self.client.post(action, follow_redirects=False), "sso_storage_unavailable")
+        self.assertEqual(self.accounts.get(self.admin.principal_id), self.admin)
+        self.assertIsNone(self.accounts.sso_owner(ISSUER, SUB))
+        retry = self.prepare_link()
+        self.assertEqual(self.client.post(retry, follow_redirects=False).status_code, 303)
+
     def test_complete_cookie_jar_retains_binding_until_finish(self):
         response, q = self.start(next="/#world")
         self.assertIn("SameSite=lax", response.headers["set-cookie"])
