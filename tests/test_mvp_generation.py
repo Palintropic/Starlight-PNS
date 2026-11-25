@@ -447,7 +447,6 @@ class ProductionPathTests(MvpTestCase):
 class LeoNeedProfileTests(MvpTestCase):
     def test_generation_and_judge_keep_e137_in_the_correct_perspectives(self):
         candidate = "穗波已经当面向一歌道过歉，两人把初中的事说开了。"
-        scene = {"time": "放学后", "location": "练习室", "weather": "晴"}
         for character_id in ("ichika", "saki", "honami", "shiho"):
             with self.subTest(character=character_id):
                 content = self.registry.character(character_id)
@@ -458,20 +457,23 @@ class LeoNeedProfileTests(MvpTestCase):
                 ):
                     with self.subTest(model=model):
                         self.assertIsNotNone(expected_prompt)
-                        call_character(
-                            self.provider,
-                            character_id,
-                            [{"role": "user", "content": "说说重聚之后的事。"}],
-                            scene,
-                            model,
-                            max_tokens=100,
-                            temperature=0.5,
-                            registry=self.registry,
-                        )
-                        system = self.provider.generations[-1]["system"]
+                        def generate(cid, view, history):
+                            return call_character(
+                                self.provider, cid, history, view, model,
+                                max_tokens=100, temperature=0.5, registry=self.registry,
+                            )
+
+                        context = replace(_context(character_id), location_id="练习室")
+                        PromptedLineGenerator(generate).generate(context)
+                        request = self.provider.generations[-1]
+                        system = request["system"]
                         self.assertIn(expected_prompt.splitlines()[0], system)
                         self.assertIn(content.constitution, system)
-                        self.assertIn("地点：练习室", system)
+                        self.assertIn("地点：练习室", request["messages"][0]["content"])
+                        if model == "stub-flash-lite":
+                            self.assertIn("地点：练习室", system)
+                        else:
+                            self.assertNotIn("地点：练习室", system)
                         self.assertNotIn("## 内容判据", system)
                         if character_id == "honami":
                             self.assertIn("景象已经消失", system)
