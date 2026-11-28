@@ -359,6 +359,36 @@ N 次"：用完了等下一个世界日（东京 05:00）自动续满，旧日�
 暂时不受作息驱动），要由项目所有者明确采用才生效。这一步目前没有界面，只能在服务器侧调用
 `WorldControlPlane.decide_content_conflict()`。
 
+### 大存档恢复
+
+在运行中的生产容器里执行以下命令。以标准输入传入脚本，已部署的镜像也可以用。
+
+```bash
+docker compose exec -T app python - yoake-mae --timeout 900 < scripts/restore_world.py
+```
+
+脚本先检查轻量总览，确认世界未打开后只提交一次恢复。成功响应之后再用总览核对版本。
+从发起恢复到验收完成，关闭所有 PNS 浏览器标签页，或先登出。世界总览在发现世界关闭时会自动查询世界列表，
+而列表和单世界状态在世界未打开时可能完整解析存档。
+恢复成功不会启动认知。
+
+退出码 0 表示总览确认世界已打开。1 表示前置检查失败、连接确定未建立，或服务端明确拒绝恢复。
+收到 `content_not_adopted` 时按 §10.1 处理内容决定后重试。2 表示同一世界已有脚本实例在运行，
+或恢复结果仍待核实，包括恢复返回 200 但总览暂时不可用。
+
+结果不明时，脚本在数据卷保留 `/app/data/.restore-operations/<world_id>.pending`。
+可以先等服务端完成，再运行同一命令。总览确认世界已打开时会清掉标记。若仍显示 `world_not_open`，
+先从服务端日志确认上一条请求已结束，或确认处理该请求的进程已退出。
+实际内核锁可辅助排查。下面的检查返回 0 表示当时锁空闲，锁被占用时会抛出 `BlockingIOError`。
+锁空闲也可能表示请求尚未走到拿锁的阶段。
+
+```bash
+docker compose exec -T app python -c 'import fcntl, os; from pathlib import Path; p = Path(os.getenv("PNS_WORLD_ROOT") or "/app/data/worlds") / "yoake-mae" / "OWNER.lock"; f = p.open("rb"); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)'
+```
+
+确认无相关请求或脚本仍在执行后，才手动清除该世界的 `.pending` 文件。保留 `.lock` 文件和目录，
+脚本实例通过同一个锁文件互斥。
+
 ## 8. 账户与角色（AUTH-1）
 
 浏览器登录用的是**账户**（用户名 + 密码），不是 `PNS_ADMIN_TOKEN`。那把 token 仍然有效，
