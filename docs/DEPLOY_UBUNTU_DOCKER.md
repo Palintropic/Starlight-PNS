@@ -564,24 +564,11 @@ access_log /var/log/nginx/pns.access.log pns_auth_safe;
 ```
 
 此格式刻意省略 Referer；否则旧的自定义格式可能经 Referer 再记一次票。callback/finish 也返回
-`no-store` 和 `no-referrer`。在 LAN 的 HTTP 跳转和 HTTPS 反代两个 `server` 中均启用该访问日志格式。
-nginx 上游错误日志也可能带原始请求行。在 HTTPS 的 `location /` 内给 SSO 路径加独立子路由，
-显式使用现有 PNS 上游地址，以便继续转发相同路径与查询参数。
-
-```nginx
-location ^~ /api/auth/sso/ {
-    proxy_pass http://127.0.0.1:7860;
-    error_log /dev/null;
-}
-```
-
-SSO 上游失败仍由访问日志记录路径和状态码。验收时检查正常回调、HTTP 到 HTTPS 跳转、
-带合成 Referer 的请求以及隔离环境里的上游 502，确认 nginx 和应用日志均未留下票据。
+`no-store` 和 `no-referrer`。反代配置及实际日志仍需部署验收，不能由应用测试替代。
 
 待部署者实测（本地假端点测试不代表以下通过）：
 
-- 在隔离的本机 Hydra 注册 `.lan` HTTPS 回调，走完登录与 consent。确认 S256 签发授权码，
-  缺失 challenge 和 `plain` 均返回 `invalid_request`。
+- 在隔离的本机 Hydra/Kratos compose 注册 `.lan` HTTPS 回调，确认 Hydra 接受；不改真实 IdP。
 - Chrome、Safari 各从本地管理员切 SSO：中转页 meta refresh 的 finish 请求携带旧 Strict Cookie，
   新 Cookie 存下且跳转后已登录；用保存的旧 sid 调 `/api/auth/session` 必须未登录。
   若任一浏览器不成立，再按设计改为用户点击的 POST 领取表单。

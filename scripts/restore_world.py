@@ -21,7 +21,15 @@ KNOWN_RESTORE_REJECTIONS = {
     (409, "provider_switch_in_progress"),
     (503, "settings_quarantined"),
     (503, "adapters_unavailable"),
+    (503, "control_plane_unavailable"),
+    (503, "ownership_unsupported"),
 }
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -52,6 +60,8 @@ def overview_revision(result, world):
         and isinstance(payload, dict)
         and payload.get("world_id") == world
         and type(payload.get("revision")) is int
+        and isinstance(payload.get("autonomy"), dict)
+        and payload["autonomy"].get("worker_alive") is True
     ):
         return payload["revision"]
     return None
@@ -95,7 +105,7 @@ def recover(call, world, marker, timeout):
         except URLError as exc:
             if not isinstance(exc.reason, ConnectionRefusedError):
                 raise
-            marker.unlink()
+            marker.unlink(missing_ok=True)
             print(f"{world}: connection refused before restore was sent", file=sys.stderr)
             return 1
         if status != 200:
@@ -105,7 +115,7 @@ def recover(call, world, marker, timeout):
             category = detail.get("category")
             known_rejection = isinstance(category, str) and (status, category) in KNOWN_RESTORE_REJECTIONS
             if status in (401, 403, 404, 422) or known_rejection:
-                marker.unlink()
+                marker.unlink(missing_ok=True)
                 return 1
             return 2
         restored = payload.get("revision") if isinstance(payload, dict) else None
@@ -120,25 +130,28 @@ def recover(call, world, marker, timeout):
         print(f"{world}: restore result unverified ({type(exc).__name__})", file=sys.stderr)
         return 2
 
-    marker.unlink()
+    marker.unlink(missing_ok=True)
     print(f"{world}: restore verified (revision {revision})")
     return 0
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = Parser(description=__doc__)
     parser.add_argument("world")
     parser.add_argument("--timeout", type=float, default=900)
     args = parser.parse_args()
     valid_id = re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?", args.world)
     if not valid_id or ".." in args.world:
-        parser.error("invalid world ID")
+        print("invalid world ID", file=sys.stderr)
+        return 1
     if not math.isfinite(args.timeout) or args.timeout <= 0:
-        parser.error("--timeout must be positive and finite")
+        print("--timeout must be positive and finite", file=sys.stderr)
+        return 1
 
     token = os.getenv("PNS_ADMIN_TOKEN")
     if not token:
-        parser.error("PNS_ADMIN_TOKEN must be set")
+        print("PNS_ADMIN_TOKEN must be set", file=sys.stderr)
+        return 1
     port = int(os.getenv("PORT", "7860"))
     base = f"http://127.0.0.1:{port}/api/persistent-worlds/{args.world}"
     opener = build_opener(ProxyHandler({}), NoRedirect())
